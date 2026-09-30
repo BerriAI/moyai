@@ -198,12 +198,12 @@ async def test_retry_waiting_on_lock_cannot_outlive_parent_cancellation(durable)
     assert manager.store.rows('SELECT * FROM agent_retries') == []
 
 
-def test_manual_child_followup_cannot_replace_the_assigned_result(workspace):
+def test_orphan_child_cannot_receive_a_followup(workspace):
     app, client = workspace
     child = active(app)
-    app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', ('parent', child['id']))
+    app.state.store.execute("UPDATE runs SET parent_run_id=?,mode='demo' WHERE id=?", ('parent', child['id']))
     response = client.post(f"/api/runs/{child['id']}/messages", json={'content':'Replace the answer', 'client_id':'override-child'})
-    assert response.status_code == 409 and 'coordinator' in response.json()['detail']
+    assert response.status_code == 409 and 'parent assignment' in response.json()['detail']
     assert len(app.state.store.messages(child['id'])) == 1
 
 
@@ -256,3 +256,99 @@ def test_capacity_configuration_accepts_100_not_unbounded():
     assert Settings(_env_file=None, max_concurrent_model_requests=100).max_concurrent_model_requests == 100
     with pytest.raises(ValidationError):
         Settings(_env_file=None, max_concurrent_runs=101)
+
+
+async def test_direct_child_chat_joins_pending_work_and_keeps_sender_and_model(durable):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    await pause_parent(manager, root, result['group_id'])
+    child = coordinator.children(result['group_id'])[0]['id']
+    await drive(manager, child, phase='monitor')
+    message, created = coordinator.enqueue_child(child, 'Also check the edge case', 'direct-followup', 'test-model', 'google:bob')
+    assert created
+    assert coordinator.enqueue_child(child, 'Also check the edge case', 'direct-followup', 'test-model', 'google:bob')[1] is False
+    assert coordinator.handoff(root, result['group_id']) is False
+    # Finishing the assignment cannot resume the parent ahead of a queued chat.
+    await drive(manager, child)
+    assert manager.store.run(child)['status'] == 'queued'
+    assert await manager.advance(root) == 'children'
+    await drive(manager, child)
+    assert manager.store.run(child)['active_user_id'] == 'google:bob'
+    assert manager.store.run(child)['active_message_id'] == message['id']
+    await drive(manager, root)
+    assert coordinator.results(root, result['group_id'])['result_scope'] == 'handoff'
+    assert len([m for m in manager.store.messages(child) if m['role'] == 'assistant']) == 2
+
+
+async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, monkeypatch):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    await pause_parent(manager, root, result['group_id'])
+    child = coordinator.children(result['group_id'])[0]['id']
+    await drive(manager, child)
+    async def admit(_):
+        coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
+        return True
+    monkeypatch.setattr(manager, 'make_capacity', admit)
+    assert await manager.advance(root) == 'children'
+    assert manager.state(root)['phase'] == 'waiting_children'
+    assert coordinator.group(root, result['group_id'])['result_snapshot'] == ''
+
+
+async def test_post_handoff_chat_preserves_answers_and_files_across_restart(durable):
+    from test_durable import aio
+    from app.runner import RunManager
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    await pause_parent(manager, root, result['group_id'])
+    child = coordinator.children(result['group_id'])[0]['id']
+    await drive(manager, child)
+    archive = manager.settings.data_dir / 'artifacts' / (child + '.zip')
+    archive.parent.mkdir()
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('results.json', '{"passed":20}')
+    await drive(manager, root)
+    coordinator.enqueue_child(child, 'Change the follow-up report', 'new-report', None, 'google:bob')
+    await drive(manager, child)
+    manager.store.update_run(child, summary='New follow-up answer')
+    # Exercise the real archive writer: replacing current files cannot mutate
+    # the saved handoff's shared inode.
+    from io import BytesIO
+    content = BytesIO()
+    with zipfile.ZipFile(content, 'w') as z:
+        z.writestr('results.json', '{"passed":21}')
+    async def stat(_): return SimpleNamespace(size=len(content.getvalue()))
+    async def read(_): return content.getvalue()
+    sandbox = SimpleNamespace(filesystem=SimpleNamespace(stat=aio(stat), read_bytes=aio(read)))
+    await RunManager.save_artifact(manager, sandbox, child)
+    coordinator = attach(cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings)))
+    assert coordinator.results(root, result['group_id'])['children'][0]['summary'] == 'Saved answer'
+    assert coordinator.results(root, result['group_id'], latest=True)['children'][0]['summary'] == 'New follow-up answer'
+    assert coordinator.read_artifact(root, Artifact(child_id=child, path='results.json'))['content'] == '{"passed":20}'
+    assert coordinator.read_artifact(root, Artifact(child_id=child, path='results.json', latest=True))['content'] == '{"passed":21}'
+    assert coordinator.view(root, include_costs=False)['groups'][0]['children'][0]['status'] == 'idle'
+    assert len([m for m in manager.store.messages(root) if m['role'] == 'assistant']) == 1
+
+
+async def test_child_chat_during_parent_stop_is_rejected_without_losing_assignment(durable):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    child = coordinator.children(result['group_id'])[0]['id']
+    manager.store.update_run(root, status='stopping')
+    with pytest.raises(ValueError, match='finish stopping'):
+        coordinator.enqueue_child(child, 'More work', 'while-stopping', None, 'google:bob')
+    assert len(manager.store.messages(child)) == 1
+
+
+async def test_cancelled_group_cannot_freeze_other_workers_that_are_still_stopping(durable):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=2)
+    await pause_parent(manager, root, result['group_id'])
+    first, other = [c['id'] for c in coordinator.children(result['group_id'])]
+    await drive(manager, first)
+    manager.store.execute("UPDATE agent_groups SET status='cancelled' WHERE id=?", (result['group_id'],))
+    manager.store.update_run(other, status='stopping')
+    coordinator.enqueue_child(first, 'Inspect your result', 'cancelled-group-chat', None, 'google:bob')
+    assert not coordinator.group(root, result['group_id'])['result_snapshot']
+    assert not coordinator.settled(root, result['group_id'])
+    assert not coordinator.handoff(root, result['group_id'])

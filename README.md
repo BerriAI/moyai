@@ -506,7 +506,7 @@ Workers should save structured case results under `/workspace`; the parent can
 read and merge them into its own final result. Failure is not success or a zero
 cost. `agents_retry` accepts explicit recovery instructions for failed workers;
 it does not blindly replay uncertain external actions. Stopping a parent stops
-its unfinished workers. The chat shows worker progress, links, downloads and,
+its unfinished workers. The expandable sidebar nests each worker beneath its parent, with its own live status and direct chat. Individual activity and file downloads are available inside each worker session. The parent’s Activity panel shows combined progress and,
 for admins, combined current-key model spend. Every request remains one ledger
 row tied to the initiating teammate, so parent rollups do not double count
 organization totals. Only the parent session mirrors its final answer to Slack.
@@ -542,6 +542,31 @@ restart with five concurrently active simulated Modal workers. This is not a
 100-sandbox production load test; verify provider quotas and control-plane memory
 before sustained use at that scale.
 
+
+### Direct subagent conversations
+
+Click the chevron beside a parent session to expand its workers. Each child opens
+its own saved chat, live activity, model picker and file download. Search matches
+child labels while retaining their parent; direct links also keep older parents
+visible beyond the recent-session limit. The large worker-card panel no longer
+occupies the conversation. Drafts remain separate for each chat.
+
+Authenticated web follow-ups can be sent directly to a child. They queue behind
+its current turn and are charged to the signed-in sender. While the parent is
+waiting, it waits for accepted follow-ups too, including messages arriving during
+capacity admission. A parent stop blocks new child messages until cleanup finishes.
+Workers still cannot create further agents, and all existing external-write
+approvals apply.
+
+At handoff, the parent receives saved answers and immutable archive versions.
+Later child chats can change their own workspace without silently changing those
+collected results or launching another parent turn. `agents_results` and
+`agents_read_artifact` default to the handoff version; the parent can explicitly
+request `latest=true` when asked to inspect subsequent work. Existing completed
+groups are preserved before their first direct follow-up. Archives are published
+by atomic replacement; retained hard links initially share storage, with later
+changed versions consuming additional disk space. Runtime and spend views show
+the workers’ current state and all attributed follow-up costs.
 
 ## Shared organization GitHub
 

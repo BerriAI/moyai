@@ -407,9 +407,12 @@ class DurableRunner(RunManager):
             async with self.admission_lock:
                 if not await self.make_capacity(run_id):
                     return 'capacity'
+                # Admission may await releasing another machine. A web user can
+                # queue a worker follow-up during that wait; recheck atomically.
+                if not self.coordinator.handoff(run_id, state['wait_group']):
+                    return 'children'
                 state.update(phase='provision', resume_group=state['wait_group'])
                 self.save(run_id, state)
-            self.store.execute("UPDATE agent_groups SET status='completed' WHERE id=? AND status='running'", (state['wait_group'],))
             self.running_status(run_id, 'provisioning')
             self.store.event(run_id, 'agents', 'Workers finished. Restoring the coordinator to gather results.', {'group_id': state['wait_group']})
             self.save(run_id, state)

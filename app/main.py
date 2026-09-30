@@ -277,9 +277,19 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request):
+    async def runs(request: Request, focus: str = ''):
         security.require(request)
-        return [public_run(store.run(row["id"])) for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY created_at DESC LIMIT 100")]
+        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY created_at DESC LIMIT 100")]
+        selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
+        parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
+        if parent_id and parent_id not in ids and store.run(parent_id):
+            ids.append(parent_id)
+        runs = {run_id: {**public_run(store.run(run_id)), 'children': []} for run_id in ids}
+        if ids:
+            children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
+            for child in children:
+                runs[child['parent_run_id']]['children'].append(child)
+        return list(runs.values())
 
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
@@ -325,8 +335,6 @@ def create_app(settings: Settings | None = None):
         run = store.run(run_id)
         if not run:
             raise HTTPException(404, "Session not found")
-        if run['parent_run_id']:
-            raise HTTPException(409, 'Send instructions in the coordinator session. It manages this worker and its results.')
         if run["mode"] == "modal" and missing_cloud():
             raise HTTPException(503, "Cloud setup is incomplete. See Runtime.")
         try:
@@ -339,7 +347,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, str(exc))
         try:
             user_id = store.identity(security.session_info(request))
-            message, created = slack.chat.enqueue_web(run_id, body.content, body.client_id, selected_model, user_id)
+            enqueue = coordinator.enqueue_child if run['parent_run_id'] else slack.chat.enqueue_web
+            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()

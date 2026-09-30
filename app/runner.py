@@ -413,8 +413,10 @@ class RunManager:
             directory = self.settings.data_dir / "artifacts"
             directory.mkdir(exist_ok=True, mode=0o700)
             path = directory / f"{run_id}.zip"
-            path.write_bytes(data)
-            path.chmod(0o600)
+            staged = path.with_suffix('.next')
+            staged.write_bytes(data)
+            staged.chmod(0o600)
+            staged.replace(path)
             self.store.event(run_id, "artifact", "Result archive saved", {"download": f"/api/runs/{run_id}/artifact"})
         except Exception:
             self.store.event(run_id, "error", "No result archive was recovered from this run.")
