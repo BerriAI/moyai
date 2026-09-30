@@ -27,6 +27,7 @@ from .google_sso import GoogleSignIn
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
+from .operating_costs import OperatingCosts
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -107,6 +108,7 @@ def create_app(settings: Settings | None = None):
         manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
     spend = Spend(store, settings, security, checkpoints)
+    operating_costs = OperatingCosts(store, settings, security, checkpoints)
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
@@ -135,6 +137,8 @@ def create_app(settings: Settings | None = None):
     app.state.google_signin = google
     app.include_router(google.routes())
     app.include_router(spend.routes())
+    app.include_router(operating_costs.routes())
+    app.state.operating_costs = operating_costs
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend}.items():
         setattr(app.state, key, value)

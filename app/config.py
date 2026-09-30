@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     temporal_tls: bool = True
     temporal_task_queue: str = "moyai-sessions-v1"
     temporal_checkpoint_seconds: int = Field(default=600, ge=30, le=3600)
+    # Remains off until provider billing access and shared-fee allocation are ready.
+    operating_costs_enabled: bool = False
+    operating_costs_modal_object_ids: str = ""
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
     linear_client_id: str = ""
     linear_client_secret: str = ""

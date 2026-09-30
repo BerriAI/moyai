@@ -166,6 +166,12 @@ A model-only command starts or updates the saved session without launching a san
 
 ## Per-user model spend
 
+The proposed [monthly operating-cost view](docs/operating-costs.md) is gated by
+`OPERATING_COSTS_ENABLED=false`. Its rollout is deferred until the team is ready
+for paid-provider billing. It adds provider statements and an optional scoped
+Modal export prefill; it does not change the live deployment or existing model
+accounting. See the activation notes for credit handling and collection limits.
+
 **Live verification (September 29, 2026):** deployed commit `87aa874` on Render. Session [`9895bd3b52a9403a988f4dc06c7545dd`](https://moyai-devin.onrender.com/#run=9895bd3b52a9403a988f4dc06c7545dd), started by `tin@berri.ai`, completed an Astra response, then an Opus follow-up that recalled `granite-27`, wrote a local file and read it back. Three successful inference responses supplied `x-litellm-response-cost`: `$0.061130000000000004`, `$0.037141`, and `$0.0042726`, totaling `$0.102543600000000004` (displayed as `$0.102544`). User, session and model totals agree. Both successful turns saved filesystem/conversation snapshots and terminated their Modal sandboxes. The admin UI exposed the exact header amounts; unauthenticated spend access returned 401 and the removed callback route returned 404.
 
 Initial verification exposed LiteLLM's rejection of request-level `turn_off_message_logging`. Moyai no longer sends that option; gateway security settings were not changed. Seven rejected attempts remain visible as unknown cost, rather than assigning an invented zero. A separate minimal diagnostic request cost `$0.00029` on the same key, outside the Moyai session ledger. The gateway still has no key-scoped logging integration, and `allowed_routes` remains `llm_api_routes`. The full 110-test suite passed before deployment; all 22 spend/model tests passed after the logging-policy correction.
