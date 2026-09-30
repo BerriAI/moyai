@@ -27,6 +27,7 @@ from .google_sso import GoogleSignIn
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
+from .identities import SlackIdentities
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -97,7 +98,7 @@ def create_app(settings: Settings | None = None):
     configure_access_logging()
     settings = settings or Settings()
     restore_checkpoint(settings)
-    store = Store(settings.data_dir, default_model=settings.resolve_model())
+    store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled)
     security = Security(settings)
     connectors = Connectors(store, security, settings)
     if settings.temporal_enabled:
@@ -110,6 +111,8 @@ def create_app(settings: Settings | None = None):
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
+    identities = SlackIdentities(store, connectors, settings, security, checkpoints)
+    slack.identities = identities
     manager.prepare_context = slack.prepare
     login_attempts = []
 
@@ -118,11 +121,13 @@ def create_app(settings: Settings | None = None):
         await manager.recover()
         await checkpoints.flush()
         slack.recover()
+        identities.start()
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         try:
             yield
         finally:
+            await identities.close()
             await slack.shutdown()
             await manager.shutdown()
             if watcher:
@@ -135,6 +140,8 @@ def create_app(settings: Settings | None = None):
     app.state.google_signin = google
     app.include_router(google.routes())
     app.include_router(spend.routes())
+    app.include_router(identities.routes())
+    app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend}.items():
         setattr(app.state, key, value)

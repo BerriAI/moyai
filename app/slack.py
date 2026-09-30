@@ -20,6 +20,7 @@ class SlackSessions:
         self.store, self.connectors, self.manager = store, connectors, manager
         self.checkpoints, self.settings = checkpoints, settings
         self.jobs = set()
+        self.identities = None
         self.chat = SlackChat(self)
         self.agentchat, self.channel = connect_agentchat(self)
 
@@ -118,6 +119,8 @@ class SlackSessions:
             except ValueError as exc:
                 raise HTTPException(503, str(exc))
             await self.checkpoints.flush()
+            if self.identities:
+                self.identities.wake.set()
             if run:
                 self.manager.submit(run)
             return
@@ -132,6 +135,8 @@ class SlackSessions:
             raise HTTPException(503, 'The session queue is full.')
         if run:
             await self.checkpoints.flush()
+            if self.identities:
+                self.identities.wake.set()
             self.manager.submit(run)
             self.submit_reply(run['id'])
 

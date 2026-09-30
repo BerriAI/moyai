@@ -170,7 +170,7 @@ class Spend:
 
     def report(self, start=None, end=None):
         start, end, lower, upper = period(start, end)
-        users = {u['id']: u for u in self.store.rows('SELECT id,kind,email,name,linked_user_id FROM users')}
+        users = {u['id']: u for u in self.store.rows('SELECT id,kind,email,name,linked_user_id,link_method,link_status,profile_checked_at FROM users')}
         requests = {r['id']: r for r in self.store.rows('SELECT * FROM model_requests WHERE key_hash=?', (self.key_hash,))}
         rows = [row for row in requests.values() if lower <= row['created_at'] < upper]
         def empty():
@@ -222,12 +222,14 @@ class Spend:
             self.security.require(request, mutation=True, admin=True)
             actor = self.store.identity(self.security.session_info(request))
             with self.store.connect() as conn:
-                source = conn.execute("SELECT id FROM users WHERE id=? AND kind='slack'", (body.slack_user_id,)).fetchone()
+                conn.execute('BEGIN IMMEDIATE')
+                source = conn.execute("SELECT id,linked_user_id FROM users WHERE id=? AND kind='slack'", (body.slack_user_id,)).fetchone()
                 target = conn.execute("SELECT id FROM users WHERE id=? AND kind='google'", (body.google_user_id,)).fetchone()
                 if not source or not target:
                     raise HTTPException(422, 'Choose a Slack account and an existing Google sign-in.')
-                conn.execute('UPDATE users SET linked_user_id=?,updated_at=? WHERE id=?', (body.google_user_id, now(), body.slack_user_id))
-                conn.execute('INSERT INTO identity_audit(actor_id,source_id,target_id,created_at) VALUES(?,?,?,?)', (actor, body.slack_user_id, body.google_user_id, now()))
+                conn.execute("UPDATE users SET linked_user_id=?,link_method='manual',link_status='manual',updated_at=? WHERE id=?", (body.google_user_id, now(), body.slack_user_id))
+                conn.execute('INSERT INTO identity_audit(actor_id,source_id,target_id,created_at,reason,previous_target_id) VALUES(?,?,?,?,?,?)',
+                             (actor, body.slack_user_id, body.google_user_id, now(), 'admin_override', source['linked_user_id'] or ''))
             return {'ok': True}
 
         return router

@@ -1,7 +1,7 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,7 +11,8 @@ def now() -> str:
 
 
 class Store:
-    def __init__(self, directory: Path, default_model: str = ''):
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False):
+        self.auto_link_identities = auto_link_identities
         self.generation = 0
         self.default_model = default_model
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -118,6 +119,19 @@ class Store:
                 for name in names:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(users)')}
+            for name in ('link_method', 'link_status', 'profile_checked_at'):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE users ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            for name in ('profile_eligible', 'profile_next_check', 'profile_conflict'):
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE users ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+            # Every pre-existing link was explicitly chosen by an administrator.
+            conn.execute("UPDATE users SET link_method='manual',link_status='manual' WHERE linked_user_id IS NOT NULL AND link_method=''")
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(identity_audit)')}
+            for name in ('reason', 'previous_target_id'):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE identity_audit ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if 'active_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
                 conn.execute('ALTER TABLE runs ADD COLUMN active_message_id INTEGER')
             if "model_calls" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
@@ -280,15 +294,54 @@ class Store:
         if info.get('method') == 'google':
             identity = info['identity']
             user_id = 'google:' + identity['sub']
-            kind, email, name = 'google', identity['email'], identity.get('name') or identity['email']
+            kind, email, name = 'google', identity['email'].strip().lower(), identity.get('name') or identity['email']
         else:
             kind, email = 'shared', ''
             user_id = 'shared:' + info.get('method', 'password') + ':' + info.get('role', 'admin')
             name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
         stamp = now()
-        self.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
-                     (user_id, kind, email, name, stamp, stamp))
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            old = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+            conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
+                         (user_id, kind, email, name, stamp, stamp))
+            if kind == 'google':
+                for value in {email, old['email'] if old else email}:
+                    self.reconcile_email_in(conn, value)
         return user_id
+
+    def reconcile_email_in(self, conn, email):
+        """Accounting links only. Never authenticate a user or grant a role here.
+
+        The email must have come from a checked Slack profile or Google OIDC.
+        Once bound, provider IDs stay authoritative; changes need admin review.
+        """
+        if not email or not self.auto_link_identities:
+            return
+        google = conn.execute("SELECT id FROM users WHERE kind='google' AND email=?", (email,)).fetchall()
+        slack = conn.execute("SELECT * FROM users WHERE kind='slack' AND email=? AND profile_eligible=1", (email,)).fetchall()
+        fresh_after = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        # Retain collision detection for older/deactivated Slack identities too:
+        # a recycled corporate email must not move old spend to another person.
+        slack_count = conn.execute("SELECT COUNT(*) FROM users WHERE kind='slack' AND email=?", (email,)).fetchone()[0]
+        ambiguous = len(google) > 1 or slack_count > 1
+        for row in slack:
+            if row['link_method'] == 'manual':
+                continue
+            target = google[0]['id'] if len(google) == 1 else None
+            if row['linked_user_id']:
+                status = 'linked' if not ambiguous and row['linked_user_id'] == target else 'review'
+            elif ambiguous:
+                status = 'review'
+            elif row['profile_checked_at'] < fresh_after:
+                status = 'pending_profile'
+            elif target:
+                conn.execute("UPDATE users SET linked_user_id=?,link_method='email',updated_at=? WHERE id=?", (target, now(), row['id']))
+                conn.execute("INSERT INTO identity_audit(actor_id,source_id,target_id,created_at,reason) VALUES('system:email-match',?,?,?,'automatic_email_match')", (row['id'], target, now()))
+                status = 'linked'
+            else:
+                status = 'awaiting_google'
+            conn.execute('UPDATE users SET link_status=? WHERE id=?', (status, row['id']))
 
     @staticmethod
     def slack_identity_in(conn, team, user):
