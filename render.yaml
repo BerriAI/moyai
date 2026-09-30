@@ -1,9 +1,9 @@
 services:
   - type: web
-    name: moyai-devin
+    name: moyai-devin-litellm
     runtime: python
     region: oregon
-    plan: starter
+    plan: 1c-2g
     numInstances: 1
     buildCommand: pip install uv==0.11.17 && uv sync --frozen --no-dev
     startCommand: .venv/bin/python render_start.py
@@ -31,7 +31,7 @@ services:
       - key: MAX_PARALLEL_AGENTS
         value: "100"
       - key: MAX_CONCURRENT_MODEL_REQUESTS
-        value: "8"
+        value: "32"
       - key: MAX_AGENT_ITERATIONS
         value: "0"
       - key: SANDBOX_ROTATION_SECONDS
