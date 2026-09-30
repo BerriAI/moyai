@@ -10,13 +10,19 @@ import sys
 import urllib.request
 from urllib.parse import urlparse
 
+try:
+    from . import github_tools
+except ImportError:
+    import github_tools
+
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
+GIT_BROKER = os.environ.get('WORKSPACE_GIT_BROKER_URL', BROKER)
 browser = page = playwright = None
 
 
 def broker(path, body=None):
-    data = json.dumps(body).encode() if body is not None else None
+    data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     req = urllib.request.Request(BROKER + path, data=data, headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=920) as response:
         return json.load(response)
@@ -76,13 +82,21 @@ def serve():
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
-                tools = broker("/tools") + BROWSER_TOOLS
+                tools = github_tools.advertised_tools(broker("/tools")) + BROWSER_TOOLS
                 result = {"tools": tools}
             elif method == "tools/call":
                 name, args = params["name"], params.get("arguments", {})
                 try:
-                    data = browser_tool(name, args) if name.startswith("browser_") else broker("/tools/call", {"name": name, "arguments": args})
+                    if name in {'github_checkout', 'github_create_pull_request'}:
+                        available = broker('/tools')  # Recheck revocation/read-only changes.
+                        if name not in {tool['name'] for tool in available}:
+                            raise github_tools.GitHubToolError('This GitHub operation is not enabled for the session.')
+                        data = github_tools.call(name, args, broker, GIT_BROKER, TOKEN)
+                    else:
+                        data = browser_tool(name, args) if name.startswith("browser_") else broker("/tools/call", {"name": name, "arguments": args})
                     result = {"content": [{"type": "text", "text": json.dumps(data)}], "isError": bool(isinstance(data, dict) and data.get("error"))}
+                except github_tools.GitHubToolError as exc:
+                    result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
                 except Exception as exc:
                     result = {"content": [{"type": "text", "text": f"Tool failed ({type(exc).__name__}). The action was not confirmed; do not retry writes automatically."}], "isError": True}
             else:

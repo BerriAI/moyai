@@ -29,10 +29,11 @@ from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
+from .github_setup import routes as github_routes
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
-Provider = Literal["linear", "slack", "notion"]
+Provider = Literal["linear", "slack", "notion", "github"]
 
 
 class NewRun(BaseModel):
@@ -40,7 +41,7 @@ class NewRun(BaseModel):
     prompt: str = Field(min_length=3, max_length=16000)
     repo_url: str = Field(default="", max_length=500)
     mode: Literal["demo", "modal"] = "demo"
-    plugins: list[Provider] = Field(default_factory=list, max_length=3)
+    plugins: list[Provider] = Field(default_factory=list, max_length=4)
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
 
@@ -49,7 +50,7 @@ class NewRun(BaseModel):
     def repository(cls, value):
         value = value.strip().removesuffix("/")
         if value and not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
-            raise ValueError("Use a public https://github.com/owner/repository URL.")
+            raise ValueError("Use a https://github.com/owner/repository URL.")
         return value
 
     @field_validator("prompt")
@@ -146,6 +147,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(google.routes())
     app.include_router(spend.routes())
     app.include_router(identities.routes())
+    app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
@@ -178,6 +180,8 @@ def create_app(settings: Settings | None = None):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        if request.url.path == '/auth/github/register':
+            response.headers['Content-Security-Policy'] += ' https://github.com'
         if request.url.path.startswith(("/api/", "/oauth/", "/auth/", "/broker/")):
             response.headers["Cache-Control"] = "no-store"
         return response
@@ -398,6 +402,8 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/connections/{provider}")
     async def connect(provider: Provider, body: TokenConnection, request: Request):
         security.require(request, mutation=True, admin=True)
+        if provider == 'github':
+            raise HTTPException(400, 'Install the organization GitHub App; personal or raw access tokens are not accepted.')
         credentials = {"access_token": body.token.strip(), "kind": "personal"}
         label = await connectors.verify(provider, credentials)
         connectors.save(provider, credentials, label)
@@ -498,6 +504,9 @@ def create_app(settings: Settings | None = None):
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, 'Invalid broker request JSON.')
 
+    from .github_git import routes as git_routes
+    app.include_router(git_routes(connectors.github, require_run))
+
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
@@ -530,6 +539,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, "Invalid tool arguments.")
         if not connectors.allowed(body.name):
             raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
+        if provider == 'github':
+            run = {**run, 'github_connection_version': connectors.github.connection_version()}
         approval_id = None
         if write:
             approval_id = uuid4().hex
@@ -568,7 +579,8 @@ def create_app(settings: Settings | None = None):
         if approval_id:
             await checkpoints.flush()
         try:
-            result = await connectors.call(body.name, arguments)
+            result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
+                      else await connectors.call(body.name, arguments))
             if approval_id:
                 store.execute("UPDATE approvals SET status='completed',result=? WHERE id=?", (json.dumps(result)[:12000], approval_id))
             store.event(run_id, "tool", f"{body.name} completed")

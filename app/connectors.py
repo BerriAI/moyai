@@ -8,10 +8,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import Store, now
-
-
-class ConnectorError(Exception):
-    pass
+from .connector_errors import ConnectorError
+from .github import GitHub, TOOLS as GITHUB_TOOLS
 
 
 class Args(BaseModel):
@@ -55,6 +53,7 @@ class NotionAppend(NotionPage):
 
 
 TOOLS = {
+    **GITHUB_TOOLS,
     "linear_teams": ("linear", False, Args, "List up to 50 accessible Linear teams and their IDs. Use before creating an issue; ask if the right team is ambiguous."),
     "linear_search": ("linear", False, Search, "Search Linear issue titles by text. Returns at most 20 issues."),
     "linear_issue": ("linear", False, LinearIssue, "Read a Linear issue's description, status, and recent comments."),
@@ -72,18 +71,23 @@ TOOLS = {
 class Connectors:
     def __init__(self, store: Store, security, settings):
         self.store, self.security, self.settings = store, security, settings
-        self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion")}
+        self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github")}
+        self.github = GitHub(store, security, settings, self)
 
     def configured_oauth(self, provider):
+        if provider == 'github':
+            return True
         return bool(getattr(self.settings, f"{provider}_client_id") and getattr(self.settings, f"{provider}_client_secret"))
 
     def list(self):
         connected = {row["provider"]: row for row in self.store.rows("SELECT * FROM connections")}
         result = []
-        for provider in ("linear", "slack", "notion"):
+        for provider in ("linear", "slack", "notion", "github"):
             row = connected.get(provider, {})
             credentials = json.loads(self.security.decrypt(row["encrypted"])) if row else {}
             identity = ("Shared user OAuth" if provider == "slack" else "OAuth connection") if credentials.get("kind") == "oauth" else ("Personal API key" if provider == "linear" else "Integration token")
+            if provider == 'github':
+                identity = 'Organization GitHub App'
             result.append({"id": provider, "connected": bool(row), "scope": "organization",
                            "oauth_configured": self.configured_oauth(provider),
                            "label": row.get("label", ""), "updated_at": row.get("updated_at"),
@@ -176,6 +180,8 @@ class Connectors:
             raise ConnectorError("Could not reach the app. Please retry.") from exc
 
     async def verify(self, provider, credentials):
+        if provider == 'github':
+            return await self.github.verify(credentials)
         token = credentials["access_token"]
         headers = self.headers(provider, credentials)
         if provider == "linear":

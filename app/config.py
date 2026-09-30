@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
+    github_repository: str = Field(default="BerriAI/litellm", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
     @field_validator('run_timeout_seconds')
     @classmethod
