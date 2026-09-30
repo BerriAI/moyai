@@ -235,6 +235,7 @@ class SlackChat:
         return {'queued': 'Your message is queued.', 'provisioning': 'Opening the cloud workspace…',
                 'running': 'I’m working through your request…', 'saving': 'Saving the conversation and workspace…',
                 'waiting_children': 'The parallel agents are working. I’ll combine their results when they finish.',
+                'waiting_credential': 'I need a provider key. Use the secure form in the web session; do not paste it in Slack.',
                 'awaiting_approval': 'I need an administrator’s approval in the web app before making that change.',
                 'stopping': 'Stopping and cleaning up the cloud workspace…', 'idle': 'Ready for your next message.',
                 'completed': 'Finished. Ready for your next message.', 'failed': 'The response failed. Send a follow-up to continue.',
@@ -284,6 +285,11 @@ class SlackChat:
                 for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
                     self.queue(conn, run_id, 'approval:' + approval['id'], 'approval',
                                'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
+                # A child can ask while the Slack-linked parent waits for it.
+                if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential_requests'").fetchone():
+                    for key in conn.execute("SELECT q.id,q.run_id FROM credential_requests q JOIN runs r ON r.id=q.run_id WHERE (r.id=? OR r.parent_run_id=?) AND q.status='pending' AND q.message_id=r.active_message_id AND r.status IN ('running','saving','waiting_credential')",(run_id,run_id)).fetchall():
+                        self.queue(conn,run_id,'credential:'+key['id'],'approval',
+                                   'A provider API key is needed to continue. Provide a key or open the provider setup link through the secure form. Do not paste keys in Slack.\n' + self.link(key['run_id']))
                 if binding['status'] == 'interrupted':
                     self.queue(conn, run_id, f"interrupted:{run_id}:{binding['updated_at']}", 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 

@@ -42,9 +42,14 @@ class AgentWait(RotationDeadline):
         super().__init__(0)
         self.relay = relay
         self.group = ''
+        self.credential = ''
 
     def step(self, agent):
-        if self.relay.wait_group and not self.requested:
+        if getattr(self.relay,'wait_credential','') and not self.requested:
+            self.credential = self.relay.wait_credential
+            agent.interrupt()
+            self.requested = True
+        elif self.relay.wait_group and not self.requested:
             self.group = self.relay.wait_group
             agent.interrupt()
             self.requested = True

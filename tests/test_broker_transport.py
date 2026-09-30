@@ -118,6 +118,40 @@ def test_loopback_relay_seals_model_and_mcp_requests_and_returns_sse():
     assert requests==[(path,{'content':CODE}) for path in ['/v1/chat/completions','/tools/call']]
 
 
+def test_credential_relay_pauses_and_exposes_only_scoped_sdk_paths():
+    calls=[]
+    request_id='a'*32
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            path=self.path.removeprefix('/broker/run')
+            body=json.loads(unseal('runtime-token',path,self.rfile.read(int(self.headers['Content-Length']))))
+            calls.append((path,body))
+            result={'moyai_wait_credential':request_id} if path=='/tools/call' else {'data':[]}
+            self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
+            self.wfile.write(json.dumps(result).encode())
+    server=ThreadingHTTPServer(('127.0.0.1',0),Edge)
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    relay=BrokerRelay(f'http://127.0.0.1:{server.server_port}/broker/run','runtime-token').start()
+    try:
+        with httpx.Client(base_url=relay.url,timeout=5) as client:
+            headers={'Authorization':'Bearer runtime-token'}
+            assert client.post('/tools/call',json={'name':'credentials_request','arguments':{}},headers=headers).status_code==200
+            assert relay.wait_credential==request_id
+            base='/credentials/'+request_id+'/v1'
+            assert client.get(base+'/models',headers=headers).json()=={'data':[]}
+            assert client.post(base+'/messages',json={'model':'claude-test'},headers={'x-api-key':'runtime-token'}).status_code==200
+            assert client.post(base+'/chat/completions',json={'model':'gpt-test'},headers=headers).status_code==200
+            assert client.get(base+'/models').status_code==401
+            assert client.post(base+'/keys',json={},headers=headers).status_code==404
+            assert client.get('/credentials/'+request_id+'/v1/models?token=x',headers=headers).status_code==404
+        assert calls[1]==('/credentials/invoke',{'request_id':request_id,'method':'GET','path':'/models','body':{}})
+        assert calls[2][1]['path']=='/messages' and calls[3][1]['path']=='/chat/completions'
+        assert len(calls)==4
+    finally:
+        relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
+
+
 def test_edge_failure_is_actionable_and_does_not_guess_about_user_key():
     class Blocked(BaseHTTPRequestHandler):
         def log_message(self,*args): pass

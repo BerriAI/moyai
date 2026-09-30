@@ -12,6 +12,8 @@ from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -30,6 +32,7 @@ from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
+from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -113,7 +116,10 @@ def create_app(settings: Settings | None = None):
     spend = Spend(store, settings, security, checkpoints)
     coordinator = AgentCoordinator(store, settings, manager)
     manager.coordinator = coordinator
+    credentials = Credentials(store, security, settings, manager, checkpoints)
+    manager.credentials = credentials
     model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
+    credentials.slots = model_slots
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
@@ -147,6 +153,8 @@ def create_app(settings: Settings | None = None):
     app.include_router(google.routes())
     app.include_router(spend.routes())
     app.include_router(identities.routes())
+    app.include_router(credentials.routes())
+    app.state.credentials = credentials
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
@@ -189,6 +197,12 @@ def create_app(settings: Settings | None = None):
     @app.exception_handler(ConnectorError)
     async def connector_error(request, exc):
         return JSONResponse({"detail": str(exc)}, status_code=502)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, exc):
+        if request.url.path.startswith('/api/credentials'):
+            return JSONResponse({'detail':'Invalid credential form. Check the provider, scope and required fields.'},status_code=422)
+        return await request_validation_exception_handler(request,exc)
 
     @app.get("/health")
     async def health():
@@ -326,6 +340,7 @@ def create_app(settings: Settings | None = None):
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
                 "owner": owners[0] if owners else None,
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
+                "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
 
@@ -519,7 +534,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -529,6 +544,20 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in CREDENTIAL_TOOLS:
+            if not credentials.tools(run):
+                raise HTTPException(403,'Credential requests require a durable chat session.')
+            try:
+                if body.name == 'credentials_request':
+                    result = credentials.request(run,CredentialRequest.model_validate(body.arguments))
+                    await checkpoints.flush()
+                    return result
+                status,result = await credentials.invoke(run,Invoke.model_validate(body.arguments))
+                return {'status_code':status,'response':result}
+            except ValidationError:
+                return {'error':'Invalid credential tool arguments.'}
+            except ValueError as exc:
+                return {'error':str(exc)}
         if body.name in AGENT_TOOLS:
             if not coordinator.available(run):
                 raise HTTPException(403, 'Only a top-level Temporal session can coordinate agents.')
@@ -600,6 +629,16 @@ def create_app(settings: Settings | None = None):
                 store.execute("UPDATE approvals SET status='uncertain',result=? WHERE id=?", (message, approval_id))
             store.event(run_id, "error", f"{body.name}: {message}")
             return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
+
+    @app.post('/broker/{run_id}/credentials/invoke')
+    async def credential_invoke(run_id: str, request: Request):
+        run = require_run(run_id,request)
+        try:
+            args = Invoke.model_validate(await broker_body(request,'/credentials/invoke'))
+            status,result = await credentials.invoke(run,args)
+        except (ValueError,ValidationError):
+            raise HTTPException(422,'Invalid provider request.') from None
+        return JSONResponse(result,status_code=status)
 
     @app.get("/broker/{run_id}/v1/models")
     async def models(run_id: str, request: Request):

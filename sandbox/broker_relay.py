@@ -2,6 +2,7 @@
 import hmac
 import json
 import random
+import re
 import threading
 import time
 import urllib.error
@@ -22,6 +23,7 @@ class BrokerRelay:
     def __init__(self, remote, token):
         self.last_error = ''
         self.wait_group = ''
+        self.wait_credential = ''
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -37,26 +39,38 @@ class BrokerRelay:
                 self.wfile.write(content)
 
             def handle_request(self):
-                if not hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token):
+                credential_route = re.fullmatch(r'/credentials/([0-9a-f]{32})/v1(/models|/chat/completions|/completions|/embeddings|/messages)',self.path)
+                authorized = hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token)
+                if credential_route:
+                    authorized = authorized or hmac.compare_digest(self.headers.get('x-api-key',''),token)
+                if not authorized:
                     return self.error(401, 'Invalid cloud session capability.')
                 allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/tools/call'}}
-                if self.path not in allowed.get(self.command, set()):
+                if not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:
                     size = int(self.headers.get('Content-Length', '0'))
                     if size < 0 or size > MAX_BODY:
                         return self.error(413, 'Broker request is too large.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
+                    route,method = self.path,self.command
+                    if credential_route:
+                        try:
+                            raw = json.dumps({'request_id':credential_route[1],'method':method,'path':credential_route[2],
+                                              'body':json.loads(raw) if raw else {}}).encode()
+                        except (ValueError,UnicodeDecodeError):
+                            return self.error(422,'Invalid provider request JSON.')
+                        route,method = '/credentials/invoke','POST'
                     control_call = False
                     if self.path == '/tools/call':
                         try:
-                            control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry'}
+                            control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry', 'credentials_request'}
                         except (ValueError, AttributeError):
                             pass
                     while True:
-                        data = seal(token, self.path, raw) if self.command == 'POST' else None
-                        request = urllib.request.Request(remote.rstrip('/') + self.path, data=data,
-                            headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=self.command)
+                        data = seal(token, route, raw) if method == 'POST' else None
+                        request = urllib.request.Request(remote.rstrip('/') + route, data=data,
+                            headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=method)
                         try:
                             response = urllib.request.urlopen(request, timeout=940)
                             break
@@ -81,11 +95,15 @@ class BrokerRelay:
                             group = value.get('moyai_wait_group')
                             if isinstance(group, str) and len(group) == 32 and all(c in '0123456789abcdef' for c in group):
                                 relay.wait_group = group
+                            credential = value.get('moyai_wait_credential')
+                            if isinstance(credential,str) and re.fullmatch(r'[0-9a-f]{32}',credential):
+                                relay.wait_credential = credential
                             self.wfile.write(body)
                         else:
                             while chunk := response.read(65536):
                                 self.wfile.write(chunk)
-                        relay.last_error = ''
+                        if not credential_route:
+                            relay.last_error = ''
                 except urllib.error.HTTPError as exc:
                     message = EDGE_ERROR if exc.code == 403 and 'json' not in exc.headers.get('Content-Type', '') else ''
                     if not message:
@@ -95,11 +113,14 @@ class BrokerRelay:
                         except (ValueError, AttributeError):
                             pass
                     message = str(message or 'The cloud connection failed before a response could finish.')
-                    relay.last_error = message
+                    if not credential_route:
+                        relay.last_error = message
                     self.error(502 if exc.code == 403 else exc.code, message)
                 except (urllib.error.URLError, TimeoutError):
-                    relay.last_error = 'The cloud connection timed out or could not be reached. Your message is saved.'
-                    self.error(502, relay.last_error)
+                    message = 'The cloud connection timed out or could not be reached. Your message is saved.'
+                    if not credential_route:
+                        relay.last_error = message
+                    self.error(502, message)
 
             do_GET = do_POST = handle_request
 

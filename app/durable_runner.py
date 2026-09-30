@@ -187,7 +187,7 @@ class DurableRunner(RunManager):
         return self.has_capacity()
 
     def has_capacity(self):
-        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children'}
+        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children', 'waiting_credential'}
                      for r in self.store.rows('SELECT state FROM durable_sessions'))
         return active < self.settings.max_concurrent_runs
 
@@ -284,6 +284,8 @@ class DurableRunner(RunManager):
             spec['chat_enabled'] = True
             if state.get('resume_group') and self.coordinator:
                 spec['agent_results'] = self.coordinator.results(run_id, state['resume_group'])
+            if state.get('resume_credential') and self.credentials:
+                spec['credential_resolution'] = self.credentials.resolution(run_id,state['resume_credential'])
             if self.settings.run_timeout_seconds:
                 remaining = self.settings.run_timeout_seconds - (time.time() - state['turn_started'])
                 if remaining <= 0:
@@ -368,7 +370,19 @@ class DurableRunner(RunManager):
         elif phase == 'checkpointed':
             result = state['result']
             continuing = result.get('continuation') and state['exit_code'] == 0
-            if continuing and result.get('wait_group') and self.coordinator:
+            if continuing and result.get('wait_credential') and self.credentials:
+                self.credentials.resolution(run_id,result['wait_credential'])
+                await self.cleanup(state)
+                state.update(phase='waiting_credential',wait_credential=result['wait_credential'],sandbox_id='',
+                             segment=state['segment']+1,cursor=0)
+                state.pop('result',None)
+                state.pop('save_attempts',None)
+                self.running_status(run_id,'waiting_credential','')
+                self.store.update_run(run_id,pending_result='',summary='',sandbox_id='')
+                self.store.event(run_id,'credential','Workspace saved. Waiting for a provider key; sandbox released.',
+                                 {'request_id':state['wait_credential']})
+                self.save(run_id,state)
+            elif continuing and result.get('wait_group') and self.coordinator:
                 # Validate the control message against persisted ownership.
                 self.coordinator.group(run_id, result['wait_group'])
                 await self.cleanup(state)
@@ -401,6 +415,16 @@ class DurableRunner(RunManager):
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='completed' if completed else 'failed',
                              response=result.get('message') or 'Hermes stopped without a final answer.')
                 self.save(run_id, state)
+        elif phase == 'waiting_credential':
+            if not self.credentials or self.credentials.resolution(run_id,state['wait_credential'])['status']=='pending':
+                return False  # Temporal waits on a durable wake, without a sandbox or polling.
+            async with self.admission_lock:
+                if not await self.make_capacity(run_id):
+                    return 'capacity'
+                state.update(phase='provision',resume_credential=state['wait_credential'])
+                self.save(run_id,state)
+            self.running_status(run_id,'provisioning')
+            self.store.event(run_id,'credential','Credential request resolved. Resuming the saved session.')
         elif phase == 'waiting_children':
             if not self.coordinator or not self.coordinator.settled(run_id, state['wait_group']):
                 return 'children'

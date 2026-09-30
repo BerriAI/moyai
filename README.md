@@ -577,3 +577,50 @@ The agent can read repository details and PRs, check out private code, and packa
 GitHub's `pull_requests:write` permission includes review/merge capabilities, so GitHub scopes alone cannot implement a create-only permission. Moyai enforces this boundary in its server broker: it exposes no approval, review, merge, auto-merge, branch update, force-push, or generic GitHub API operation. Signing keys are encrypted on the server; short-lived installation tokens are narrowed to the configured repository and never sent to Modal. Git transport is a streaming read-only `git-upload-pack` endpoint, authenticated with the current session capability. Credentials are not stored in Git URLs/config or command arguments. Workflow, access-control, credential, binary, symlink and submodule changes are rejected; the base tree is checked to prevent implicit directory deletion. Do not add the App as a branch-protection/ruleset bypass actor.
 
 A publication journal uses the session plus `request_key` to recover an uncertain branch/PR response across chat turns. Explicit retries with unchanged files and fields find the existing PR; conflicting payloads, changed installations and externally changed branches stop instead of overwriting. A new approval is still required. Pausing/disconnecting GitHub or stopping the session revokes further calls; an already-sent GitHub action cannot be recalled.
+
+## Secure provider key requests
+
+Durable sessions can call `credentials_request` when a benchmark needs a separate
+provider key. The session displays a secure form and a provider setup link, saves
+its conversation/files, releases its Modal sandbox and waits for a Temporal wake.
+Providing or declining the key resumes the same user message from its checkpoint.
+Slack-linked sessions send a web-form link; keys must never be pasted into Slack
+or chat. Subagent requests appear in the child's chat and also notify the linked
+parent Slack thread.
+
+The Secrets page stores encrypted keys with three scopes:
+
+- **This session:** available to the requester in this session and its subagents.
+- **Personal:** reusable for that signed-in user's requests.
+- **Organization:** reusable by teammates; only current admins can add or revoke.
+
+A single authorized saved key for a provider is reused automatically. Multiple
+matches require choosing a key in the form. Saved values cannot be read back in
+the UI or API. Revocation blocks future proxy calls but does not cancel in-flight
+provider calls or revoke the upstream provider key. Use revoke/add to replace a
+key. Session keys remain until revoked. Results retain the session's existing
+sharing; personal key scope does not turn shared conversations into private chats.
+
+Personal access is checked on every provider call against the active message's
+server-owned user identity, including follow-ups by a different teammate. Slack
+requests can match SSO only using a recent eligible Slack profile email; manual
+spend attribution links alone never grant credential access. Google sign-in is
+required for personal/session keys outside local previews.
+
+Initial providers: Fireworks, OpenAI, Anthropic, Together AI and Groq. Their fixed
+HTTPS origins and inference/model-list routes are allowlisted in
+`app/credentials.py`. The server injects provider authentication and rejects
+redirects, arbitrary hosts, account-management routes and streaming/background
+requests. `credentials_http_request` handles individual calls. Parallel benchmark
+scripts can use the OpenAI/Anthropic SDK through a per-turn loopback proxy using
+the environment instructions returned by the request tool; set `max_retries=0`
+and `stream=False`. Keys are never returned to the agent, placed in sandbox
+environment variables, saved in artifacts, or stored in Temporal history.
+Provider error bodies are not forwarded. The proxy shares the web process's
+model-request concurrency limit and bounds response size.
+
+These separate-provider charges are **not** added to the Moyai gateway-key spend
+total: they are billed to the key supplied by the user. This flow does not create
+provider accounts or keys automatically; the setup link lets the user create one
+in their provider account and return to Moyai. Arbitrary secrets/raw environment
+variable injection and custom provider origins are not supported.

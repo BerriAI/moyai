@@ -38,6 +38,7 @@ class RunManager:
         self.closing = False
         self.prepare_context = None
         self.coordinator = None
+        self.credentials = None
 
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""

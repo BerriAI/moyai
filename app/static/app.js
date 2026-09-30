@@ -63,9 +63,9 @@ function bindComposer(input,form){
 }
 async function navigate(view) {
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
-  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend'}[view]);
+  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',secrets:'Secrets'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
-  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else await renderRuntime();
+  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='secrets')await renderSecrets();else await renderRuntime();
 }
 async function refreshRuns(){const focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';state.runs=await api('/api/runs'+(focus?'?focus='+encodeURIComponent(focus):''));renderSidebar();}
 async function renderHome(){
@@ -118,7 +118,7 @@ function toggleDetails(open){
 function renderChat(run){
   const id=run.id;
   $('#header-actions').innerHTML=`${run.parent_run_id?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span><button id="toggle-details" class="quiet details-toggle" aria-expanded="false" aria-controls="session-details"><span aria-hidden="true">☷</span> Activity</button>`;
-  $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar">${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Shift + Enter for a new line</span></div></div></section>
+  $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="credential-requests"></div><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar">${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
   $('#toggle-details').onclick=()=>toggleDetails(!state.detailsOpen);$('#close-details').onclick=()=>toggleDetails(false);toggleDetails(state.detailsOpen);
   $('#followup').value=state.drafts[id]||'';
@@ -153,7 +153,7 @@ function connectChatStream(run){
       if(!current())return;
       const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;
       if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));
-      if(['chat','approval','artifact','context','agents'].includes(event.kind))refreshChat(id).catch(showError);
+      if(['chat','approval','artifact','context','agents','credential'].includes(event.kind))refreshChat(id).catch(showError);
     };
     source.addEventListener('run-status',e=>{if(current()){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
     source.onerror=()=>{
@@ -175,7 +175,7 @@ function updateChatStatus(run){
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
   if(state.activeParentId)$('#queue-note').textContent='Chatting with this agent directly. Results already sent to the parent stay saved.';
   $('#chat-working').classList.toggle('busy',busy);
-  $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for a provider key. Your work is saved and the sandbox is paused.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
   if(busy&&run.active_model)$('#chat-working').textContent+=' · '+modelName(run.active_model);
   const item=state.runs.flatMap(r=>[r,...(r.children||[])]).find(r=>r.id===state.selected);if(item&&item.status!==run.status){item.status=run.status;renderSidebar();}
 }
@@ -190,7 +190,7 @@ function updateChat(run,initial=false){
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
   $('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;
-  updateChatStatus(run);renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
+  updateChatStatus(run);renderCredentialRequests(run.credential_requests||[]);renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
   $('#artifact-area').innerHTML=run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download latest files</a>`:'';
   $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
@@ -272,7 +272,7 @@ $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
   const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1];
-  (linkedRun?openRun(linkedRun):navigate(['#connections','#runtime','#spend'].includes(location.hash)?location.hash.slice(1):'tasks')).catch(showError);
+  (linkedRun?openRun(linkedRun):navigate(['#connections','#runtime','#spend','#secrets'].includes(location.hash)?location.hash.slice(1):'tasks')).catch(showError);
 });
 async function boot(){
   try{
@@ -292,7 +292,7 @@ async function boot(){
     document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
     [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';$('#logout')?.remove();$('.rail-foot').insertAdjacentHTML('beforeend','<button id="logout" class="quiet" aria-label="Sign out">⏻</button>');$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload();};}
-    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(['#connections','#runtime','#spend'].includes(location.hash)?location.hash.slice(1):'tasks');
+    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(['#connections','#runtime','#spend','#secrets'].includes(location.hash)?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
   }catch(e){$('#content').innerHTML='<div class="error-banner">'+esc(e.message)+'</div>';}
