@@ -156,7 +156,7 @@ function updateChatStatus(run){
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
-  $('#queue-note').textContent=run.slack_mirroring==='active'?'Replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack replies are paused for this session.':busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
+  $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
   if($('#followup').disabled)$('#queue-note').textContent='The coordinator manages this worker’s instructions and results.';
   $('#chat-working').classList.toggle('busy',busy);
   $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';

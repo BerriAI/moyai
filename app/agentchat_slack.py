@@ -10,6 +10,7 @@ from types import MappingProxyType
 from weakref import WeakValueDictionary
 
 from agentchat import AgentChat
+from agentchat.channels.slack_mirror import mirror_payload
 from agentchat.models import Message, Sender
 
 
@@ -108,6 +109,27 @@ class SlackWebhookChannel:
                        conversation_id=source.conversation_id, channel=self.name,
                        sender=Sender(id='moyai'), text=content, role='assistant',
                        metadata=MappingProxyType({'slack_ts': response.get('ts', '')}))
+
+    async def mirror(self, source, message, *, origin='Moyai web'):
+        payload = mirror_payload(message, origin=origin)
+        token = await self.owner.connectors.slack_bot_token()
+        # Recheck after token refresh, immediately before the external send.
+        binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (source.metadata['run_id'],))[0]
+        if (binding['paused'] or not self.owner.settings.slack_thread_chat_enabled
+                or not self.owner.status()['enabled']
+                or binding['team_id'] != self.owner.connectors.slack_installation().get('team_id')):
+            raise RuntimeError('Slack destination changed before mirroring.')
+        response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
+            headers={'Authorization': f'Bearer {token}'}, json={
+                **payload, 'channel': binding['channel'],
+                'thread_ts': None if binding['channel'].startswith('D') and binding['thread_ts'] == binding['started_ts'] else binding['thread_ts'],
+            })
+        if not response.get('ts'):
+            raise RuntimeError('Slack mirror delivery could not be confirmed.')
+        return Message(id=f"slack:{binding['channel']}:{response['ts']}",
+                       conversation_id=source.conversation_id, channel=self.name,
+                       sender=message.sender, text=message.text, role='user',
+                       metadata=MappingProxyType({'slack_ts': response['ts'], 'mirrored_message_id': message.id}))
 
     async def acknowledge(self, run_id, message_ts):
         """React only to an accepted message in the immutable session binding."""

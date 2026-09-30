@@ -8,6 +8,8 @@ import time
 from decimal import Decimal
 from uuid import uuid4
 
+from agentchat.models import Message, Sender
+
 from .db import now
 from .security import digest
 
@@ -66,9 +68,45 @@ class SlackChat:
             return None
         return 'paused' if rows[0]['paused'] else 'active'
 
-    def queue(self, conn, run_id, key, kind, text):
-        conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at) VALUES(?,?,?,?,?)',
-                     (run_id, key, kind, text, now()))
+    def queue(self, conn, run_id, key, kind, text, metadata=None):
+        conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
+                     (run_id, key, kind, text, now(), json.dumps(metadata or {})))
+
+    def enqueue_web(self, run_id, content, client_id, model, user_id):
+        """Save a verified web input and its mirror in the same transaction.
+
+        Only new inputs in an enabled, awake binding are eligible. Retrying a
+        submission, reconnecting Slack or waking a thread cannot backfill it.
+        """
+        enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
+        team = self.owner.connectors.slack_installation().get('team_id')
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id)
+            binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+            if created and binding:
+                allowed = enabled and binding['team_id'] == team
+                # Preserve chronology when the previous answer has been saved
+                # but the background collector has not seen it yet.
+                self.collect_answers_in(conn, binding, allowed)
+                if allowed and not binding['paused']:
+                    user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+                    name = user['name'] if user else 'Web user'
+                    if user and user['kind'] == 'google' and user['email']:
+                        name = f"{name} ({user['email']})" if name != user['email'] else name
+                    value = self.scrub(content)
+                    # Plain-text chunks preserve every character of the input.
+                    chunks = [value[i:i + 2600] for i in range(0, len(value), 2600)]
+                    for index, chunk in enumerate(chunks):
+                        key = f"input:{message['id']}:{index}"
+                        self.queue(conn, run_id, key, 'input', chunk, {
+                            'message_id': key, 'sender_id': user_id,
+                            'sender_name': self.scrub(name),
+                        })
+        if created:
+            self.store.event(run_id, 'chat', 'Message queued', {'message_id': message['id']})
+        self.wake.set()
+        return message, created
 
     def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False):
         """Reserve the physical Slack message and queue its turn atomically."""
@@ -149,7 +187,7 @@ class SlackChat:
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Model changed for new messages',?,?)", (run_id, json.dumps({'model':selected_model}), now()))
                 if command == 'sleep':
                     conn.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
-                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind IN ('answer','progress','approval')", (run_id,))
+                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind IN ('answer','input','progress','approval')", (run_id,))
                 elif command == 'wake':
                     conn.execute('UPDATE slack_threads SET paused=0 WHERE run_id=?', (run_id,))
                 if command in {'stop', 'sleep'}:
@@ -211,6 +249,25 @@ class SlackChat:
         text = re.sub(r'\b(?:xox[baprs]-[A-Za-z0-9-]{12,}|sk-[A-Za-z0-9_-]{16,}|GOCSPX-[A-Za-z0-9_-]+)', '[credential redacted]', text)
         return text
 
+    def collect_answers_in(self, conn, binding, allowed):
+        run_id = binding['run_id']
+        messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
+        for message in messages:
+            if allowed and not binding['paused']:
+                value = self.scrub(message['content'])
+                if message['status'] in {'failed', 'cancelled', 'interrupted'}:
+                    value = 'Response ' + message['status'] + ':\n\n' + value
+                if len(value) > 32000:
+                    value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
+                if binding['channel'].startswith('D') and not conn.execute(
+                    "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
+                    value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
+                chunks = split_reply(slack_text(value))
+                for index, chunk in enumerate(chunks):
+                    suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
+                    self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix)
+            conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
+
     def collect(self):
         enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
         team = self.owner.connectors.slack_installation().get('team_id')
@@ -221,22 +278,7 @@ class SlackChat:
                 allowed = enabled and binding['team_id'] == team
                 if not allowed:
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
-                messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
-                for message in messages:
-                    if allowed and not binding['paused']:
-                        value = self.scrub(message['content'])
-                        if message['status'] in {'failed', 'cancelled', 'interrupted'}:
-                            value = 'Response ' + message['status'] + ':\n\n' + value
-                        if len(value) > 32000:
-                            value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
-                        if binding['channel'].startswith('D') and not conn.execute(
-                            "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
-                            value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
-                        chunks = split_reply(slack_text(value))
-                        for index, chunk in enumerate(chunks):
-                            suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
-                            self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix)
-                    conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
+                self.collect_answers_in(conn, binding, allowed)
                 if not allowed or binding['paused']:
                     continue
                 for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
@@ -251,7 +293,7 @@ class SlackChat:
                 continue
             if (not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
                     or row['team_id'] != self.owner.connectors.slack_installation().get('team_id')
-                    or (row['paused'] and row['kind'] in {'answer', 'progress', 'approval', 'reaction'})):
+                    or (row['paused'] and row['kind'] in {'answer', 'input', 'progress', 'approval', 'reaction'})):
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
             if not self.store.execute("UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'", (row['id'],)):
@@ -263,6 +305,14 @@ class SlackChat:
                 if row['kind'] == 'reaction':
                     await self.owner.channel.acknowledge(row['run_id'], row['text'])
                     sent_ts = row['text']
+                elif row['kind'] == 'input':
+                    data = json.loads(row['metadata'])
+                    source = self.owner.channel.source_for_run(row['run_id'])
+                    message = Message(id=data['message_id'], conversation_id=source.conversation_id,
+                        channel='web', sender=Sender(id=data['sender_id'], display_name=data['sender_name']),
+                        text=row['text'], role='user')
+                    response = await self.owner.agentchat.mirror(self.owner.channel, source, message, origin='Moyai web')
+                    sent_ts = response.metadata['slack_ts']
                 else:
                     response = await self.owner.agentchat.reply(self.owner.channel,
                         self.owner.channel.source_for_run(row['run_id']), row['text'])
@@ -277,7 +327,7 @@ class SlackChat:
                 self.store.event(row['run_id'], 'status',
                     'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
                     if row['kind'] == 'reaction' else
-                    'Slack reply delivery could not be confirmed. The reply remains in the web session and will not be sent twice automatically.')
+                    'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
                 if isinstance(exc, asyncio.CancelledError):
                     raise
             finally:

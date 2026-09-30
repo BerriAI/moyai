@@ -115,6 +115,8 @@ class Store:
                     source_id TEXT NOT NULL, target_id TEXT NOT NULL, created_at TEXT NOT NULL
                 );
             """)
+            if 'metadata' not in {row['name'] for row in conn.execute('PRAGMA table_info(slack_outbox)')}:
+                conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
             for table, names in [('runs', ('owner_id', 'active_user_id')), ('messages', ('user_id',))]:
                 existing = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
                 for name in names:

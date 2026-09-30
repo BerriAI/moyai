@@ -339,7 +339,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, str(exc))
         try:
             user_id = store.identity(security.session_info(request))
-            message, created = store.enqueue_message(run_id, body.content, body.client_id, selected_model, user_id)
+            message, created = slack.chat.enqueue_web(run_id, body.content, body.client_id, selected_model, user_id)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
