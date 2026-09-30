@@ -37,6 +37,7 @@ class RunManager:
         self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
         self.closing = False
         self.prepare_context = None
+        self.coordinator = None
 
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
@@ -149,6 +150,8 @@ class RunManager:
         return self.store.run(run_id)["status"] in TERMINAL | {"stopping"}
 
     async def cancel(self, run_id):
+        if self.coordinator:
+            await self.coordinator.cancel_children(run_id)
         run = self.store.run(run_id)
         if run["status"] in TERMINAL and run_id not in self.jobs:
             return
@@ -265,6 +268,8 @@ class RunManager:
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
+                "is_child_agent": bool(run.get('parent_run_id')),
+                "fresh_child": bool(run.get('parent_run_id')) and not run.get('continuation') and not any(m['role'] == 'assistant' for m in self.store.messages(run_id)),
                 "chat_enabled": bool(run.get("chat_enabled")),
                 "workspace_warning": run.get("checkpoint_error", ""),
                 "slack_source": self.store.slack_source(run_id),

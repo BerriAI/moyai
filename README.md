@@ -451,3 +451,79 @@ A second production restart with no active tasks verified that the updated web
 chat showed "Reconnecting", recovered without a page reload, and preserved an
 unsent draft. The Render Blueprint now also keeps `TEMPORAL_ENABLED=true`,
 matching the verified production configuration.
+
+## Parallel agents and demand-based capacity
+
+`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on executing sandboxes,
+including delegated workers. It does not pre-provision 100 machines. Ten
+executing agents need about ten sandboxes; idle conversations need none. Each
+completed response saves its filesystem and terminates its machine. A follow-up
+restores a new sandbox from the snapshot. Provisioning/cleanup and Modal quotas
+can temporarily change the observed count; capacity above the ceiling queues.
+`MAX_PENDING_RUNS=1000` bounds the combined active/queued inbox. Modal CPU,
+memory, concurrency and account quotas still apply; the app setting is not a
+reservation of provider capacity. Each sandbox currently requests 2 CPU/4 GiB.
+
+With Temporal enabled, a top-level chat can use `agents_fanout` to supply either
+explicit labeled assignments or common instructions plus an ordered list of
+items. The server divides items into balanced contiguous partitions and assigns
+each a stable one-based index. For example, 100 items with `workers=5` creates
+five workers with exactly 20 cases each. Repeated launch calls with the same
+`request_key` and original turn reuse the same group; changing its arguments
+requires a new key. Each child inherits the initiating message's user, selected
+model, repository and enabled app set, and receives an isolated snapshot of the
+parent's current files. Finish file writes before delegating. Child conversations
+start fresh; child changes are not automatically merged. Workers cannot launch
+further children. Connected-app write approvals remain mandatory.
+
+After the delegation tool completes, the coordinator checkpoints between tool
+rounds, terminates its sandbox and waits durably. Its original user message stays
+open. Once every child has settled (including failures), it reacquires capacity,
+restores its checkpoint and continues the same request with the worker reports.
+This works even with only one available sandbox slot. Each child is an ordinary
+Temporal `SessionWorkflow`; parent/group relationships and result data are stored
+in SQLite rather than as large Temporal history payloads. A waiting parent uses
+no Modal sandbox. It currently checks completion using a five-second Temporal
+timer; this is a workflow-history cost, not sandbox idle time.
+
+`agents_results` retrieves answers/statuses, and `agents_read_artifact` lists or
+reads a bounded UTF-8 file from a child's recovery archive (128 KiB per read).
+Workers should save structured case results under `/workspace`; the parent can
+read and merge them into its own final result. Failure is not success or a zero
+cost. `agents_retry` accepts explicit recovery instructions for failed workers;
+it does not blindly replay uncertain external actions. Stopping a parent stops
+its unfinished workers. The chat shows worker progress, links, downloads and,
+for admins, combined current-key model spend. Every request remains one ledger
+row tied to the initiating teammate, so parent rollups do not double count
+organization totals. Only the parent session mirrors its final answer to Slack.
+
+The Render process still hosts one shared Temporal worker and SQLite disk.
+`max_concurrent_activities` scales with the sandbox ceiling, but this does not
+horizontally autoscale Render workers. Running multiple control-plane replicas
+requires a shared database and artifact store first. Model response buffering is
+separately bounded by `MAX_CONCURRENT_MODEL_REQUESTS=8` on this small Render
+instance; other agents can continue running sandbox commands while model calls
+queue. The worker pool size and Modal sandbox count are separate concepts.
+Queued model calls retry in the sandbox only after an explicit unbilled
+admission response; each attempt refreshes its short-lived transport envelope.
+Gateway errors and uncertain network failures are not retried by this queue.
+Worker chats are inspectable, but instructions and retries go through the parent
+so manual follow-ups cannot replace a worker's result while it is being gathered.
+
+### Framework choice
+
+Hermes remains the agent runtime. Its native delegation uses an in-process
+thread pool; Moyai's added coordination handles independent Modal sessions,
+durable waiting, capacity, identity and artifact collection. OpenAI's Agents SDK
+supports manager-style agents-as-tools and beta Modal sandbox clients; CrewAI
+supports hierarchical managers and checkpointing. Either is an alternative
+runtime, but adopting one still requires the Moyai-specific persistence,
+authorization and accounting contract. This feature does not stack these
+frameworks or replace the existing Hermes conversation format.
+
+Validation includes 100-slot admission (101st queues), disjoint 100/5 partitioning,
+idempotent launch/retry, parent suspension with a one-slot limit, user attribution,
+artifact access boundaries, cancellation, and a real Temporal dev-server worker
+restart with five concurrently active simulated Modal workers. This is not a
+100-sandbox production load test; verify provider quotas and control-plane memory
+before sustained use at that scale.

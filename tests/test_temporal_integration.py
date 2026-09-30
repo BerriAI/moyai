@@ -6,6 +6,7 @@ import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
+from app.agents import AgentCoordinator, Fanout
 from app.db import Store
 from app.session_workflow import SessionWorkflow
 from app.temporal_runtime import TemporalRunManager
@@ -50,6 +51,64 @@ async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable
             assert 'A follow-up sent while offline' not in history_text
             assert manager.settings.session_secret not in history_text
             await handle.terminate('Integration test complete')
+        finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()
+
+
+async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(durable):
+    manager, cloud, root = durable
+    manager.settings.temporal_enabled = True
+    manager.settings.max_concurrent_runs = 100
+    cloud.saving_before_answer = False
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    original_command = cloud.command
+    release_children = False
+    peak = 0
+
+    async def command(machine, action, directory, value):
+        nonlocal peak
+        peak = max(peak, sum(m.alive for m in cloud.machines))
+        if action == 'read' and machine.spec.get('run_id') != root and not release_children:
+            return json.dumps({'state': 'running', 'events': [], 'cursor': 0})
+        return await original_command(machine, action, directory, value)
+
+    cloud.finished = False
+    manager.command = command
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            return env.client
+        manager.connect_temporal = connect
+        successor = None
+        try:
+            await manager.recover()
+            await eventually(lambda: manager.state(root).get('phase') == 'monitor', seconds=25)
+            result = await manager.coordinator.fanout(manager.store.run(root), Fanout(
+                request_key='temporal-fanout', instructions='Check each case', workers=5, items=[str(i) for i in range(100)]))
+            directory = manager.directory(manager.state(root))
+            cloud.machines[0].operations[directory].update(completed=False, continuation=True, wait_group=result['group_id'])
+            cloud.finished = True
+            await eventually(lambda: manager.state(root).get('phase') == 'waiting_children', seconds=30)
+            assert not cloud.machines[0].alive
+            children = manager.coordinator.children(result['group_id'])
+            await eventually(lambda: all(manager.state(c['id']).get('phase') == 'monitor' for c in children), seconds=30)
+            assert sum(m.alive for m in cloud.machines) == 5
+            await manager.shutdown()
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.coordinator = AgentCoordinator(successor.store, successor.settings, successor)
+            successor.command = command
+            successor.connect_temporal = connect
+            release_children = True
+            await successor.recover()
+            await eventually(lambda: successor.store.run(root)['status'] == 'idle', seconds=60)
+            assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 7
+            assert peak >= 5
+            assert len([m for m in successor.store.messages(root) if m['role'] == 'assistant']) == 1
+            handle = env.client.get_workflow_handle('moyai-session-' + root)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
+            for run_id in [root] + [c['id'] for c in children]:
+                await env.client.get_workflow_handle('moyai-session-' + run_id).terminate('Integration test complete')
         finally:
             if successor:
                 await successor.shutdown()

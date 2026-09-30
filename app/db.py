@@ -11,8 +11,9 @@ def now() -> str:
 
 
 class Store:
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False):
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000):
         self.auto_link_identities = auto_link_identities
+        self.max_pending_runs = max_pending_runs
         self.generation = 0
         self.default_model = default_model
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -140,9 +141,10 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             if default_model:
@@ -188,12 +190,17 @@ class Store:
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
-        self.execute(
-            "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id),
-        )
-        if chat_enabled:
-            self.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, user_id))
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
+            if pending >= self.max_pending_runs:
+                raise ValueError('The session queue is full. Wait for a task to finish.')
+            conn.execute(
+                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id),
+            )
+            if chat_enabled:
+                conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, user_id))
         self.event(run_id, "status", "Task queued")
         return self.run(run_id)
 
@@ -207,7 +214,7 @@ class Store:
                 return None
             actor_id = self.slack_identity_in(conn, team_id, user_id)
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
-            if pending >= 20:
+            if pending >= self.max_pending_runs:
                 raise ValueError("The session queue is full.")
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal','queued',?,?,?,1,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, self.default_model, actor_id))
@@ -252,7 +259,7 @@ class Store:
         count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user'", (run_id,)).fetchone()[0]
         if pending >= 5 or count >= 100:
             raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
-        if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= 20 and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
+        if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= self.max_pending_runs and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()
         model = model if model is not None else row['model'] or self.default_model

@@ -1,7 +1,9 @@
 """Loopback OpenAI/MCP adapter; never forwards a model-chosen destination."""
 import hmac
 import json
+import random
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +21,7 @@ EDGE_ERROR = ('Moyai could not reach the model because the cloud connection reje
 class BrokerRelay:
     def __init__(self, remote, token):
         self.last_error = ''
+        self.wait_group = ''
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -43,15 +46,45 @@ class BrokerRelay:
                     size = int(self.headers.get('Content-Length', '0'))
                     if size < 0 or size > MAX_BODY:
                         return self.error(413, 'Broker request is too large.')
-                    data = seal(token, self.path, self.rfile.read(size)) if self.command == 'POST' else None
-                    request = urllib.request.Request(remote.rstrip('/') + self.path, data=data,
-                        headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=self.command)
-                    with urllib.request.urlopen(request, timeout=940) as response:
+                    raw = self.rfile.read(size) if self.command == 'POST' else b''
+                    control_call = False
+                    if self.path == '/tools/call':
+                        try:
+                            control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry'}
+                        except (ValueError, AttributeError):
+                            pass
+                    while True:
+                        data = seal(token, self.path, raw) if self.command == 'POST' else None
+                        request = urllib.request.Request(remote.rstrip('/') + self.path, data=data,
+                            headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=self.command)
+                        try:
+                            response = urllib.request.urlopen(request, timeout=940)
+                            break
+                        except urllib.error.HTTPError as exc:
+                            if (self.path != '/v1/chat/completions' or exc.code != 429
+                                    or exc.headers.get('X-Moyai-Model-Queue') != '1'):
+                                raise
+                            exc.close()
+                            # Never retry a submitted inference or uncertain
+                            # network failure here. This marker is only emitted
+                            # before admission, so no gateway call was made.
+                            time.sleep(3 + random.random())
+                    with response:
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
                         self.end_headers()
-                        while chunk := response.read(65536):
-                            self.wfile.write(chunk)
+                        if control_call:
+                            body = response.read(MAX_BODY + 1)
+                            if len(body) > MAX_BODY:
+                                raise ValueError('Delegation reply exceeds size limit')
+                            value = json.loads(body)
+                            group = value.get('moyai_wait_group')
+                            if isinstance(group, str) and len(group) == 32 and all(c in '0123456789abcdef' for c in group):
+                                relay.wait_group = group
+                            self.wfile.write(body)
+                        else:
+                            while chunk := response.read(65536):
+                                self.wfile.write(chunk)
                         relay.last_error = ''
                 except urllib.error.HTTPError as exc:
                     message = EDGE_ERROR if exc.code == 403 and 'json' not in exc.headers.get('Content-Type', '') else ''

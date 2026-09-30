@@ -34,3 +34,17 @@ class RotationDeadline:
             if message.get('role') == 'tool':
                 pending.discard(message.get('tool_call_id'))
         return not pending
+
+
+class AgentWait(RotationDeadline):
+    """Pause between complete tool rounds after a trusted broker delegation."""
+    def __init__(self, relay):
+        super().__init__(0)
+        self.relay = relay
+        self.group = ''
+
+    def step(self, agent):
+        if self.relay.wait_group and not self.requested:
+            self.group = self.relay.wait_group
+            agent.interrupt()
+            self.requested = True

@@ -135,6 +135,7 @@ class Spend:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_requests_gateway ON model_requests(key_hash,gateway_id);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_time ON model_requests(key_hash,created_at);
+                CREATE INDEX IF NOT EXISTS idx_model_requests_run ON model_requests(key_hash,run_id);
             ''')
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
             if 'cost_source' not in columns:

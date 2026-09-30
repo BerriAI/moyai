@@ -67,11 +67,8 @@ class DurableRunner(RunManager):
                     if row['status'] == 'stopping':
                         self.store.update_run(run_id, status='cancelled')
                     return False
-                active = sum(json.loads(r['state']).get('phase', 'idle') != 'idle'
-                             for r in self.store.rows('SELECT state FROM durable_sessions'))
-                if active >= self.settings.max_concurrent_runs:
-                    await asyncio.sleep(2)
-                    return True
+                if not self.has_capacity():
+                    return 'capacity'
                 messages = self.store.rows("SELECT * FROM messages WHERE run_id=? AND status='running'", (run_id,))
                 message = messages[0] if messages else self.store.claim_message(run_id)
                 if not message:
@@ -93,6 +90,16 @@ class DurableRunner(RunManager):
                 self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
                           'An administrator must check the selected model and runtime settings.')
                 return True
+
+    def has_capacity(self):
+        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children'}
+                     for r in self.store.rows('SELECT state FROM durable_sessions'))
+        return active < self.settings.max_concurrent_runs
+
+    async def snapshot_for_children(self, run):
+        sandbox = await self.sandbox(self.state(run['id']))
+        snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds, ttl=None)
+        return snapshot.object_id
 
     def fail(self, run_id, state, explanation, status='failed'):
         preserved = self.preserve_answer(run_id)
@@ -176,6 +183,8 @@ class DurableRunner(RunManager):
                               'continuation': state['segment'] > 0})
             spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
             spec['chat_enabled'] = True
+            if state.get('resume_group') and self.coordinator:
+                spec['agent_results'] = self.coordinator.results(run_id, state['resume_group'])
             if self.settings.run_timeout_seconds:
                 remaining = self.settings.run_timeout_seconds - (time.time() - state['turn_started'])
                 if remaining <= 0:
@@ -260,7 +269,20 @@ class DurableRunner(RunManager):
         elif phase == 'checkpointed':
             result = state['result']
             continuing = result.get('continuation') and state['exit_code'] == 0
-            if continuing:
+            if continuing and result.get('wait_group') and self.coordinator:
+                # Validate the control message against persisted ownership.
+                self.coordinator.group(run_id, result['wait_group'])
+                await self.cleanup(state)
+                state.update(phase='waiting_children', wait_group=result['wait_group'], sandbox_id='',
+                             segment=state['segment'] + 1, cursor=0)
+                state.pop('result', None)
+                state.pop('save_attempts', None)
+                self.running_status(run_id, 'waiting_children', '')
+                self.store.update_run(run_id, pending_result='', summary='')
+                self.store.event(run_id, 'agents', 'Workspace saved. Waiting for parallel agents; coordinator sandbox released.',
+                                 {'group_id': state['wait_group']})
+                self.save(run_id, state)
+            elif continuing:
                 if time.time() - state['machine_started'] >= self.settings.sandbox_rotation_seconds:
                     await self.cleanup(state)
                     state.update(sandbox_id='', phase='provision')
@@ -277,7 +299,19 @@ class DurableRunner(RunManager):
                 state.update(phase='cleanup', outcome='completed' if result.get('completed') and state['exit_code'] == 0 else 'failed',
                              response=result.get('message') or 'Hermes stopped without a final answer.')
                 self.save(run_id, state)
+        elif phase == 'waiting_children':
+            if not self.coordinator or not self.coordinator.settled(run_id, state['wait_group']):
+                return 'children'
+            if not self.has_capacity():
+                return 'capacity'
+            state.update(phase='provision', resume_group=state['wait_group'])
+            self.store.execute("UPDATE agent_groups SET status='completed' WHERE id=? AND status='running'", (state['wait_group'],))
+            self.running_status(run_id, 'provisioning')
+            self.store.event(run_id, 'agents', 'Workers finished. Restoring the coordinator to gather results.', {'group_id': state['wait_group']})
+            self.save(run_id, state)
         elif phase == 'cleanup':
+            if self.coordinator and state.get('outcome') != 'completed':
+                await self.coordinator.cancel_children(run_id)
             await self.cleanup(state)
             state['phase'] = 'finish'
             self.save(run_id, state)

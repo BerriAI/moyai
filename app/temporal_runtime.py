@@ -29,6 +29,8 @@ class TemporalRunManager(DurableRunner):
             ON CONFLICT(run_id) DO UPDATE SET revision=revision+1''', (run['id'],))
 
     async def cancel(self, run_id):
+        if self.coordinator:
+            await self.coordinator.cancel_children(run_id)
         if not self.is_active(run_id):
             return
         self.store.update_run(run_id, status='stopping', token_hash='')
@@ -64,7 +66,8 @@ class TemporalRunManager(DurableRunner):
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
                       workflows=[SessionWorkflow], activities=[self.advance_session],
-                      max_concurrent_activities=20, max_cached_workflows=100,
+                      max_concurrent_activities=self.settings.max_concurrent_runs + 20,
+                      max_cached_workflows=200,
                       graceful_shutdown_timeout=timedelta(seconds=1))
 
     async def serve(self):
@@ -94,17 +97,24 @@ class TemporalRunManager(DurableRunner):
                 await asyncio.sleep(5)
 
     async def dispatch(self):
-        for row in self.store.rows('SELECT run_id,revision FROM durable_sessions WHERE revision>delivered'):
-            await self.temporal.start_workflow(
-                SessionWorkflow.run, row['run_id'], id='moyai-session-' + row['run_id'],
-                task_queue=self.settings.temporal_task_queue, start_signal='wake',
-                rpc_timeout=timedelta(seconds=10),
-            )
-            self.store.execute('UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
-                               (row['revision'], row['run_id']))
+        slots = asyncio.Semaphore(10)
+        async def deliver(row):
+            async with slots:
+                await self.temporal.start_workflow(
+                    SessionWorkflow.run, row['run_id'], id='moyai-session-' + row['run_id'],
+                    task_queue=self.settings.temporal_task_queue, start_signal='wake',
+                    rpc_timeout=timedelta(seconds=10),
+                )
+                self.store.execute('UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
+                                   (row['revision'], row['run_id']))
+        rows = self.store.rows('SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY rowid LIMIT 200')
+        results = await asyncio.gather(*(deliver(row) for row in rows), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     @activity.defn(name='advance_session')
-    async def advance_session(self, run_id: str) -> bool:
+    async def advance_session(self, run_id: str) -> bool | str:
         async def heartbeat():
             while True:
                 activity.heartbeat(run_id)

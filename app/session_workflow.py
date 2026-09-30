@@ -29,6 +29,10 @@ class SessionWorkflow:
                 retry_policy=RetryPolicy(initial_interval=timedelta(seconds=2),
                                          maximum_interval=timedelta(seconds=60)),
             )
+            # New Activity results only; historical boolean results follow the
+            # original command sequence when replayed by upgraded workers.
+            if busy in ('capacity', 'children'):
+                await workflow.sleep(5)
             dirty = busy or self.revision != before
         # Re-check the authoritative inbox after rollover. Signals that arrived
         # during the final Activity have already committed their DB message.

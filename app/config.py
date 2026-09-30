@@ -36,7 +36,11 @@ class Settings(BaseSettings):
     modal_app_name: str = "hermes-workspace"
     modal_vm_runtime: bool = False
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
-    max_concurrent_runs: int = Field(default=2, ge=1, le=10)
+    max_concurrent_runs: int = Field(default=100, ge=1, le=100)
+    max_pending_runs: int = Field(default=1000, ge=100, le=5000)
+    max_parallel_agents: int = Field(default=100, ge=1, le=100)
+    # Bound response buffers on the web worker independently of sandbox count.
+    max_concurrent_model_requests: int = Field(default=8, ge=1, le=100)
     # Zero means no overall response deadline or iteration cap.
     run_timeout_seconds: int = Field(default=0, ge=0, le=82800)
     snapshot_timeout_seconds: int = Field(default=180, ge=10, le=600)

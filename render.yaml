@@ -26,6 +26,12 @@ services:
         value: ""
       - key: RUN_TIMEOUT_SECONDS
         value: "0"
+      - key: MAX_CONCURRENT_RUNS
+        value: "100"
+      - key: MAX_PARALLEL_AGENTS
+        value: "100"
+      - key: MAX_CONCURRENT_MODEL_REQUESTS
+        value: "8"
       - key: MAX_AGENT_ITERATIONS
         value: "0"
       - key: SANDBOX_ROTATION_SECONDS

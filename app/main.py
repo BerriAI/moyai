@@ -28,6 +28,7 @@ from .access_logging import configure_access_logging
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
+from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -98,7 +99,8 @@ def create_app(settings: Settings | None = None):
     configure_access_logging()
     settings = settings or Settings()
     restore_checkpoint(settings)
-    store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled)
+    store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled,
+                  max_pending_runs=settings.max_pending_runs)
     security = Security(settings)
     connectors = Connectors(store, security, settings)
     if settings.temporal_enabled:
@@ -108,6 +110,9 @@ def create_app(settings: Settings | None = None):
         manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
     spend = Spend(store, settings, security, checkpoints)
+    coordinator = AgentCoordinator(store, settings, manager)
+    manager.coordinator = coordinator
+    model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
@@ -143,7 +148,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(identities.routes())
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
-    for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend}.items():
+    for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
         setattr(app.state, key, value)
 
     @app.middleware("http")
@@ -241,6 +246,8 @@ def create_app(settings: Settings | None = None):
         missing = missing_cloud()
         return {"cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
+                "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
+                "max_concurrent_model_requests": settings.max_concurrent_model_requests,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
                 "sandbox_rotation_seconds": settings.sandbox_rotation_seconds,
                 "execution_engine": "Temporal" if settings.temporal_enabled else "Local worker",
@@ -267,7 +274,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/runs")
     async def runs(request: Request):
         security.require(request)
-        return [public_run(store.run(row["id"])) for row in store.rows("SELECT id FROM runs ORDER BY created_at DESC LIMIT 100")]
+        return [public_run(store.run(row["id"])) for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY created_at DESC LIMIT 100")]
 
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
@@ -283,10 +290,13 @@ def create_app(settings: Settings | None = None):
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
         pending = store.rows("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')")[0]["n"]
-        if pending >= 20:
+        if pending >= settings.max_pending_runs:
             raise HTTPException(429, "The queue is full. Wait for a task to finish.")
         user_id = store.identity(security.session_info(request))
-        run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id)
+        try:
+            run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id)
+        except ValueError as exc:
+            raise HTTPException(429, str(exc))
         await checkpoints.flush()
         manager.submit(run)
         return public_run(run)
@@ -300,6 +310,7 @@ def create_app(settings: Settings | None = None):
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
                 "owner": owners[0] if owners else None,
+                "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
 
@@ -309,6 +320,8 @@ def create_app(settings: Settings | None = None):
         run = store.run(run_id)
         if not run:
             raise HTTPException(404, "Session not found")
+        if run['parent_run_id']:
+            raise HTTPException(409, 'Send instructions in the coordinator session. It manages this worker and its results.')
         if run["mode"] == "modal" and missing_cloud():
             raise HTTPException(503, "Cloud setup is incomplete. See Runtime.")
         try:
@@ -487,7 +500,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -497,6 +510,16 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in AGENT_TOOLS:
+            if not coordinator.available(run):
+                raise HTTPException(403, 'Only a top-level Temporal session can coordinate agents.')
+            try:
+                result = await coordinator.call(run_id, body.name, body.arguments)
+                await checkpoints.flush()
+                return result
+            except (ValueError, ValidationError) as exc:
+                # Do not include validation payloads or private provider errors.
+                return {'error': 'Invalid agent arguments.' if isinstance(exc, ValidationError) else str(exc)}
         if body.name not in TOOLS or TOOLS[body.name][0] not in run["plugins"]:
             raise HTTPException(403, "This tool is not enabled for this task.")
         provider, write, schema, _ = TOOLS[body.name]
@@ -567,6 +590,17 @@ def create_app(settings: Settings | None = None):
 
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):
+        require_run(run_id, request)
+        # Reject before reading/charging an inference. Waiting on this server
+        # would retain large request bodies and could expire sealed envelopes.
+        # The sandbox retries only this explicit, unbilled admission response.
+        if model_slots.locked():
+            raise HTTPException(429, 'Waiting for a model request slot.',
+                                headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
+        async with model_slots:
+            return await forward_model(run_id, request)
+
+    async def forward_model(run_id: str, request: Request):
         run = require_run(run_id, request)
         try:
             selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])

@@ -147,3 +147,89 @@ def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):
     message=app.state.store.claim_message(run['id'])
     app.state.store.finish_message(run['id'],message['id'],'Connection failed','failed')
     assert [m['status'] for m in app.state.store.messages(run['id'])]==['failed','failed']
+
+
+def test_relay_only_pauses_for_an_authenticated_delegation_response():
+    group = 'f' * 32
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_POST(self):
+            unseal('token', self.path, self.rfile.read(int(self.headers['Content-Length'])))
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'moyai_wait_group': group}).encode())
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'token').start()
+    try:
+        headers = {'Authorization': 'Bearer token'}
+        httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'slack_search'})
+        assert relay.wait_group == ''
+        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'agents_fanout'})
+        assert response.json()['moyai_wait_group'] == relay.wait_group == group
+    finally:
+        relay.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_relay_retries_only_explicit_unbilled_model_admission(monkeypatch):
+    requests, envelopes = [], []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            envelope = self.rfile.read(int(self.headers['Content-Length']))
+            envelopes.append(envelope)
+            body = json.loads(unseal('token', self.path, envelope))
+            requests.append(body)
+            self.send_response(429 if len(requests) == 1 or body.get('generic_error') else 200)
+            if len(requests) == 1:
+                self.send_header('X-Moyai-Model-Queue', '1')
+            self.end_headers()
+            self.wfile.write(b'{"detail":"queued"}' if len(requests) == 1 else b'{"choices":[]}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'token').start()
+    monkeypatch.setattr('sandbox.broker_relay.time.sleep', lambda seconds: None)
+    try:
+        headers = {'Authorization':'Bearer token'}
+        assert httpx.post(relay.url + '/v1/chat/completions', headers=headers, json={'messages':[]}).status_code == 200
+        assert len(requests) == 2 and requests[0] == requests[1]
+        assert envelopes[0] != envelopes[1]
+        assert httpx.post(relay.url + '/v1/chat/completions', headers=headers, json={'generic_error':True}).status_code == 429
+        assert len(requests) == 3
+    finally:
+        relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
+
+
+def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkeypatch):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    run = active(app)
+    received = []
+    release = threading.Event()
+    async def upstream(request):
+        received.append(request)
+        import asyncio
+        while not release.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(200, json={'choices':[]})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    endpoint = f"/broker/{run['id']}/v1/chat/completions"
+    headers = {'Authorization':'Bearer capability'}
+    with ThreadPoolExecutor(max_workers=9) as pool:
+        calls = [pool.submit(client.post, endpoint, json={'messages':[]}, headers=headers) for _ in range(8)]
+        try:
+            wait_for(lambda: len(received) == 8)
+            queued = client.post(endpoint, json={'messages':[]}, headers=headers)
+            assert queued.status_code == 429 and queued.headers['X-Moyai-Model-Queue'] == '1'
+            assert len(app.state.store.rows('SELECT * FROM model_requests')) == 8
+        finally:
+            release.set()
+        assert all(call.result(timeout=5).status_code == 200 for call in calls)

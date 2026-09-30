@@ -120,7 +120,7 @@ class SlackChat:
                         return None
                 else:
                     pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
-                    if pending >= 20:
+                    if pending >= self.settings.max_pending_runs:
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
@@ -196,6 +196,7 @@ class SlackChat:
     def status_text(status):
         return {'queued': 'Your message is queued.', 'provisioning': 'Opening the cloud workspace…',
                 'running': 'I’m working through your request…', 'saving': 'Saving the conversation and workspace…',
+                'waiting_children': 'The parallel agents are working. I’ll combine their results when they finish.',
                 'awaiting_approval': 'I need an administrator’s approval in the web app before making that change.',
                 'stopping': 'Stopping and cleaning up the cloud workspace…', 'idle': 'Ready for your next message.',
                 'completed': 'Finished. Ready for your next message.', 'failed': 'The response failed. Send a follow-up to continue.',

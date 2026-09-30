@@ -107,6 +107,7 @@ function renderChat(run){
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
   $('#toggle-details').onclick=()=>toggleDetails(!state.detailsOpen);$('#close-details').onclick=()=>toggleDetails(false);toggleDetails(state.detailsOpen);
   $('#followup').value=state.drafts[id]||'';
+  if(run.parent_run_id){$('#followup').disabled=true;$('#followup').placeholder='Send instructions in the coordinator session.';$('#message-form [type="submit"]').hidden=true;if($('#chat-model'))$('#chat-model').disabled=true;}
   if($('#chat-model'))$('#chat-model').onchange=()=>{state.modelDrafts[id]=$('#chat-model').value;};
   $('#followup').oninput=()=>{state.drafts[id]=$('#followup').value;};
   bindComposer($('#followup'),$('#message-form'));
@@ -136,7 +137,7 @@ function connectChatStream(run){
       if(!current())return;
       const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;
       if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));
-      if(['chat','approval','artifact','context'].includes(event.kind))refreshChat(id).catch(showError);
+      if(['chat','approval','artifact','context','agents'].includes(event.kind))refreshChat(id).catch(showError);
     };
     source.addEventListener('run-status',e=>{if(current()){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
     source.onerror=()=>{
@@ -156,8 +157,9 @@ function updateChatStatus(run){
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack replies are paused for this session.':busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
+  if($('#followup').disabled)$('#queue-note').textContent='The coordinator manages this worker’s instructions and results.';
   $('#chat-working').classList.toggle('busy',busy);
-  $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
   if(busy&&run.active_model)$('#chat-working').textContent+=' · '+modelName(run.active_model);
   const item=state.runs.find(r=>r.id===state.selected);if(item&&item.status!==run.status){item.status=run.status;renderSidebar();}
 }
@@ -172,12 +174,21 @@ function updateChat(run,initial=false){
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
   $('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;
-  updateChatStatus(run);renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);
+  updateChatStatus(run);renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);renderAgentTeam(run.agents);
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
   $('#artifact-area').innerHTML=run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download latest files</a>`:'';
   $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
 }
 async function copyText(text,button){try{await navigator.clipboard.writeText(text);const label=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=label,1800);}catch{toast('Could not copy. You can select and copy the text.');}}
+function renderAgentTeam(team){
+  let target=$('#agent-team');
+  if(!target){target=document.createElement('section');target.id='agent-team';target.className='agent-team';$('#conversation').before(target);}
+  const signature=JSON.stringify(team);if(target.dataset.team===signature)return;target.dataset.team=signature;
+  target.hidden=!team?.parent_id&&!team?.groups?.length;if(target.hidden)return;
+  target.dataset.active=String(team.groups.some(g=>!g.settled));
+  target.innerHTML=team.parent_id?`<a href="#run=${esc(team.parent_id)}">← Coordinator session</a>`:
+    `<details open><summary>Parallel agents · ${team.groups.reduce((n,g)=>n+g.completed,0)} / ${team.groups.reduce((n,g)=>n+g.total,0)} completed${team.spend!==null?' · '+dollars(team.spend)+' including coordinator':''}</summary>${team.missing_costs?'<p class="subtext">Some request costs have not arrived.</p>':''}<div class="agent-grid">${team.groups.flatMap(g=>g.children).map(c=>`<article class="agent-worker"><a href="#run=${esc(c.id)}">${esc(c.agent_label)}</a>${statusLabel(c.status)}${c.cost?`<small>${dollars(c.cost.spend)}${c.cost.missing_costs?' · cost pending or missing':''}</small>`:''}${c.has_artifact?`<a class="agent-files" href="/api/runs/${esc(c.id)}/artifact">Download files</a>`:''}${c.checkpoint_error?'<small>Latest workspace save failed</small>':''}</article>`).join('')}</div></details>`;
+}
 function renderSlackContext(source){
   const target=$('#slack-context');if(!target)return;const signature=JSON.stringify(source);if(target.dataset.source===signature)return;target.dataset.source=signature;
   if(!source){target.innerHTML='';return;}
@@ -225,7 +236,7 @@ function connectionDialog(provider){
   if($('#oauth-connect'))$('#oauth-connect').onclick=async()=>{try{const result=await api('/api/connections/'+provider+'/oauth',{method:'POST'});window.location.assign(result.url);}catch(e){$('#connection-error').textContent=e.message;}};
   $('#connection-dialog').showModal();
 }
-async function renderRuntime(){const version=state.pageVersion;const config=await api('/api/config');if(version!==state.pageVersion)return;state.config=config;const fields=['MODAL_TOKEN_ID','MODAL_TOKEN_SECRET','LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];$('#content').innerHTML=`<div class="page-heading"><div><div class="eyebrow">EXECUTION</div><h1>Runtime</h1><p class="subtext">One isolated workspace for every cloud task.</p></div><span class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Modal + Hermes</h2><p class="subtext">Modal provides the machine. Hermes plans the work, uses tools, and returns the result.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Session recovery</span><span>${esc(state.config.execution_engine||"Local worker")}${state.config.execution_connected===false?" · reconnecting":""}</span></div>${state.config.checkpoint_interval_seconds?`<div class="detail-row"><span>Save progress</span><span>Every ${Math.round(state.config.checkpoint_interval_seconds/60)} minutes between tool rounds</span></div>`:""}<div class="detail-row"><span>Concurrent tasks</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Response time limit</span><span>${state.config.run_timeout_seconds?Math.round(state.config.run_timeout_seconds/60)+' minutes':'No app limit'}</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message. Long tasks automatically continue on a fresh machine before Modal’s 24-hour limit.</p></div></div>`;}
+async function renderRuntime(){const version=state.pageVersion;const config=await api('/api/config');if(version!==state.pageVersion)return;state.config=config;const fields=['MODAL_TOKEN_ID','MODAL_TOKEN_SECRET','LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];$('#content').innerHTML=`<div class="page-heading"><div><div class="eyebrow">EXECUTION</div><h1>Runtime</h1><p class="subtext">One isolated workspace for every cloud task.</p></div><span class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Modal + Hermes</h2><p class="subtext">Modal provides the machine. Hermes plans the work, uses tools, and returns the result.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Session recovery</span><span>${esc(state.config.execution_engine||"Local worker")}${state.config.execution_connected===false?" · reconnecting":""}</span></div>${state.config.checkpoint_interval_seconds?`<div class="detail-row"><span>Save progress</span><span>Every ${Math.round(state.config.checkpoint_interval_seconds/60)} minutes between tool rounds</span></div>`:""}<div class="detail-row"><span>Maximum active sandboxes</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Parallel agents</span><span>${state.config.parallel_agents_enabled?'Up to '+state.config.max_parallel_agents+' workers per group':'Requires Temporal'}</span></div><div class="detail-row"><span>Idle sessions</span><span>No running sandbox</span></div><div class="detail-row"><span>Response time limit</span><span>${state.config.run_timeout_seconds?Math.round(state.config.run_timeout_seconds/60)+' minutes':'No app limit'}</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message. Long tasks automatically continue on a fresh machine before Modal’s 24-hour limit.</p></div></div>`;}
 function showError(error){toast(error.message);}
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view).catch(showError));
 $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
@@ -274,3 +285,5 @@ function registerWebMCP(){
 matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
 setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
 boot();
+
+setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected&&$('#agent-team')?.dataset.active==='true')refreshChat(state.selected).catch(()=>{});},10000);
