@@ -36,6 +36,8 @@ services:
         value: "0"
       - key: SANDBOX_ROTATION_SECONDS
         value: "82800"
+      - key: SANDBOX_IDLE_SECONDS
+        value: "300"
       # Production namespace credentials are installed and cutover is verified.
       # The Temporal worker shares this service's disk; keep numInstances: 1.
       - key: TEMPORAL_ENABLED

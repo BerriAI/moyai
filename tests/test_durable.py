@@ -61,6 +61,7 @@ class Cloud:
     def __init__(self, monkeypatch, store, run_id):
         self.store, self.run_id = store, run_id
         self.machines, self.launches, self.terminations = [], [], []
+        self.launch_tokens = []
         self.snapshots = self.save_failures = 0
         self.finished = True
         self.saving_before_answer = True
@@ -89,10 +90,11 @@ class Cloud:
     async def from_id(self, identity, **kwargs):
         return next(machine for machine in self.machines if machine.object_id == identity)
 
-    async def command(self, machine, action, directory, value):
+    async def command(self, machine, action, directory, value, *, token=None):
         if action == 'start':
             if directory not in machine.operations:
                 self.launches.append(directory)
+                self.launch_tokens.append(token)
                 continuing = self.continue_once and len(self.launches) == 1
                 machine.operations[directory] = {'kind': 'final', 'message': 'checkpoint' if continuing else 'Saved answer',
                                                  'completed': not continuing, 'continuation': continuing}
@@ -119,7 +121,7 @@ class Cloud:
 
 @pytest.fixture
 def durable(tmp_path, monkeypatch):
-    settings = Settings(_env_file=None, data_dir=tmp_path, session_secret='stable-test-key', agent_model='test-model')
+    settings = Settings(_env_file=None, data_dir=tmp_path, session_secret='stable-test-key', agent_model='test-model', sandbox_idle_seconds=0)
     store = Store(tmp_path)
     run = store.create_run('Do the task', '', 'modal', [], chat_enabled=True)
     cloud = Cloud(monkeypatch, store, run['id'])

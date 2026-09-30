@@ -1,6 +1,7 @@
 """Temporal client, durable wake outbox, and co-located Python worker."""
 import asyncio
 from datetime import timedelta
+import json
 import logging
 
 from temporalio import activity
@@ -31,7 +32,7 @@ class TemporalRunManager(DurableRunner):
     async def cancel(self, run_id):
         if self.coordinator:
             await self.coordinator.cancel_children(run_id)
-        if not self.is_active(run_id):
+        if not self.is_active(run_id) and self.state(run_id).get('phase') not in {'warm', 'warm_cleanup'}:
             return
         self.store.update_run(run_id, status='stopping', token_hash='')
         self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
@@ -51,6 +52,9 @@ class TemporalRunManager(DurableRunner):
             raise RuntimeError('Finish or stop legacy active sessions before enabling Temporal')
         for row in self.store.rows("SELECT id FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status='queued')"):
             self.submit(self.store.run(row['id']))
+        for row in self.store.rows('SELECT run_id,state FROM durable_sessions'):
+            if json.loads(row['state']).get('phase') in {'warm', 'warm_cleanup'}:
+                self.submit(self.store.run(row['run_id']))
         # An external write interrupted during Render shutdown is ambiguous;
         # preserve it for review instead of treating it as an unexecuted action.
         self.store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
@@ -114,7 +118,7 @@ class TemporalRunManager(DurableRunner):
                 raise result
 
     @activity.defn(name='advance_session')
-    async def advance_session(self, run_id: str) -> bool | str:
+    async def advance_session(self, run_id: str) -> bool | str | dict:
         async def heartbeat():
             while True:
                 activity.heartbeat(run_id)

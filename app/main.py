@@ -250,6 +250,7 @@ def create_app(settings: Settings | None = None):
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
                 "sandbox_rotation_seconds": settings.sandbox_rotation_seconds,
+                "sandbox_idle_seconds": settings.sandbox_idle_seconds if settings.temporal_enabled else 0,
                 "execution_engine": "Temporal" if settings.temporal_enabled else "Local worker",
                 "execution_connected": manager.ready.is_set() if settings.temporal_enabled else True,
                 "checkpoint_interval_seconds": settings.temporal_checkpoint_seconds if settings.temporal_enabled else None,

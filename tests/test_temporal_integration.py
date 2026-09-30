@@ -67,12 +67,12 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
     release_children = False
     peak = 0
 
-    async def command(machine, action, directory, value):
+    async def command(machine, action, directory, value, **kwargs):
         nonlocal peak
         peak = max(peak, sum(m.alive for m in cloud.machines))
         if action == 'read' and machine.spec.get('run_id') != root and not release_children:
             return json.dumps({'state': 'running', 'events': [], 'cursor': 0})
-        return await original_command(machine, action, directory, value)
+        return await original_command(machine, action, directory, value, **kwargs)
 
     cloud.finished = False
     manager.command = command
@@ -109,6 +109,49 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
             await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
             for run_id in [root] + [c['id'] for c in children]:
                 await env.client.get_workflow_handle('moyai-session-' + run_id).terminate('Integration test complete')
+        finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()
+
+
+async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durable):
+    manager, cloud, run_id = durable
+    manager.settings.sandbox_idle_seconds = 6
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            return env.client
+        manager.connect_temporal = connect
+        successor = None
+        try:
+            await manager.recover()
+            await eventually(lambda: manager.state(run_id).get('phase') == 'warm', seconds=25)
+            first_deadline = manager.state(run_id)['idle_until']
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            await handle.signal(SessionWorkflow.wake)
+            await asyncio.sleep(0.2)
+            assert manager.state(run_id)['idle_until'] == first_deadline
+            manager.store.enqueue_message(run_id, 'Within the idle window', 'warm-followup')
+            manager.submit(manager.store.run(run_id))
+            await eventually(lambda: len([m for m in manager.store.messages(run_id) if m['role'] == 'assistant']) == 2)
+            assert len(cloud.machines) == 1 and len(cloud.launches) == 2
+            assert cloud.launch_tokens[0] != cloud.launch_tokens[1]
+            deadline = manager.state(run_id)['idle_until']
+            await manager.shutdown()
+            assert cloud.machines[0].alive
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.connect_temporal = connect
+            await successor.recover()
+            await eventually(lambda: successor.state(run_id).get('phase') == 'idle', seconds=20)
+            assert len(cloud.terminations) == 1
+            assert len([m for m in successor.store.messages(run_id) if m['role'] == 'assistant']) == 2
+            history = await handle.fetch_history()
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
+            history_text = history.to_json()
+            assert 'Within the idle window' not in history_text
+            assert not any(token in history_text for token in cloud.launch_tokens)
+            assert deadline >= first_deadline
+            await handle.terminate('Integration test complete')
         finally:
             if successor:
                 await successor.shutdown()

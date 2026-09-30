@@ -78,7 +78,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 | External writes | Exact arguments appear for one-time admin approval. Denied/expired actions are not sent. Ambiguous write failures are recorded as uncertain and never retried automatically. |
 | Agent browser | Isolated headless Chromium with open/read/click/fill tools over MCP; latest screenshot returned in the result archive. |
 | Results | Summary, tracked changes as a patch, eligible new files, and latest browser screenshot. Up to 2 MB per artifact file / 15 MB collected content / 20 MB archive download. Hidden files and symlinks are skipped. |
-| Saved workspace | Each response saves Hermes conversation history and a Modal filesystem snapshot. Later responses restore those files and tool history; idle sessions use no sandbox compute. Filesystem snapshots do not preserve running background processes or browser tabs. |
+| Saved workspace | Each response saves Hermes conversation history and a Modal filesystem snapshot. With Temporal, follow-ups reuse the sandbox for five idle minutes; later responses restore saved files and tool history. Warm sandboxes consume compute. Filesystem snapshots do not preserve running background processes or browser tabs. |
 | Restart handling | Saved chats and workspace snapshots survive deployments. Unfinished responses/queued messages are interrupted, capabilities revoked, and known sandboxes cleaned up. Send a new message to resume from the last saved workspace; unfinished external actions are never silently replayed. |
 
 ## Enable cloud runs
@@ -254,7 +254,7 @@ flowchart LR
 
 The app uses native REST/GraphQL adapters for predictable OAuth and a small tool surface. A stdio MCP bridge exposes those tools to Hermes. A sandbox gets a random capability limited to its run and enabled apps; the capability is revoked on stop, completion, timeout, or restart. It does not receive provider or Modal account credentials. Agent code and browser sessions run on Modal, never on the control-plane host.
 
-Response states: `queued → provisioning → running ↔ awaiting_approval → saving → idle` (shown as **Ready**). A session keeps its ID across responses. Messages submitted during a response queue for the next turn; they do not interrupt an in-flight tool. Each machine receives a fresh sandbox capability. Model requests remain attributed to the original user and message across renewals. After saving the latest artifact and conversation/filesystem snapshot, its sandbox terminates. The next response restores that snapshot. Snapshot retention is indefinite; Modal storage charges may apply. Stopping ends the current response and cancels queued messages. A new message resumes the last completed checkpoint; unfinished changes may be lost. Legacy tasks created before chat support remain readable with **Run again** available to start a new chat.
+Response states: `queued → provisioning → running ↔ awaiting_approval → saving → idle` (shown as **Ready**). A session keeps its ID across responses. Messages submitted during a response queue for the next turn; they do not interrupt an in-flight tool. Each response receives a fresh sandbox capability, including on a reused machine. Model requests remain attributed to the original user and message across renewals. After saving the latest artifact and conversation/filesystem snapshot, a completed top-level Temporal chat keeps its sandbox for five idle minutes. Follow-ups reuse it; messages already queued drain before the idle timer starts. After release, the next response restores that snapshot. Snapshot retention is indefinite; Modal storage charges may apply. Stopping ends the current response and cancels queued messages. A new message resumes the last completed checkpoint; unfinished changes may be lost. Legacy tasks created before chat support remain readable with **Run again** available to start a new chat.
 
 Final answers are stored on the control-plane disk as soon as Hermes returns them, before collecting artifacts or saving the Modal filesystem. A save failure preserves the answer in web chat and Slack with an explicit warning, retains the previous snapshot, and cancels queued follow-ups. Restart recovery completes a received answer once without replaying work. A later explicit message receives the saved chat and a warning that its files may be older. The warning clears only after a successful snapshot. Recovery archives prioritize uncommitted patches and eligible new files in nested repositories over installed dependencies; they are bounded, incomplete backups and do not include newly committed history.
 
@@ -363,8 +363,16 @@ are never sent to Temporal.
 Every 10 minutes by default, Hermes pauses at the next safe tool-round boundary.
 Its conversation and filesystem are snapshotted together before continuing on the
 same machine. After 23 hours the old machine must be confirmed stopped before a
-replacement restores the checkpoint and continues the same turn. Idle chats
-terminate their machine; later messages restore the saved snapshot. Each final
+replacement restores the checkpoint and continues the same turn. Completed top-level
+chats keep their machine for `SANDBOX_IDLE_SECONDS=300` after the queue drains;
+set this to `0` for immediate release. The deadline is stored in SQLite and a
+Temporal timer schedules cleanup without holding an Activity slot. Wakes and
+worker restarts do not extend the deadline. If the worker is unavailable at
+expiry, cleanup runs when it reconnects. Follow-ups within the window reuse the
+machine with a fresh capability; after release, they restore the saved snapshot.
+A missing idle machine is safely replaced before the new turn launches.
+Finished child agents, coordinators waiting for children, stopped/failed turns
+and failed saves release immediately. The local engine still releases each turn. Each final
 answer is persisted before archive/snapshot operations. Three failed snapshot
 attempts retain that answer with a warning, retain the prior snapshot, and stop
 queued messages. Intermediate checkpoints are not posted as Slack answers.
@@ -458,11 +466,13 @@ matching the verified production configuration.
 
 The same rollout moved 27 existing sessions, 13 user profiles, all three encrypted organization connections, and 25 result archives into **Organization for Litellm → Litellm** on Render. Google SSO and all three provider health checks passed on the new origin. Slack's verified event endpoint and Slack/Notion OAuth callback configuration use the new origin. The existing gateway key and spend ledger were preserved. A follow-up in the existing #bot-spam thread restored its prior marker and file value `24` and posted one answer with a link to the new origin.
 
-`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on executing sandboxes,
-including delegated workers. It does not pre-provision 100 machines. Ten
-executing agents need about ten sandboxes; idle conversations need none. Each
-completed response saves its filesystem and terminates its machine. A follow-up
-restores a new sandbox from the snapshot. Provisioning/cleanup and Modal quotas
+`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on active and warm
+sandboxes, including delegated workers. It does not pre-provision 100 machines.
+Ten executing agents need about ten sandboxes, plus recent chats within their
+five-minute idle window. Each completed response saves its filesystem immediately.
+Idle sandboxes incur compute charges and are reclaimed oldest-first when another
+session needs capacity; a sandbox with queued work is protected. Follow-ups reuse
+a warm machine or restore a new sandbox from the snapshot after release. Provisioning/cleanup and Modal quotas
 can temporarily change the observed count; capacity above the ceiling queues.
 `MAX_PENDING_RUNS=1000` bounds the combined active/queued inbox. Modal CPU,
 memory, concurrency and account quotas still apply; the app setting is not a

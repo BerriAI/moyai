@@ -23,6 +23,7 @@ class DurableRunner(RunManager):
     def __init__(self, store, settings):
         super().__init__(store, settings)
         self.locks = {}
+        self.admission_lock = asyncio.Lock()
         store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
             run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
             revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
@@ -62,26 +63,44 @@ class DurableRunner(RunManager):
             if not row:
                 return False
             state = self.state(run_id)
+            if state.get('phase') in {'warm', 'warm_cleanup'}:
+                reuse = await self.warm(run_id, state)
+                if reuse is not True:
+                    return reuse
+                row = self.store.run(run_id)
+                state = self.state(run_id)
+                if state.get('phase') == 'warm':
+                    # A queued follow-up claims the already occupied slot.
+                    if not self.begin_turn(run_id, row, state):
+                        return True
+                    state = self.state(run_id)
             if not state or state.get('phase') == 'idle':
                 if row['status'] in {'cancelled', 'interrupted', 'stopping'}:
                     if row['status'] == 'stopping':
                         self.store.update_run(run_id, status='cancelled')
                     return False
-                if not self.has_capacity():
-                    return 'capacity'
-                messages = self.store.rows("SELECT * FROM messages WHERE run_id=? AND status='running'", (run_id,))
-                message = messages[0] if messages else self.store.claim_message(run_id)
-                if not message:
+                if not self.store.has_queued_messages(run_id) and not self.store.rows(
+                        "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
                     return False
-                state = {'version': 1, 'phase': 'prepare', 'message_id': message['id'], 'segment': 0,
-                         'snapshot_id': row['snapshot_id'], 'sandbox_id': '', 'cursor': 0, 'turn_started': time.time()}
-                self.save(run_id, state)
+                async with self.admission_lock:
+                    if not await self.make_capacity(run_id):
+                        return 'capacity'
+                    if not self.begin_turn(run_id, self.store.run(run_id)):
+                        return True
+                    state = self.state(run_id)
+                if state.get('phase') == 'idle' or not state:
+                    return False
             # Cancellation is persistent, including across worker restarts.
-            if row['status'] == 'stopping' and state['phase'] not in {'cleanup', 'finish'}:
+            if self.store.run(run_id)['status'] == 'stopping' and state['phase'] not in {'cleanup', 'finish'}:
                 self.fail(run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
             try:
                 return await self.step(run_id, state)
             except LostExecution:
+                if state.get('reused_machine') and state['phase'] in {'prepare', 'install'}:
+                    # This new turn has not reached its launch boundary yet.
+                    state.update(phase='provision', sandbox_id='', reused_machine=False)
+                    self.save(run_id, state)
+                    return True
                 self.fail(run_id, state,
                           'The cloud process stopped before its work could be confirmed. The last checkpoint is preserved. '
                           'No unfinished actions were replayed; send a new message to inspect and continue.', 'interrupted')
@@ -90,6 +109,82 @@ class DurableRunner(RunManager):
                 self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
                           'An administrator must check the selected model and runtime settings.')
                 return True
+
+    def begin_turn(self, run_id, row, warm=None):
+        if row['status'] in {'stopping', 'cancelled', 'interrupted'}:
+            return False
+        messages = self.store.rows("SELECT * FROM messages WHERE run_id=? AND status='running'", (run_id,))
+        message = messages[0] if messages else self.store.claim_message(run_id)
+        if not message:
+            return False
+        state = {'version': 1, 'phase': 'prepare', 'message_id': message['id'], 'segment': 0,
+                 'snapshot_id': row['snapshot_id'], 'sandbox_id': '', 'cursor': 0, 'turn_started': time.time()}
+        if warm and warm.get('sandbox_id'):
+            state.update(sandbox_id=warm['sandbox_id'], machine_started=warm['machine_started'], reused_machine=True)
+            self.store.event(run_id, 'status', 'Reusing the saved session sandbox for this response.')
+        self.save(run_id, state)
+        return True
+
+    def idle_deadline(self, state):
+        # A follow-up never extends the machine's absolute renewal deadline.
+        return min(state.get('idle_until') or float('inf'),
+                   state['machine_started'] + self.settings.sandbox_rotation_seconds)
+
+    async def release_warm(self, run_id, state, reason):
+        # Persist before the provider call: a lost termination ACK is retryable
+        # and never publishes the previous answer a second time.
+        state.update(phase='warm_cleanup', idle_reason=reason)
+        self.save(run_id, state)
+        await self.cleanup(state)
+        state.update(phase='idle', sandbox_id='')
+        state.pop('idle_until', None)
+        self.save(run_id, state)
+        self.store.update_run(run_id, sandbox_id='', token_hash='')
+        self.store.event(run_id, 'status', 'Idle sandbox released: ' + reason + '.')
+
+    async def warm(self, run_id, state):
+        row = self.store.run(run_id)
+        stopping = row['status'] in {'stopping', 'cancelled', 'interrupted'}
+        queued = self.store.has_queued_messages(run_id)
+        expired = (time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds
+                   or (not queued and time.time() >= self.idle_deadline(state)))
+        if (state['phase'] == 'warm_cleanup' or stopping or not self.settings.sandbox_idle_seconds
+                or expired):
+            await self.release_warm(run_id, state, state.get('idle_reason', 'idle timeout' if not stopping else 'stop requested'))
+            row = self.store.run(run_id)
+            stopping = row['status'] in {'stopping', 'cancelled', 'interrupted'}
+            if row['status'] == 'stopping':
+                self.store.update_run(run_id, status='cancelled')
+            return False if stopping else self.store.has_queued_messages(run_id)
+        if not queued:
+            if state.get('idle_until') is None:
+                state['idle_until'] = time.time() + self.settings.sandbox_idle_seconds
+                self.save(run_id, state)
+            return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}
+        state['idle_until'] = None
+        self.save(run_id, state)
+        try:
+            await self.sandbox(state)
+        except LostExecution:
+            await self.release_warm(run_id, state, 'machine no longer available')
+            return True
+        return True
+
+    async def make_capacity(self, run_id):
+        # Caller holds admission_lock until its own slot is persisted. Skip
+        # busy per-session locks rather than deadlocking competing admissions.
+        candidates = [(r['run_id'], json.loads(r['state'])) for r in self.store.rows('SELECT run_id,state FROM durable_sessions')]
+        for other, state in sorted(candidates, key=lambda entry: entry[1].get('idle_until') or float('inf')):
+            if self.has_capacity():
+                return True
+            lock = self.locks.setdefault(other, asyncio.Lock())
+            if other == run_id or lock.locked() or state.get('phase') not in {'warm', 'warm_cleanup'}:
+                continue
+            async with lock:
+                if self.store.has_queued_messages(other):
+                    continue
+                await self.release_warm(other, state, 'capacity needed by another session')
+        return self.has_capacity()
 
     def has_capacity(self):
         active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children'}
@@ -146,8 +241,12 @@ class DurableRunner(RunManager):
     def directory(self, state):
         return f"/session/executions/{state['message_id']}-{state['segment']}"
 
-    async def command(self, sandbox, *args):
-        process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args, timeout=30)
+    async def command(self, sandbox, *args, token=None):
+        # Pass capabilities only in the exec environment, never in a persisted
+        # task spec, command argument or Temporal payload. Reused machines have
+        # an older creation-time environment, so every launch overrides it.
+        process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args,
+                                         timeout=30, env={'WORKSPACE_RUN_TOKEN': token} if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:
             raise RuntimeError('Sandbox supervisor command failed')
@@ -168,8 +267,8 @@ class DurableRunner(RunManager):
                     return True
                 state.update(phase='finish', outcome='completed', response=self.store.run(run_id)['summary'])
             else:
-                state['phase'] = 'provision'
-                self.running_status(run_id, 'provisioning')
+                state['phase'] = 'install' if state.get('sandbox_id') else 'provision'
+                self.running_status(run_id, 'running' if state.get('sandbox_id') else 'provisioning')
             self.save(run_id, state)
         elif phase == 'provision':
             await self.provision(run_id, state)
@@ -201,7 +300,7 @@ class DurableRunner(RunManager):
             if not self.running_status(run_id, 'running', digest(self.token(run_id, state['message_id']))):
                 return True
             spec_path = f"/tmp/moyai-{state['message_id']}-{state['segment']}.json"
-            await self.command(sandbox, 'start', self.directory(state), spec_path)
+            await self.command(sandbox, 'start', self.directory(state), spec_path, token=self.token(run_id, state['message_id']))
             state['phase'] = 'monitor'
             self.save(run_id, state)
         elif phase == 'monitor':
@@ -296,15 +395,20 @@ class DurableRunner(RunManager):
                 self.store.event(run_id, 'status', 'Workspace checkpoint saved. Continuing the same request.')
                 self.save(run_id, state)
             else:
-                state.update(phase='cleanup', outcome='completed' if result.get('completed') and state['exit_code'] == 0 else 'failed',
+                completed = result.get('completed') and state['exit_code'] == 0
+                keep = (completed and self.settings.sandbox_idle_seconds and run['chat_enabled'] and not run['parent_run_id']
+                        and time.time() < state['machine_started'] + self.settings.sandbox_rotation_seconds)
+                state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='completed' if completed else 'failed',
                              response=result.get('message') or 'Hermes stopped without a final answer.')
                 self.save(run_id, state)
         elif phase == 'waiting_children':
             if not self.coordinator or not self.coordinator.settled(run_id, state['wait_group']):
                 return 'children'
-            if not self.has_capacity():
-                return 'capacity'
-            state.update(phase='provision', resume_group=state['wait_group'])
+            async with self.admission_lock:
+                if not await self.make_capacity(run_id):
+                    return 'capacity'
+                state.update(phase='provision', resume_group=state['wait_group'])
+                self.save(run_id, state)
             self.store.execute("UPDATE agent_groups SET status='completed' WHERE id=? AND status='running'", (state['wait_group'],))
             self.running_status(run_id, 'provisioning')
             self.store.event(run_id, 'agents', 'Workers finished. Restoring the coordinator to gather results.', {'group_id': state['wait_group']})
@@ -313,9 +417,16 @@ class DurableRunner(RunManager):
             if self.coordinator and state.get('outcome') != 'completed':
                 await self.coordinator.cancel_children(run_id)
             await self.cleanup(state)
-            state['phase'] = 'finish'
+            state.update(phase='finish', keep_warm=False, sandbox_id='')
+            self.store.update_run(run_id, sandbox_id='')
             self.save(run_id, state)
         elif phase == 'finish':
+            if run['status'] == 'stopping':
+                state['outcome'] = 'cancelled'
+                if state.get('keep_warm'):
+                    state.update(phase='cleanup', keep_warm=False)
+                    self.save(run_id, state)
+                    return True
             self.store.finish_message(run_id, state['message_id'], state['response'], state['outcome'])
             status = 'idle' if state['outcome'] == 'completed' else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
             if status != 'idle':
@@ -323,8 +434,15 @@ class DurableRunner(RunManager):
             self.store.update_run(run_id, status='queued' if status == 'idle' and self.store.has_queued_messages(run_id) else status,
                                   token_hash='', summary=state['response'])
             self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
-            state['phase'] = 'idle'
+            state['phase'] = 'warm' if state.get('keep_warm') else 'idle'
+            if state['phase'] == 'warm':
+                # Queued work has not gone idle, even if the worker restarts
+                # before it can claim the next message.
+                state['idle_until'] = (None if self.store.has_queued_messages(run_id)
+                                       else time.time() + self.settings.sandbox_idle_seconds)
             self.save(run_id, state)
+            if state['phase'] == 'warm' and not self.store.has_queued_messages(run_id):
+                return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}
             return self.store.has_queued_messages(run_id)
         return True
 
