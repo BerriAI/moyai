@@ -624,3 +624,34 @@ total: they are billed to the key supplied by the user. This flow does not creat
 provider accounts or keys automatically; the setup link lets the user create one
 in their provider account and return to Moyai. Arbitrary secrets/raw environment
 variable injection and custom provider origins are not supported.
+### Personal and organization skills
+
+The **Skills** library stores reusable Markdown instructions. Add a name, a
+description of when to use the skill, and Markdown text, or import a `SKILL.md`.
+This version imports a single Markdown file; bundled scripts and supporting
+files are not imported. Keep API keys in **Secrets**, not in skill text.
+
+- **Personal:** only the owner can view, edit, or use the skill. The current
+  message's verified Google identity controls access, not the session creator.
+- **Organization:** every signed-in teammate can view and use it. Admins can
+  create and maintain shared skills; only the original owner can change its
+  sharing. Archiving removes a skill from use and is reversible.
+
+Use the chat's **Skills** picker, write `$personal:benchmark-review` or
+`$org:benchmark-review`, or describe a task that matches a skill. Moyai receives
+the authorized catalog and can call `skills_load` for a relevant workflow.
+Unqualified `$benchmark-review` prefers a personal skill over the same name in
+the organization library. Slack sessions use the same references; personal
+access requires a fresh eligible Slack email matching verified Google SSO, not
+an accounting-only identity link. Subagents have the current requester's skill
+access and can load a skill named in their assignment.
+
+Definitions are encrypted at rest and injected into inference by the server,
+rather than returned in sandbox tool results or copied into workspace files.
+Each turn pins the revision it first loads, including across durable resumes;
+later turns use the latest revision. Permissions and archive status are checked
+again on every model call. At most five skills may be loaded per turn, with
+32,000 characters per skill, 50 personal skills per user and 100 shared skills
+(including archived entries). Skills cannot bypass tool permissions, provide
+credentials, or approve writes. Personal skills do not make shared session
+outputs private; generated results keep the session's existing sharing.

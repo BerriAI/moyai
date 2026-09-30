@@ -33,6 +33,7 @@ from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
+from .skills import Skills, LoadSkill, TOOL as SKILL_TOOL
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -118,6 +119,7 @@ def create_app(settings: Settings | None = None):
     manager.coordinator = coordinator
     credentials = Credentials(store, security, settings, manager, checkpoints)
     manager.credentials = credentials
+    skills = Skills(store, security, credentials.same_requester)
     model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
@@ -155,6 +157,8 @@ def create_app(settings: Settings | None = None):
     app.include_router(identities.routes())
     app.include_router(credentials.routes())
     app.state.credentials = credentials
+    app.include_router(skills.routes())
+    app.state.skills = skills
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
@@ -202,6 +206,8 @@ def create_app(settings: Settings | None = None):
     async def invalid_request(request, exc):
         if request.url.path.startswith('/api/credentials'):
             return JSONResponse({'detail':'Invalid credential form. Check the provider, scope and required fields.'},status_code=422)
+        if request.url.path.startswith('/api/skills'):
+            return JSONResponse({'detail':'Invalid skill. Use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
         return await request_validation_exception_handler(request,exc)
 
     @app.get("/health")
@@ -534,7 +540,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return ([SKILL_TOOL] if run['chat_enabled'] and run['active_user_id'] else []) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -544,6 +550,13 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'skills_load':
+            try:
+                result = skills.load(run,LoadSkill.model_validate(body.arguments).name)
+            except ValidationError:
+                raise HTTPException(422,'Use a valid skill reference.') from None
+            await checkpoints.flush()
+            return result
         if body.name in CREDENTIAL_TOOLS:
             if not credentials.tools(run):
                 raise HTTPException(403,'Credential requests require a durable chat session.')
@@ -676,6 +689,12 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(429, "This run reached its model request limit.")
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
+        skill_context = skills.context(run)
+        if skill_context:
+            # The original platform system instructions stay last and take
+            # precedence. Skill definitions never enter sandbox tool results,
+            # conversation snapshots, event logs or Temporal workflow history.
+            payload['messages'] = [{'role':'system','content':skill_context}, *payload['messages']]
         payload["model"] = selected_model
         for field in ("max_tokens", "max_completion_tokens"):
             if field in payload:
