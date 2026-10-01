@@ -190,12 +190,43 @@ def test_decline_and_stopped_request_do_not_save_secrets(workspace,monkeypatch):
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     path='/api/credentials/requests/'+request['request_id']
     app.state.store.update_run(run['id'],status='stopping')
-    assert client.post(path,json={'value':KEY}).status_code==409
+    assert client.post(path,json={'scope':'personal','value':KEY}).status_code==409
     app.state.store.update_run(run['id'],status='waiting_credential')
     assert client.post(path,json={'decision':'decline'}).status_code==200
     resolution=app.state.credentials.resolution(run['id'],request['request_id'])
     assert resolution['status']=='declined' and 'credentials_http_request' not in resolution['instructions']
     assert not app.state.store.rows('SELECT * FROM provider_secrets')
+
+
+@pytest.mark.parametrize('scope',[None,''])
+def test_new_keys_require_explicit_scope_in_library_and_request_form(workspace,scope):
+    app,client=workspace
+    sign_in(app,client)
+    body={'provider':'fireworks','label':'New key','value':KEY,'client_id':'scope-choice-test'}
+    if scope is not None:
+        body['scope']=scope
+    response=client.post('/api/credentials/secrets',json=body)
+    assert response.status_code==422 and KEY not in response.text
+    request=requested(app,active(app))
+    resolution={'value':KEY}
+    if scope is not None:
+        resolution['scope']=scope
+    response=client.post('/api/credentials/requests/'+request['request_id'],json=resolution)
+    assert response.status_code==422 and KEY not in response.text
+    assert not app.state.store.rows('SELECT * FROM provider_secrets')
+    assert app.state.credentials.row(request['request_id'])['status']=='pending'
+
+
+def test_saved_key_selection_keeps_scope_without_new_scope_choice(workspace,monkeypatch):
+    app,client=workspace
+    sign_in(app,client)
+    request=requested(app,active(app))
+    saved=save(client,'organization').json()['id']
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    response=client.post('/api/credentials/requests/'+request['request_id'],json={'secret_id':saved})
+    assert response.status_code==200
+    assert len(app.state.store.rows('SELECT * FROM provider_secrets'))==1
+    assert app.state.store.rows('SELECT scope FROM provider_secrets')[0]['scope']=='organization'
 
 
 async def test_wait_releases_modal_survives_restart_and_resumes_same_message(durable):

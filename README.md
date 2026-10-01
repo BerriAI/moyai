@@ -596,7 +596,10 @@ Slack-linked sessions send a web-form link; keys must never be pasted into Slack
 or chat. Subagent requests appear in the child's chat and also notify the linked
 parent Slack thread.
 
-The Secrets page stores encrypted keys with three scopes:
+The Secrets page asks who can use each new key before saving it. No scope is
+preselected; the server rejects a new key without an explicit choice. The
+secure form shown when an agent requests a key uses the same choice. Reusing an
+already saved key keeps its existing scope. Available scopes:
 
 - **This session:** available to the requester in this session and its subagents.
 - **Personal:** reusable for that signed-in user's requests.
@@ -641,7 +644,11 @@ You can also ask Moyai in chat to “save this as a personal skill” or, as an 
 files; `skills_save` copies the originals by attachment ID into the encrypted
 library. It can also write instructions directly, update an existing skill, add
 or replace references, and explicitly remove files. Only sent attachments in the
-current session through the executing message can be imported. Keep API keys in
+current session through the executing message can be imported. If you have not
+specified Personal or Organization, Moyai asks which you want and waits before
+saving. A `skills_save` call with no scope returns `scope_required` and writes
+nothing. The library's Add skill form also requires a choice instead of
+preselecting Personal; editing preserves the existing selection. Keep API keys in
 **Secrets**, not in skill text.
 
 - **Personal:** only the owner can view, edit, or use the skill. The current

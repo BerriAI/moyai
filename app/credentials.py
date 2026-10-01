@@ -53,7 +53,7 @@ class Invoke(Arguments):
 class SaveSecret(Arguments):
     provider: Provider
     label: str = Field(min_length=1, max_length=80)
-    scope: Scope = 'personal'
+    scope: Scope
     value: SecretStr
     client_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
 
@@ -61,7 +61,7 @@ class SaveSecret(Arguments):
 class Resolve(Arguments):
     decision: Literal['provide', 'decline'] = 'provide'
     secret_id: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
-    scope: Scope = 'personal'
+    scope: Scope | None = None
     label: str = Field(default='', max_length=80)
     value: SecretStr = SecretStr('')
 
@@ -69,11 +69,13 @@ class Resolve(Arguments):
     def one_source(self):
         if self.decision == 'provide' and bool(self.secret_id) == bool(self.value.get_secret_value()):
             raise ValueError('Choose a saved key or supply a new key.')
+        if self.decision == 'provide' and not self.secret_id and self.scope is None:
+            raise ValueError('Choose who can use this new key before saving it.')
         return self
 
 
 TOOLS = {
-    'credentials_request': (CredentialRequest, 'Request a provider API key when a benchmark needs one. Never ask for keys in chat. Supply a clear reason and stable request_key. Existing authorized keys may be reused. Otherwise this tool checkpoints and pauses the session for a secure web form; do not poll or launch other work in this tool round. Personal keys stay owned by the user; organization keys are shared. Keys never enter the sandbox.'),
+    'credentials_request': (CredentialRequest, 'Request a provider API key when a benchmark needs one. Never ask for keys in chat. Supply a clear reason and stable request_key. Existing authorized keys may be reused. Otherwise this tool checkpoints and pauses the session for a secure web form; do not poll or launch other work in this tool round. When adding a new key, the secure form asks the user to choose Personal or Organization (admin-only); This session is also available. Never pick a default on their behalf. Personal keys stay owned by the user; organization keys are shared. Keys never enter the sandbox.'),
     'credentials_http_request': (Invoke, 'Use an authorized credential request for a non-streaming inference or model-list API call. The server supplies authentication to the fixed provider origin. Only approved inference paths are allowed. Responses contain no key. For parallel Python benchmarks, use the proxy instructions returned by credentials_request. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
 }
 

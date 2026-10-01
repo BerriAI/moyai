@@ -19,7 +19,7 @@ class SkillForm(BaseModel):
     name: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
     description: str = Field(min_length=3, max_length=320)
     instructions: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=3, max_length=32000)
-    scope: Literal['personal', 'organization'] = 'personal'
+    scope: Literal['personal', 'organization']
     revision: int = Field(default=0, ge=0)
     client_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
 

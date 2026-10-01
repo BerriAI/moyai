@@ -213,9 +213,9 @@ def create_app(settings: Settings | None = None):
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         if request.url.path.startswith('/api/credentials'):
-            return JSONResponse({'detail':'Invalid credential form. Check the provider, scope and required fields.'},status_code=422)
+            return JSONResponse({'detail':'Invalid credential form. Choose who can use a new key and check the provider and required fields.'},status_code=422)
         if request.url.path.startswith('/api/skills'):
-            return JSONResponse({'detail':'Invalid skill. Use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
+            return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
         return await request_validation_exception_handler(request,exc)
 
     @app.get("/health")

@@ -18,7 +18,7 @@ def call(client, run, tool_name='skills_save', **arguments):
 
 
 def form(**changes):
-    return {'name':'team-review', 'description':'Review a team change.', 'instructions':'# Review\nCheck evidence.\n',
+    return {'name':'team-review', 'scope':'personal', 'description':'Review a team change.', 'instructions':'# Review\nCheck evidence.\n',
             'request_id':'save-team-review', **changes}
 
 
@@ -28,7 +28,7 @@ def attach(app, client, run, name, content):
     return file['id']
 
 
-def test_save_current_requester_default_personal_and_admin_org_only(workspace):
+def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     app,client = workspace
     sign_in(app,client)
     run = active(app)
@@ -51,6 +51,41 @@ def test_save_current_requester_default_personal_and_admin_org_only(workspace):
     assert client.get('/api/skills/'+mine['id']).status_code==404
     app.state.store.update_run(member['id'],token_hash='')
     assert call(client,member,**form()).status_code==401
+
+
+def test_unspecified_skill_scope_returns_question_and_saves_nothing(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    run=active(app)
+    args=form()
+    del args['scope']
+    question=call(client,run,**args)
+    assert question.status_code==200
+    assert question.json()['status']=='scope_required' and question.json()['saved'] is False
+    assert [c['scope'] for c in question.json()['choices']]==['personal','organization']
+    assert all(c['available'] for c in question.json()['choices'])
+    assert not app.state.store.rows('SELECT * FROM skills')
+    assert not app.state.store.rows('SELECT * FROM skill_saves')
+    # Asking the question consumes no save receipt; an explicit reply can save.
+    assert call(client,run,**args,scope='organization').json()['scope']=='organization'
+    sign_in(app,client,'ishaan','ishaan@berri.ai')
+    member=active(app,'google:ishaan')
+    choices=call(client,member,**args).json()['choices']
+    assert choices[0]['available'] and not choices[1]['available']
+    assert call(client,member,**args,scope='organization').status_code==403
+
+
+@pytest.mark.parametrize('scope',[None,''])
+def test_library_api_requires_explicit_skill_scope(workspace,scope):
+    app,client=workspace
+    sign_in(app,client)
+    body={k:v for k,v in form().items() if k not in {'request_id','scope'}}
+    body['client_id']='scope-choice-test'
+    if scope is not None:
+        body['scope']=scope
+    response=client.post('/api/skills',json=body)
+    assert response.status_code==422 and 'Personal or Organization' in response.text
+    assert not app.state.store.rows('SELECT * FROM skills')
 
 
 def test_atomic_save_replay_concurrent_updates_and_no_duplicate_audit(workspace):

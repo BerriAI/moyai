@@ -41,7 +41,8 @@ class SaveSkill(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
     description: str = Field(min_length=3, max_length=320)
-    scope: Literal['personal', 'organization'] = 'personal'
+    scope: Literal['personal', 'organization'] | None = Field(default=None,
+        description='The user must choose personal or organization. Omit when they have not chosen; the tool returns a scope question without saving. Never infer a preference.')
     instructions: str | None = Field(default=None, min_length=3, max_length=32000)
     instructions_attachment_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
     files: list[SkillFile] = Field(default_factory=list, max_length=MAX_FILES)
@@ -72,7 +73,7 @@ class ReadSkillFile(BaseModel):
 
 SAVE_TOOL = {
     'name': 'skills_save',
-    'description': 'Create or update a reusable skill when the current user asks to save/install one. Personal is the default; organization publishes to every teammate and requires the requester to be an admin. Ownership is set by the server. Use instructions_attachment_id to import an uploaded SKILL.md exactly, and files [{path: "references/runbook.md", attachment_id: "..."}] to copy supporting text files without reproducing their content. Only sent attachments from this session through the current turn are eligible. Inline instructions/content also work. On updates omit instructions to keep them; files are merged and remove_files explicitly deletes paths. Use expected_revision=0 to create, or the current revision from the catalog to update (skills_load stays pinned for a turn). Reuse request_id for identical retries. Never save secrets, claim success before this tool succeeds, or publish personally scoped content without the owner asking.',
+    'description': 'Create or update a reusable skill when the current user asks to save/install one. Ask the user to choose Personal (their requests only) or Organization (all teammates) before saving, unless they already specified the scope. Never infer a default. Omit scope when no choice was made: this returns scope_required without saving; present the question and wait for their reply. Organization publishing requires an admin. Ownership is set by the server. Use instructions_attachment_id to import an uploaded SKILL.md exactly, and files [{path: "references/runbook.md", attachment_id: "..."}] to copy supporting text files without reproducing their content. Only sent attachments from this session through the current turn are eligible. Inline instructions/content also work. On updates omit instructions to keep them; files are merged and remove_files explicitly deletes paths. Use expected_revision=0 to create, or the current revision from the catalog to update (skills_load stays pinned for a turn). Reuse request_id for identical retries. Never save secrets, claim success before this tool succeeds, or publish personally scoped content without the owner asking.',
     'inputSchema': SaveSkill.model_json_schema(),
     'annotations': {'readOnlyHint': False},
 }
@@ -143,6 +144,12 @@ def attachment_text(skills, run, attachment_id, *, instructions=False):
 def save_skill(skills, run, args):
     from .skills import SkillForm
     actor, admin = writing_actor(skills, run)
+    if args.scope is None:
+        return {'saved': False, 'status': 'scope_required',
+                'question': 'Where should I save this skill: Personal (only for your requests) or Organization (shared with teammates)?',
+                'choices': [{'scope': 'personal', 'label': 'Personal · my requests only', 'available': True},
+                            {'scope': 'organization', 'label': 'Organization · all teammates', 'available': admin}],
+                'instructions': 'Nothing has been saved. Ask the current user to choose and wait for their reply. Do not pick a default or retry with an inferred scope. Organization saves require an admin; explain that if unavailable.'}
     if args.scope == 'organization' and not admin:
         raise HTTPException(403, 'Only an administrator can publish organization skills.')
     fingerprint = hashlib.sha256(json.dumps(args.model_dump(), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
