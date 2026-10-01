@@ -317,7 +317,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/runs")
     async def runs(request: Request, focus: str = ''):
         security.require(request)
-        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY created_at DESC LIMIT 100")]
+        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
         if parent_id and parent_id not in ids and store.run(parent_id):

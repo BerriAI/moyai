@@ -153,6 +153,7 @@ class Store:
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}

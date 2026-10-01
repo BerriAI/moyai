@@ -60,6 +60,8 @@ The server verifies Google’s signature, issuer, audience, expiry, nonce, verif
 
 The browser opens into a conversation workspace with searchable sessions in the sidebar, a centered new-session composer, and a full-height chat with the composer fixed below the conversation. Enter sends; Shift + Enter adds a line. Unsent follow-up drafts remain with their session while switching chats. Activity opens the session's progress, Slack source context, and file download in a collapsible panel. Pending write approvals remain visible beside the composer.
 
+The sidebar lists the 100 most recently updated parent sessions first, using the same last-updated time shown beneath each title. New messages and session state changes update this time; simply opening a session does not. Subagents stay nested under their parent in assignment order. The list refreshes every 15 seconds, and a selected older session remains accessible beyond the list limit.
+
 Assistant replies render Markdown headings, lists, links, tables, and copyable code blocks. The pinned local Marked and DOMPurify libraries are listed with their source tarballs and hashes in `app/static/vendor/versions.json`; licenses ship alongside them. Raw HTML is escaped, the resulting markup is sanitized, and only HTTP(S)/mailto links are enabled. No external script or image is loaded to format replies.
 
 Browser acceptance covered desktop and a 390px narrow viewport, session search, multiline input, Enter-to-send, queued follow-ups, per-session drafts, live status, activity controls, and hostile HTML/URL rendering. The 49 existing automated tests pass.

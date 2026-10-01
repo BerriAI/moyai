@@ -42,6 +42,41 @@ def test_child_deep_link_keeps_older_parent_visible_beyond_list_limit(workspace)
     assert parent not in [r['id'] for r in client.get('/api/runs').json()]
     rows = client.get('/api/runs', params={'focus':child}).json()
     assert parent in [r['id'] for r in rows] and child == next(r for r in rows if r['id'] == parent)['children'][0]['id']
+    # Resuming an old session must bring it back into the main list, not just
+    # reorder whichever 100 sessions happened to be created most recently.
+    app.state.store.update_run(parent, status='running')
+    rows = client.get('/api/runs').json()
+    assert len(rows) == 100 and rows[0]['id'] == parent
+    assert rows[0]['children'][0]['id'] == child
+
+
+def test_sidebar_orders_by_the_displayed_update_time_and_keeps_children_nested(workspace, monkeypatch):
+    app, client = workspace
+    store = app.state.store
+    older, child, _ = seeded_group(app)
+    newer, newer_child, _ = seeded_group(app)
+    store.execute('UPDATE runs SET created_at=?,updated_at=? WHERE id=?',
+                  ('2026-09-01T00:00:00+00:00', '2026-09-03T00:00:00+00:00', older))
+    store.execute('UPDATE runs SET created_at=?,updated_at=? WHERE id=?',
+                  ('2026-09-02T00:00:00+00:00', '2026-09-04T00:00:00+00:00', newer))
+    assert [r['id'] for r in client.get('/api/runs').json()] == [newer, older]
+
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    response = client.post('/api/runs/'+older+'/messages',
+                           json={'content': 'Continue the older task', 'client_id': 'resume-older'})
+    assert response.status_code == 202
+    rows = client.get('/api/runs').json()
+    assert [r['id'] for r in rows] == [older, newer]
+    assert rows[0]['updated_at'] > rows[1]['updated_at']
+    assert [c['id'] for r in rows for c in r['children']] == [child, newer_child]
+    # Looking at an older session does not count as new activity.
+    client.get('/api/runs/'+newer)
+    assert [r['id'] for r in client.get('/api/runs').json()] == [older, newer]
+
+    # Equal update times remain stable across refreshes.
+    store.execute('UPDATE runs SET updated_at=? WHERE parent_run_id=?',
+                  ('2026-09-05T00:00:00+00:00', ''))
+    assert [r['id'] for r in client.get('/api/runs').json()] == [newer, older]
 
 
 def test_authenticated_direct_chat_wakes_only_child_and_preserves_legacy_results(workspace, monkeypatch):
