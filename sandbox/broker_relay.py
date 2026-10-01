@@ -1,5 +1,6 @@
 """Loopback OpenAI/MCP adapter; never forwards a model-chosen destination."""
 import hmac
+import http.client
 import json
 import random
 import re
@@ -8,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import nullcontext
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, seal
@@ -28,6 +30,7 @@ class BrokerRelay:
         self.wait_credential = ''
         self.remote, self.token = remote, token
         self.startup_failure = None
+        self.steering = None
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -95,22 +98,26 @@ class BrokerRelay:
                         self.end_headers()
                         self.wfile.write(body)
                         return
-                    while True:
-                        data = seal(token, route, raw) if method == 'POST' else None
-                        request = urllib.request.Request(remote.rstrip('/') + route, data=data,
-                            headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=method)
-                        try:
-                            response = urllib.request.urlopen(request, timeout=940)
-                            break
-                        except urllib.error.HTTPError as exc:
-                            if (self.path != '/v1/chat/completions' or exc.code != 429
-                                    or exc.headers.get('X-Moyai-Model-Queue') != '1'):
-                                raise
-                            exc.close()
-                            # Never retry a submitted inference or uncertain
-                            # network failure here. This marker is only emitted
-                            # before admission, so no gateway call was made.
-                            time.sleep(3 + random.random())
+                    steering = relay.steering if self.path == '/v1/chat/completions' else None
+                    with steering.model_wait() if steering else nullcontext():
+                        while True:
+                            if steering and steering.requested:
+                                return self.error(409, 'This model request was superseded by a queued message.')
+                            data = seal(token, route, raw) if method == 'POST' else None
+                            request = urllib.request.Request(remote.rstrip('/') + route, data=data,
+                                headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=method)
+                            try:
+                                response = urllib.request.urlopen(request, timeout=940)
+                                break
+                            except urllib.error.HTTPError as exc:
+                                if (self.path != '/v1/chat/completions' or exc.code != 429
+                                        or exc.headers.get('X-Moyai-Model-Queue') != '1'):
+                                    raise
+                                exc.close()
+                                # Never retry a submitted inference or uncertain
+                                # network failure here. This marker is only emitted
+                                # before admission, so no gateway call was made.
+                                time.sleep(3 + random.random())
                     with response:
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
@@ -167,7 +174,7 @@ class BrokerRelay:
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
                 return json.load(response)
-        except (urllib.error.URLError, TimeoutError, ValueError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, ValueError):
             # Control-plane failure cannot authorize interrupting or replaying work.
             return {}
 

@@ -163,6 +163,9 @@ def run_agent(spec, relay):
             prompt += ('\n\nPROVIDER KEY REQUEST RESOLVED:\n' + json.dumps(spec['credential_resolution']) +
                        '\nContinue the original work if provided. If declined, explain what can be done without the key; do not request it again unless the user asks.')
         emit('status', 'Workspace connected. Starting agent work.', {'activity_version': 1, 'phase': 'execution_started'})
+        relay.steering = steering
+        steering.listen(agent, lambda: emit('status', 'Pausing this response to save your work and pick up the queued message.',
+                                             {'activity_version': 1, 'phase': 'steering'}))
         result = agent.run_conversation(prompt, conversation_history=history, system_message=(
             "You are Moyai Devin, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "
@@ -247,6 +250,7 @@ def run_agent(spec, relay):
             temporary.chmod(0o600)
             temporary.replace(history_path)
     finally:
+        steering.close()
         agent.close()
     collect_archive(workspace, artifacts, os.environ["WORKSPACE_RUN_TOKEN"].encode())
     return 0 if completed or continuing or steered else 1

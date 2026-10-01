@@ -307,3 +307,19 @@ def test_bootstrap_relay_retries_reads_but_never_retries_submitted_posts():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_superseded_model_wait_never_submits_another_gateway_call(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    def forbidden(*args, **kwargs):
+        pytest.fail('Cancelled generation submitted a new model request')
+    monkeypatch.setattr('sandbox.broker_relay.urllib.request.urlopen', forbidden)
+    relay = BrokerRelay('http://unused.example', 'token').start()
+    relay.steering = SimpleNamespace(model_wait=nullcontext, requested=True)
+    try:
+        with httpx.Client(base_url=relay.url, timeout=2) as client:
+            response = client.post('/v1/chat/completions', json={}, headers={'Authorization':'Bearer token'})
+            assert response.status_code == 409
+    finally:
+        relay.close()

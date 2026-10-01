@@ -1,5 +1,7 @@
 """Cooperative machine renewal, requested only between Hermes tool rounds."""
 import time
+import threading
+from contextlib import contextmanager
 
 
 class RotationDeadline:
@@ -56,16 +58,58 @@ class AgentWait(RotationDeadline):
 
 
 class AgentSteer(RotationDeadline):
-    """Cooperative interruption only after a complete tool round; save before switching users."""
+    """Interrupt model generation or a complete tool round; never a running tool."""
     def __init__(self, relay):
         super().__init__(0)
         self.relay = relay
         self.message_id = None
+        self.lock = threading.RLock()
+        self.changed = threading.Condition(self.lock)
+        self.model_pending = 0
+        self.closed = False
+        self.thread = None
+        self.notify = lambda: None
+
+    def listen(self, agent, notify=None):
+        self.notify = notify or self.notify
+        self.thread = threading.Thread(target=self._listen, args=(agent,), daemon=True)
+        self.thread.start()
+
+    @contextmanager
+    def model_wait(self):
+        # End this interval BEFORE the response reaches Hermes. Holding the
+        # same lock through control/interrupt prevents a late monitor callback
+        # from cancelling tools that have already started from that response.
+        with self.changed:
+            self.model_pending += 1
+            self.changed.notify_all()
+        try:
+            yield
+        finally:
+            with self.changed:
+                self.model_pending -= 1
+                self.changed.notify_all()
+
+    def _listen(self, agent):
+        with self.changed:
+            while not self.closed and not self.requested:
+                if self.model_pending:
+                    self.step(agent)
+                self.changed.wait(timeout=1)
+
+    def close(self):
+        with self.changed:
+            self.closed = True
+            self.changed.notify_all()
+        if self.thread:
+            self.thread.join(timeout=6)
 
     def step(self, agent):
-        if not self.requested:
-            target = self.relay.control().get('steer_message_id')
-            if isinstance(target, int) and not isinstance(target, bool) and target > 0:
-                self.message_id = target
-                self.requested = True
-                agent.interrupt()
+        with self.lock:
+            if not self.requested and not self.closed:
+                target = self.relay.control().get('steer_message_id')
+                if isinstance(target, int) and not isinstance(target, bool) and target > 0:
+                    self.message_id = target
+                    self.requested = True
+                    agent.interrupt()
+                    self.notify()
