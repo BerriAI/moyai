@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import nullcontext
 
@@ -24,7 +25,7 @@ EDGE_ERROR = ('Moyai could not reach the model because the cloud connection reje
 
 
 class BrokerRelay:
-    def __init__(self, remote, token, notify=None):
+    def __init__(self, remote, token, notify=None, *, durable_inference=False):
         self.last_error = ''
         self.wait_group = ''
         self.wait_credential = ''
@@ -42,11 +43,14 @@ class BrokerRelay:
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(content)))
+                if durable_inference and self.path == '/v1/chat/completions':
+                    self.send_header('x-should-retry', 'false')
                 self.end_headers()
                 self.wfile.write(content)
 
             def handle_request(self):
                 steering, generation = None, None
+                durable = durable_inference and self.path == '/v1/chat/completions'
                 credential_route = re.fullmatch(r'/credentials/([0-9a-f]{32})/v1(/models|/chat/completions|/completions|/embeddings|/messages)',self.path)
                 authorized = hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token)
                 if credential_route:
@@ -105,6 +109,12 @@ class BrokerRelay:
                             value = json.loads(raw)
                             value['steering_applied'] = steering.receipts()
                             raw = json.dumps(value).encode()
+                        if durable:
+                            value = json.loads(raw)
+                            value['inference_id'] = uuid4().hex
+                            raw = json.dumps(value).encode()
+                        deadline = time.monotonic() + 7200 if durable else float('inf')
+                        buffered = None
                         while True:
                             if steering and (steering.cancelled(generation) if hasattr(steering, 'cancelled') else steering.requested):
                                 return self.error(409, 'This model request was superseded by a queued message.')
@@ -113,23 +123,46 @@ class BrokerRelay:
                                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE}, method=method)
                             try:
                                 response = urllib.request.urlopen(request, timeout=940)
+                                if durable:
+                                    # Expose nothing until the full saved reply has
+                                    # arrived. A partial Render connection can retry
+                                    # the same ID without duplicating model output.
+                                    with response:
+                                        buffered = response.read(12 * 1024 * 1024 + 1)
+                                    if len(buffered) > 12 * 1024 * 1024:
+                                        return self.error(400, 'Saved model reply exceeds size limit.')
+                                    expected = response.headers.get('Content-Length')
+                                    if expected is not None and len(buffered) != int(expected):
+                                        raise http.client.IncompleteRead(buffered)
+                                    if ('text/event-stream' in response.headers.get('Content-Type', '')
+                                            and not buffered.rstrip().endswith(b'data: [DONE]')):
+                                        raise http.client.IncompleteRead(buffered)
                                 break
                             except urllib.error.HTTPError as exc:
-                                if (self.path != '/v1/chat/completions' or exc.code != 429
-                                        or exc.headers.get('X-Moyai-Model-Queue') != '1'):
+                                queued = (self.path == '/v1/chat/completions' and exc.code == 429
+                                          and exc.headers.get('X-Moyai-Model-Queue') == '1')
+                                pending = durable and (exc.headers.get('X-Moyai-Inference-Pending') == '1'
+                                                       or exc.code in {502, 503, 504})
+                                if not (queued or pending) or time.monotonic() >= deadline:
                                     raise
                                 exc.close()
-                                # Never retry a submitted inference or uncertain
-                                # network failure here. This marker is only emitted
-                                # before admission, so no gateway call was made.
-                                time.sleep(3 + random.random())
-                    with response:
+                                time.sleep(1 + random.random() if pending else 3 + random.random())
+                            except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+                                if not durable or time.monotonic() >= deadline:
+                                    raise
+                                # Only the durable protocol admits by stable ID.
+                                # Legacy inference and other routes never retry
+                                # an uncertain network failure.
+                                time.sleep(1 + random.random())
+                    with nullcontext(response) if buffered is not None else response:
                         if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                             return  # A redirected request may complete/bill later; discard its output.
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
                         self.end_headers()
-                        if control_call:
+                        if buffered is not None:
+                            self.wfile.write(buffered)
+                        elif control_call:
                             body = response.read(MAX_BODY + 1)
                             if len(body) > MAX_BODY:
                                 raise ValueError('Delegation reply exceeds size limit')
@@ -162,14 +195,14 @@ class BrokerRelay:
                     message = str(message or 'The cloud connection failed before a response could finish.')
                     if not credential_route:
                         relay.last_error = message
-                    self.error(502 if exc.code == 403 else exc.code, message)
-                except (urllib.error.URLError, TimeoutError):
+                    self.error(400 if durable else 502 if exc.code == 403 else exc.code, message)
+                except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
                     if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                         return
                     message = 'The cloud connection timed out or could not be reached. Your message is saved.'
                     if not credential_route:
                         relay.last_error = message
-                    self.error(502, message)
+                    self.error(400 if durable else 502, message)
 
             do_GET = do_POST = handle_request
 

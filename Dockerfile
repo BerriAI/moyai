@@ -6,6 +6,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY app ./app
+COPY inference ./inference
 COPY sandbox ./sandbox
 RUN useradd --uid 10001 --create-home workspace && mkdir /data && chown workspace:workspace /data
 USER workspace

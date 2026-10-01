@@ -281,6 +281,7 @@ class RunManager:
                 "github_repository": self.settings.allowed_github_repositories()[0] if 'github' in run['plugins'] else '',
                 "github_repositories": self.settings.allowed_github_repositories() if 'github' in run['plugins'] else [],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
+                "durable_inference": self.settings.durable_inference_enabled,
                 "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,

@@ -323,3 +323,61 @@ def test_superseded_model_wait_never_submits_another_gateway_call(monkeypatch):
             assert response.status_code == 409
     finally:
         relay.close()
+
+
+def test_durable_relay_retries_disconnect_and_partial_body_with_same_id(monkeypatch):
+    import socket
+    requests = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            body = json.loads(unseal('token', self.path, self.rfile.read(int(self.headers['Content-Length']))))
+            requests.append(body)
+            if len(requests) == 1:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            content = b'{"id":"saved","choices":[]}'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content[:8] if len(requests) == 2 else content)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'token', durable_inference=True).start()
+    monkeypatch.setattr('sandbox.broker_relay.time.sleep', lambda seconds: None)
+    try:
+        response = httpx.post(relay.url + '/v1/chat/completions', headers={'Authorization':'Bearer token'}, json={'messages':[]})
+        assert response.status_code == 200 and response.json()['id'] == 'saved'
+        assert len(requests) == 3
+        assert len({r['inference_id'] for r in requests}) == 1
+        assert len(requests[0]['inference_id']) == 32
+    finally:
+        relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_durable_relay_pending_retries_but_terminal_error_does_not(monkeypatch):
+    requests = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            requests.append(json.loads(unseal('token', self.path, self.rfile.read(int(self.headers['Content-Length'])))))
+            self.send_response(503 if len(requests) == 1 else 400)
+            if len(requests) == 1:
+                self.send_header('X-Moyai-Inference-Pending', '1')
+            self.end_headers()
+            self.wfile.write(b'{"detail":"Model outcome is unconfirmed"}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'token', durable_inference=True).start()
+    monkeypatch.setattr('sandbox.broker_relay.time.sleep', lambda seconds: None)
+    try:
+        response = httpx.post(relay.url + '/v1/chat/completions', headers={'Authorization':'Bearer token'}, json={'messages':[]})
+        assert response.status_code == 400
+        assert response.headers['x-should-retry'] == 'false'
+        assert len(requests) == 2 and requests[0]['inference_id'] == requests[1]['inference_id']
+    finally:
+        relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)

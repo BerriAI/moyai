@@ -129,6 +129,9 @@ def create_app(settings: Settings | None = None):
         manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
     spend = Spend(store, settings, security, checkpoints)
+    from .inference import InferenceJobs
+    inference = InferenceJobs(store, settings, spend, checkpoints)
+    manager.inference = inference
     coordinator = AgentCoordinator(store, settings, manager)
     manager.coordinator = coordinator
     credentials = Credentials(store, security, settings, manager, checkpoints)
@@ -152,7 +155,7 @@ def create_app(settings: Settings | None = None):
         await checkpoints.flush()
         slack.recover()
         identities.start()
-        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
+        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending' AND id NOT IN (SELECT id FROM inference_jobs)")
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         try:
             yield
@@ -177,6 +180,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     app.state.skills = skills
+    app.state.inference = inference
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
@@ -725,16 +729,23 @@ def create_app(settings: Settings | None = None):
 
     async def forward_model(run_id: str, request: Request):
         run = require_run(run_id, request)
+        body = await broker_body(request, '/v1/chat/completions')
+        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            raise HTTPException(422, "messages must be an array")
+        durable = settings.durable_inference_enabled or 'inference_id' in body
+        if durable:
+            # A duplicate returns its immutable saved result before context,
+            # attribution, steering acknowledgments or counters can change.
+            existing, _ = inference.existing(run, body)
+            if existing:
+                return await durable_response(existing)
         try:
             selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
             raise HTTPException(409, str(exc))
-        body = await broker_body(request, '/v1/chat/completions')
-        if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
-            raise HTTPException(422, "messages must be an array")
         if 'steering_applied' in body:
             message_queue.acknowledge(run_id, run['active_message_id'], body['steering_applied'])
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
+        admitted = True if durable else store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
                                  (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
@@ -755,6 +766,10 @@ def create_app(settings: Settings | None = None):
                 payload[field] = min(payload[field], 16000)
         if not ({"max_tokens", "max_completion_tokens"} & payload.keys()):
             payload["max_tokens"] = 8192
+        if durable:
+            job = inference.admit(run, body, payload, selected_model)
+            await checkpoints.flush()
+            return await durable_response(job)
         request_id = spend.begin(run, selected_model)
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.
@@ -805,6 +820,12 @@ def create_app(settings: Settings | None = None):
                         break
                     yield chunk
             return StreamingResponse(relay(), media_type='text/event-stream')
+        return JSONResponse(value)
+
+    async def durable_response(job):
+        value, wants_stream = await inference.response(job)
+        if wants_stream:
+            return StreamingResponse(iter(completion_events(value)), media_type='text/event-stream')
         return JSONResponse(value)
 
     @app.get("/")
