@@ -1,6 +1,17 @@
 /* Assistant output is untrusted. Render Markdown, then enforce a narrow HTML allowlist. */
 function renderMarkdown(content) {
   const renderer = new marked.Renderer();
+  const fileReferences = [];
+  const defaultLink = renderer.link;
+  renderer.link = function(token) {
+    // Placeholders survive sanitization; only our code adds the data attribute.
+    // No local path is ever used as a browser URL.
+    if(MoyaiFiles.reference(token.href)) {
+      fileReferences.push(token.href);
+      return defaultLink.call(this,{...token,href:'#saved-file-'+(fileReferences.length-1)});
+    }
+    return defaultLink.call(this,token);
+  };
   renderer.html = token => esc(token.text);
   renderer.image = token => esc(token.text || 'Image');
   const template = document.createElement('template');
@@ -10,6 +21,8 @@ function renderMarkdown(content) {
   });
   template.content.querySelectorAll('a').forEach(link => {
     const href = link.getAttribute('href') || '';
+    const fileIndex = href.match(/^#saved-file-(\d+)$/)?.[1];
+    if(fileIndex!==undefined&&fileReferences[fileIndex])link.dataset.fileRef=fileReferences[fileIndex];
     if (!/^(https?:\/\/|mailto:)/i.test(href)) link.removeAttribute('href');
     else { link.target='_blank'; link.rel='noopener noreferrer'; }
   });

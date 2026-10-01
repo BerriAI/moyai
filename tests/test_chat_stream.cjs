@@ -13,6 +13,7 @@ function browser() {
   let nextTimer = 0;
   const context = {
     state,
+    savedFiles: {reset() {}},
     EventSource: class {
       constructor(url) { this.url = url; this.handlers = {}; sources.push(this); }
       addEventListener(name, handler) { this.handlers[name] = handler; }

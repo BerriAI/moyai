@@ -35,6 +35,7 @@ from .github_setup import routes as github_routes
 from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
 from .attachments import upload_limit
+from .artifact_files import routes as artifact_file_routes
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -174,6 +175,7 @@ def create_app(settings: Settings | None = None):
     app.state.credentials = credentials
     app.include_router(skills.routes())
     app.include_router(store.attachments.routes(security, settings))
+    app.include_router(artifact_file_routes(settings, store, security))
     app.state.skills = skills
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities

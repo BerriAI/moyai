@@ -79,7 +79,7 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],value:'draft kept',innerHTML:''});return nodes.get(selector);}
   const data=run();data.mode='modal';data.messages[0].content='First request';data.messages[1].content='Next request';
   const state={selected:'chat',sending:new Set(),userId:'user',drafts:{chat:'draft kept'}};
-  const context={state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={savedFiles:{sync(){},decorate(){}},state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
   assert.match(node('#conversation').innerHTML,/data-activity-slot="1"/);
@@ -109,7 +109,7 @@ test('steering inputs share the original work timeline and do not invent another
   const script=readFileSync('app/static/app.js','utf8');
   const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],innerHTML:''});return nodes.get(selector);}
   data.messages[0].content='Original objective';
-  const context={state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={savedFiles:{sync(){},decorate(){}},state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
   const markup=node('#conversation').innerHTML;

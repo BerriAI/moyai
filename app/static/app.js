@@ -2,6 +2,7 @@ const $ = (s) => document.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const state = {view:'tasks', runs:[], config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{}};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
+const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,size:fileSize});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...options.headers}});
@@ -22,7 +23,7 @@ async function api(path, options = {}) {
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : min < 1440 ? `${Math.floor(min/60)}h ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; }
+function stopStream(){ clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; savedFiles.reset(); }
 function sessionTitle(run){return (run.agent_label||run.prompt||'Session').split('\n')[0].replace(/\s+/g,' ').trim();}
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
@@ -119,7 +120,7 @@ async function openRun(id){
   if($('#cancel'))$('#cancel').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await openRun(id);}catch(e){toast(e.message);}};
   if($('#retry'))$('#retry').onclick=async()=>{await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));};
   renderApprovals(run.approvals || []);
-  if(run.has_artifact)$('#artifact-area').innerHTML=`<div class="artifact-download"><a href="/api/runs/${id}/artifact">Download result and changes (.zip)</a></div>`;
+  savedFiles.sync(run);
   if(!terminal.has(run.status) || run.active){
     const cursor=run.events.at(-1)?.id||0; const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
     source.onmessage=(e)=>{if(state.selected!==id)return;const event=JSON.parse(e.data);$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));if(event.kind==='approval') refreshApproval(id).catch(showError);};
@@ -136,7 +137,7 @@ function toggleDetails(open){
 }
 function renderChat(run){
   const id=run.id;
-  $('#header-actions').innerHTML=`${run.parent_run_id?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span><button id="toggle-details" class="quiet details-toggle" aria-expanded="false" aria-controls="session-details"><span aria-hidden="true">☷</span> Activity</button>`;
+  $('#header-actions').innerHTML=`${run.parent_run_id?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span><button id="files-button" class="quiet details-toggle" aria-haspopup="dialog" hidden>Files</button><button id="toggle-details" class="quiet details-toggle" aria-expanded="false" aria-controls="session-details"><span aria-hidden="true">☷</span> Activity</button>`;
   $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="credential-requests"></div><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai Devin</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Ask a follow-up or give the next step…"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill">✦ Skills</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message"><span aria-hidden="true">↑</span></button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Type / for skills · Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
   $('#toggle-details').onclick=()=>toggleDetails(!state.detailsOpen);$('#close-details').onclick=()=>toggleDetails(false);toggleDetails(state.detailsOpen);
@@ -192,7 +193,7 @@ function connectChatStream(run){
   connect();
 }
 function updateChatStatus(run){
-  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});}
+  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
   if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
@@ -227,7 +228,7 @@ function updateChat(run,initial=false){
   $('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;
   updateChatStatus(run);renderCredentialRequests(run.credential_requests||[]);renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
-  $('#artifact-area').innerHTML=run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download latest files</a>`:'';
+  savedFiles.sync(run);
   $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
 }
 function renderLiveWork(event,disconnected){
@@ -235,6 +236,7 @@ function renderLiveWork(event,disconnected){
   run.activity_disconnected=disconnected;
   if(event&&!run.events.some(existing=>existing.id===event.id))run.events.push(event);
   MoyaiActivity.sync($('#conversation'),run,{markdown:renderMarkdown,copy:copyText});
+  savedFiles.decorate($('#conversation'));
 }
 async function copyText(text,button){try{await navigator.clipboard.writeText(text);const label=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=label,1800);}catch{toast('Could not copy. You can select and copy the text.');}}
 function renderAgentDetails(team){
