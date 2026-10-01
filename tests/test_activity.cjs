@@ -2,6 +2,7 @@ const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
 const vm=require('node:vm');
+const MoyaiQueue=require('../app/static/message-queue.js');
 const {groups,html,duration,sync,tick}=require('../app/static/activity.js');
 const stamp=n=>new Date(Date.UTC(2026,8,30,12,0,n)).toISOString();
 const event=(id,kind,message,data={})=>({id,kind,message,data,created_at:stamp(id)});
@@ -13,6 +14,20 @@ test('queued follow-ups never capture work from the current response; restored t
   data.active_message_id=2;data.messages[0].status='completed';data.messages[1].status='running';
   const turns=groups(data);assert.equal(turns.get('1').rows.length,1);assert.equal(turns.get('1').live,false);assert.equal(turns.get('2').rows[0].message,'Now inspecting the follow-up');assert.equal(turns.get('2').live,true);
   assert.match(html(turns.get('1')),/Work finished/);assert.doesNotMatch(html(turns.get('1')),/data-work-timer/);
+});
+
+test('dispatching a follow-up cannot reopen the previous completed work or start a fake timer',()=>{
+  const data=run();data.status='queued';data.messages[0].status='completed';
+  data.events.push(tool(2,'a','completed'),event(3,'chat','Response saved',{message_id:1}));
+  let turns=groups(data);
+  assert.equal(turns.get('1').status,'completed');assert.equal(turns.get('1').live,false);
+  assert.match(html(turns.get('1')),/Work finished/);assert.doesNotMatch(html(turns.get('1')),/Waiting to start|data-work-timer/);
+  assert.equal(html(turns.get('2')),'');assert.equal(turns.get('2').live,false);
+  // The persisted terminal message also wins if the stream has not delivered its save event.
+  data.events.pop();turns=groups(data);assert.equal(turns.get('1').status,'completed');
+  // Conversely, a received save event wins over an older message-list fetch.
+  data.messages[0].status='running';data.events.push(event(3,'chat','Response saved',{message_id:1}));
+  turns=groups(data);assert.equal(turns.get('1').status,'completed');assert.equal(turns.get('1').live,false);
 });
 
 test('parallel tools and journal replay pair once, even after rotation or reconnect',()=>{
@@ -64,13 +79,21 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],value:'draft kept',innerHTML:''});return nodes.get(selector);}
   const data=run();data.mode='modal';data.messages[0].content='First request';data.messages[1].content='Next request';
   const state={selected:'chat',sending:new Set(),userId:'user',drafts:{chat:'draft kept'}};
-  const context={state,$:node,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
   assert.match(node('#conversation').innerHTML,/data-work-slot="1"/);
+  assert.doesNotMatch(node('#conversation').innerHTML,/Next request/);
   context.renderLiveWork(tool(2,'a','started'),false);
   context.updateChat(structuredClone(data));
   assert.equal(state.chatRun.events.length,2);assert.equal(state.drafts.chat,'draft kept');assert.equal(node('#followup').value,'draft kept');assert.equal(renders.at(-1).events[1].data.call_id,'a');
+  data.status='queued';data.messages[0].status='completed';
+  context.updateChat(structuredClone(data));
+  const markup=node('#conversation').innerHTML;
+  assert.match(markup,/Next request/);assert.doesNotMatch(markup,/>queued</);
+  assert.equal((markup.match(/Next request/g)||[]).length,1);
+  data.active_message_id=2;data.messages[1].status='running';context.updateChat(structuredClone(data));
+  assert.equal((node('#conversation').innerHTML.match(/Next request/g)||[]).length,1);
 });
 
 test('startup recovery shows a waiting state without claiming active tool work',()=>{
@@ -86,7 +109,7 @@ test('steering inputs share the original work timeline and do not invent another
   const script=readFileSync('app/static/app.js','utf8');
   const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],innerHTML:''});return nodes.get(selector);}
   data.messages[0].content='Original objective';
-  const context={state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
   const markup=node('#conversation').innerHTML;

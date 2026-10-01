@@ -25,9 +25,10 @@
       if(turn&&visible.has(event.kind))turn.events.push(event);
     }
     for(const turn of turns.values()){
-      const isCurrent=String(run.active_message_id)===turn.id||(!run.active_message_id&&turn.message.status==='running');
-      turn.status=isCurrent&&!settled.has(run.status)?run.status:turn.message.status;
-      if(isCurrent&&settled.has(run.status)&&turn.status==='running')turn.status=run.status;
+      // active_message_id remains on the previous response until the next claim.
+      // A new request's dispatch status must never reopen completed work.
+      const isCurrent=!turn.end&&turn.message.status==='running'&&(String(run.active_message_id)===turn.id||!run.active_message_id);
+      turn.status=isCurrent?(run.status||turn.message.status):turn.message.status;
       if(turn.end&&turn.status==='running')turn.status='completed';
       turn.live=!settled.has(turn.status)&&turn.status!=='save_failed'&&!!turn.start&&!turn.end;
       turn.start||=Date.parse(turn.events[0]?.created_at)||0;

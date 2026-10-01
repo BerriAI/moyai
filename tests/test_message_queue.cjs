@@ -5,13 +5,55 @@ const vm=require('node:vm');
 const queue=require('../app/static/message-queue.js');
 const message={id:2,role:'user',user_id:'alice',user_name:'Alice',status:'queued',content:'Original message',model:'astra',revision:0,queue_locked:0,attachments:[]};
 
+const active={id:1,role:'user',status:'running',content:'Current request'};
+
 function controller(){
-  const requests=[],toasts=[],drafts=new Map(),used=[];let run={id:'run',messages:[{...message}]},writes=0;
+  const requests=[],toasts=[],drafts=new Map(),used=[];let run={id:'run',messages:[active,{...message}]},writes=0;
   const element={ownerDocument:{},hidden:true,querySelectorAll:()=>[],querySelector:()=>null,set innerHTML(text){this.html=text;writes++;}};
   const options={element,runId:'run',user:'alice',role:'member',drafts,toast:value=>toasts.push(value),useDraft:text=>used.push(text),api:async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {revision:1};},refresh:async()=>ctrl.render(run)};
   const ctrl=queue.create(options);ctrl.render(run);
   return {ctrl,requests,toasts,drafts,used,element,options,get writes(){return writes;},setRun(next){run=next;ctrl.render(next);}};
 }
+
+test('a new request is immediately in the transcript without changing its durable state',()=>{
+  const input={...message,attachments:[{id:'file',name:'skill.md'}]},run={status:'queued',messages:[input]};
+  const before=structuredClone(run),view=queue.presentation(run);
+  assert.deepEqual(view.queued,[]);assert.deepEqual(view.transcript,[input]);
+  assert.equal(view.transcript[0].attachments[0].name,'skill.md');assert.deepEqual(run,before);
+  const b=controller();b.setRun(run);assert.equal(b.element.hidden,true);
+});
+
+test('idle follow-ups enter chat despite a completed active ID; only later inputs remain queued',()=>{
+  const finished={...active,status:'completed'},reply={id:3,role:'assistant',status:'completed',content:'Done'};
+  const next={...message,id:4},later={...message,id:5};
+  const run={status:'queued',active_message_id:1,messages:[finished,reply,next,later]};
+  let view=queue.presentation(run);
+  assert.deepEqual(view.transcript,[finished,reply,next]);assert.deepEqual(view.queued,[later]);
+  next.status='running';view=queue.presentation(run);
+  assert.deepEqual(view.transcript,[finished,reply,next]);assert.deepEqual(view.queued,[later]);
+  next.status='completed';view=queue.presentation(run);
+  assert.deepEqual(view.transcript,[finished,reply,next,later]);assert.deepEqual(view.queued,[]);
+});
+
+test('dispatch priority matches Send now, while active work retains all genuine queue controls',()=>{
+  const first={...message},priority={...message,id:3};
+  const run={status:'queued',steer_message_id:3,messages:[first,priority]};
+  assert.deepEqual(queue.presentation(run),{queued:[first],transcript:[priority]});
+  for(const status of ['queued','provisioning','running','saving','awaiting_approval','waiting_children','waiting_credential','reconnecting']){
+    const working={...run,status,messages:[active,first,priority]};
+    assert.deepEqual(queue.queued(working),[priority,first]);
+    const b=controller();b.setRun(working);assert.match(b.element.html,/2 queued/);assert.match(b.element.html,/Edit queued message/);
+  }
+  for(const status of ['stopping','cancelled','interrupted'])assert.deepEqual(queue.queued({...run,status}),[priority,first]);
+});
+
+test('a queued edit survives promotion into the conversation before worker claim',async()=>{
+  const b=controller();await b.ctrl.act(2,'edit');b.drafts.get(2).content='Keep this correction';
+  b.setRun({status:'queued',active_message_id:1,messages:[{...active,status:'completed'},message]});
+  assert.doesNotMatch(b.element.html,/data-queued-row="2"/);assert.match(b.element.html,/Unsent edit/);
+  assert.equal(b.drafts.get(2).content,'Keep this correction');
+  await b.ctrl.act(2,'followup');assert.deepEqual(b.used,['Keep this correction']);assert.equal(b.element.hidden,true);
+});
 
 test('queue controls are scoped and show pending, requested, and locked handoff states',()=>{
   const html=queue.card({...message,content:'<img src=x onerror=bad()>'},{},'alice','member',false,false,()=> '');
@@ -24,7 +66,7 @@ test('queue controls are scoped and show pending, requested, and locked handoff 
 
 test('edits preserve revision and draft, and save-now submits the saved revision before steering',async()=>{
   const b=controller();await b.ctrl.act(2,'edit');b.drafts.get(2).content='Changed text';const before=b.writes;
-  b.ctrl.render({id:'run',messages:[{...message}]});assert.equal(b.writes,before,'status refresh must not replace a typing editor');
+  b.ctrl.render({id:'run',messages:[active,{...message}]});assert.equal(b.writes,before,'status refresh must not replace a typing editor');
   await b.ctrl.act(2,'save-now');
   assert.deepEqual(b.requests.map(r=>r.body),[{action:'edit',content:'Changed text',revision:0},{action:'steer',revision:1}]);
   assert.equal(b.drafts.size,0);
@@ -43,7 +85,7 @@ test('failed edit retains the text, and delete never submits an edited draft by 
   // The API callback is captured at construction; use an independent failing controller.
   const drafts=new Map([[2,{content:'Unsent revised text',revision:0}]]),calls=[];
   const c=queue.create({...b.options,drafts,api:async(url,options)=>{calls.push(JSON.parse(options.body));throw Error('already picked up');},refresh:async()=>{}});
-  c.render({messages:[message]});await c.act(2,'save');assert.equal(drafts.get(2).content,'Unsent revised text');
+  c.render({messages:[active,message]});await c.act(2,'save');assert.equal(drafts.get(2).content,'Unsent revised text');
   await c.act(2,'delete');assert.deepEqual(calls[1],{action:'delete',revision:0});
 });
 

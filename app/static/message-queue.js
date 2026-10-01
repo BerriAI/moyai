@@ -1,7 +1,16 @@
 (function(root){
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const canEdit=(message,user,role)=>!message.queue_locked&&(role==='admin'||message.user_id===user);
-  const queued=run=>(run.messages||[]).filter(message=>message.role==='user'&&message.status==='queued').sort((a,b)=>(a.id===run.steer_message_id?-1:b.id===run.steer_message_id?1:a.id-b.id));
+  function presentation(run){
+    const messages=run.messages||[];
+    const pending=messages.filter(message=>message.role==='user'&&message.status==='queued').sort((a,b)=>(a.id===run.steer_message_id?-1:b.id===run.steer_message_id?1:a.id-b.id));
+    // Durable inputs stay queued until a worker claims them. The next input
+    // belongs in the conversation if no response is ahead of it, even during
+    // dispatch/startup. Match claim_message's priority and stop conditions.
+    const next=messages.some(message=>message.role==='user'&&message.status==='running')||['stopping','cancelled','interrupted'].includes(run.status)?null:pending[0];
+    return {queued:pending.filter(message=>message!==next),transcript:messages.filter(message=>message.status!=='queued'||message===next)};
+  }
+  const queued=run=>presentation(run).queued;
   function card(message,run,user,role,editing,busy,attachments){
     const allowed=canEdit(message,user,role),requested=message.id===run.steer_message_id;
     const status=message.queue_locked?'Picking up…':requested?'Send requested':'Queued';
@@ -19,7 +28,7 @@
       element.hidden=!messages.length&&!drafts.size;
       element.innerHTML=`<div class="queue-heading"><span role="status">${messages.length} queued</span><small>Enter to queue · Ctrl/⌘ Enter to send now</small></div><div class="queued-list">${messages.map(message=>card(message,run,user,role,drafts.has(message.id),busy,attachments)).join('')}${[...drafts].map(([id,draft])=>{
         const message=messages.find(message=>message.id===id),available=message&&canEdit(message,user,role);
-        return `<form class="queue-editor" data-queue-editor="${id}"><label for="queue-edit-${id}">${available?'Edit queued message':'Unsent edit'}</label>${!available?'<p class="queue-edit-warning">Moyai has picked up this message. Your edit is still here; you can use it as a follow-up.</p>':message.revision!==draft.revision?'<p class="queue-edit-warning">The saved message changed. Your unsaved edit is preserved.</p>':''}<textarea id="queue-edit-${id}" data-queue-edit="${id}" maxlength="16000" required rows="3" ${busy?'disabled':''}>${esc(draft.content)}</textarea><div class="queue-edit-actions"><small>${available?'The model and attachments stay with this message.':'Your composer draft will be preserved.'}</small><button type="button" data-queue-action="discard" data-queue-id="${id}" ${busy?'disabled':''}>${available?'Cancel':'Discard edit'}</button><button type="${available?'submit':'button'}" ${available?'':`data-queue-action="followup" data-queue-id="${id}"`} ${busy?'disabled':''}>${available?'Save edit':'Use as follow-up'}</button></div></form>`;
+        return `<form class="queue-editor" data-queue-editor="${id}"><label for="queue-edit-${id}">${available?'Edit queued message':'Unsent edit'}</label>${!available?'<p class="queue-edit-warning">This message has moved into the conversation. Your edit is still here; you can use it as a follow-up.</p>':message.revision!==draft.revision?'<p class="queue-edit-warning">The saved message changed. Your unsaved edit is preserved.</p>':''}<textarea id="queue-edit-${id}" data-queue-edit="${id}" maxlength="16000" required rows="3" ${busy?'disabled':''}>${esc(draft.content)}</textarea><div class="queue-edit-actions"><small>${available?'The model and attachments stay with this message.':'Your composer draft will be preserved.'}</small><button type="button" data-queue-action="discard" data-queue-id="${id}" ${busy?'disabled':''}>${available?'Cancel':'Discard edit'}</button><button type="${available?'submit':'button'}" ${available?'':`data-queue-action="followup" data-queue-id="${id}"`} ${busy?'disabled':''}>${available?'Save edit':'Use as follow-up'}</button></div></form>`;
       }).join('')}</div>`;
       element.querySelectorAll('[data-queue-action]').forEach(button=>button.onclick=()=>act(Number(button.dataset.queueId),button.dataset.queueAction));
       element.querySelectorAll('[data-queue-edit]').forEach(input=>{
@@ -55,5 +64,5 @@
     }
     return {render,act,sendFirst(){const message=queued(run).find(message=>canEdit(message,user,role));if(message)return act(message.id,'steer');toast('There is no editable queued message to send.');}};
   }
-  root.MoyaiQueue={create,queued,card,canEdit};if(typeof module!=='undefined')module.exports=root.MoyaiQueue;
+  root.MoyaiQueue={create,presentation,queued,card,canEdit};if(typeof module!=='undefined')module.exports=root.MoyaiQueue;
 })(typeof globalThis!=='undefined'?globalThis:window);
