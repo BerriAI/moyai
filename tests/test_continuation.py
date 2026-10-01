@@ -3,7 +3,18 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
-from sandbox.continuation import RotationDeadline
+from sandbox.continuation import RotationDeadline, resumed_context
+
+
+def test_resume_context_does_not_claim_pending_workers_or_keys_have_finished():
+    pending = resumed_context({'agent_results': {'group_id':'group', 'settled':False, 'children':[]},
+                               'credential_resolution': {'status':'pending'}})
+    assert 'STILL RUNNING' in pending and 'STILL PENDING' in pending
+    assert 'HAVE SETTLED' not in pending and 'REQUEST RESOLVED' not in pending
+    assert 'agents_wait' in pending and 'duplicate' in pending
+    settled = resumed_context({'agent_results': {'settled':True, 'children':[]},
+                               'credential_resolution': {'status':'declined'}})
+    assert 'HAVE SETTLED' in settled and 'REQUEST RESOLVED' in settled
 
 
 def test_rotation_requests_stop_only_at_next_safe_step_and_checks_tool_results():

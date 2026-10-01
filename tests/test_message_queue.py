@@ -93,7 +93,7 @@ def test_steering_locks_only_at_safe_boundary_and_reorders_without_losing_earlie
     app.state.store.finish_message(run_id,target,'Urgent answer')
     assert app.state.store.claim_message(run_id)['id']==earlier
     transcript=app.state.store.messages(run_id)
-    assert [m['content'] for m in transcript]==['Initial request','Paused','Urgent edited','Urgent answer','Queued request']
+    assert [m['content'] for m in transcript]==['Initial request','Urgent edited','Urgent answer','Queued request']
     context=app.state.manager.spec({**app.state.store.run(run_id),'message_id':earlier})['history_fallback']
     assert any(m['content']=='Urgent answer' for m in context)
     assert all(m['content']!='Queued request' for m in context)
@@ -175,18 +175,20 @@ async def test_failed_steering_save_never_starts_queued_message(durable):
 
 
 @pytest.mark.parametrize('phase',['waiting_children','waiting_credential'])
-async def test_steering_a_checkpointed_wait_does_not_start_or_replay_the_old_agent(durable,phase):
+@pytest.mark.parametrize('scope', [{'user_id':'teammate'}, {'model':'other-model'}])
+async def test_cross_scope_checkpointed_steering_keeps_the_saved_handoff(durable,phase,scope):
     manager,cloud,run_id=durable
     await drive(manager,run_id,phase='checkpointed')
     state=manager.state(run_id);old=state['message_id']
     await manager.cleanup(state)
     state.update(phase=phase,sandbox_id='');manager.save(run_id,state)
     manager.store.update_run(run_id,status=phase)
-    target,_=manager.store.enqueue_message(run_id,'Continue with this instead','steer-wait')
-    manager.message_queue.change(run_id,target['id'],'',False,0,'steer')
+    target,_=manager.store.enqueue_message(run_id,'Continue with this instead','steer-wait',**scope)
+    manager.message_queue.change(run_id,target['id'],scope.get('user_id',''),False,0,'steer')
     await drive(manager,run_id,phase='idle')
     assert manager.store.rows('SELECT status FROM messages WHERE id=?',(old,))[0]['status']=='steered'
     assert len(cloud.launches)==1 and cloud.snapshots==1
+    assert not [m for m in manager.store.messages(run_id) if m['role']=='assistant']
     assert manager.store.has_queued_messages(run_id)
 
 

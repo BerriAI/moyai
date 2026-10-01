@@ -80,6 +80,21 @@ def test_workspace_save_failure_delivers_the_preserved_answer_once(slack_app):
     assert 'Response failed:' not in answers[0]['text']
 
 
+def test_checkpoint_handoffs_do_not_post_synthetic_answers_to_slack(slack_app):
+    app, client, run_id = start(slack_app)
+    message = app.state.store.claim_message(run_id)
+    app.state.store.finish_message(run_id, message['id'], 'Paused and saved', 'steered')
+    assert not [m for m in app.state.store.messages(run_id) if m['role'] == 'assistant']
+    # Notices saved by an older release must not be delivered after an upgrade.
+    app.state.store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant','Old paused notice','steered',?)", (run_id, now()))
+    app.state.slack.chat.collect()
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' AND run_id=?", (run_id,))
+    send(client, 1, 'Continue the same work')
+    finish(app, run_id, 'The actual result')
+    answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' AND run_id=?", (run_id,))
+    assert len(answers) == 1 and 'The actual result' in answers[0]['text']
+
+
 def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(slack_app):
     app, client, run_id = start(slack_app)
     for index, changes in enumerate([

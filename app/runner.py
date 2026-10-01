@@ -8,7 +8,7 @@ from pathlib import Path
 import modal
 
 from .security import digest
-from .message_queue import MessageQueue, STEER_NOTE
+from .message_queue import MessageQueue
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
@@ -244,7 +244,7 @@ class RunManager:
             if self.stopped(run_id):
                 return
             if run.get('chat_enabled') and self.message_queue.accept_steer(run_id, self.store.run(run_id)['active_message_id']):
-                self.store.update_run(run_id, status='steered', summary='Paused this simulated response to pick up your queued message.')
+                self.store.update_run(run_id, status='steered', summary='')
                 return
             self.store.event(run_id, *step)
         self.store.update_run(run_id, status="completed", summary=steps[-1][1])
@@ -273,6 +273,8 @@ class RunManager:
         by_message = {}
         for upload in uploads:
             by_message.setdefault(upload['message_id'], []).append(upload)
+        delivered = self.store.rows("SELECT id FROM messages WHERE run_id=? AND steering_parent_id=? AND status='injected' ORDER BY started_at DESC,id DESC LIMIT 1",
+                                    (run_id, run.get('message_id')))
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "attachments": uploads,
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
@@ -283,6 +285,7 @@ class RunManager:
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
+                "activity_input_id": delivered[0]['id'] if delivered else run.get('message_id'),
                 "is_child_agent": bool(run.get('parent_run_id')),
                 "fresh_child": bool(run.get('parent_run_id')) and not run.get('continuation') and not any(m['role'] == 'assistant' for m in self.store.messages(run_id)),
                 "chat_enabled": bool(run.get("chat_enabled")),
@@ -406,7 +409,7 @@ class RunManager:
                 return
             if (result and result.get('steer_message_id') and code == 0 and result.get('checkpoint_saved')
                     and self.message_queue.accepted(run_id, result['steer_message_id'])):
-                self.store.update_run(run_id, status='steered', summary=STEER_NOTE)
+                self.store.update_run(run_id, status='steered', summary='')
                 return
             if result and result.get("continuation") and result.get("checkpoint_saved") and code == 0:
                 return True

@@ -283,7 +283,7 @@ class SlackChat:
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
         for message in messages:
-            if allowed and not binding['paused']:
+            if allowed and not binding['paused'] and message['status'] != 'steered':
                 value = self.scrub(message['content'])
                 if message['status'] in {'failed', 'cancelled', 'interrupted'}:
                     value = 'Response ' + message['status'] + ':\n\n' + value

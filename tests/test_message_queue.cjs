@@ -7,6 +7,13 @@ const message={id:2,role:'user',user_id:'alice',user_name:'Alice',status:'queued
 
 const active={id:1,role:'user',status:'running',content:'Current request'};
 
+test('historical handoff notices stay out of chat while real failures remain visible',()=>{
+  const run={status:'idle',messages:[{...active,status:'steered'},
+    {id:3,role:'assistant',status:'steered',content:'Paused and saved'},
+    {id:4,role:'assistant',status:'save_failed',content:'Real answer; saving failed'}]};
+  assert.deepEqual(queue.presentation(run).transcript.map(m=>m.id),[1,4]);
+});
+
 function controller(){
   const requests=[],toasts=[],drafts=new Map(),used=[];let run={id:'run',messages:[active,{...message}]},writes=0;
   const element={ownerDocument:{},hidden:true,querySelectorAll:()=>[],querySelector:()=>null,set innerHTML(text){this.html=text;writes++;}};

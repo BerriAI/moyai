@@ -3,7 +3,7 @@ const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
 const vm=require('node:vm');
 const MoyaiQueue=require('../app/static/message-queue.js');
-const {groups,html,duration,sync,tick}=require('../app/static/activity.js');
+const {groups,timeline,html,duration,syncWork,tick}=require('../app/static/activity.js');
 const stamp=n=>new Date(Date.UTC(2026,8,30,12,0,n)).toISOString();
 const event=(id,kind,message,data={})=>({id,kind,message,data,created_at:stamp(id)});
 function run(){return {id:'chat',status:'running',active_message_id:1,messages:[{id:1,role:'user',status:'running'},{id:2,role:'user',status:'queued'}],events:[event(1,'chat','Response started',{message_id:1})]};}
@@ -53,11 +53,11 @@ test('tool details are escaped; public commentary is excluded from expandable wo
   const markup=html(groups(data).get('1'));assert.match(markup,/Show 5 earlier updates/);assert.doesNotMatch(markup,/<script>|<img/);assert.match(markup,/&lt;script&gt;/);
 });
 
-test('timers update only text, while feed sync skips unchanged history and preserves reading position',()=>{
+test('timers update only text and unchanged activity blocks keep their DOM',()=>{
   assert.equal(duration(0,65000),'1m 5s');assert.equal(duration(0,3601000),'1h 0m');assert.equal(duration(100,50),'0s');
   let writes=0;const slot={dataset:{workSlot:'1'},querySelectorAll:()=>[],contains:()=>false,set innerHTML(value){writes++;this.html=value;}};
-  const container={scrollHeight:1000,scrollTop:100,clientHeight:400,querySelectorAll:selector=>selector==='[data-work-slot]'?[slot]:[]};const data=run();data.events.push(tool(2,'a','started'));
-  sync(container,data);sync(container,data);assert.equal(writes,1);assert.equal(container.scrollTop,100);
+  const data=run();data.events.push(tool(2,'a','started'));
+  syncWork(slot,groups(data).get('1'));syncWork(slot,groups(data).get('1'));assert.equal(writes,1);
   const timer={dataset:{workTimer:Date.now()-3000},textContent:''};tick({querySelectorAll:()=>[timer]});assert.equal(timer.textContent,'3s');assert.equal(writes,1);
 });
 
@@ -67,10 +67,10 @@ test('expanded commands survive incoming events and keep keyboard focus',()=>{
     {dataset:{workKey:'1:a'},open:true,querySelector:()=>({addEventListener:()=>{},focus:()=>{focused=true;}})}];
   let current=nodes();
   const slot={dataset:{workSlot:'1',workLive:'true'},contains:()=>true,querySelectorAll:()=>current,set innerHTML(value){current=nodes().map(node=>({...node,open:false}));}};
-  const container={scrollHeight:1000,scrollTop:50,clientHeight:400,ownerDocument:{activeElement:{closest:()=>current[1]}},querySelectorAll:selector=>selector==='[data-work-slot]'?[slot]:[]};
+  const container={scrollHeight:1000,scrollTop:50,clientHeight:400,ownerDocument:{activeElement:{closest:()=>current[1]}},querySelectorAll:selector=>selector==='[data-activity-slot]'?[slot]:[]};
   const data=run();data.events.push(tool(2,'a','started'));
-  sync(container,data);assert.equal(current[1].open,true);assert.equal(focused,true);assert.equal(container.scrollTop,50);
-  data.events.push(tool(3,'a','completed'));sync(container,data);assert.equal(current[1].open,true);
+  slot.ownerDocument=container.ownerDocument;syncWork(slot,groups(data).get('1'));assert.equal(current[1].open,true);assert.equal(focused,true);assert.equal(container.scrollTop,50);
+  data.events.push(tool(3,'a','completed'));syncWork(slot,groups(data).get('1'));assert.equal(current[1].open,true);
 });
 
 test('chat rendering mounts inline work and a stale fetch cannot erase streamed events or drafts',()=>{
@@ -82,7 +82,7 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   const context={state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
-  assert.match(node('#conversation').innerHTML,/data-work-slot="1"/);
+  assert.match(node('#conversation').innerHTML,/data-activity-slot="1"/);
   assert.doesNotMatch(node('#conversation').innerHTML,/Next request/);
   context.renderLiveWork(tool(2,'a','started'),false);
   context.updateChat(structuredClone(data));
@@ -113,13 +113,11 @@ test('steering inputs share the original work timeline and do not invent another
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
   const markup=node('#conversation').innerHTML;
-  assert.equal((markup.match(/data-work-slot=/g)||[]).length,1);
-  assert.match(markup,/data-work-slot="1"/);assert.doesNotMatch(markup,/data-work-slot="2"/);
-  assert(markup.indexOf('Also check caching')<markup.indexOf('data-work-slot="1"'));
+  assert.equal((markup.match(/data-activity-slot=/g)||[]).length,2);
+  assert.match(markup,/data-activity-slot="1"/);assert.match(markup,/data-activity-slot="2"/);
+  assert(markup.indexOf('data-activity-slot="1"')<markup.indexOf('Also check caching'));
   assert.match(markup,/>Steering</);
-  assert.match(markup,/data-update-slot="1"/);assert.match(markup,/data-update-slot="2"/);
-  assert(markup.indexOf('data-update-slot="1"')<markup.indexOf('Also check caching'));
-  assert(markup.indexOf('Also check caching')<markup.indexOf('data-update-slot="2"'));
+  assert(markup.indexOf('Also check caching')<markup.indexOf('data-activity-slot="2"'));
 });
 
 test('backgrounded commands do not claim a finished process',()=>{
@@ -131,4 +129,53 @@ test('backgrounded commands do not claim a finished process',()=>{
   assert.equal(turn.rows[0].state,'backgrounded');
   assert.match(html(turn),/Moved to background/);
   assert.doesNotMatch(html(turn),/>Finished</);
+});
+
+test('tools and public replies stay on each side of multiple injected messages, including late completion',()=>{
+  const data=run();data.messages[1]={id:2,role:'user',status:'injected',steering_parent_id:1};
+  data.messages.push({id:3,role:'user',status:'injected',steering_parent_id:1});
+  data.events.push(tool(2,'before','started'),event(3,'message','Initial finding'),
+    tool(4,'also-before','completed'),event(5,'status','Delivered',{turn_id:1,message_id:2,phase:'steering'}),
+    event(6,'message','Answer to your question'),tool(7,'after','completed'),
+    tool(8,'before','completed'),event(9,'message','Verified the change'),
+    event(10,'status','Delivered',{turn_id:1,message_id:3,phase:'steering'}),tool(11,'last','started'));
+  const entries=timeline(data);
+  const order=id=>entries.get(id).flatMap(item=>item.type==='update'?item.content:item.block.rows.map(row=>row.id));
+  assert.deepEqual(order('1'),['before','Initial finding','also-before']);
+  assert.deepEqual(order('2'),['Answer to your question','after','Verified the change']);
+  assert.deepEqual(order('3'),['last']);
+  assert.equal(entries.get('1')[0].block.rows[0].state,'completed','a completion updates the original row without moving it');
+  assert.equal(entries.get('1')[0].block.live,false);
+  assert.equal(entries.get('3')[0].block.live,true);
+  assert.deepEqual(timeline(JSON.parse(JSON.stringify(data))),entries,'reload reconstructs the same order');
+  data.events.push(event(12,'chat','Response saved',{message_id:1}));data.messages[0].status='completed';
+  assert.equal(timeline(data).get('3')[0].block.live,false);
+  assert.equal(timeline(data).get('3')[0].block.rows[0].state,'unconfirmed');
+});
+
+test('emission input tags keep delayed activity above the injection, independently of journal arrival',()=>{
+  const data=run();data.messages[1]={id:2,role:'user',status:'injected',steering_parent_id:1};
+  data.events.push(event(2,'status','Delivered',{turn_id:1,message_id:2,phase:'steering'}),
+    tool(3,'old-buffered-tool','started',{input_id:1}),
+    event(4,'message','Before the correction',{turn_id:1,input_id:1}),
+    event(5,'message','After the correction',{turn_id:1,input_id:2}),
+    tool(6,'new-tool','completed',{input_id:2}),
+    tool(7,'old-buffered-tool','completed',{input_id:2}));
+  const entries=timeline(data);
+  assert.equal(entries.get('1')[0].block.rows[0].id,'old-buffered-tool');
+  assert.equal(entries.get('1')[1].content,'Before the correction');
+  assert.equal(entries.get('2')[0].content,'After the correction');
+  assert.deepEqual(entries.get('2')[1].block.rows.map(row=>row.id),['new-tool']);
+  assert.equal(entries.get('1')[0].block.rows[0].state,'completed');
+});
+
+test('queueing an input does not split the current work; delivery while no new tool exists still shows live work',()=>{
+  const data=run();data.events.push(tool(2,'original','completed'),event(3,'chat','Message queued',{message_id:2}));
+  assert.equal(timeline(data).get('2')?.length||0,0);
+  data.messages[1]={id:2,role:'user',status:'injected',steering_parent_id:1,started_at:stamp(4)};
+  data.events.push(event(4,'status','Delivered',{turn_id:1,message_id:2,phase:'steering'}));
+  assert.equal(timeline(data).get('1')[0].block.count,1);
+  assert.equal(timeline(data).get('1')[0].block.live,false);
+  assert.equal(timeline(data).get('2')[0].block.count,0);
+  assert.equal(timeline(data).get('2')[0].block.live,true);
 });

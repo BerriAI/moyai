@@ -13,7 +13,6 @@ import modal
 
 from .runner import RunManager, SANDBOX_FILES, SAVE_WARNING, TERMINAL, safe_error_detail
 from .security import digest
-from .message_queue import STEER_NOTE
 
 
 class LostExecution(Exception):
@@ -285,11 +284,28 @@ class DurableRunner(RunManager):
     async def step(self, run_id, state):
         phase = state['phase']
         run = self.store.run(run_id)
-        if phase in {'waiting_children', 'waiting_credential'} and self.message_queue.accept_steer(run_id, state['message_id']):
-            # These phases already have a durable conversation/filesystem save.
-            state.update(phase='finish', outcome='steered', response=STEER_NOTE, keep_warm=False)
-            self.save(run_id, state)
-            return True
+        if phase in {'waiting_children', 'waiting_credential'}:
+            control = self.message_queue.live_control(run_id, state['message_id'], [], checkpointed=True)
+            if control.get('handoff'):
+                # A different requester/model still needs a capability boundary.
+                # The checkpoint is already durable; no synthetic chat answer.
+                state.update(phase='finish', outcome='steered', response='', keep_warm=False)
+                self.save(run_id, state)
+                return True
+            if control.get('input'):
+                async with self.admission_lock:
+                    if not await self.make_capacity(run_id):
+                        return 'capacity'
+                    if self.store.run(run_id)['status'] == 'stopping':
+                        return True
+                    # Resume the saved conversation under the same turn and scope.
+                    # Leave the input pending until the restored agent acknowledges
+                    # native delivery; a worker restart cannot lose the correction.
+                    state.update(phase='provision', resume_group=state.get('wait_group'),
+                                 resume_credential=state.get('wait_credential'))
+                    self.save(run_id, state)
+                self.running_status(run_id, 'provisioning')
+                return True
         if phase == 'prepare':
             if self.prepare_context:
                 await self.prepare_context(run_id)
@@ -441,7 +457,7 @@ class DurableRunner(RunManager):
             if steered:
                 keep = (self.settings.sandbox_idle_seconds and not run['parent_run_id']
                         and time.time() < state['machine_started'] + self.settings.sandbox_rotation_seconds)
-                state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='steered', response=STEER_NOTE)
+                state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='steered', response='')
                 self.save(run_id, state)
             elif continuing and result.get('wait_credential') and self.credentials:
                 self.credentials.resolution(run_id,result['wait_credential'])
@@ -521,6 +537,8 @@ class DurableRunner(RunManager):
             self.store.update_run(run_id, sandbox_id='')
             self.save(run_id, state)
         elif phase == 'finish':
+            if state['outcome'] == 'steered':
+                state['response'] = ''  # Also suppress notices checkpointed by an older worker.
             if run['status'] == 'stopping':
                 state['outcome'] = 'cancelled'
                 if state.get('keep_warm'):

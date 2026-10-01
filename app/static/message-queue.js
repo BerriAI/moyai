@@ -8,7 +8,7 @@
     // belongs in the conversation if no response is ahead of it, even during
     // dispatch/startup. Match claim_message's priority and stop conditions.
     const next=messages.some(message=>message.role==='user'&&message.status==='running')||['stopping','cancelled','interrupted'].includes(run.status)?null:pending[0];
-    return {queued:pending.filter(message=>message!==next),transcript:messages.filter(message=>message.status!=='queued'||message===next)};
+    return {queued:pending.filter(message=>message!==next),transcript:messages.filter(message=>(message.status!=='queued'||message===next)&&!(message.role==='assistant'&&message.status==='steered'))};
   }
   const queued=run=>presentation(run).queued;
   function card(message,run,user,role,editing,busy,attachments){

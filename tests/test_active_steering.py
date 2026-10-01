@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -19,6 +20,92 @@ from sandbox.continuation import ActiveTurnSteering
 from test_message_queue import queue, change  # noqa: F401
 from test_workspace import workspace  # noqa: F401
 from test_attachments import upload
+
+
+async def checkpoint_wait(durable, phase):
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='checkpointed')
+    state = manager.state(run_id)
+    await manager.cleanup(state)
+    state.update(phase=phase, sandbox_id='', segment=1, cursor=0)
+    state.pop('result', None)
+    if phase == 'waiting_children':
+        state['wait_group'] = 'existing-workers'
+        manager.coordinator = SimpleNamespace(results=lambda *a: {
+            'group_id':'existing-workers', 'settled':False, 'children':[{'summary':'Still working'}]},
+            cancel_children=AsyncMock())
+    else:
+        state['wait_credential'] = 'existing-key-request'
+        manager.credentials = SimpleNamespace(resolution=lambda *a: {'status':'pending'})
+    manager.save(run_id, state)
+    manager.store.update_run(run_id, status=phase, pending_result='', summary='', token_hash='')
+    return state['message_id']
+
+
+@pytest.mark.parametrize('phase', ['waiting_children', 'waiting_credential'])
+async def test_checkpointed_steering_resumes_same_turn_and_survives_worker_restarts(durable, phase):
+    manager, cloud, run_id = durable
+    original = await checkpoint_wait(durable, phase)
+    target, _ = manager.store.enqueue_message(run_id, 'What is the status? Continue the task.', 'status-during-wait')
+    manager.message_queue.change(run_id, target['id'], '', False, 0, 'steer')
+    await manager.advance(run_id)
+    state = manager.state(run_id)
+    assert state['phase'] == 'provision' and state['message_id'] == original
+    assert state['snapshot_id'] == 'im-1' and state['segment'] == 1
+    assert len(cloud.launches) == 1
+    # Lose the worker before restoring the machine: pending delivery is durable.
+    successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    successor.coordinator, successor.credentials = manager.coordinator, manager.credentials
+    await drive(successor, run_id, phase='monitor')
+    assert cloud.machines[1].spec['continuation'] is True
+    if phase == 'waiting_children':
+        assert cloud.machines[1].spec['agent_results']['settled'] is False
+    else:
+        assert cloud.machines[1].spec['credential_resolution']['status'] == 'pending'
+    packet = successor.message_queue.live_control(run_id, original, [])
+    assert packet['input']['id'] == target['id']
+    assert packet['input']['content'].startswith('What is the status?')
+    assert successor.store.run(run_id)['active_message_id'] == original
+    successor.message_queue.live_control(run_id, original, [target['id']])
+    # Lose the worker after native delivery too. Finish the same execution once.
+    last = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    last.coordinator, last.credentials = manager.coordinator, manager.credentials
+    await drive(last, run_id)
+    messages = last.store.messages(run_id)
+    assert [m['role'] for m in messages] == ['user', 'user', 'assistant']
+    assert all(m['status'] == 'completed' for m in messages)
+    assert messages[1]['steering_parent_id'] == original
+    assert messages[-1]['content'] == 'Saved answer'
+    assert len(cloud.launches) == 2 and len(cloud.machines) == 2
+    assert len(last.store.rows("SELECT id FROM events WHERE run_id=? AND message='Response started'", (run_id,))) == 1
+    if manager.coordinator:
+        manager.coordinator.cancel_children.assert_not_awaited()
+
+
+async def test_checkpointed_steering_waits_for_capacity_without_acknowledging_or_finishing(durable):
+    manager, cloud, run_id = durable
+    original = await checkpoint_wait(durable, 'waiting_children')
+    target, _ = manager.store.enqueue_message(run_id, 'Status?', 'waiting-capacity')
+    manager.message_queue.change(run_id, target['id'], '', False, 0, 'steer')
+    manager.make_capacity = AsyncMock(return_value=False)
+    assert await manager.advance(run_id) == 'capacity'
+    assert manager.state(run_id)['phase'] == 'waiting_children'
+    assert [m['status'] for m in manager.store.messages(run_id)] == ['running', 'queued']
+    assert len(cloud.launches) == 1
+    manager.make_capacity = AsyncMock(return_value=True)
+    await manager.advance(run_id)
+    assert manager.state(run_id)['message_id'] == original
+    assert manager.state(run_id)['phase'] == 'provision'
+
+
+def test_only_checkpointed_control_can_offer_a_waiting_input(queue):
+    app, client, run_id, first, target, user = queue
+    change(client, run_id, target, 'steer')
+    app.state.store.update_run(run_id, status='waiting_children')
+    control = MessageQueue(app.state.store)
+    assert 'input' not in control.live_control(run_id, first, [])
+    assert control.live_control(run_id, first, [], checkpointed=True)['input']['id'] == target
+    assert app.state.store.messages(run_id)[1]['status'] == 'queued'
 
 
 def control(app, client, run_id, applied=()):

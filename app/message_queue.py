@@ -4,8 +4,6 @@ import json
 
 from .db import now
 
-STEER_NOTE = 'Paused this response to pick up your queued message. The conversation and workspace were saved.'
-
 
 class MessageQueue:
     def __init__(self, store, mirror=None):
@@ -86,7 +84,7 @@ class MessageQueue:
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Your message is guiding the current task.',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'turn_id': turn_id, 'phase': 'steering'}), now()))
 
-    def live_control(self, run_id, turn_id, applied):
+    def live_control(self, run_id, turn_id, applied, *, checkpointed=False):
         self.acknowledge(run_id, turn_id, applied)
         target = self.accept_steer(run_id, turn_id)
         if not target:
@@ -95,7 +93,8 @@ class MessageQueue:
             conn.execute('BEGIN IMMEDIATE')
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             message = conn.execute('SELECT * FROM messages WHERE id=?', (target,)).fetchone()
-            if run['active_message_id'] != turn_id or run['status'] not in {'running','reconnecting','awaiting_approval'}:
+            allowed = {'waiting_children', 'waiting_credential'} if checkpointed else {'running', 'reconnecting', 'awaiting_approval'}
+            if run['active_message_id'] != turn_id or run['status'] not in allowed:
                 return {'steer_message_id': None}
             # A new requester or model needs a checkpointed capability handoff.
             # Never inject another person's input under the current person's private scope.

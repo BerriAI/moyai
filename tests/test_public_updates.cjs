@@ -63,7 +63,8 @@ test('only public messages become updates and their Markdown uses the same trust
 // layout are also verified in the browser using the production renderer.
 function dom(){
   let creations=0;const copied=[];
-  const document={createElement(){
+  const document={createElement(tag){
+    if(tag==='div')return {dataset:{},ownerDocument:document,contains:()=>false,querySelectorAll:()=>[],innerHTML:'',remove(){this.parent.children=this.parent.children.filter(child=>child!==this);}};
     return {content:{},set innerHTML(markup){
       creations++;
       const button={},codeButton={closest:()=>({querySelector:()=>({textContent:'example code'})})};
@@ -74,12 +75,12 @@ function dom(){
       this.content.firstElementChild=node;
     }};
   }};
-  const slots=['1','2','3'].map(id=>({dataset:{updateSlot:id},ownerDocument:document,children:[],
+  const slots=['1','2','3'].map(id=>({dataset:{activitySlot:id},ownerDocument:document,children:[],
     querySelectorAll(){return this.children;},insertBefore(node,before){
       this.children=this.children.filter(child=>child!==node);
       const i=before?this.children.indexOf(before):this.children.length;this.children.splice(i,0,node);node.parent=this;
     }}));
-  const container={scrollTop:50,scrollHeight:1000,clientHeight:400,querySelectorAll:selector=>selector==='[data-update-slot]'?slots:[]};
+  const container={scrollTop:50,scrollHeight:1000,clientHeight:400,querySelectorAll:selector=>selector==='[data-activity-slot]'?slots:[]};
   return {slots,container,copied,options:{copy:(text,button)=>copied.push(text)},get creations(){return creations;}};
 }
 
