@@ -641,10 +641,18 @@ files are not imported. Keep API keys in **Secrets**, not in skill text.
   create and maintain shared skills; only the original owner can change its
   sharing. Archiving removes a skill from use and is reversible.
 
-Use the chat's **Skills** picker, write `$personal:benchmark-review` or
-`$org:benchmark-review`, or describe a task that matches a skill. Moyai receives
+Type `/` in a new-session or follow-up composer to search an inline list of your
+personal and organization skills. Use arrow keys and Enter/Tab, or click a skill;
+selection inserts its explicit scoped reference without sending or replacing the
+rest of your draft. Escape closes the menu and Shift+Enter still adds a new line.
+`/skill` opens the same list. The **Skills** button also remains available.
+
+Write `/personal:benchmark-review`, `/org:benchmark-review`, or `/skill benchmark-review`
+to invoke a workflow; existing `$personal:benchmark-review` and `$org:benchmark-review`
+references still work. Slash references inside code, URLs, and file paths are not
+automatically loaded. You can also describe a task that matches a skill. Moyai receives
 the authorized catalog and can call `skills_load` for a relevant workflow.
-Unqualified `$benchmark-review` prefers a personal skill over the same name in
+Unqualified `/benchmark-review` or `$benchmark-review` prefers a personal skill over the same name in
 the organization library. Slack sessions use the same references; personal
 access requires a fresh eligible Slack email matching verified Google SSO, not
 an accounting-only identity link. Subagents have the current requester's skill

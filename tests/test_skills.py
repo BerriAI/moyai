@@ -5,12 +5,48 @@ import pytest
 from fastapi import HTTPException
 
 from app.db import now
+from app.skills import requested_skills
 from test_spend import active, sign_in
 from test_workspace import workspace
 
 
 INSTRUCTIONS = '# Benchmark review\n\nUse the marker basalt-skill-42. Count every case and report failures.'
 MARKER = 'basalt-skill-42'
+
+
+@pytest.mark.parametrize('content,expected', [
+    ('/benchmark-review Check results', ['benchmark-review']),
+    ('Check this with /org:benchmark-review and /personal:benchmark-review', ['org:benchmark-review', 'personal:benchmark-review']),
+    ('/skill org:benchmark-review Check results', ['org:benchmark-review']),
+    ('/skills benchmark-review Check results', ['benchmark-review']),
+    ('$org:benchmark-review /org:benchmark-review', ['org:benchmark-review']),
+    ('/org:unavailable Check results', ['org:unavailable']),
+    ('/tmp /help https://example.com/benchmark-review /benchmark-review/results', []),
+    ('/benchmark-review.py ./benchmark-review ~/benchmark-review', []),
+    ('`/org:benchmark-review`\n```\n/org:benchmark-review\n```', []),
+    ('```\n/org:benchmark-review', []),
+])
+def test_slash_references_do_not_confuse_paths_code_or_legacy_tokens(content, expected):
+    assert requested_skills(content, [{'name':'benchmark-review'}]) == expected
+
+
+def test_slash_selection_uses_current_requester_and_respects_archiving(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    personal = create(client).json()['id']
+    create(client, 'organization', instructions='Shared instructions', client_id='shared-slash')
+    run = active(app)
+    app.state.store.execute('UPDATE messages SET content=? WHERE id=?',
+                           ('/personal:benchmark-review Check results', run['active_message_id']))
+    assert MARKER in app.state.skills.context(run)
+    app.state.store.execute("UPDATE runs SET active_user_id='google:ishaan' WHERE id=?", (run['id'],))
+    assert MARKER not in app.state.skills.context(app.state.store.run(run['id']))
+    next_turn = active(app, 'google:ishaan')
+    app.state.store.execute('UPDATE messages SET content=? WHERE id=?',
+                           ('/skill org:benchmark-review Check results', next_turn['active_message_id']))
+    assert 'Shared instructions' in app.state.skills.context(next_turn)
+    assert client.post('/api/skills/'+personal+'/archive', json={'archived':True,'revision':1}).status_code == 200
+    assert MARKER not in app.state.skills.context(run)
 
 
 def create(client,scope='personal',name='benchmark-review',instructions=INSTRUCTIONS,client_id='skill-save-1'):

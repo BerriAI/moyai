@@ -37,6 +37,20 @@ TOOL = {'name':'skills_load',
         'inputSchema':LoadSkill.model_json_schema()}
 
 
+def requested_skills(content, available):
+    """Keep legacy $ references and add slash commands outside code/URLs/paths."""
+    reference = r'(?:(?:personal|org):)?[a-z0-9]+(?:-[a-z0-9]+)*'
+    references = re.findall(r'(?<![\w$])\$(' + reference + r')(?![\w-])', content)
+    prose = re.sub(r'```[\s\S]*?(?:```|$)|`[^`\n]*(?:`|$)', '', content)
+    names = {skill['name'] for skill in available}
+    for name in re.findall(r'(?<!\S)/(?:skills?[ \t]+)?(' + reference + r')(?![\w:/.-])', prose):
+        # A bare /tmp or /help is not automatically a missing skill. Explicit
+        # scoped choices still report revoked/archived skills to the requester.
+        if ':' in name or name in names:
+            references.append(name)
+    return list(dict.fromkeys(references))[:10]
+
+
 class Skills:
     def __init__(self, store, security, same_requester):
         self.store, self.security, self.same_requester = store, security, same_requester
@@ -161,8 +175,7 @@ class Skills:
         missing = []
         # Only the current authenticated message can explicitly select a skill.
         # Quoted Slack context, previous users, tool results and HTTP payloads cannot.
-        references = re.findall(r'(?<![\w$])\$((?:(?:personal|org):)?[a-z0-9]+(?:-[a-z0-9]+)*)(?![\w-])',messages[0]['content'] if messages else '')
-        for name in list(dict.fromkeys(references))[:10]:
+        for name in requested_skills(messages[0]['content'] if messages else '', available):
             try:
                 self.load(run,name)
             except HTTPException as exc:

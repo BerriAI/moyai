@@ -1,4 +1,4 @@
-function skillToken(skill){return '$'+skill.reference;}
+function skillToken(skill){return '/'+skill.reference;}
 function skillCard(skill){
   return `<article class="skill-card"><div><div class="skill-title"><strong>${esc(skill.name)}</strong><span class="secret-scope">${skill.scope==='personal'?'Personal':'Organization'}</span>${skill.archived?'<span class="secret-scope">Archived</span>':''}</div><p>${esc(skill.description)}</p><code>${esc(skillToken(skill))}</code></div><div class="skill-card-actions">${!skill.archived?`<button class="quiet" data-use-skill="${esc(skill.id)}">Use in chat</button>`:''}<button class="quiet" data-edit-skill="${esc(skill.id)}">${skill.can_manage?'Edit':'View'}</button>${skill.can_manage?`<button class="quiet" data-archive-skill="${esc(skill.id)}">${skill.archived?'Restore':'Archive'}</button>`:''}</div></article>`;
 }
