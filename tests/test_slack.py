@@ -58,7 +58,7 @@ def wait_for(predicate):
     raise AssertionError("Slack background work did not finish")
 
 
-def test_signed_mentions_create_one_session_and_react_to_the_request(slack_app):
+def test_signed_mentions_create_one_session_and_show_working_status(slack_app):
     app, client, runs, messages = slack_app
     app.state.store.execute("INSERT INTO connection_policies(provider,enabled,read_only) VALUES('notion',0,0)")
     payload = event(thread_ts="1790718000.654321")
@@ -69,7 +69,7 @@ def test_signed_mentions_create_one_session_and_react_to_the_request(slack_app):
     assert runs[0]["mode"] == "modal"
     wait_for(lambda: len(messages) == 1)
     message = messages[0]
-    assert message == {"channel": "C12345678", "timestamp": "1790719000.123456", "name": "eyes"}
+    assert message == {"channel_id": "C12345678", "thread_ts": "1790718000.654321", "status": "is getting ready…"}
     wait_for(lambda: app.state.store.rows("SELECT reply_status FROM slack_events")[0]["reply_status"] == "sent")
 
 
@@ -93,7 +93,7 @@ def test_slack_requires_signature_freshness_workspace_and_user_authorization(sla
     assert not runs and not messages
 
 
-def test_failed_bot_reply_is_not_retried_on_delivery_or_restart(slack_app, monkeypatch):
+def test_uncertain_working_status_does_not_replay_the_agent(slack_app, monkeypatch):
     app, client, runs, messages = slack_app
     attempts = []
     async def uncertain(*args, **kwargs):
@@ -101,7 +101,7 @@ def test_failed_bot_reply_is_not_retried_on_delivery_or_restart(slack_app, monke
         raise ConnectorError("Response lost after send")
     monkeypatch.setattr(app.state.connectors, "request", uncertain)
     client.post("/hooks/slack/events", **signed(event()))
-    wait_for(lambda: app.state.store.rows("SELECT reply_status FROM slack_events")[0]["reply_status"] == "uncertain")
+    wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE retry_at>0")))
     client.post("/hooks/slack/events", **signed(event()))
     app.state.slack.recover()
     assert len(runs) == 1 and len(attempts) == 1

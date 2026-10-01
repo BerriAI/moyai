@@ -184,7 +184,7 @@ def test_queue_limit_has_one_visible_reply_and_no_dropped_duplicate_execution(sl
 
 def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app):
     app, client, run_id = start(slack_app)
-    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'sent')
+    wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     finish(app, run_id, 'Hello <!channel> <@U12345678>. The key is model-test-key.\n```python\nprint("hello")\n```')
     app.state.slack.chat.last_post.clear()
     asyncio.run(app.state.slack.chat.deliver_one())
@@ -198,7 +198,7 @@ def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app
 
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
     app, client, run_id = start(slack_app)
-    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'sent')
+    wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     finish(app, run_id, 'An important answer')
     attempts = []
     async def fail(*args, **kwargs):
@@ -343,14 +343,14 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history','reactions:write','assistant:write','users:read','users:read.email'}
 
 
-def test_acknowledgment_is_one_reaction_without_periodic_chatter(slack_app):
+def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
     app, client, run_id = start(slack_app)
-    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'sent')
+    wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
     client.post('/hooks/slack/events', **signed(event('EvDuplicateType', type='message')))
     app.state.store.execute('UPDATE slack_threads SET last_progress=0')
     app.state.slack.chat.collect()
     assert len(slack_app[3]) == 1
-    assert slack_app[3][0]['name'] == 'eyes'
+    assert slack_app[3][0]['status'] == 'is getting ready…'
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind IN ('ack','progress','control')")
     finish(app, run_id, 'Here is the answer.')
     app.state.slack.chat.last_post.clear()
@@ -358,16 +358,16 @@ def test_acknowledgment_is_one_reaction_without_periodic_chatter(slack_app):
     assert slack_app[3][-1]['text'].startswith('Here is the answer.')
 
 
-def test_reaction_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
+def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
     app, client, _, sent = slack_app
     real = app.state.connectors.request
     async def reject_reaction(method, url, **kwargs):
-        if url.endswith('reactions.add'):
+        if url.endswith('assistant.threads.setStatus'):
             raise RuntimeError('missing_scope')
         return await real(method, url, **kwargs)
     monkeypatch.setattr(app.state.connectors, 'request', reject_reaction)
     _, _, run_id = start(slack_app)
-    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='reaction'")[0]['status'] == 'uncertain')
+    wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE retry_at>0")))
     finish(app, run_id, 'Still answered.')
     app.state.slack.chat.last_post.clear()
     asyncio.run(app.state.slack.chat.deliver_one())

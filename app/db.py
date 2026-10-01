@@ -104,6 +104,10 @@ class Store:
                     status TEXT NOT NULL DEFAULT 'pending', slack_ts TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_slack_outbox_status ON slack_outbox(status,id);
+                CREATE TABLE IF NOT EXISTS slack_activity (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(id), status TEXT NOT NULL DEFAULT '',
+                    refreshed_at REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0
+                );
                 PRAGMA optimize;
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',

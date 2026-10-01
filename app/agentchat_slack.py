@@ -13,6 +13,8 @@ from agentchat import AgentChat
 from agentchat.channels.slack_mirror import mirror_payload
 from agentchat.models import Message, Sender
 
+from .slack_activity import threaded
+
 
 class SessionState:
     def __init__(self, store):
@@ -98,17 +100,37 @@ class SlackWebhookChannel:
         if not self.owner.status()['enabled'] or binding['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
             raise RuntimeError('Slack connection changed before delivery.')
         token = await self.owner.connectors.slack_bot_token()
+        link = self.owner.chat.link(source.metadata['run_id'])
+        body = content.removesuffix('\n\n' + link)
+        blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        if body != content:
+            blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={
                 'channel': binding['channel'],
                 'thread_ts': None if binding['channel'].startswith('D') and binding['thread_ts'] == binding['started_ts'] else binding['thread_ts'],
                 'text': content,
-                'blocks': [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': content, 'verbatim': True}}] if len(content) <= 3000 else None,
+                'blocks': blocks if len(body) <= 3000 else None,
                 'unfurl_links': False, 'unfurl_media': False, 'parse': 'none', 'link_names': False})
         return Message(id=f"slack:{binding['channel']}:{response.get('ts', '')}",
                        conversation_id=source.conversation_id, channel=self.name,
                        sender=Sender(id='moyai'), text=content, role='assistant',
                        metadata=MappingProxyType({'slack_ts': response.get('ts', '')}))
+
+    async def set_status(self, source, status):
+        run_id = source.metadata['run_id']
+        token = await self.owner.connectors.slack_bot_token()
+        rows = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (run_id,))
+        # Resolve and recheck the immutable destination after token refresh.
+        if (not rows or not self.owner.settings.slack_thread_chat_enabled
+                or not self.owner.status()['enabled']
+                or rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id')
+                or not threaded(rows[0]) or (status and rows[0]['paused'])):
+            raise RuntimeError('Slack destination changed before working status.')
+        await self.owner.connectors.request('POST', 'https://slack.com/api/assistant.threads.setStatus',
+            headers={'Authorization': f'Bearer {token}'},
+            json={'channel_id': rows[0]['channel'], 'thread_ts': rows[0]['thread_ts'], 'status': status})
+        return True
 
     async def mirror(self, source, message, *, origin='Moyai web'):
         payload = mirror_payload(message, origin=origin)

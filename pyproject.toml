@@ -25,4 +25,4 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.uv.sources]
-agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "f302425f47f96df441bf7a846f062b5e1cec157c" }
+agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "bf38f1044a5feb38d836610cf0fb974f311c0477" }

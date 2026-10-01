@@ -12,6 +12,7 @@ from agentchat.models import Message, Sender
 
 from .db import now
 from .security import digest
+from .slack_activity import SlackActivity, threaded
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'idle'}
 COMMANDS = {'stop', 'sleep', 'wake', 'status'}
@@ -55,6 +56,7 @@ class SlackChat:
         self.watcher = None
         self.wake = asyncio.Event()
         self.last_post = {}
+        self.activity = SlackActivity(owner)
 
 
     def link(self, run_id):
@@ -220,7 +222,8 @@ class SlackChat:
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
-                    self.queue(conn, run_id, 'received:' + str(message_id), 'reaction', ts)
+                    if not threaded(binding):
+                        self.queue(conn, run_id, 'received:' + str(message_id), 'reaction', ts)
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Message received from Slack',?,?)",
                                  (run_id, json.dumps({'message_id': message_id, 'user_id': user}), now()))
                 except ValueError as exc:
@@ -324,6 +327,8 @@ class SlackChat:
                         self.owner.channel.source_for_run(row['run_id']), row['text'])
                     sent_ts = response.metadata['slack_ts']
                 self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
+                if row['kind'] != 'reaction':
+                    self.activity.posted(row['run_id'])
                 if row['kind'] in {'ack', 'reaction'}:
                     self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
             except (Exception, asyncio.CancelledError) as exc:
@@ -350,6 +355,7 @@ class SlackChat:
                     self.store.execute('UPDATE slack_receipts SET handled=1 WHERE event_id=?', (row['event_id'],))
                 self.collect()
                 await self.deliver_one()
+                await self.activity.sync()
                 await self.owner.checkpoints.flush()
             except asyncio.CancelledError:
                 raise
