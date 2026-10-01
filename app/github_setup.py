@@ -8,10 +8,17 @@ from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from .connector_errors import ConnectorError
 from .github import PERMISSIONS
 from .security import digest
+
+
+class ExistingApp(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    app_id: int = Field(gt=0)
+    private_key: SecretStr = Field(min_length=100, max_length=20000)
 
 
 def routes(connectors, security, store, settings):
@@ -38,6 +45,33 @@ def routes(connectors, security, store, settings):
         slug = github.app_config()['slug']
         return 'https://github.com/apps/' + slug + '/installations/new?' + urlencode({'state': state_for(sid, 'github')})
 
+    @router.post('/api/connections/github/app')
+    async def existing_app(request: Request):
+        sid = security.require(request, mutation=True, admin=True)
+        raw = await request.body()
+        if len(raw) > 24000:
+            raise HTTPException(413, 'The GitHub App key file is too large.')
+        try:
+            args = ExistingApp.model_validate_json(raw)
+        except ValidationError:
+            raise HTTPException(422, 'Provide a GitHub App ID and its PEM private key.') from None
+        async with github.setup_lock:
+            previous = github.app_config()
+            if previous and previous.get('id') != args.app_id:
+                raise HTTPException(409, 'A different GitHub App is already registered. Keep the existing organization app.')
+            config = {'id': args.app_id, 'pem': args.private_key.get_secret_value()}
+            data = await github.request('GET', '/app', token=github.app_jwt(config))
+            if (data.get('id') != args.app_id or data.get('owner', {}).get('type') != 'Organization'
+                    or data.get('owner', {}).get('login', '').lower() != github.target().split('/')[0].lower()
+                    or data.get('permissions') != PERMISSIONS
+                    or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', data.get('slug', ''))):
+                raise ConnectorError('Use the organization-owned App with only Contents and Pull requests write access, plus Metadata read access.')
+            config['slug'] = data['slug']
+            github.save_app(config)
+            connectors.expire_approvals('github')
+            connectors.audit('github', 'Verified existing organization GitHub App; repository access awaits installation')
+            return {'url': install_url(sid)}
+
     @router.post('/api/connections/github/oauth')
     async def start(request: Request):
         sid = security.require(request, mutation=True, admin=True)
@@ -62,7 +96,7 @@ def routes(connectors, security, store, settings):
         action = 'https://github.com/organizations/' + owner + '/settings/apps/new?' + urlencode({'state': state})
         return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai Devin</title>'
             '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
-            '<h1>Connect GitHub for your organization</h1><p>Repository: <strong>' + html.escape(github.target()) + '</strong></p>'
+            '<h1>Connect GitHub for your organization</h1><p>Repositories: <strong>' + html.escape(', '.join(github.targets())) + '</strong></p>'
             '<p>Moyai can read code and publish normal pull requests after administrator approval. It cannot approve or merge pull requests, '
             'enable auto-merge, update existing branches, or change workflow and access-control files.</p>'
             '<p>GitHub combines these operations under Contents and Pull requests write permissions. The credential stays on the server; '
@@ -96,7 +130,7 @@ def routes(connectors, security, store, settings):
         check_state(sid, 'github', state)
         if not installation_id.isdecimal() or len(installation_id) > 20 or setup_action not in {'install', 'update'}:
             raise HTTPException(400, 'GitHub did not confirm an installation. Start again from Connections.')
-        credentials = {'kind': 'github_app', 'installation_id': int(installation_id), 'repository': github.target()}
+        credentials = {'kind': 'github_app', 'installation_id': int(installation_id), 'repositories': github.targets()}
         label = await github.verify(credentials)
         connectors.expire_approvals('github')
         connectors.save('github', credentials, label)

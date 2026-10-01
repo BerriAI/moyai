@@ -50,13 +50,16 @@ def metadata(directory):
     return data
 
 
-def checkout(broker, remote, token, directory=''):
-    repo = broker('/tools/call', {'name': 'github_checkout', 'arguments': {}})
+def checkout(broker, remote, token, directory='', repository=''):
+    repo = broker('/tools/call', {'name': 'github_checkout', 'arguments': {'repository': repository} if repository else {}})
     if repo.get('error'):
         return repo
     target = directory_path(directory)
     target.parent.mkdir(parents=True, exist_ok=True)
     canonical = 'https://github.com/' + repo['repository'] + '.git'
+    git_path = repo.get('git_path', '/github.git')
+    if git_path not in {'/github.git', '/github/' + repo['repository'] + '.git'}:
+        raise GitHubToolError('The shared GitHub checkout path is invalid.')
     if target.exists():
         if (target / '.git/moyai.json').exists():
             data = metadata(target)
@@ -76,7 +79,7 @@ def checkout(broker, remote, token, directory=''):
         env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraHeader',
                    GIT_CONFIG_VALUE_0='Authorization: Bearer ' + token)
         git(target.parent, 'clone', '--depth', '1', '--single-branch', '--no-tags', '--branch', repo['default_branch'],
-            '--', remote.rstrip('/') + '/github.git', str(target), env=env)
+            '--', remote.rstrip('/') + git_path, str(target), env=env)
         git(target, 'remote', 'set-url', 'origin', canonical)
         base = git(target, 'rev-parse', 'HEAD').decode().strip()
     data = {'repository': repo['repository'], 'base_sha': base, 'default_branch': repo['default_branch']}
@@ -136,6 +139,8 @@ def advertised_tools(tools):
         if tool['name'] in {'github_checkout', 'github_create_pull_request'}:
             properties = {'directory': {'type': 'string', 'description': 'Repository directory inside /workspace; defaults to /workspace/repo.'}}
             required = []
+            if tool['name'] == 'github_checkout':
+                properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai-devin. Use github_repositories to list choices; defaults to the session repository.'}
             if tool['name'] == 'github_create_pull_request':
                 properties.update({
                     'title': {'type': 'string', 'minLength': 3, 'maxLength': 250},
@@ -150,8 +155,8 @@ def advertised_tools(tools):
 
 def call(name, args, broker, remote, token):
     if name == 'github_checkout':
-        if set(args) - {'directory'}:
-            raise GitHubToolError('Checkout accepts only a directory.')
+        if set(args) - {'directory', 'repository'}:
+            raise GitHubToolError('Checkout accepts only a directory and repository.')
         return checkout(broker, remote, token, **args)
     if name == 'github_create_pull_request':
         payload = collect(directory=args.get('directory', ''), title=args['title'], body=args['body'], request_key=args['request_key'])

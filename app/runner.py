@@ -264,7 +264,8 @@ class RunManager:
     def spec(self, run):
         run_id = run["id"]
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
-                "github_repository": self.settings.github_repository if 'github' in run['plugins'] else '',
+                "github_repository": self.settings.allowed_github_repositories()[0] if 'github' in run['plugins'] else '',
+                "github_repositories": self.settings.allowed_github_repositories() if 'github' in run['plugins'] else [],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
                 "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,

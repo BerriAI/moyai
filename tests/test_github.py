@@ -31,8 +31,8 @@ def connected(app):
 
 
 class GitHubAPI:
-    def __init__(self, github, monkeypatch):
-        self.github, self.calls = github, []
+    def __init__(self, github, monkeypatch, repository="BerriAI/litellm"):
+        self.github, self.calls, self.repository = github, [], repository
         self.branch = None
         self.pr = None
         self.tree = []
@@ -48,9 +48,9 @@ class GitHubAPI:
         self.calls.append((method, path, kwargs))
         if self.on_call:
             self.on_call(method, path)
-        prefix = '/repos/BerriAI/litellm'
+        prefix = '/repos/' + self.repository
         if path == prefix:
-            return {'full_name': 'BerriAI/litellm', 'default_branch': 'main', 'html_url': 'https://github.com/BerriAI/litellm', 'private': True}
+            return {'full_name': self.repository, 'default_branch': 'main', 'html_url': 'https://github.com/' + self.repository, 'private': True}
         if path == prefix + '/git/ref/heads/main':
             return {'object': {'sha': CURRENT}}
         if '/compare/' in path:
@@ -75,7 +75,7 @@ class GitHubAPI:
             if method == 'GET':
                 return [self.pr] if self.pr else []
             assert kwargs['json']['draft'] is False
-            self.pr = {'number': 100, 'html_url': 'https://github.com/BerriAI/litellm/pull/100', 'draft': False, 'state': 'open'}
+            self.pr = {'number': 100, 'html_url': 'https://github.com/' + self.repository + '/pull/100', 'draft': False, 'state': 'open'}
             if self.lose == 'pr':
                 self.lose = ''
                 raise ConnectorError('Lost response')
@@ -155,7 +155,7 @@ def test_non_default_base_and_missing_deletion_are_rejected(workspace, monkeypat
     assert not any(c[0] == 'POST' for c in api.calls)
 
 
-@pytest.mark.parametrize('change', ['disconnect', 'replace', 'stop', 'rotate', 'read_only'])
+@pytest.mark.parametrize('change', ['disconnect', 'replace', 'stop', 'rotate', 'read_only', 'allowlist'])
 def test_revocation_during_publication_stops_further_mutations(workspace, monkeypatch, change):
     app, _ = workspace
     run_id, _ = connected(app)
@@ -172,6 +172,8 @@ def test_revocation_during_publication_stops_further_mutations(workspace, monkey
             app.state.store.update_run(run_id, status='cancelled')
         elif change == 'rotate':
             app.state.store.update_run(run_id, token_hash=digest('new-token'))
+        elif change == 'allowlist':
+            app.state.connectors.settings.github_repositories = 'BerriAI/moyai-devin'
         else:
             app.state.store.execute("INSERT INTO connection_policies(provider,read_only) VALUES('github',1)")
     api.on_call = mutate
@@ -316,3 +318,148 @@ def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypa
     assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).status_code == 403
     app.state.store.update_run(run_id, token_hash=digest('rotated'))
     assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).status_code == 401
+
+
+def connect_multiple(app):
+    app.state.connectors.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai-devin'
+    app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 10,
+        'repositories': ['BerriAI/litellm', 'BerriAI/moyai-devin']}, 'Both repositories')
+
+
+@pytest.mark.parametrize('decision', ['approve', 'deny'])
+def test_self_repository_pr_requires_exact_approval(workspace, monkeypatch, decision):
+    app, client = workspace
+    run_id, headers = connected(app)
+    connect_multiple(app)
+    github = app.state.connectors.github
+    api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai-devin')
+    payload = {**PAYLOAD, 'repository': 'BerriAI/moyai-devin'}
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, f'/broker/{run_id}/tools/call', headers=headers,
+                             json={'name': 'github_create_pull_request', 'arguments': payload})
+        approval = wait_for(lambda: app.state.store.approvals(run_id))[0]
+        assert approval['arguments'] == payload and not api.calls
+        client.post(f"/api/approvals/{approval['id']}", json={'decision': decision})
+        result = future.result(5).json()
+    assert bool(api.pr) == (decision == 'approve')
+    if decision == 'approve':
+        assert result['repository'] == 'BerriAI/moyai-devin' and not result['draft']
+        assert all(path.startswith('/repos/BerriAI/moyai-devin') for _, path, _ in api.calls)
+        assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
+
+
+def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypatch):
+    app, client = workspace
+    run_id, headers = connected(app)
+    github = app.state.connectors.github
+    github.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai-devin'
+    with pytest.raises(ConnectorError, match='Reconnect'):
+        asyncio.run(github.selected_target({}, 'BerriAI/moyai-devin'))
+    assert asyncio.run(github.selected_target({})) == 'BerriAI/litellm'
+    connect_multiple(app)
+    api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai-devin')
+    run = {**app.state.store.run(run_id), 'repo_url': 'https://github.com/BerriAI/moyai-devin.git'}
+    result = asyncio.run(github.call(run, 'github_checkout', {}))
+    assert result['repository'] == 'BerriAI/moyai-devin'
+    assert result['git_path'] == '/github/BerriAI/moyai-devin.git'
+    assert asyncio.run(github.call(run, 'github_repositories', {}))['repositories'] == github.targets()
+    api.calls.clear()
+    for target in ['BerriAI/other', 'OtherOrg/moyai-devin', '../moyai-devin']:
+        with pytest.raises(ConnectorError):
+            asyncio.run(github.call(run, 'github_checkout', {'repository': target}))
+        response = client.get(f'/broker/{run_id}/github/{target}.git/info/refs?service=git-upload-pack', headers=headers)
+        assert response.status_code in {403, 404}
+    assert not api.calls
+    approved = {**run, 'github_connection_version': github.connection_version()}
+    github.settings.github_repositories = 'BerriAI/litellm'
+    with pytest.raises(ConnectorError):
+        asyncio.run(github.publish(approved, Publish.model_validate({**PAYLOAD, 'repository': 'BerriAI/moyai-devin'})))
+    assert not api.calls
+
+
+def test_installation_tokens_are_scoped_cached_and_verified_per_repository(workspace, monkeypatch):
+    app, _ = workspace
+    connected(app); connect_multiple(app)
+    github = app.state.connectors.github
+    monkeypatch.setattr(github, 'app_jwt', lambda config=None: 'jwt')
+    requests = []
+    async def request(method, path, **kwargs):
+        if path.endswith('/access_tokens'):
+            requests.append(kwargs['json'])
+            repo = kwargs['json']['repositories'][0]
+            return {'token': repo + '-' + kwargs['json']['permissions']['contents'], 'expires_at': '2099-01-01T00:00:00Z'}
+        if path == '/installation/repositories':
+            repo = kwargs['token'].removesuffix('-read')
+            return {'repositories': [{'full_name': 'BerriAI/' + repo}]}
+        return {'account': {'login': 'BerriAI', 'type': 'Organization'}, 'permissions': PERMISSIONS, 'suspended_at': None}
+    monkeypatch.setattr(github, 'request', request)
+    credentials = {'kind': 'github_app', 'installation_id': 10, 'repositories': github.targets()}
+    assert asyncio.run(github.verify(credentials)) == 'BerriAI/litellm, BerriAI/moyai-devin'
+    assert [r['repositories'] for r in requests] == [['litellm'], ['moyai-devin']]
+    assert asyncio.run(github.installation_token(repository='berriai/MOYAI-devin')) == 'moyai-devin-read'
+    assert len(requests) == 2
+    assert asyncio.run(github.installation_token(repository='BerriAI/moyai-devin', write=True)) == 'moyai-devin-write'
+    assert requests[-1] == {'repositories': ['moyai-devin'], 'permissions': {'contents': 'write', 'pull_requests': 'write'}}
+    assert asyncio.run(github.installation_token(repository='BerriAI/litellm')) == 'litellm-read'
+    with pytest.raises(ConnectorError):
+        asyncio.run(github.installation_token(repository='BerriAI/unlisted', write=True))
+    assert len(requests) == 3
+
+
+def test_specific_git_route_cannot_change_repo_or_allow_push(workspace, monkeypatch):
+    app, client = workspace
+    run_id, headers = connected(app); connect_multiple(app)
+    github = app.state.connectors.github
+    tokens, paths = [], []
+    async def token(*args, **kwargs):
+        assert not kwargs.get('write')
+        tokens.append(kwargs['repository'])
+        return 'server-only'
+    monkeypatch.setattr(github, 'installation_token', token)
+    def upstream(request):
+        paths.append(request.url.path)
+        kind = 'advertisement' if request.method == 'GET' else 'result'
+        return httpx.Response(200, content=b'0000', headers={'Content-Type': 'application/x-git-upload-pack-' + kind})
+    original = httpx.AsyncClient
+    monkeypatch.setattr('app.github_git.httpx.AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(upstream), **kwargs))
+    for repo in ['BerriAI/litellm', 'BerriAI/moyai-devin']:
+        base = f'/broker/{run_id}/github/{repo}.git/'
+        assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).content == b'0000'
+        assert paths[-1] == '/' + repo + '.git/info/refs' and tokens[-1] == repo
+        for suffix in ['info/refs?service=git-receive-pack', 'info/refs?service=git-upload-pack&repository=other', 'config']:
+            assert client.get(base + suffix, headers=headers).status_code == 403
+        assert client.post(base + 'git-receive-pack', headers=headers).status_code == 403
+    assert len(paths) == 2
+    github.settings.github_repositories = 'BerriAI/litellm'
+    assert client.get(f'/broker/{run_id}/github/BerriAI/moyai-devin.git/info/refs?service=git-upload-pack', headers=headers).status_code == 403
+    assert len(paths) == 2
+
+
+@pytest.mark.parametrize('invalid', ['', 'owner', 'type', 'permission', 'id', 'signature'])
+def test_existing_app_recovery_verifies_before_saving_and_keeps_key_private(workspace, monkeypatch, invalid):
+    app, client = workspace
+    github = app.state.connectors.github
+    secret = 'private-key-material-' * 12
+    def sign(config=None):
+        if invalid == 'signature':
+            raise ConnectorError('The signing key is invalid.')
+        return 'signed-jwt'
+    monkeypatch.setattr(github, 'app_jwt', sign)
+    async def request(method, path, **kwargs):
+        assert method == 'GET' and path == '/app' and kwargs['token'] == 'signed-jwt'
+        return {'id': 1 if invalid == 'id' else 123, 'slug': 'moyai-test',
+                'owner': {'login': 'Other' if invalid == 'owner' else 'BerriAI', 'type': 'User' if invalid == 'type' else 'Organization'},
+                'permissions': {**PERMISSIONS, **({'administration': 'write'} if invalid == 'permission' else {})}}
+    monkeypatch.setattr(github, 'request', request)
+    result = client.post('/api/connections/github/app', json={'app_id': 123, 'private_key': secret})
+    assert secret not in result.text
+    if invalid:
+        assert result.status_code >= 400 and not github.app_config()
+    else:
+        assert result.status_code == 200 and result.json()['url'].startswith('https://github.com/apps/moyai-test/installations/new?')
+        assert github.app_config()['pem'] == secret
+        assert secret not in app.state.store.rows('SELECT encrypted FROM github_app')[0]['encrypted']
+        assert secret not in client.get('/api/connections').text
+    sid = app.state.security.signer.dumps({'sid': 'member-session', 'role': 'member', 'method': 'local'})
+    client.cookies.clear(); client.cookies.set('workspace_session', sid)
+    assert client.post('/api/connections/github/app', json={'app_id': 123, 'private_key': secret}).status_code == 403

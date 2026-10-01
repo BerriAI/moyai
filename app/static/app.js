@@ -248,8 +248,25 @@ function connectionDialog(provider){
   const hints={linear:'Authorize the Linear account or integration your organization should use. Its existing team permissions still apply.',slack:'Connect the Slack account whose conversations your organization can search. The workspace bot handles session mentions separately.',notion:'Connect Notion and choose the pages your organization can use in sessions.'};
   $('#connection-title').textContent='Connect '+name+' for your organization';
   if(provider==='github'){
-    $('#connection-body').innerHTML='<p>Install the organization GitHub App for the configured repository. Teammates share this connection; no personal GitHub sign-in is needed.</p><p>Moyai can read code and open normal pull requests after administrator approval. It cannot approve or merge PRs, enable auto-merge, update existing branches, or change workflows and access controls.</p><button class="primary full" type="submit">Continue with GitHub</button><div id="connection-error" role="alert"></div>';
-    $('#connection-form').onsubmit=async e=>{e.preventDefault();const button=$('#connection-form button[type="submit"]');button.disabled=true;try{const result=await api('/api/connections/github/oauth',{method:'POST'});location.assign(result.url);}catch(error){$('#connection-error').textContent=error.message;button.disabled=false;}};
+    const repos=connection.repositories||[];
+    $('#connection-body').innerHTML=`<p>Connect once for your team. Select these repositories when installing on GitHub:</p><ul>${repos.map(repo=>`<li><strong>${esc(repo)}</strong></li>`).join('')}</ul><p>Moyai can read code and open normal pull requests after administrator approval. It cannot approve or merge PRs, enable auto-merge, update existing branches, or change workflows and access controls.</p>${connection.app_registered?'<button class="primary full" type="submit">Continue with GitHub</button>':`<h3>Connect an existing GitHub App</h3><p>An organization App owner or manager can find the App ID and download a private key in GitHub’s App settings. Upload it here, never in chat. The key stays encrypted on Moyai’s server.</p><div class="field"><label for="github-app-id">GitHub App ID</label><input id="github-app-id" type="number" min="1" required autocomplete="off"></div><div class="field"><label for="github-app-key">Private key (.pem)</label><input id="github-app-key" type="file" accept=".pem" required><small>Used only to authenticate your organization’s GitHub App.</small></div><button class="primary full" type="submit">Verify app and continue</button><div class="divider">or</div><button class="quiet full" id="github-new-app" type="button">Register a new GitHub App</button>`}<div id="connection-error" role="alert"></div>`;
+    async function githubSetup(existing){
+      const buttons=document.querySelectorAll('#connection-form button');buttons.forEach(button=>button.disabled=true);
+      try{
+        let path='/api/connections/github/oauth',body;
+        if(existing){
+          const file=$('#github-app-key').files[0];
+          if(!file||file.size>20000)throw new Error('Choose a PEM private key file under 20 KB.');
+          path='/api/connections/github/app';
+          body=JSON.stringify({app_id:Number($('#github-app-id').value),private_key:await file.text()});
+        }
+        const result=await api(path,{method:'POST',...(body?{body}:{})});
+        if($('#github-app-key'))$('#github-app-key').value='';
+        location.assign(result.url);
+      }catch(error){$('#connection-error').textContent=error.message;buttons.forEach(button=>button.disabled=false);}
+    }
+    $('#connection-form').onsubmit=async e=>{e.preventDefault();await githubSetup(!connection.app_registered);};
+    if($('#github-new-app'))$('#github-new-app').onclick=()=>githubSetup(false);
     $('#connection-dialog').showModal();return;
   }
 

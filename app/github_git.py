@@ -6,22 +6,30 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from .connector_errors import ConnectorError
+
 
 def routes(github, require_run):
     router = APIRouter()
 
     @router.api_route('/broker/{run_id}/github.git/{operation:path}', methods=['GET', 'POST'])
-    async def git(run_id: str, operation: str, request: Request):
+    @router.api_route('/broker/{run_id}/github/{owner}/{repository}.git/{operation:path}', methods=['GET', 'POST'])
+    async def git(run_id: str, operation: str, request: Request, owner: str = '', repository: str = ''):
         def authorize():
             run = require_run(run_id, request)
             if 'github' not in run['plugins'] or not github.connectors.allowed('github_checkout'):
                 raise HTTPException(403, 'GitHub is not enabled for this session.')
-        authorize()
+            return run
+        run = authorize()
         advertisement = (request.method == 'GET' and operation == 'info/refs'
                          and list(request.query_params.multi_items()) == [('service', 'git-upload-pack')])
         pack = request.method == 'POST' and operation == 'git-upload-pack' and not request.query_params
         if not (advertisement or pack):
             raise HTTPException(403, 'Only read-only Git fetch is available. Use the approved PR tool to publish changes.')
+        try:
+            target = await github.selected_target(run, f'{owner}/{repository}' if owner else '')
+        except ConnectorError as exc:
+            raise HTTPException(403, str(exc)) from None
         data = bytearray()
         async for chunk in request.stream():
             data.extend(chunk)
@@ -35,7 +43,7 @@ def routes(github, require_run):
         if encoding not in {'identity', 'gzip'}:
             raise HTTPException(415, 'Unsupported Git encoding.')
         version = github.connection_version()
-        token = await github.installation_token()
+        token = await github.installation_token(repository=target)
         authorize()
         if version != github.connection_version():
             raise HTTPException(409, 'The GitHub connection changed. Start checkout again.')
@@ -45,7 +53,7 @@ def routes(github, require_run):
             headers['Git-Protocol'] = 'version=2'
         if pack:
             headers.update({'Content-Type': 'application/x-git-upload-pack-request', 'Content-Encoding': encoding})
-        url = f'https://github.com/{github.target()}.git/{operation}'
+        url = f'https://github.com/{target}.git/{operation}'
         if advertisement:
             url += '?service=git-upload-pack'
         client = httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=False)

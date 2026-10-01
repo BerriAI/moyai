@@ -15,7 +15,9 @@ def git(directory, *args):
 
 
 @pytest.fixture
-def checkout(tmp_path, monkeypatch):
+def checkout(tmp_path, monkeypatch, request):
+    repository = getattr(request, 'param', '')
+    git_path = '/github/' + repository + '.git' if repository else '/github.git'
     source = tmp_path / 'source'
     source.mkdir()
     git(source, 'init', '-b', 'main')
@@ -27,7 +29,9 @@ def checkout(tmp_path, monkeypatch):
     base = git(source, 'rev-parse', 'HEAD')
     upstream = tmp_path / 'upstream'
     upstream.mkdir()
-    git(upstream, 'clone', '--bare', str(source), 'github.git')
+    destination = upstream / git_path.lstrip('/')
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    git(upstream, 'clone', '--bare', str(source), str(destination))
     root = tmp_path / 'workspace'
     root.mkdir()
     monkeypatch.setattr(local, 'ROOT', root)
@@ -62,10 +66,10 @@ def checkout(tmp_path, monkeypatch):
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     def broker(path, body):
-        assert path == '/tools/call' and body == {'name': 'github_checkout', 'arguments': {}}
-        return {'repository': 'BerriAI/litellm', 'default_branch': 'main', 'base_sha': base}
+        assert path == '/tools/call' and body == {'name': 'github_checkout', 'arguments': {'repository': repository} if repository else {}}
+        return {'repository': repository or 'BerriAI/litellm', 'default_branch': 'main', 'base_sha': base, 'git_path': git_path}
     try:
-        result = local.checkout(broker, f'http://127.0.0.1:{server.server_port}', 'current-capability')
+        result = local.checkout(broker, f'http://127.0.0.1:{server.server_port}', 'current-capability', repository=repository)
         yield root / 'repo', result, requests, broker, server
     finally:
         server.shutdown(); server.server_close(); thread.join(2)
@@ -129,3 +133,19 @@ def test_escape_and_existing_nonrepo_refused(checkout):
     with pytest.raises(local.GitHubToolError, match='already exists'):
         local.checkout(broker, f'http://127.0.0.1:{server.server_port}', 'current-capability', str(occupied))
     assert (occupied / 'keep').read_text() == 'preserve'
+
+
+@pytest.mark.parametrize('checkout', ['BerriAI/litellm', 'BerriAI/moyai-devin'], indirect=True)
+def test_specific_repository_real_checkout_and_publication_payload(checkout):
+    repo, result, requests, broker, server = checkout
+    target = result['repository']
+    assert {path.split('?')[0] for path, _ in requests} == {
+        '/github/' + target + '.git/info/refs', '/github/' + target + '.git/git-upload-pack'}
+    assert 'current-capability' not in (repo / '.git/config').read_text()
+    (repo / 'new.py').write_text('answer = 42\n')
+    assert local.collect(str(repo), 'Change this repository', 'Verified checkout', 'repo-test-123')['repository'] == target
+    def different(path, body):
+        return {'repository': 'BerriAI/other', 'default_branch': 'main', 'base_sha': result['base_sha']}
+    with pytest.raises(local.GitHubToolError, match='another repository'):
+        local.checkout(different, f'http://127.0.0.1:{server.server_port}', 'current-capability', str(repo))
+    assert (repo / 'new.py').read_text() == 'answer = 42\n'
