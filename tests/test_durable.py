@@ -224,9 +224,12 @@ async def test_save_failure_keeps_answer_prior_snapshot_and_cancels_queue(durabl
     await drive(manager, run_id)
     assert manager.store.run(run_id)['snapshot_id'] == 'im-before'
     messages = manager.store.messages(run_id)
-    assert messages[0]['status'] == 'save_failed'
-    assert messages[1]['status'] == 'cancelled'
-    assert 'Saved answer' in messages[2]['content']
+    assert [(message['role'], message['status']) for message in messages] == [
+        ('user', 'save_failed'),
+        ('assistant', 'save_failed'),
+        ('user', 'cancelled'),
+    ]
+    assert 'Saved answer' in messages[1]['content']
     assert len(cloud.launches) == 1
 
 

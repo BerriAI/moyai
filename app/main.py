@@ -92,6 +92,14 @@ class ChatMessage(BaseModel):
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
+    send_now: bool = False
+
+
+class QueueChange(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    revision: int = Field(ge=0)
+    action: Literal['edit', 'delete', 'steer']
+    content: str | None = Field(default=None, min_length=1, max_length=16000)
 
 
 class ConnectionPolicy(BaseModel):
@@ -130,6 +138,8 @@ def create_app(settings: Settings | None = None):
     manager.persist = checkpoints.flush
     store.execute("INSERT OR IGNORE INTO organization(id,name) VALUES(1,?)", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings)
+    from .message_queue import MessageQueue
+    message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints)
     slack.identities = identities
     manager.prepare_context = slack.prepare
@@ -375,7 +385,7 @@ def create_app(settings: Settings | None = None):
         try:
             user_id = store.identity(security.session_info(request))
             enqueue = coordinator.enqueue_child if run['parent_run_id'] else slack.chat.enqueue_web
-            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id, body.attachment_ids)
+            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id, body.attachment_ids, body.send_now)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
@@ -391,6 +401,20 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Task not found")
         await manager.cancel(run_id)
         return public_run(store.run(run_id))
+
+    @app.patch('/api/runs/{run_id}/messages/{message_id}')
+    async def change_queued_message(run_id: str, message_id: int, body: QueueChange, request: Request):
+        security.require(request, mutation=True)
+        if body.action == 'edit' and body.content is None:
+            raise HTTPException(422, 'Enter the updated message.')
+        actor = store.identity(security.session_info(request))
+        result = message_queue.change(run_id, message_id, actor, security.role(request) == 'admin',
+                                      body.revision, body.action, body.content)
+        await checkpoints.flush()
+        slack.chat.wake.set()
+        if store.has_queued_messages(run_id):
+            manager.submit(store.run(run_id))
+        return {'id': result['id'], 'status': result['status'], 'revision': result['revision']}
 
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, request: Request, after: int = 0):
@@ -542,6 +566,15 @@ def create_app(settings: Settings | None = None):
 
     from .github_git import routes as git_routes
     app.include_router(git_routes(connectors.github, require_run))
+
+    @app.post('/broker/{run_id}/control')
+    async def session_control(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        await broker_body(request, '/control')
+        target = message_queue.accept_steer(run_id, run['active_message_id'])
+        if target:
+            await checkpoints.flush()
+        return {'steer_message_id': target}
 
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):

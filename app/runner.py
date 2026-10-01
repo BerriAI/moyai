@@ -8,6 +8,7 @@ from pathlib import Path
 import modal
 
 from .security import digest
+from .message_queue import MessageQueue, STEER_NOTE
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
@@ -39,6 +40,7 @@ class RunManager:
         self.prepare_context = None
         self.coordinator = None
         self.credentials = None
+        self.message_queue = MessageQueue(store)
 
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
@@ -128,8 +130,8 @@ class RunManager:
                 self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status='queued'", (run_id,))
                 raise
             row = self.store.run(run_id)
-            if row["status"] == "completed":
-                self.store.finish_message(run_id, message["id"], row["summary"])
+            if row["status"] in {"completed", "steered"}:
+                self.store.finish_message(run_id, message["id"], row["summary"], row['status'])
                 self.store.update_run(run_id, status="queued" if self.store.has_queued_messages(run_id) else "idle")
                 await self.persist()
             else:
@@ -241,6 +243,9 @@ class RunManager:
             await asyncio.sleep(self.settings.demo_step_seconds)
             if self.stopped(run_id):
                 return
+            if run.get('chat_enabled') and self.message_queue.accept_steer(run_id, self.store.run(run_id)['active_message_id']):
+                self.store.update_run(run_id, status='steered', summary='Paused this simulated response to pick up your queued message.')
+                return
             self.store.event(run_id, *step)
         self.store.update_run(run_id, status="completed", summary=steps[-1][1])
 
@@ -285,7 +290,7 @@ class RunManager:
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
-                                     if m["id"] < run.get("message_id", 0) and m["status"] not in {"queued", "running"}]}
+                                     if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "deleted"}]}
         return spec
 
     async def cloud(self, run):
@@ -397,6 +402,10 @@ class RunManager:
                 self.store.update_run(run_id, snapshot_id=snapshot.object_id, checkpoint_error="", pending_result=json.dumps(result) if result else "")
                 await self.persist()
             if self.stopped(run_id):
+                return
+            if (result and result.get('steer_message_id') and code == 0 and result.get('checkpoint_saved')
+                    and self.message_queue.accepted(run_id, result['steer_message_id'])):
+                self.store.update_run(run_id, status='steered', summary=STEER_NOTE)
                 return
             if result and result.get("continuation") and result.get("checkpoint_saved") and code == 0:
                 return True

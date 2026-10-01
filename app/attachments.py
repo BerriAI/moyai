@@ -148,12 +148,12 @@ class Attachments:
         return [{**message, 'attachments': grouped.get(message['id'], [])} for message in messages]
 
     def for_run(self, run_id, through_message):
-        rows = self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=? AND id<=?) ORDER BY message_id,created_at,id', (run_id, through_message))
+        rows = self.store.rows(f"SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=? AND status!='deleted' AND (id=? OR status!='queued')) ORDER BY message_id,created_at,id", (run_id, through_message))
         return [{**public_file(row), 'message_id': row['message_id'], 'sha256': row['sha256'],
                  'path': f"/workspace/.moyai-attachments/{row['id']}/{row['name']}"} for row in rows]
 
     def broker_file(self, run, attachment_id):
-        rows = self.store.rows('SELECT a.data FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.id<=?',
+        rows = self.store.rows("SELECT a.data FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued')",
                                (attachment_id, run['id'], run.get('active_message_id') or 0))
         if not rows:
             raise HTTPException(404, 'Attachment not found in this session.')

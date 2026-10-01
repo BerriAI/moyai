@@ -1,10 +1,10 @@
 /* Public work history, grouped by the claimed user turn rather than enqueue time. */
 (function(root){
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const settled=new Set(['idle','completed','failed','cancelled','interrupted']);
+  const settled=new Set(['idle','completed','failed','cancelled','interrupted','steered']);
   const waiting=new Set(['awaiting_approval','waiting_children','waiting_credential']);
   const visible=new Set(['tool','message','status','error','plan','agents','credential','approval','artifact']);
-  const labels={running:'Working',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for a key',stopping:'Stopping',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
+  const labels={running:'Working',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for a key',stopping:'Stopping',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Paused for your message',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
   function duration(start,end=Date.now()){
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;
     return seconds<60?`${seconds}s`:seconds<3600?`${Math.floor(seconds/60)}m ${seconds%60}s`:`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`;

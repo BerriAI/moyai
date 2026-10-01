@@ -53,3 +53,19 @@ class AgentWait(RotationDeadline):
             self.group = self.relay.wait_group
             agent.interrupt()
             self.requested = True
+
+
+class AgentSteer(RotationDeadline):
+    """Cooperative interruption only after a complete tool round; save before switching users."""
+    def __init__(self, relay):
+        super().__init__(0)
+        self.relay = relay
+        self.message_id = None
+
+    def step(self, agent):
+        if not self.requested:
+            target = self.relay.control().get('steer_message_id')
+            if isinstance(target, int) and not isinstance(target, bool) and target > 0:
+                self.message_id = target
+                self.requested = True
+                agent.interrupt()

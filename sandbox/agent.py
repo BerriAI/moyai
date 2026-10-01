@@ -11,14 +11,14 @@ import uuid
 try:
     from .broker_relay import BrokerRelay
     from .artifacts import collect_archive
-    from .continuation import RotationDeadline, AgentWait
+    from .continuation import RotationDeadline, AgentWait, AgentSteer
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
     from .activity import ActivityReporter
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
-    from continuation import RotationDeadline, AgentWait
+    from continuation import RotationDeadline, AgentWait, AgentSteer
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
     from activity import ActivityReporter
@@ -96,12 +96,15 @@ def run_agent(spec, relay):
     print("Discovered workspace tools:", discovered, file=sys.stderr, flush=True)
     rotation = RotationDeadline(spec.get("rotation_seconds", 0))
     waiting = AgentWait(relay)
+    steering = AgentSteer(relay)
     activity = ActivityReporter(emit)
     def step(*args):
         waiting.step(agent)
         if not waiting.requested:
-            rotation.step(agent)
-        if not waiting.requested and not rotation.requested:
+            steering.step(agent)
+            if not steering.requested:
+                rotation.step(agent)
+        if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
     agent = AIAgent(
         model=spec["model"], provider="custom", api_mode="chat_completions",
@@ -202,7 +205,7 @@ def run_agent(spec, relay):
                "The Slack conversation’s participants can see your replies: never include credentials or unrelated private information. "
                "For external write approvals, direct the user to the web session; a Slack reply is not admin approval. " if spec.get("slack_thread_chat") else "") +
             "Do not push, merge, deploy, or publish unless explicitly requested. "
-            "After a stopped or failed response, do not assume prior actions completed or replay external writes without verification. "
+            "After a stopped, steered or failed response, follow the latest message; do not assume prior actions completed or replay external writes without verification. "
             "Do not claim a check passed unless you ran it. For work tasks, summarize work done, verification, and limitations. "
             "For conversational questions, answer directly and naturally without status preambles or a routine work summary."
         ))
@@ -210,13 +213,15 @@ def run_agent(spec, relay):
         wait_group = waiting.group if waiting.can_continue(result) else ''
         wait_credential = waiting.credential if waiting.can_continue(result) else ''
         continuing = not relay.last_error and (bool(wait_group) or bool(wait_credential) or rotation.can_continue(result))
-        summary = ("A provider key is needed. Supply it through the secure form in this session, not in chat." if continuing and wait_credential else
+        steered = steering.message_id if steering.can_continue(result) and not relay.last_error else None
+        summary = ("Pausing to pick up your queued message. Saving the conversation and workspace before switching." if steered else
+                   "A provider key is needed. Supply it through the secure form in this session, not in chat." if continuing and wait_credential else
                    "Parallel agents are working; the coordinator will resume with their results." if continuing and wait_group else
                    "Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
                    str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
-        emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential)
+        emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered)
         (artifacts / "result.md").write_text(summary)
         if spec.get("chat_enabled"):
             if not isinstance(result.get("messages"), list):
@@ -229,7 +234,7 @@ def run_agent(spec, relay):
     finally:
         agent.close()
     collect_archive(workspace, artifacts, os.environ["WORKSPACE_RUN_TOKEN"].encode())
-    return 0 if completed or continuing else 1
+    return 0 if completed or continuing or steered else 1
 
 
 if __name__ == "__main__":

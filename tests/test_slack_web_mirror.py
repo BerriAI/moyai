@@ -78,7 +78,8 @@ def test_web_retry_two_sso_senders_and_answer_order(mirror):
     source = app.state.slack.channel.source_for_run(run_id)
     history = asyncio.run(app.state.slack.agentchat.state.history(source.conversation_id))
     assert len(history) == 5
-    assert [m.role for m in history] == ['user', 'assistant', 'user', 'user', 'assistant']
+    # A still-queued input follows the executed turn and its answer.
+    assert [m.role for m in history] == ['user', 'assistant', 'user', 'assistant', 'user']
     assert web(app, client, run_id, user='bob').status_code == 409
 
 

@@ -74,7 +74,7 @@ class SlackChat:
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {})))
 
-    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None):
+    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False):
         """Save a verified web input and its mirror in the same transaction.
 
         Only new inputs in an enabled, awake binding are eligible. Retrying a
@@ -84,7 +84,7 @@ class SlackChat:
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now)
             binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
             if created and binding:
                 allowed = enabled and binding['team_id'] == team
@@ -113,6 +113,28 @@ class SlackChat:
             self.store.event(run_id, 'chat', 'Message queued', {'message_id': message['id']})
         self.wake.set()
         return message, created
+
+    def change_queued_in(self, conn, run_id, message, action):
+        """Retire pending mirrors; post an explicit correction to an active thread."""
+        binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+        if not binding:
+            return
+        prefix = f"input:{message['id']}:%"
+        mirrored = conn.execute("SELECT 1 FROM slack_outbox WHERE run_id=? AND dedupe_key LIKE ? AND status IN ('sent','sending','uncertain')", (run_id, prefix)).fetchone()
+        inbound = conn.execute('SELECT 1 FROM slack_receipts WHERE run_id=? AND message_id=?', (run_id, message['id'])).fetchone()
+        conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND dedupe_key LIKE ? AND status='pending'", (run_id, prefix))
+        if (binding['paused'] or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
+                or binding['team_id'] != self.owner.connectors.slack_installation().get('team_id')):
+            return
+        if action == 'delete' and not (mirrored or inbound):
+            return
+        text = (f"Queued message #{message['id']} removed in Moyai before the agent picked it up." if action == 'delete' else
+                f"Queued message #{message['id']} updated in Moyai. The agent will use this version:\n\n" + message['content'])
+        names = [row['name'] for row in conn.execute('SELECT name FROM attachments WHERE message_id=?', (message['id'],))]
+        if action == 'edit' and names:
+            text += '\n\nAttachments: ' + ', '.join(names)
+        for index, chunk in enumerate(split_reply(slack_text(self.scrub(text)))):
+            self.queue(conn, run_id, f"input:{message['id']}:revision:{message['revision']}:{index}", 'input_update', chunk + '\n' + self.link(run_id))
 
     def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False):
         """Reserve the physical Slack message and queue its turn atomically."""
@@ -193,7 +215,7 @@ class SlackChat:
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Model changed for new messages',?,?)", (run_id, json.dumps({'model':selected_model}), now()))
                 if command == 'sleep':
                     conn.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
-                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind IN ('answer','input','progress','approval')", (run_id,))
+                    conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending' AND kind IN ('answer','input','input_update','progress','approval')", (run_id,))
                 elif command == 'wake':
                     conn.execute('UPDATE slack_threads SET paused=0 WHERE run_id=?', (run_id,))
                 if command in {'stop', 'sleep'}:
@@ -306,7 +328,7 @@ class SlackChat:
                 continue
             if (not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
                     or row['team_id'] != self.owner.connectors.slack_installation().get('team_id')
-                    or (row['paused'] and row['kind'] in {'answer', 'input', 'progress', 'approval', 'reaction'})):
+                    or (row['paused'] and row['kind'] in {'answer', 'input', 'input_update', 'progress', 'approval', 'reaction'})):
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
             if not self.store.execute("UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'", (row['id'],)):

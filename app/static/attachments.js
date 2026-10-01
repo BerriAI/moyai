@@ -87,6 +87,7 @@ function bindAttachments(input,form,key){
   const outside=event=>{if(hasFiles(event)&&!form.contains(event.target))event.preventDefault();};
   document.addEventListener('dragover',outside);document.addEventListener('drop',outside);
   return {
+    hasFiles(){return draft.items.length>0;},
     ids(){if(draft.items.some(item=>item.status!=='ready'))throw Error('Wait for uploads to finish, or retry/remove the failed attachment.');return draft.items.map(item=>item.id);},
     lock(value){draft.locked=value;notify();},
     clear(ids){for(const item of draft.items.filter(file=>ids.includes(file.id))){if(item.localUrl)URL.revokeObjectURL(item.localUrl);}draft.items=draft.items.filter(file=>!ids.includes(file.id));notify();},

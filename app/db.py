@@ -155,6 +155,15 @@ class Store:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}
+            for name in ('revision', 'queue_locked'):
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+            if 'started_at' not in columns:
+                conn.execute("ALTER TABLE messages ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
+                conn.execute("UPDATE messages SET started_at=created_at WHERE status!='queued'")
+            if 'steer_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+                conn.execute('ALTER TABLE runs ADD COLUMN steer_message_id INTEGER')
             if default_model:
                 conn.execute("UPDATE runs SET model=? WHERE model=''", (default_model,))
                 conn.execute("UPDATE runs SET active_model=model WHERE active_model='' AND status NOT IN ('idle','completed','failed','cancelled','interrupted')")
@@ -253,18 +262,18 @@ class Store:
         return {**context, **row}
 
     def messages(self, run_id):
-        messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.model,m.user_id,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? ORDER BY m.id", (run_id,))
+        messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,m.user_id,m.revision,m.queue_locked,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? AND m.status!='deleted' ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,COALESCE(NULLIF(m.started_at,''),m.created_at),m.id", (run_id,))
         return self.attachments.messages(run_id, messages)
 
-    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None):
+    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids)
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if not row or not row["chat_enabled"]:
@@ -277,8 +286,10 @@ class Store:
             return dict(existing), False
         if row["status"] == "stopping":
             raise ValueError("Wait for the current response to stop before sending another message.")
+        if send_now and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
+            raise ValueError('Moyai is already picking up another queued message. Wait or queue this normally.')
         pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
-        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user'", (run_id,)).fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
         if pending >= 5 or count >= 100:
             raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
         if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= self.max_pending_runs and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
@@ -288,6 +299,9 @@ class Store:
         message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, content, client_id, stamp, model, user_id)).lastrowid
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
+        if send_now:
+            conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (message_id, run_id))
+            conn.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
         running = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone()
         if not running:
             conn.execute("UPDATE runs SET status='queued',error='',updated_at=? WHERE id=?", (stamp, run_id))
@@ -296,15 +310,17 @@ class Store:
     def claim_message(self, run_id):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+            run = conn.execute("SELECT status,steer_message_id FROM runs WHERE id=?", (run_id,)).fetchone()
             if not run or run["status"] in {"stopping", "cancelled", "interrupted"}:
                 return None
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone():
                 return None
-            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY id LIMIT 1", (run_id,)).fetchone()
+            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
             if not row:
                 return None
-            conn.execute("UPDATE messages SET status='running' WHERE id=?", (row["id"],))
+            conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (now(), row["id"]))
+            if row['id'] == run['steer_message_id']:
+                conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=?', (run_id,))
             conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',pending_result='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))
         self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)

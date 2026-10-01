@@ -73,7 +73,9 @@ async def test_queued_followup_runs_once_with_saved_workspace_and_fresh_capabili
     assert row['token_hash'] == '' and token1
     transcript = runner.store.messages(run['id'])
     assert len(transcript) == 4
-    assert [m['model'] for m in transcript] == ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5'] * 2
+    # Each executed user turn now stays with its answer, even when the second
+    # request was enqueued before the first response had finished.
+    assert [m['model'] for m in transcript] == ['openai/gpt-6-astra'] * 2 + ['anthropic/claude-opus-5-5'] * 2
     assert all(m['status'] == 'completed' for m in transcript)
     runner.store.enqueue_message(run['id'], 'Read the same file', 'request-0002')
     assert not runner.store.has_queued_messages(run['id'])

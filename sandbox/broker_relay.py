@@ -24,6 +24,7 @@ class BrokerRelay:
         self.last_error = ''
         self.wait_group = ''
         self.wait_credential = ''
+        self.remote, self.token = remote, token
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -131,6 +132,17 @@ class BrokerRelay:
     def start(self):
         self.thread.start()
         return self
+
+    def control(self):
+        request = urllib.request.Request(self.remote.rstrip('/') + '/control',
+            data=seal(self.token, '/control', b'{}'),
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                return json.load(response)
+        except (urllib.error.URLError, TimeoutError, ValueError):
+            # Control-plane failure cannot authorize interrupting or replaying work.
+            return {}
 
     def close(self):
         self.server.shutdown()

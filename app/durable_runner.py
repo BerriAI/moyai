@@ -13,6 +13,7 @@ import modal
 
 from .runner import RunManager, SANDBOX_FILES, SAVE_WARNING, TERMINAL, safe_error_detail
 from .security import digest
+from .message_queue import STEER_NOTE
 
 
 class LostExecution(Exception):
@@ -255,6 +256,11 @@ class DurableRunner(RunManager):
     async def step(self, run_id, state):
         phase = state['phase']
         run = self.store.run(run_id)
+        if phase in {'waiting_children', 'waiting_credential'} and self.message_queue.accept_steer(run_id, state['message_id']):
+            # These phases already have a durable conversation/filesystem save.
+            state.update(phase='finish', outcome='steered', response=STEER_NOTE, keep_warm=False)
+            self.save(run_id, state)
+            return True
         if phase == 'prepare':
             if self.prepare_context:
                 await self.prepare_context(run_id)
@@ -265,7 +271,8 @@ class DurableRunner(RunManager):
                 if self.store.run(run_id)['status'] == 'stopping':
                     self.fail(run_id, state, 'The response was stopped.', 'cancelled')
                     return True
-                state.update(phase='finish', outcome='completed', response=self.store.run(run_id)['summary'])
+                row = self.store.run(run_id)
+                state.update(phase='finish', outcome='steered' if row['status']=='steered' else 'completed', response=row['summary'])
             else:
                 state['phase'] = 'install' if state.get('sandbox_id') else 'provision'
                 self.running_status(run_id, 'running' if state.get('sandbox_id') else 'provisioning')
@@ -370,7 +377,14 @@ class DurableRunner(RunManager):
         elif phase == 'checkpointed':
             result = state['result']
             continuing = result.get('continuation') and state['exit_code'] == 0
-            if continuing and result.get('wait_credential') and self.credentials:
+            steered = (state['exit_code'] == 0 and
+                       self.message_queue.accepted(run_id, result.get('steer_message_id')))
+            if steered:
+                keep = (self.settings.sandbox_idle_seconds and not run['parent_run_id']
+                        and time.time() < state['machine_started'] + self.settings.sandbox_rotation_seconds)
+                state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='steered', response=STEER_NOTE)
+                self.save(run_id, state)
+            elif continuing and result.get('wait_credential') and self.credentials:
                 self.credentials.resolution(run_id,result['wait_credential'])
                 await self.cleanup(state)
                 state.update(phase='waiting_credential',wait_credential=result['wait_credential'],sandbox_id='',
@@ -441,7 +455,7 @@ class DurableRunner(RunManager):
             self.store.event(run_id, 'agents', 'Workers finished. Restoring the coordinator to gather results.', {'group_id': state['wait_group']})
             self.save(run_id, state)
         elif phase == 'cleanup':
-            if self.coordinator and state.get('outcome') != 'completed':
+            if self.coordinator and state.get('outcome') not in {'completed', 'steered'}:
                 await self.coordinator.cancel_children(run_id)
             await self.cleanup(state)
             state.update(phase='finish', keep_warm=False, sandbox_id='')
@@ -455,7 +469,7 @@ class DurableRunner(RunManager):
                     self.save(run_id, state)
                     return True
             self.store.finish_message(run_id, state['message_id'], state['response'], state['outcome'])
-            status = 'idle' if state['outcome'] == 'completed' else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
+            status = 'idle' if state['outcome'] in {'completed', 'steered'} else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
             if status != 'idle':
                 self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
             self.store.update_run(run_id, status='queued' if status == 'idle' and self.store.has_queued_messages(run_id) else status,
