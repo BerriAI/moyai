@@ -309,3 +309,34 @@ def test_user_session_model_totals_match_exactly_and_requests_keep_original_date
     for field in ['users','sessions','models']:
         assert sum(Decimal(row['spend']) for row in report[field]) == Decimal(report['total']['spend']) == Decimal('0.160')
     assert app.state.spend.report(start=datetime(2026,9,30).date(),end=datetime(2026,9,30).date())['total']['spend'] == '0'
+
+
+def test_durable_broker_reconnect_preserves_original_context_attribution_and_cost(workspace):
+    from cryptography.fernet import Fernet
+    from test_inference import Cloud
+    app, client = workspace
+    settings = app.state.settings
+    settings.temporal_enabled = settings.durable_inference_enabled = True
+    settings.inference_encryption_key = Fernet.generate_key().decode()
+    settings.litellm_api_key = 'test-key'
+    settings.litellm_api_base = 'https://gateway.example/v1'
+    jobs = app.state.inference
+    jobs.cipher = Fernet(settings.inference_encryption_key.encode())
+    jobs.backend = Cloud(settings)
+    run = active(app)
+    body = {'inference_id': 'a' * 32, 'messages': [], 'stream': True, 'metadata': {'forged': 'user'}}
+    url = f"/broker/{run['id']}/v1/chat/completions"
+    headers = {'Authorization': 'Bearer capability'}
+    first = client.post(url, json=body, headers=headers)
+    assert first.status_code == 200 and '[DONE]' in first.text
+    # Current configuration/actor changes cannot change a previously admitted job.
+    app.state.store.execute('UPDATE runs SET active_user_id=?,active_model=? WHERE id=?', ('google:bob', 'removed-model', run['id']))
+    settings.durable_inference_enabled = False
+    again = client.post(url, json=body, headers=headers)
+    assert again.status_code == 200 and again.text == first.text
+    assert jobs.backend.calls == 1
+    row = app.state.store.rows('SELECT * FROM model_requests')[0]
+    assert row['user_id'] == 'google:alice' and row['cost'] == '0.251452'
+    assert app.state.store.run(run['id'])['model_calls'] == 1
+    assert client.post(url, json={**body, 'messages':[{'role':'user','content':'Different'}]}, headers=headers).status_code == 409
+    assert client.post(url, json=body, headers={'Authorization':'Bearer wrong'}).status_code == 401

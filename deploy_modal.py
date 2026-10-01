@@ -21,6 +21,7 @@ image = (
     .add_local_file(ROOT / "uv.lock", "/opt/workspace/uv.lock", copy=True)
     .run_commands("cd /opt/workspace && uv sync --frozen --no-dev")
     .add_local_dir(ROOT / "app", "/opt/workspace/app", copy=True)
+    .add_local_dir(ROOT / "inference", "/opt/workspace/inference", copy=True)
     .add_local_dir(ROOT / "sandbox", "/opt/workspace/sandbox", copy=True)
     .env({"PYTHONUNBUFFERED": "1"})
 )

@@ -6,10 +6,12 @@ import logging
 
 from temporalio import activity
 from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.worker import Worker
 
 from .durable_runner import DurableRunner
 from .session_workflow import SessionWorkflow
+from .inference_workflow import InferenceWorkflow
 
 log = logging.getLogger(__name__)
 
@@ -17,6 +19,7 @@ log = logging.getLogger(__name__)
 class TemporalRunManager(DurableRunner):
     def __init__(self, store, settings):
         super().__init__(store, settings)
+        self.inference = None
         self.temporal = None
         self.worker = None
         self.worker_task = None
@@ -69,7 +72,7 @@ class TemporalRunManager(DurableRunner):
 
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
-                      workflows=[SessionWorkflow], activities=[self.advance_session],
+                      workflows=[SessionWorkflow, InferenceWorkflow], activities=[self.advance_session, self.advance_inference],
                       max_concurrent_activities=self.settings.max_concurrent_runs + 20,
                       max_cached_workflows=200,
                       graceful_shutdown_timeout=timedelta(seconds=1))
@@ -102,6 +105,16 @@ class TemporalRunManager(DurableRunner):
 
     async def dispatch(self):
         slots = asyncio.Semaphore(10)
+        async def deliver_inference(row):
+            async with slots:
+                try:
+                    await self.temporal.start_workflow(InferenceWorkflow.run, row['id'],
+                        id='moyai-inference-' + row['id'], task_queue=self.settings.temporal_task_queue,
+                        rpc_timeout=timedelta(seconds=10))
+                except WorkflowAlreadyStartedError:
+                    pass  # The workflow start acknowledgment may have been lost.
+                self.store.execute('UPDATE inference_jobs SET workflow_sent=1 WHERE id=?', (row['id'],))
+
         async def deliver(row):
             async with slots:
                 await self.temporal.start_workflow(
@@ -112,10 +125,22 @@ class TemporalRunManager(DurableRunner):
                 self.store.execute('UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
                                    (row['revision'], row['run_id']))
         rows = self.store.rows('SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY rowid LIMIT 200')
-        results = await asyncio.gather(*(deliver(row) for row in rows), return_exceptions=True)
+        jobs = self.store.rows('SELECT id FROM inference_jobs WHERE recovered=0 AND workflow_sent=0 LIMIT 100') if self.inference is not None else []
+        results = await asyncio.gather(*(deliver(row) for row in rows),
+                                       *(deliver_inference(job) for job in jobs), return_exceptions=True)
         for result in results:
             if isinstance(result, BaseException):
                 raise result
+
+    @activity.defn(name='advance_inference')
+    async def advance_inference(self, job_id: str) -> bool | dict:
+        from temporalio.exceptions import ApplicationError
+        if self.inference is None:
+            raise ApplicationError('Inference recovery is not configured')
+        try:
+            return await self.inference.advance(job_id)
+        except Exception as exc:
+            raise ApplicationError('Inference recovery temporarily unavailable', type=type(exc).__name__) from None
 
     @activity.defn(name='advance_session')
     async def advance_session(self, run_id: str) -> bool | str | dict:

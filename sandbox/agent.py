@@ -47,7 +47,7 @@ def conversation_prompt(spec, *, has_history=False):
 def run(spec):
     global ACTIVITY_INPUT_ID
     ACTIVITY_INPUT_ID = spec.get('activity_input_id')
-    relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting).start()
+    relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting, durable_inference=spec.get('durable_inference', False)).start()
     os.environ['MOYAI_CREDENTIAL_PROXY_URL'] = relay.url + '/credentials'
     try:
         return run_agent(spec, relay)

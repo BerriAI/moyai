@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     max_agent_iterations: int = Field(default=0, ge=0)
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
+    durable_inference_enabled: bool = False
+    inference_app_name: str = 'moyai-inference'
+    inference_volume_name: str = 'moyai-inference-results-v1'
+    inference_ledger_name: str = 'moyai-inference-ledger-v1'
+    inference_encryption_key: str = ''
     temporal_enabled: bool = False
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
