@@ -105,7 +105,7 @@ class GoogleSignIn:
                 raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
             self.attempts.append(now)
             state, browser, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
-            return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|run=[a-f0-9]{32})", body.return_to) else "/#tasks"
+            return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32})", body.return_to) else "/#tasks"
             self.store.execute("DELETE FROM login_states WHERE expires<?", (time.time(),))
             self.store.execute("INSERT INTO login_states VALUES(?,?,?,?,?,?)",
                                (digest(state), digest(browser), nonce, verifier, return_to, time.time() + 600))
@@ -142,7 +142,7 @@ class GoogleSignIn:
                 return response
             response = RedirectResponse(row["return_path"], status_code=303)
             response.delete_cookie(COOKIE, path="/auth/google")
-            role = "admin" if identity["email"] in self.settings.google_admins() else "member"
+            role = self.security.google_role(identity['email'])
             self.store.identity({'method': 'google', 'identity': identity, 'role': role})
             self.security.new_session(response, role, identity=identity)
             return response

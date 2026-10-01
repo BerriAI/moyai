@@ -184,3 +184,15 @@ def test_remote_sso_only_configuration_is_valid(tmp_path):
     with TestClient(app, base_url='https://workspace.example') as client:
         assert not client.get('/api/session').json()['authenticated']
         assert client.get('/api/runs').status_code == 401
+
+
+def test_google_login_respects_saved_role_and_preserves_users_link(sso):
+    from app.user_roles import RoleChange
+    app, client, _ = sso
+    actor = {'method': 'google', 'identity': {'email': 'tin@berri.ai'}}
+    app.state.user_roles.change(RoleChange(email='ishaan@berri.ai', role='admin', revision=0), actor)
+    app.state.user_roles.change(RoleChange(email='tin@berri.ai', role='member', revision=0), actor)
+    callback, _, _ = begin(sso, '/#users')
+    assert client.get(callback, follow_redirects=False).headers['location'] == '/#users'
+    assert client.get('/api/session').json()['role'] == 'member'
+    assert client.get('/api/admin/users').status_code == 403

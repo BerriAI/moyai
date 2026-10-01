@@ -26,6 +26,7 @@ from .runner import RunManager, TERMINAL
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
 from .google_sso import GoogleSignIn
+from .user_roles import UserRoles
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
@@ -120,7 +121,8 @@ def create_app(settings: Settings | None = None):
     restore_checkpoint(settings)
     store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled,
                   max_pending_runs=settings.max_pending_runs)
-    security = Security(settings)
+    user_roles = UserRoles(store, settings)
+    security = Security(settings, user_roles)
     connectors = Connectors(store, security, settings)
     if settings.temporal_enabled:
         from .temporal_runtime import TemporalRunManager
@@ -169,6 +171,8 @@ def create_app(settings: Settings | None = None):
     google = GoogleSignIn(settings, security, store)
     app.state.google_signin = google
     app.include_router(google.routes())
+    app.include_router(user_roles.routes(security))
+    app.state.user_roles = user_roles
     app.include_router(spend.routes())
     app.include_router(identities.routes())
     app.include_router(credentials.routes())

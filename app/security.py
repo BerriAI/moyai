@@ -26,8 +26,9 @@ def local_secret(path: Path, generate) -> str:
 
 
 class Security:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, user_roles=None):
         self.settings = settings
+        self.user_roles = user_roles
         self.secret = settings.session_secret or local_secret(settings.data_dir / "session.key", lambda: secrets.token_urlsafe(48))
         key = settings.encryption_key or local_secret(settings.data_dir / "encryption.key", lambda: Fernet.generate_key().decode())
         self.fernet = Fernet(key.encode())
@@ -68,7 +69,7 @@ class Security:
                         or email.rpartition("@")[2] != domain or not identity.get("sub")
                         or info.get("client_id") != self.settings.google_client_id):
                     return None
-                role = "admin" if email in self.settings.google_admins() else "member"
+                role = self.google_role(email)
             elif method == "local":
                 if not self.local_preview():
                     return None
@@ -82,6 +83,11 @@ class Security:
             return {**info, "role": role}
         except (BadSignature, SignatureExpired, KeyError, TypeError, AttributeError):
             return None
+
+    def google_role(self, email: str) -> str:
+        if self.user_roles is not None:
+            return self.user_roles.role(email)
+        return 'admin' if email in self.settings.google_admins() else 'member'
 
     def local_preview(self) -> bool:
         return self.local and not self.settings.workspace_password and not self.settings.google_enabled()

@@ -105,7 +105,7 @@ def writing_actor(skills, run):
     user = matches[0]
     if user['email'].rpartition('@')[2] not in settings.google_domains():
         raise HTTPException(403, 'This account is no longer eligible to manage skills.')
-    return user['id'], user['email'] in settings.google_admins()
+    return user['id'], skills.security.google_role(user['email']) == 'admin'
 
 
 def bundle_row(conn, skill_id, revision):

@@ -78,9 +78,9 @@ function bindComposer(input,form){
 }
 async function navigate(view) {
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
-  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',secrets:'Secrets',skills:'Skills'}[view]);
+  setView(view,{tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',users:'Users',secrets:'Secrets',skills:'Skills'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
-  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else await renderRuntime();
+  if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else await renderRuntime();
 }
 async function refreshRuns(){const focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';state.runs=await api('/api/runs'+(focus?'?focus='+encodeURIComponent(focus):''));renderSidebar();}
 async function renderHome(){
@@ -332,12 +332,13 @@ $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
   const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1];
-  (linkedRun?openRun(linkedRun):navigate(['#connections','#runtime','#spend','#secrets','#skills'].includes(location.hash)?location.hash.slice(1):'tasks')).catch(showError);
+  (linkedRun?openRun(linkedRun):navigate(['#connections','#runtime','#spend','#users','#secrets','#skills'].includes(location.hash)?location.hash.slice(1):'tasks')).catch(showError);
 });
 async function boot(){
   try{
-    const session=await api('/api/session');state.authenticated=session.authenticated;state.csrf=session.csrf;state.role=session.role||'member';state.userId=session.user_id;
+    const session=await api('/api/session');state.authenticated=session.authenticated;state.csrf=session.csrf;state.role=session.role||'member';state.userId=session.user_id;state.identity=session.identity;
     $('#spend-nav').hidden=!session.authenticated||state.role!=='admin';
+    $('#users-nav').hidden=!session.authenticated||state.role!=='admin';
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
     if(!session.authenticated){
       const passwordForm='<form id="login-form"><div class="field"><label for="password">Workspace password</label><input id="password" type="password" autocomplete="current-password" required></div><button class="primary full">Sign in</button></form>';
@@ -352,7 +353,7 @@ async function boot(){
     document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
     [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';$('#logout')?.remove();$('.rail-foot').insertAdjacentHTML('beforeend','<button id="logout" class="quiet" aria-label="Sign out">⏻</button>');$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST'});location.reload();};}
-    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(['#connections','#runtime','#spend','#secrets','#skills'].includes(location.hash)?location.hash.slice(1):'tasks');
+    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(['#connections','#runtime','#spend','#users','#secrets','#skills'].includes(location.hash)?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
   }catch(e){$('#content').innerHTML='<div class="error-banner">'+esc(e.message)+'</div>';}
