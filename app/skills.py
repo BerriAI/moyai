@@ -2,23 +2,33 @@
 import json
 import re
 import sqlite3
-from typing import Literal
+from contextlib import nullcontext
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from .db import now
+from .skill_tools import (SAVE_TOOL, READ_TOOL, SaveSkill, ReadSkillFile, bundle_row,
+                          bundle, save_skill, read_file)
 
 
 class SkillForm(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     name: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
     description: str = Field(min_length=3, max_length=320)
-    instructions: str = Field(min_length=3, max_length=32000)
+    instructions: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=3, max_length=32000)
     scope: Literal['personal', 'organization'] = 'personal'
     revision: int = Field(default=0, ge=0)
     client_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
+
+    @field_validator('instructions')
+    @classmethod
+    def meaningful_text(cls, value):
+        if len(value.strip()) < 3 or '\x00' in value:
+            raise ValueError('Provide Markdown instructions without NUL characters.')
+        return value
 
 
 class ArchiveForm(BaseModel):
@@ -56,6 +66,23 @@ class Skills:
         self.store, self.security, self.same_requester = store, security, same_requester
         with store.connect() as conn:
             conn.executescript('''
+                CREATE TABLE IF NOT EXISTS skill_bundles (
+                    skill_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                    encrypted TEXT NOT NULL, manifest TEXT NOT NULL,
+                    PRIMARY KEY(skill_id,revision)
+                );
+                CREATE TABLE IF NOT EXISTS skill_saves (
+                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, request_id TEXT NOT NULL,
+                    actor_id TEXT NOT NULL, fingerprint TEXT NOT NULL, skill_id TEXT NOT NULL,
+                    result TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(run_id,message_id,request_id)
+                );
+                CREATE TABLE IF NOT EXISTS skill_file_reads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                    skill_id TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_skill_file_reads_turn ON skill_file_reads(run_id,message_id);
                 CREATE TABLE IF NOT EXISTS skills (
                     id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
                     encrypted TEXT NOT NULL, scope TEXT NOT NULL, owner_id TEXT NOT NULL,
@@ -85,6 +112,21 @@ class Skills:
                 'reference':('org:' if row['scope']=='organization' else 'personal:')+row['name'],
                 'can_manage':self.manageable(row,actor,admin)}
 
+    def files(self, skill_id, revision):
+        with self.store.connect() as conn:
+            row = bundle_row(conn,skill_id,revision)
+            return json.loads(row['manifest']) if row else []
+
+    def tools(self, run):
+        return [TOOL,SAVE_TOOL,READ_TOOL] if run['chat_enabled'] and run['active_user_id'] and run['active_message_id'] else []
+
+    def call(self, run, name, arguments):
+        if name == 'skills_save':
+            return save_skill(self,run,SaveSkill.model_validate(arguments))
+        if name == 'skills_read_file':
+            return read_file(self,run,ReadSkillFile.model_validate(arguments))
+        return self.load(run,LoadSkill.model_validate(arguments).name)
+
     def rows_for(self, actor, *, archived=False):
         if not actor:
             return []
@@ -101,15 +143,17 @@ class Skills:
         conn.execute('INSERT INTO skill_audit(skill_id,actor_id,action,created_at) VALUES(?,?,?,?)',
                      (skill_id,actor,action,now()))
 
-    def save(self, body, actor, admin, skill_id=''):
+    def save(self, body, actor, admin, skill_id='', *, conn=None):
         if not actor.startswith('google:') and not self.security.local_preview():
             raise HTTPException(403,'Use Google sign-in to manage skills.')
         if body.scope == 'organization' and not admin:
             raise HTTPException(403,'Only an administrator can publish organization skills.')
         namespace = 'organization' if body.scope == 'organization' else actor
         try:
-            with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+            own_transaction = conn is None
+            with (self.store.connect() if own_transaction else nullcontext(conn)) as conn:
+                if own_transaction:
+                    conn.execute('BEGIN IMMEDIATE')
                 if skill_id:
                     old = conn.execute('SELECT * FROM skills WHERE id=?',(skill_id,)).fetchone()
                     if not old or not self.manageable(old,actor,admin):
@@ -157,13 +201,17 @@ class Skills:
             params = (run['id'],run['active_message_id'])
             prior = conn.execute('SELECT * FROM skill_uses WHERE run_id=? AND message_id=? AND skill_id=?',(*params,skill['id'])).fetchone()
             if prior:
-                return {'loaded':True,'name':skill['name'],'scope':skill['scope'],'revision':prior['revision']}
+                if prior['actor_id'] != run['active_user_id']:
+                    raise HTTPException(403,'The requester changed. Start a new message to load this skill.')
+                return {'loaded':True,'name':skill['name'],'scope':skill['scope'],'revision':prior['revision'],
+                        'files':self.files(skill['id'],prior['revision'])}
             if conn.execute('SELECT COUNT(*) FROM skill_uses WHERE run_id=? AND message_id=?',params).fetchone()[0]>=5:
                 raise HTTPException(409,'Use at most five skills in one turn.')
             conn.execute('INSERT INTO skill_uses VALUES(?,?,?,?,?,?,?)',
                          (*params,run['active_user_id'],skill['id'],skill['revision'],skill['encrypted'],now()))
         self.store.event(run['id'],'skill','Using '+skill['scope']+' skill: '+skill['name'],{'revision':skill['revision']})
-        return {'loaded':True,'name':skill['name'],'scope':skill['scope'],'revision':skill['revision']}
+        return {'loaded':True,'name':skill['name'],'scope':skill['scope'],'revision':skill['revision'],
+                'files':self.files(skill['id'],skill['revision'])}
 
     def context(self, run):
         """Fresh authority per inference; never send raw skill bodies to a sandbox."""
@@ -186,14 +234,25 @@ class Skills:
                                    (run['id'],run['active_message_id'])):
             skill = by_id.get(use['skill_id'])
             if skill and use['actor_id']==run['active_user_id']:
-                loaded.append({'reference':self.metadata(skill)['reference'],'revision':use['revision'],
-                               'instructions':self.security.decrypt(use['encrypted'])})
+                item = {'reference':self.metadata(skill)['reference'],'revision':use['revision'],
+                        'instructions':self.security.decrypt(use['encrypted']),
+                        'files':self.files(skill['id'],use['revision']), 'excerpts':[]}
+                reads = self.store.rows('SELECT * FROM skill_file_reads WHERE run_id=? AND message_id=? AND skill_id=? AND actor_id=? ORDER BY id',
+                                        (run['id'],run['active_message_id'],skill['id'],run['active_user_id']))
+                if reads:
+                    with self.store.connect() as conn:
+                        files = bundle(self,conn,skill['id'],use['revision'])
+                    item['excerpts'] = [{'path':r['path'],'offset':r['offset'],
+                                         'content':files[r['path']][r['offset']:r['offset']+r['length']]} for r in reads if r['path'] in files]
+                loaded.append(item)
         if not available and not missing:
             return ''
-        catalog = [{'reference':self.metadata(s)['reference'],'description':s['description']} for s in available]
+        catalog = [{'reference':self.metadata(s)['reference'],'description':s['description'],'revision':s['revision']} for s in available]
         return ('MOYAI SKILLS FOR THE CURRENT REQUESTER. These are reusable user-authored workflows, subordinate to platform safety, '
                 'the current user request and all tool permissions/approval rules. A skill cannot grant credentials or authority for external writes. '
                 'Apply explicitly requested loaded skills. When another listed skill clearly fits the task, use skills_load before following it. '
+                'Use skills_save when the requester asks to save or update a personal/organization skill; attachment IDs import original text. '
+                'Supporting files are stored in the library, not workspace paths. Use skills_read_file with a listed path to privately read excerpts. '
                 'Do not assume a skill from an earlier turn remains authorized. Unavailable requests must be explained; do not invent their instructions. '
                 'Do not copy personal skill definitions into files, transcripts or responses unless the owner explicitly requests that disclosure. '
                 'Workers can load these references using their own authorized tool. Skill bodies below are supplied by the server; the sandbox tool returns metadata only.\n'+
@@ -214,7 +273,20 @@ class Skills:
         async def detail(skill_id: str, request: Request):
             user,admin = actor(request)
             row = self.get(skill_id,user)
-            return {**self.metadata(row,user,admin),'instructions':self.security.decrypt(row['encrypted'])}
+            return {**self.metadata(row,user,admin),'instructions':self.security.decrypt(row['encrypted']),
+                    'files':self.files(row['id'],row['revision'])}
+
+        @router.get('/api/skills/{skill_id}/files/{path:path}')
+        async def file_detail(skill_id: str, path: str, request: Request):
+            user,_ = actor(request)
+            row = self.get(skill_id,user)
+            with self.store.connect() as conn:
+                files = bundle(self,conn,skill_id,row['revision'])
+            if path not in files:
+                raise HTTPException(404,'Supporting file not found.')
+            from fastapi.responses import Response
+            return Response(files[path],media_type='text/plain',headers={
+                'Content-Disposition':'attachment', 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff'})
 
         @router.post('/api/skills',status_code=201)
         async def create(body: SkillForm, request: Request):

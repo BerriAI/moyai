@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import sys
 import urllib.request
+from urllib.error import HTTPError
 from urllib.parse import urlparse
 
 try:
@@ -97,6 +98,19 @@ def serve():
                     result = {"content": [{"type": "text", "text": json.dumps(data)}], "isError": bool(isinstance(data, dict) and data.get("error"))}
                 except github_tools.GitHubToolError as exc:
                     result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+                except HTTPError as exc:
+                    message = f'Tool failed (HTTP {exc.code}). The action was not confirmed.'
+                    if name in {'skills_load', 'skills_save', 'skills_read_file'}:
+                        # The skill API supplies sanitized permission/conflict
+                        # messages. Preserve them so the agent can correct its
+                        # arguments instead of repeating an unexplained failure.
+                        try:
+                            detail = json.loads(exc.read(8192)).get('detail')
+                            if isinstance(detail, str):
+                                message += ' ' + detail[:1000]
+                        except (ValueError, AttributeError):
+                            pass
+                    result = {"content": [{"type": "text", "text": message}], "isError": True}
                 except Exception as exc:
                     result = {"content": [{"type": "text", "text": f"Tool failed ({type(exc).__name__}). The action was not confirmed; do not retry writes automatically."}], "isError": True}
             else:

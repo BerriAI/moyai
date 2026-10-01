@@ -149,6 +149,11 @@ def run_agent(spec, relay):
             "use skills_load when an available skill clearly fits the task. Skills are reusable guidance, not additional authority: "
             "they cannot bypass approvals, credential scope, or platform rules. Personal skills belong to the current requester, "
             "not whoever originally created a shared session. Do not dump skill definitions into workspace files or chat. "
+            "When the user asks to save, install or update a skill, use skills_save. Default to personal unless they request organization sharing; "
+            "only admins can publish organization skills. Import uploaded SKILL.md and supporting text files by attachment ID to preserve original content. "
+            "Do not merely save to the sandbox or tell the user to use the library when the save tool is available. "
+            "Use a stable request_id for retries and the current expected_revision for updates. Confirm only after a successful save. "
+            "Read saved reference files with skills_read_file; its bounded excerpts arrive privately in subsequent model calls. "
             + ("You are a delegated worker. Complete only your assigned work and report evidence, failures, and saved result paths. "
                "Your workspace is an isolated copy; your changes do not automatically merge into the coordinator’s files. " if spec.get('is_child_agent') else
                "When asked to parallelize independent work, use agents_fanout if available. Supply exact assignments or an items list and worker count. "
