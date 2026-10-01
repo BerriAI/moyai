@@ -10,7 +10,7 @@
     return seconds<60?`${seconds}s`:seconds<3600?`${Math.floor(seconds/60)}m ${seconds%60}s`:`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`;
   }
   function groups(run){
-    const turns=new Map((run.messages||[]).filter(m=>m.role==='user').map(m=>[String(m.id),{id:String(m.id),message:m,events:[],start:0,end:0}]));
+    const turns=new Map((run.messages||[]).filter(m=>m.role==='user'&&!m.steering_parent_id).map(m=>[String(m.id),{id:String(m.id),message:m,events:[],start:0,end:0}]));
     let current=null;const seen=new Set();
     for(const event of run.events||[]){
       const data=event.data||{},key=data.activity_id||event.id;
@@ -46,7 +46,7 @@
             phase:event.kind==='error'?'error':'recorded'});
         }
       }
-      turn.rows=turn.rows.map(row=>({...row,state:row.phase==='started'?(turn.live&&run.activity_disconnected?'disconnected':turn.live&&!waiting.has(turn.status)?'running':turn.live?'paused':'unconfirmed'):row.phase==='error'?'error':row.phase==='completed'?'completed':'recorded'}));
+      turn.rows=turn.rows.map(row=>({...row,state:row.phase==='started'?(turn.live&&run.activity_disconnected?'disconnected':turn.live&&!waiting.has(turn.status)?'running':turn.live?'paused':'unconfirmed'):row.phase==='error'?'error':row.phase==='completed'?'completed':row.phase==='backgrounded'?'backgrounded':'recorded'}));
       const latest=turn.events.at(-1),running=turn.rows.filter(row=>row.state==='running');
       turn.headline=run.activity_disconnected&&turn.live?'Connection lost · reconnecting':labels[turn.status]||'Work history';
       turn.pulse=turn.live&&!waiting.has(turn.status)&&!run.activity_disconnected;
@@ -59,7 +59,7 @@
   }
   function rowHTML(row,turn){
     const icon={command:'⌘',file:'▤'}[row.category]||(row.kind==='message'?'✦':row.kind==='tool'?'◇':'·');
-    const status={running:'Running',completed:'Finished',error:'Error',paused:'Paused',unconfirmed:'No completion received',disconnected:'Reconnecting'}[row.state]||'';
+    const status={running:'Running',completed:'Finished',backgrounded:'Moved to background',error:'Error',paused:'Paused',unconfirmed:'No completion received',disconnected:'Reconnecting'}[row.state]||'';
     const detail=row.command||row.path;
     const title=row.path?`${row.message} · ${row.path}`:row.command?`${row.message} · ${row.command.split('\n')[0].slice(0,110)}`:row.message;
     const timer=row.duration_ms!=null?duration(0,row.duration_ms):row.state==='running'?`<span data-work-timer="${Date.parse(row.start)}">${duration(Date.parse(row.start))}</span>`:'';

@@ -1,5 +1,6 @@
 """Atomic queue edits and cooperative steering, serialized with message claim."""
 from fastapi import HTTPException
+import json
 
 from .db import now
 
@@ -70,3 +71,37 @@ class MessageQueue:
 
     def accepted(self, run_id, message_id):
         return bool(message_id and self.store.rows("SELECT 1 FROM messages m JOIN runs r ON r.id=m.run_id WHERE r.id=? AND r.steer_message_id=m.id AND m.id=? AND m.status='queued' AND m.queue_locked=1", (run_id, message_id)))
+
+    def acknowledge(self, run_id, turn_id, ids):
+        """Idempotent receipts from the live sandbox, also carried by model/final events."""
+        if not isinstance(ids, list) or len(ids) > 100 or any(type(i) is not int for i in ids):
+            raise HTTPException(422, 'Invalid steering receipts.')
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            for message_id in ids:
+                changed = conn.execute("UPDATE messages SET status='injected',started_at=? WHERE id=? AND run_id=? AND steering_parent_id=? AND status='queued' AND queue_locked=1",
+                                       (now(), message_id, run_id, turn_id)).rowcount
+                if changed:
+                    conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=? AND steer_message_id=?', (run_id, message_id))
+                    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Your message is guiding the current task.',?,?)",
+                                 (run_id, json.dumps({'message_id': message_id, 'turn_id': turn_id, 'phase': 'steering'}), now()))
+
+    def live_control(self, run_id, turn_id, applied):
+        self.acknowledge(run_id, turn_id, applied)
+        target = self.accept_steer(run_id, turn_id)
+        if not target:
+            return {'steer_message_id': None}
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+            message = conn.execute('SELECT * FROM messages WHERE id=?', (target,)).fetchone()
+            if run['active_message_id'] != turn_id or run['status'] not in {'running','reconnecting','awaiting_approval'}:
+                return {'steer_message_id': None}
+            # A new requester or model needs a checkpointed capability handoff.
+            # Never inject another person's input under the current person's private scope.
+            if message['user_id'] != run['active_user_id'] or message['model'] != run['active_model']:
+                return {'steer_message_id': target, 'handoff': True}
+            conn.execute('UPDATE messages SET steering_parent_id=? WHERE id=?', (turn_id, target))
+        from .attachments import attachment_context
+        uploads = [item for item in self.store.attachments.for_run(run_id, target) if item['message_id'] == target]
+        return {'steer_message_id': None, 'input': {'id': target, 'content': message['content'] + attachment_context(uploads), 'attachments': uploads}}

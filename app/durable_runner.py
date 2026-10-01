@@ -368,6 +368,7 @@ class DurableRunner(RunManager):
                         state['last_error'] = str(event.get('message', ''))
                 state['cursor'] = report['cursor']
                 if report.get('final'):
+                    self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
                     state['result'] = {**report['final'], 'message_id': state['message_id']}
                     if not state['result'].get('startup_retry'):
                         self.store.update_run(run_id, summary=str(report['final'].get('message', '')),

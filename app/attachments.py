@@ -153,8 +153,8 @@ class Attachments:
                  'path': f"/workspace/.moyai-attachments/{row['id']}/{row['name']}"} for row in rows]
 
     def broker_file(self, run, attachment_id):
-        rows = self.store.rows("SELECT a.data FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued')",
-                               (attachment_id, run['id'], run.get('active_message_id') or 0))
+        rows = self.store.rows("SELECT a.data FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued' OR (m.steering_parent_id=? AND m.queue_locked=1))",
+                               (attachment_id, run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0))
         if not rows:
             raise HTTPException(404, 'Attachment not found in this session.')
         return Response(rows[0]['data'], media_type='application/octet-stream')
@@ -163,8 +163,8 @@ class Attachments:
         # Keep image bytes out of sandbox transcripts, Temporal history and logs.
         # Only this run's sent attachments, up to its currently executing turn,
         # are eligible. Future queued messages cannot leak into the active turn.
-        rows = self.store.rows('SELECT a.id,a.preview FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND m.id<=? AND length(a.preview)>0 ORDER BY m.id DESC,a.created_at DESC LIMIT 10',
-                               (run['id'], run.get('active_message_id') or 0))
+        rows = self.store.rows("SELECT a.id,a.preview FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND (m.id<=? OR m.steering_parent_id=?) AND m.status NOT IN ('queued','deleted') AND length(a.preview)>0 ORDER BY m.id DESC,a.created_at DESC LIMIT 10",
+                               (run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0))
         images = {row['id']: row['preview'] for row in rows}
         result = []
         for message in reversed(messages):

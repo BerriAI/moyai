@@ -11,7 +11,7 @@ import uuid
 try:
     from .broker_relay import BrokerRelay
     from .artifacts import collect_archive
-    from .continuation import RotationDeadline, AgentWait, AgentSteer
+    from .continuation import RotationDeadline, AgentWait, ActiveTurnSteering
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
     from .activity import ActivityReporter
@@ -19,7 +19,7 @@ try:
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
-    from continuation import RotationDeadline, AgentWait, AgentSteer
+    from continuation import RotationDeadline, AgentWait, ActiveTurnSteering
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
     from activity import ActivityReporter
@@ -108,7 +108,8 @@ def run_agent(spec, relay):
     print("Discovered workspace tools:", discovered, file=sys.stderr, flush=True)
     rotation = RotationDeadline(spec.get("rotation_seconds", 0))
     waiting = AgentWait(relay)
-    steering = AgentSteer(relay)
+    steering = ActiveTurnSteering(relay, lambda item: prepare_attachments(
+        {**spec, 'attachments': item.get('attachments', [])}, os.environ['WORKSPACE_RUN_TOKEN']))
     activity = ActivityReporter(emit)
     def step(*args):
         waiting.step(agent)
@@ -164,9 +165,10 @@ def run_agent(spec, relay):
                        '\nContinue the original work if provided. If declined, explain what can be done without the key; do not request it again unless the user asks.')
         emit('status', 'Workspace connected. Starting agent work.', {'activity_version': 1, 'phase': 'execution_started'})
         relay.steering = steering
-        steering.listen(agent, lambda: emit('status', 'Pausing this response to save your work and pick up the queued message.',
+        steering.listen(agent, lambda: emit('status', 'Updating the current task with your message.' if not steering.requested else
+                                             'Saving before switching requester or model.',
                                              {'activity_version': 1, 'phase': 'steering'}))
-        result = agent.run_conversation(prompt, conversation_history=history, system_message=(
+        system_message = (
             "You are Moyai Devin, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "
             "For work that takes multiple steps, give brief public progress updates before starting and when you learn something useful. "
@@ -223,10 +225,23 @@ def run_agent(spec, relay):
                "The Slack conversation’s participants can see your replies: never include credentials or unrelated private information. "
                "For external write approvals, direct the user to the web session; a Slack reply is not admin approval. " if spec.get("slack_thread_chat") else "") +
             "Do not push, merge, deploy, or publish unless explicitly requested. "
-            "After a stopped, steered or failed response, follow the latest message; do not assume prior actions completed or replay external writes without verification. "
+            "A user correction during work is steering for the same ongoing task. Preserve the original objective and completed progress, "
+            "and incorporate additions, corrections and priorities. Only abandon or replace the objective when the user explicitly asks. "
+            "A status question does not cancel the task: answer it briefly, then continue. "
+            "A foreground command may move to the background when a correction arrives. Use process_manage with its returned session_id to collect its result; "
+            "do not start another copy or claim it completed before checking. "
+            "After a stopped or failed response, follow the latest message; do not assume prior actions completed or replay external writes without verification. "
             "Do not claim a check passed unless you ran it. For work tasks, summarize work done, verification, and limitations. "
             "For conversational questions, answer directly and naturally without status preambles or a routine work summary."
-        ))
+        )
+        while True:
+            result = agent.run_conversation(prompt, conversation_history=history, system_message=system_message)
+            # A correction can race with the last response boundary. Hermes
+            # returns any undrained input; continue it within this same app turn.
+            if not result.get('pending_steer') or result.get('interrupted') or result.get('failed'):
+                break
+            prompt, history = result['pending_steer'], result['messages']
+        steering.close()
         completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
         wait_group = waiting.group if waiting.can_continue(result) else ''
         wait_credential = waiting.credential if waiting.can_continue(result) else ''
@@ -239,7 +254,8 @@ def run_agent(spec, relay):
                    str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
-        emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered)
+        emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
+             steering_applied=steering.receipts())
         (artifacts / "result.md").write_text(summary)
         if spec.get("chat_enabled"):
             if not isinstance(result.get("messages"), list):

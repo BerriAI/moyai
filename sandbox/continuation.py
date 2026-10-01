@@ -113,3 +113,68 @@ class AgentSteer(RotationDeadline):
                     self.requested = True
                     agent.interrupt()
                     self.notify()
+
+
+class ActiveTurnSteering(AgentSteer):
+    """Deliver acknowledged user corrections through Hermes' native redirect API."""
+    def __init__(self, relay, prepare=lambda item: None):
+        super().__init__(relay)
+        self.prepare = prepare
+        self.applied = set()
+        self.generation = 0
+
+    def receipts(self):
+        with self.lock:
+            return sorted(self.applied)
+
+    def cancelled(self, generation):
+        with self.lock:
+            return self.requested or generation != self.generation
+
+    @contextmanager
+    def model_wait(self):
+        with super().model_wait():
+            with self.lock:
+                generation = self.generation
+            yield generation
+
+    def _listen(self, agent):
+        with self.changed:
+            while not self.closed and not self.requested:
+                self._poll(agent, boundary=False)
+                self.changed.wait(timeout=1)
+
+    def step(self, agent):
+        with self.lock:
+            if not self.closed and not self.requested:
+                self._poll(agent, boundary=True)
+
+    def _poll(self, agent, *, boundary):
+        control = self.relay.control({'version': 2, 'applied': self.receipts()})
+        target = control.get('steer_message_id')
+        if type(target) is int and target > 0:
+            # Cross-requester/model handoffs still use a saved capability boundary.
+            # A stale HTTP handler can outlive its model call, so check Hermes too.
+            model_active = getattr(agent, '_model_request_active', None)
+            if boundary or (model_active and model_active.is_set()):
+                self.message_id, self.requested = target, True
+                self.generation += 1
+                agent.interrupt()
+                self.notify()
+            return
+        item = control.get('input')
+        if not isinstance(item, dict) or type(item.get('id')) is not int or not isinstance(item.get('content'), str):
+            return
+        if item['id'] in self.applied:
+            return  # Retried delivery after a lost acknowledgement.
+        try:
+            self.prepare(item)
+        except Exception:
+            # Immutable attachment reads can retry; never deliver an incomplete input.
+            return
+        text = ('[User correction to the current task]\n' + item['content'])
+        accepted = agent.steer(text) if boundary else agent.redirect(text)
+        if accepted:
+            self.applied.add(item['id'])
+            self.generation += 1
+            self.notify()

@@ -266,6 +266,8 @@ def test_message_idempotency_is_transactional_and_conflicts_are_rejected(tmp_pat
 
 
 async def test_restart_preserves_idle_session_and_interrupts_unfinished_messages(runner):
+    # This checks recovery, not the demo's four seconds of presentation delays.
+    runner.settings.demo_step_seconds = 0
     saved = runner.store.create_run('Saved chat', '', 'demo', [], chat_enabled=True)
     runner.submit(saved)
     await wait_jobs(runner)

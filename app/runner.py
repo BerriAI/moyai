@@ -84,7 +84,7 @@ class RunManager:
                 self.store.update_run(row["id"], status="interrupted", token_hash="", error="The workspace restarted. This task was not replayed.")
             self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (row["id"],))
             self.store.execute("UPDATE approvals SET status='uncertain' WHERE run_id=? AND status='executing'", (row["id"],))
-            self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued')", (row["id"],))
+            self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (row["id"],))
             self.store.event(row["id"], "error", "Workspace restarted. Received answers were preserved; unfinished messages were interrupted and not replayed.")
             if row["sandbox_id"] and self.settings.modal_token_id and self.settings.modal_token_secret:
                 try:
@@ -106,7 +106,7 @@ class RunManager:
                 self.jobs.pop(run["id"], None)
             if not completed.cancelled() and completed.exception():
                 self.store.update_run(run["id"], status="failed", token_hash="", error="Session processing stopped unexpectedly. No unfinished messages were replayed.")
-                self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued')", (run["id"],))
+                self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (run["id"],))
             # A message may arrive while the last checkpoint is being saved.
             if not self.closing and run.get("chat_enabled") and self.store.has_queued_messages(run["id"]):
                 self.submit(self.store.run(run["id"]))
@@ -363,6 +363,7 @@ class RunManager:
                         event = json.loads(scrub(line[len("WORKSPACE_EVENT "):]))
                         if event.get("kind") == "final":
                             result = event
+                            self.message_queue.acknowledge(run_id, run.get('message_id'), event.get('steering_applied', []))
                             # Store the answer independently of artifacts and the Modal
                             # checkpoint. Recovery can finish this exact turn after a crash.
                             result["message_id"] = run.get("message_id")

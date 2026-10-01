@@ -162,6 +162,8 @@ class Store:
             if 'started_at' not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
                 conn.execute("UPDATE messages SET started_at=created_at WHERE status!='queued'")
+            if 'steering_parent_id' not in columns:
+                conn.execute('ALTER TABLE messages ADD COLUMN steering_parent_id INTEGER')
             if 'steer_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
                 conn.execute('ALTER TABLE runs ADD COLUMN steer_message_id INTEGER')
             if default_model:
@@ -262,7 +264,7 @@ class Store:
         return {**context, **row}
 
     def messages(self, run_id):
-        messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,m.user_id,m.revision,m.queue_locked,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? AND m.status!='deleted' ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,COALESCE(NULLIF(m.started_at,''),m.created_at),m.id", (run_id,))
+        messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,m.user_id,m.revision,m.queue_locked,m.steering_parent_id,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? AND m.status!='deleted' ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,COALESCE(NULLIF(m.started_at,''),m.created_at),m.id", (run_id,))
         return self.attachments.messages(run_id, messages)
 
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False):
@@ -329,6 +331,8 @@ class Store:
         with self.connect() as conn:
             changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
             if changed:
+                conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
+                conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
                 conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
 

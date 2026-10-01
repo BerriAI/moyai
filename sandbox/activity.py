@@ -26,6 +26,8 @@ def result_status(result):
             return 'completed', None
     if not isinstance(result, dict):
         return 'completed', None
+    if result.get('status') == 'yielded_to_background':
+        return 'backgrounded', None
     code = result.get('exit_code', result.get('returncode'))
     if not isinstance(code, int) or isinstance(code, bool):
         code = None
@@ -90,4 +92,3 @@ class ActivityReporter:
         # separate reasoning_callback. Strip tagged reasoning defensively too.
         if isinstance(text, str) and (text := public_text(text, 3000).strip()):
             self.emit('message', text, {'activity_version': 1, 'phase': 'commentary'})
-

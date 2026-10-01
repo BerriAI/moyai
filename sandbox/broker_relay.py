@@ -46,6 +46,7 @@ class BrokerRelay:
                 self.wfile.write(content)
 
             def handle_request(self):
+                steering, generation = None, None
                 credential_route = re.fullmatch(r'/credentials/([0-9a-f]{32})/v1(/models|/chat/completions|/completions|/embeddings|/messages)',self.path)
                 authorized = hmac.compare_digest(self.headers.get('Authorization', ''), 'Bearer ' + token)
                 if credential_route:
@@ -99,9 +100,13 @@ class BrokerRelay:
                         self.wfile.write(body)
                         return
                     steering = relay.steering if self.path == '/v1/chat/completions' else None
-                    with steering.model_wait() if steering else nullcontext():
+                    with steering.model_wait() if steering else nullcontext() as generation:
+                        if steering and hasattr(steering, 'receipts'):
+                            value = json.loads(raw)
+                            value['steering_applied'] = steering.receipts()
+                            raw = json.dumps(value).encode()
                         while True:
-                            if steering and steering.requested:
+                            if steering and (steering.cancelled(generation) if hasattr(steering, 'cancelled') else steering.requested):
                                 return self.error(409, 'This model request was superseded by a queued message.')
                             data = seal(token, route, raw) if method == 'POST' else None
                             request = urllib.request.Request(remote.rstrip('/') + route, data=data,
@@ -119,6 +124,8 @@ class BrokerRelay:
                                 # before admission, so no gateway call was made.
                                 time.sleep(3 + random.random())
                     with response:
+                        if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
+                            return  # A redirected request may complete/bill later; discard its output.
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
                         self.end_headers()
@@ -136,10 +143,15 @@ class BrokerRelay:
                             self.wfile.write(body)
                         else:
                             while chunk := response.read(65536):
+                                if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
+                                    return
                                 self.wfile.write(chunk)
-                        if not credential_route:
+                        if not credential_route and not (steering and hasattr(steering, 'cancelled') and steering.cancelled(generation)):
                             relay.last_error = ''
                 except urllib.error.HTTPError as exc:
+                    if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
+                        exc.close()
+                        return
                     message = EDGE_ERROR if exc.code == 403 and 'json' not in exc.headers.get('Content-Type', '') else ''
                     if not message:
                         try:
@@ -152,6 +164,8 @@ class BrokerRelay:
                         relay.last_error = message
                     self.error(502 if exc.code == 403 else exc.code, message)
                 except (urllib.error.URLError, TimeoutError):
+                    if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
+                        return
                     message = 'The cloud connection timed out or could not be reached. Your message is saved.'
                     if not credential_route:
                         relay.last_error = message
@@ -167,13 +181,14 @@ class BrokerRelay:
         self.thread.start()
         return self
 
-    def control(self):
+    def control(self, body=None):
         request = urllib.request.Request(self.remote.rstrip('/') + '/control',
-            data=seal(self.token, '/control', b'{}'),
+            data=seal(self.token, '/control', json.dumps(body or {}).encode()),
             headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
-                return json.load(response)
+                value = json.load(response)
+                return value if isinstance(value, dict) else {}
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, ValueError):
             # Control-plane failure cannot authorize interrupting or replaying work.
             return {}

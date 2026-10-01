@@ -570,7 +570,11 @@ def create_app(settings: Settings | None = None):
     @app.post('/broker/{run_id}/control')
     async def session_control(run_id: str, request: Request):
         run = require_run(run_id, request)
-        await broker_body(request, '/control')
+        body = await broker_body(request, '/control')
+        if isinstance(body, dict) and body.get('version') == 2:
+            result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
+            await checkpoints.flush()
+            return result
         target = message_queue.accept_steer(run_id, run['active_message_id'])
         if target:
             await checkpoints.flush()
@@ -726,6 +730,8 @@ def create_app(settings: Settings | None = None):
         body = await broker_body(request, '/v1/chat/completions')
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "messages must be an array")
+        if 'steering_applied' in body:
+            message_queue.acknowledge(run_id, run['active_message_id'], body['steering_applied'])
         admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
                                  (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
         if not admitted:

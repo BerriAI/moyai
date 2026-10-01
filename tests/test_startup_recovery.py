@@ -109,7 +109,7 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
             calls.append('inference')
             return {'final_response': 'Done', 'messages': [], 'completed': True}
     relay = SimpleNamespace(url='http://loopback', startup_failure=StartupUnavailable('workspace_tools', 'HTTP 503'),
-                            close=lambda: None, last_error='', wait_group='', wait_credential='')
+                            close=lambda: None, control=lambda body=None: {}, last_error='', wait_group='', wait_credential='')
     relay.start = lambda: relay
     monkeypatch.setattr(agent, 'BrokerRelay', lambda *args, **kwargs: relay)
     monkeypatch.setattr(agent, 'prepare_attachments', lambda *args, **kwargs: None)

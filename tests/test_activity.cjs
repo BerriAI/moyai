@@ -78,3 +78,31 @@ test('startup recovery shows a waiting state without claiming active tool work',
   const turn=groups(data).get('1');assert.equal(turn.live,true);assert.equal(turn.pulse,false);assert.equal(turn.count,0);
   assert.match(html(turn),/Reconnecting to workspace/);assert.doesNotMatch(html(turn),/is-live/);
 });
+
+test('steering inputs share the original work timeline and do not invent another turn',()=>{
+  const data=run();data.messages[1]={id:2,role:'user',status:'injected',steering_parent_id:1,content:'Also check caching'};
+  data.events.push(event(2,'status','Your message is guiding the current task.',{turn_id:1,message_id:2,phase:'steering'}),tool(3,'a','started'));
+  const turns=groups(data);assert.equal(turns.size,1);assert.equal(turns.get('1').live,true);assert.equal(turns.get('1').rows.length,2);
+  const script=readFileSync('app/static/app.js','utf8');
+  const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],innerHTML:''});return nodes.get(selector);}
+  data.messages[0].content='Original objective';
+  const context={state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
+  context.updateChat(data,true);
+  const markup=node('#conversation').innerHTML;
+  assert.equal((markup.match(/data-work-slot=/g)||[]).length,1);
+  assert.match(markup,/data-work-slot="1"/);assert.doesNotMatch(markup,/data-work-slot="2"/);
+  assert(markup.indexOf('Also check caching')<markup.indexOf('data-work-slot="1"'));
+  assert.match(markup,/>Steering</);
+});
+
+test('backgrounded commands do not claim a finished process',()=>{
+  const run={status:'running',active_message_id:1,messages:[{id:1,role:'user',status:'running'}],events:[
+    {id:1,kind:'chat',message:'Response started',data:{message_id:1},created_at:'2026-10-01T10:00:00Z'},
+    {id:2,kind:'tool',message:'Run command',data:{activity_version:1,call_id:'cmd',phase:'backgrounded',category:'command',command:'long-test'},created_at:'2026-10-01T10:00:01Z'}
+  ]};
+  const turn=groups(run).get('1');
+  assert.equal(turn.rows[0].state,'backgrounded');
+  assert.match(html(turn),/Moved to background/);
+  assert.doesNotMatch(html(turn),/>Finished</);
+});
