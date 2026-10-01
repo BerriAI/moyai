@@ -156,3 +156,45 @@ async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durabl
             if successor:
                 await successor.shutdown()
             await manager.shutdown()
+
+
+async def test_real_temporal_startup_retry_timer_survives_worker_replacement(durable):
+    from test_startup_recovery import startup_report
+    manager, cloud, run_id = durable
+    command = cloud.command
+    recovered = False
+    async def startup_outage(machine, action, directory, value, **kwargs):
+        if action == 'read' and not recovered:
+            return json.dumps(startup_report())
+        return await command(machine, action, directory, value, **kwargs)
+    manager.command = startup_outage
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            return env.client
+        manager.connect_temporal = connect
+        successor = None
+        try:
+            await manager.recover()
+            await eventually(lambda: manager.state(run_id).get('phase') == 'startup_wait', seconds=25)
+            first_message = manager.state(run_id)['message_id']
+            await manager.shutdown()
+            assert cloud.machines[0].alive
+            recovered = True
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.command = startup_outage
+            successor.connect_temporal = connect
+            await successor.recover()
+            await eventually(lambda: successor.store.run(run_id)['status'] == 'idle', seconds=30)
+            assert successor.state(run_id)['message_id'] == first_message
+            assert len(cloud.launches) == 2 and len(cloud.machines) == 1
+            assert [m['content'] for m in successor.store.messages(run_id) if m['role']=='assistant'] == ['Saved answer']
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            history = await handle.fetch_history()
+            assert any(event.HasField('timer_started_event_attributes') for event in history.events)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
+            assert not any(token in history.to_json() for token in cloud.launch_tokens)
+            await handle.terminate('Integration test complete')
+        finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()

@@ -34,13 +34,13 @@ class SessionWorkflow:
             # original command sequence when replayed by upgraded workers.
             if busy in ('capacity', 'children'):
                 await workflow.sleep(5)
-            if isinstance(busy, dict) and 'idle_seconds' in busy:
+            if isinstance(busy, dict) and ('idle_seconds' in busy or 'retry_seconds' in busy):
                 # New Activity result shape preserves old boolean/string replay.
                 # A durable timer consumes no Activity slot and a message wake
                 # interrupts it immediately. The database owns the deadline.
                 try:
                     await workflow.wait_condition(lambda: self.revision != before,
-                                                  timeout=timedelta(seconds=busy['idle_seconds']))
+                                                  timeout=timedelta(seconds=busy.get('idle_seconds', busy.get('retry_seconds'))))
                 except asyncio.TimeoutError:
                     pass
                 busy = True

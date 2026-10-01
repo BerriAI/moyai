@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 STATUSES = {
     'queued': 'is getting ready…',
     'provisioning': 'is opening the workspace…',
+    'reconnecting': 'is reconnecting to the workspace…',
     'running': 'is working…',
     'saving': 'is saving the work…',
     'waiting_children': 'is coordinating parallel agents…',

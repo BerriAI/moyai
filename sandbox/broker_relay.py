@@ -11,8 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, seal
+    from .startup import StartupUnavailable, read_with_reconnect
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, seal
+    from startup import StartupUnavailable, read_with_reconnect
 
 EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
               'Your conversation and files are saved. An administrator needs to repair the connection; '
@@ -20,11 +22,12 @@ EDGE_ERROR = ('Moyai could not reach the model because the cloud connection reje
 
 
 class BrokerRelay:
-    def __init__(self, remote, token):
+    def __init__(self, remote, token, notify=None):
         self.last_error = ''
         self.wait_group = ''
         self.wait_credential = ''
         self.remote, self.token = remote, token
+        self.startup_failure = None
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -68,6 +71,30 @@ class BrokerRelay:
                             control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry', 'credentials_request'}
                         except (ValueError, AttributeError):
                             pass
+                    if self.command == 'GET' and self.path in {'/tools', '/v1/models'}:
+                        if self.path == '/tools':
+                            relay.startup_failure = None
+                        request = urllib.request.Request(remote.rstrip('/') + self.path,
+                            headers={'Authorization': 'Bearer ' + token}, method='GET')
+                        try:
+                            status, content_type, body = read_with_reconnect(request,
+                                lambda response: (response.status, response.headers.get('Content-Type', 'application/json'),
+                                                  response.read(MAX_BODY + 1)),
+                                stage='workspace_tools', notify=notify)
+                        except StartupUnavailable as exc:
+                            if self.path == '/tools':
+                                relay.startup_failure = exc
+                            return self.error(503, str(exc))
+                        if self.path == '/tools':
+                            relay.startup_failure = None
+                        relay.last_error = ''
+                        if len(body) > MAX_BODY:
+                            return self.error(502, 'Workspace service reply exceeds size limit.')
+                        self.send_response(status)
+                        self.send_header('Content-Type', content_type)
+                        self.end_headers()
+                        self.wfile.write(body)
+                        return
                     while True:
                         data = seal(token, route, raw) if method == 'POST' else None
                         request = urllib.request.Request(remote.rstrip('/') + route, data=data,

@@ -255,7 +255,7 @@ class GitHub:
 
     def ensure_publish_allowed(self, run, connection_version):
         current = self.store.run(run['id'])
-        if (not current or current['status'] not in {'running', 'awaiting_approval'}
+        if (not current or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or current['active_message_id'] != run['active_message_id'] or not current['token_hash']
                 or current['token_hash'] != run['token_hash'] or 'github' not in current['plugins']
                 or connection_version != self.connection_version()

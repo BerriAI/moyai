@@ -37,11 +37,13 @@ def test_envelopes_are_bound_to_turn_capability_route_age_and_size():
         seal('turn-one', '/v1/chat/completions', b'x' * (MAX_BODY + 1))
 
 
-def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace, monkeypatch):
+@pytest.mark.parametrize('status', ['running', 'reconnecting'])
+def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace, monkeypatch, status):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     app.state.settings.litellm_api_key = 'existing-server-key'
     run = active(app)
+    app.state.store.update_run(run["id"], status=status)
     received = []
     def upstream(request):
         assert request.headers['Authorization'] == 'Bearer existing-server-key'
@@ -267,3 +269,41 @@ def test_full_model_capacity_returns_unbilled_admission_marker(workspace, monkey
         finally:
             release.set()
         assert all(call.result(timeout=5).status_code == 200 for call in calls)
+
+
+def test_bootstrap_relay_retries_reads_but_never_retries_submitted_posts():
+    counts = {'GET': 0, 'POST': 0}
+    notices = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            counts['GET'] += 1
+            self.send_response(503 if counts['GET'] == 1 else 200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"tools":[]}')
+        def do_POST(self):
+            counts['POST'] += 1
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(503)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"temporary outage"}}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'token', notify=notices.append).start()
+    try:
+        with httpx.Client(base_url=relay.url, timeout=5) as client:
+            headers = {'Authorization': 'Bearer token'}
+            assert client.get('/tools', headers=headers).json() == {'tools': []}
+            assert counts['GET'] == 2 and len(notices) == 2
+            assert relay.startup_failure is None
+            for path in ['/v1/chat/completions', '/tools/call']:
+                assert client.post(path, json={}, headers=headers).status_code == 503
+            assert counts['POST'] == 2
+    finally:
+        relay.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

@@ -533,7 +533,7 @@ def create_app(settings: Settings | None = None):
     async def approval(approval_id: str, body: Decision, request: Request):
         security.require(request, mutation=True, admin=True)
         status = "approved" if body.decision == "approve" else "denied"
-        count = store.execute("UPDATE approvals SET status=? WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','awaiting_approval'))", (status, approval_id))
+        count = store.execute("UPDATE approvals SET status=? WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','reconnecting','awaiting_approval'))", (status, approval_id))
         if not count:
             raise HTTPException(409, "This approval was already resolved or the run has ended.")
         row = store.rows("SELECT run_id,tool FROM approvals WHERE id=?", (approval_id,))[0]
@@ -543,7 +543,7 @@ def create_app(settings: Settings | None = None):
     def require_run(run_id, request):
         run = store.run(run_id)
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
-        if (not run or run["mode"] != "modal" or run["status"] not in {"running", "awaiting_approval"}
+        if (not run or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
         return run
@@ -646,14 +646,14 @@ def create_app(settings: Settings | None = None):
                     return {"error": "Tool connection closed. Action was not sent."}
                 current = store.run(run_id)
                 row = store.rows("SELECT status FROM approvals WHERE id=?", (approval_id,))[0]
-                if current["status"] not in {"running", "awaiting_approval"}:
+                if current["status"] not in {"running", "reconnecting", "awaiting_approval"}:
                     return {"error": "Run stopped. Action was not sent."}
                 if row["status"] in {"approved", "denied", "expired"}:
                     break
                 await asyncio.sleep(0.25)
             else:
                 store.execute("UPDATE approvals SET status='expired' WHERE id=? AND status='pending'", (approval_id,))
-            claim = store.execute("UPDATE approvals SET status='executing' WHERE id=? AND status='approved' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','awaiting_approval'))", (approval_id,))
+            claim = store.execute("UPDATE approvals SET status='executing' WHERE id=? AND status='approved' AND EXISTS(SELECT 1 FROM runs WHERE runs.id=approvals.run_id AND runs.status IN ('running','reconnecting','awaiting_approval'))", (approval_id,))
             remaining = store.rows("SELECT COUNT(*) AS n FROM approvals WHERE run_id=? AND status='pending'", (run_id,))[0]["n"]
             store.execute("UPDATE runs SET status='running' WHERE id=? AND status='awaiting_approval' AND ?=0", (run_id, remaining))
             if not claim:
@@ -726,7 +726,7 @@ def create_app(settings: Settings | None = None):
         body = await broker_body(request, '/v1/chat/completions')
         if not isinstance(body, dict) or not isinstance(body.get("messages"), list):
             raise HTTPException(422, "messages must be an array")
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','awaiting_approval')",
+        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
                                  (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
@@ -793,7 +793,7 @@ def create_app(settings: Settings | None = None):
         if wants_stream:
             async def relay():
                 for chunk in completion_events(value):
-                    if store.run(run_id)['status'] not in {'running', 'awaiting_approval'}:
+                    if store.run(run_id)['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
                         break
                     yield chunk
             return StreamingResponse(relay(), media_type='text/event-stream')

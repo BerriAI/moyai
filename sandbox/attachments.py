@@ -5,10 +5,15 @@ from pathlib import Path
 import re
 import urllib.request
 
+try:
+    from .startup import read_with_reconnect
+except ImportError:
+    from startup import read_with_reconnect
+
 MAX_FILE = 10 * 1024 * 1024
 
 
-def prepare_attachments(spec, token, *, root=Path('/workspace/.moyai-attachments'), opener=urllib.request.urlopen):
+def prepare_attachments(spec, token, *, root=Path('/workspace/.moyai-attachments'), opener=urllib.request.urlopen, notify=None):
     files = spec.get('attachments', [])
     if not files:
         return
@@ -31,8 +36,8 @@ def prepare_attachments(spec, token, *, root=Path('/workspace/.moyai-attachments
             continue
         request = urllib.request.Request(spec['broker_url'].rstrip('/') + '/attachments/' + attachment_id,
                                          headers={'Authorization': 'Bearer ' + token})
-        with opener(request, timeout=90) as response:
-            raw = response.read(MAX_FILE + 1)
+        raw = read_with_reconnect(request, lambda response: response.read(MAX_FILE + 1),
+                                  stage='attachments', opener=opener, notify=notify)
         if len(raw) != item['size'] or hashlib.sha256(raw).hexdigest() != item['sha256']:
             raise ValueError('Attachment download was incomplete')
         temporary = directory / '.download'

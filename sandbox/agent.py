@@ -15,6 +15,7 @@ try:
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
     from .activity import ActivityReporter
+    from .startup import StartupUnavailable
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -22,6 +23,7 @@ except ImportError:
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
     from activity import ActivityReporter
+    from startup import StartupUnavailable
 LOCK = threading.Lock()
 
 
@@ -42,18 +44,28 @@ def conversation_prompt(spec, *, has_history=False):
 
 
 def run(spec):
-    relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN']).start()
+    relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting).start()
     os.environ['MOYAI_CREDENTIAL_PROXY_URL'] = relay.url + '/credentials'
     try:
         return run_agent(spec, relay)
+    except StartupUnavailable as exc:
+        # This typed result is produced only before run_conversation. Never
+        # infer replay safety from a generic process failure or missing answer.
+        emit('final', str(exc), completed=False,
+             startup_retry={'version': 1, 'stage': exc.stage, 'reason': exc.reason})
+        return 75
     finally:
         relay.close()
+
+
+def reconnecting(message):
+    emit('status', message, {'activity_version': 1, 'phase': 'reconnecting'})
 
 
 def run_agent(spec, relay):
     workspace = Path("/workspace")
     workspace.mkdir(exist_ok=True)
-    prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'])
+    prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting)
     artifacts = Path("/artifacts")
     artifacts.mkdir(exist_ok=True)
     if spec["repo_url"]:
@@ -126,6 +138,8 @@ def run_agent(spec, relay):
     try:
         if not any("browser_open" in tool["function"]["name"] for tool in agent.tools):
             print("Available agent tools:", sorted(agent.valid_tool_names), file=sys.stderr, flush=True)
+            if relay.startup_failure:
+                raise relay.startup_failure
             raise RuntimeError("Workspace MCP tools were not loaded")
         prompt = conversation_prompt(spec, has_history=bool(history))
         if spec.get("continuation"):
@@ -148,6 +162,7 @@ def run_agent(spec, relay):
         if spec.get('credential_resolution'):
             prompt += ('\n\nPROVIDER KEY REQUEST RESOLVED:\n' + json.dumps(spec['credential_resolution']) +
                        '\nContinue the original work if provided. If declined, explain what can be done without the key; do not request it again unless the user asks.')
+        emit('status', 'Workspace connected. Starting agent work.', {'activity_version': 1, 'phase': 'execution_started'})
         result = agent.run_conversation(prompt, conversation_history=history, system_message=(
             "You are Moyai Devin, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "

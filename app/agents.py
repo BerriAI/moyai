@@ -223,7 +223,7 @@ class AgentCoordinator:
 
     def check_parent(self, parent_id):
         run = self.store.run(parent_id)
-        if not run or not self.available(run) or run['status'] not in {'running', 'awaiting_approval'} or not run['active_message_id']:
+        if not run or not self.available(run) or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or not run['active_message_id']:
             raise ValueError('Delegation requires an active top-level Temporal chat turn.')
         return run
 

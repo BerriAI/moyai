@@ -97,7 +97,9 @@ class DurableRunner(RunManager):
             try:
                 return await self.step(run_id, state)
             except LostExecution:
-                if state.get('reused_machine') and state['phase'] in {'prepare', 'install'}:
+                if ((state.get('reused_machine') and state['phase'] in {'prepare', 'install'})
+                        or (state.get('startup_attempt') and state['phase'] == 'install'
+                            and not state.get('execution_started'))):
                     # This new turn has not reached its launch boundary yet.
                     state.update(phase='provision', sandbox_id='', reused_machine=False)
                     self.save(run_id, state)
@@ -240,7 +242,34 @@ class DurableRunner(RunManager):
         return sandbox
 
     def directory(self, state):
-        return f"/session/executions/{state['message_id']}-{state['segment']}"
+        suffix = f"-startup-{state['startup_attempt']}" if state.get('startup_attempt') else ''
+        return f"/session/executions/{state['message_id']}-{state['segment']}{suffix}"
+
+    def startup_retry_allowed(self, run, state):
+        marker = state.get('result', {}).get('startup_retry')
+        return (isinstance(marker, dict) and marker.get('version') == 1
+                and marker.get('stage') in {'workspace_tools', 'attachments'}
+                and marker.get('reason') in {'network', 'HTTP 408', 'HTTP 425', 'HTTP 429',
+                                             'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504'}
+                and state.get('exit_code') == 75 and not state.get('execution_started')
+                and 'startup_model_calls' in state
+                and run['turn_model_calls'] == state['startup_model_calls'])
+
+    def wait_for_startup(self, run_id, state):
+        state.setdefault('startup_deadline', time.time() + self.settings.startup_recovery_seconds)
+        if time.time() >= state['startup_deadline']:
+            self.fail(run_id, state, 'Workspace services did not reconnect after repeated startup attempts. '
+                      'No new agent work was started. Your request and files are saved; try again when services recover.')
+            return
+        state['startup_attempt'] = state.get('startup_attempt', 0) + 1
+        state.update(phase='startup_wait', retry_at=min(state['startup_deadline'],
+                     time.time() + min(30, 2 ** min(state['startup_attempt'], 5))))
+        self.running_status(run_id, 'reconnecting')
+        self.store.update_run(run_id, summary='', pending_result='')
+        self.store.event(run_id, 'status', 'Reconnecting to workspace services. This request will resume automatically.',
+                         {'activity_version': 1, 'phase': 'reconnecting', 'attempt': state['startup_attempt'],
+                          **state['result']['startup_retry']})
+        self.save(run_id, state)
 
     async def command(self, sandbox, *args, token=None):
         # Pass capabilities only in the exec environment, never in a persisted
@@ -300,15 +329,16 @@ class DurableRunner(RunManager):
                     return True
                 spec['timeout'] = remaining
             # Each piece gets its own immutable input and launch marker.
-            spec_path = f"/tmp/moyai-{state['message_id']}-{state['segment']}.json"
+            spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
             await sandbox.filesystem.write_text.aio(json.dumps(spec), spec_path)
-            state['phase'] = 'launch'
+            state.update(phase='launch', startup_model_calls=self.store.run(run_id)['turn_model_calls'],
+                         execution_started=False)
             self.save(run_id, state)
         elif phase == 'launch':
             sandbox = await self.sandbox(state)
             if not self.running_status(run_id, 'running', digest(self.token(run_id, state['message_id']))):
                 return True
-            spec_path = f"/tmp/moyai-{state['message_id']}-{state['segment']}.json"
+            spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
             await self.command(sandbox, 'start', self.directory(state), spec_path, token=self.token(run_id, state['message_id']))
             state['phase'] = 'monitor'
             self.save(run_id, state)
@@ -327,11 +357,21 @@ class DurableRunner(RunManager):
                 for event in report['events']:
                     if event.get('kind') in {'tool', 'status', 'error', 'message'}:
                         self.store.event(run_id, event['kind'], str(event.get('message', '')), event.get('data', {}))
+                    event_phase = event.get('data', {}).get('phase')
+                    if event_phase == 'execution_started':
+                        state['execution_started'] = True
+                        state.pop('startup_deadline', None)
+                        self.running_status(run_id, 'running')
+                    elif event_phase == 'reconnecting' and not state.get('execution_started'):
+                        self.running_status(run_id, 'reconnecting')
+                    if event.get('kind') == 'error':
+                        state['last_error'] = str(event.get('message', ''))
                 state['cursor'] = report['cursor']
                 if report.get('final'):
                     state['result'] = {**report['final'], 'message_id': state['message_id']}
-                    self.store.update_run(run_id, summary=str(report['final'].get('message', '')),
-                                          pending_result=json.dumps(state['result']))
+                    if not state['result'].get('startup_retry'):
+                        self.store.update_run(run_id, summary=str(report['final'].get('message', '')),
+                                              pending_result=json.dumps(state['result']))
                 self.save(run_id, state)
                 if report['state'] == 'uncertain':
                     raise LostExecution()
@@ -343,10 +383,28 @@ class DurableRunner(RunManager):
                     return True
                 if report['state'] == 'done' and len(report['events']) < 30:
                     state['exit_code'] = report['exit_code']
+                    if self.startup_retry_allowed(self.store.run(run_id), state):
+                        self.wait_for_startup(run_id, state)
+                        return True
+                    if state.get('result', {}).get('startup_retry'):
+                        self.fail(run_id, state, 'The agent stopped, but a safe startup retry could not be confirmed. '
+                                  'No potentially completed work was replayed.')
+                        return True
                     state['phase'] = 'save'
                     self.save(run_id, state)
                     return True
                 await asyncio.sleep(2)
+        elif phase == 'startup_wait':
+            if time.time() >= state['startup_deadline']:
+                self.wait_for_startup(run_id, state)
+                return True
+            remaining = state['retry_at'] - time.time()
+            if remaining > 0:
+                return {'retry_seconds': remaining}
+            state.update(phase='install', cursor=0)
+            for key in ('result', 'exit_code', 'last_error', 'save_attempts'):
+                state.pop(key, None)
+            self.save(run_id, state)
         elif phase == 'save':
             sandbox = await self.sandbox(state)
             result = state.get('result', {})
@@ -427,7 +485,7 @@ class DurableRunner(RunManager):
                 keep = (completed and self.settings.sandbox_idle_seconds and run['chat_enabled'] and not run['parent_run_id']
                         and time.time() < state['machine_started'] + self.settings.sandbox_rotation_seconds)
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='completed' if completed else 'failed',
-                             response=result.get('message') or 'Hermes stopped without a final answer.')
+                             response=result.get('message') or state.get('last_error') or 'Hermes stopped without a final answer.')
                 self.save(run_id, state)
         elif phase == 'waiting_credential':
             if not self.credentials or self.credentials.resolution(run_id,state['wait_credential'])['status']=='pending':

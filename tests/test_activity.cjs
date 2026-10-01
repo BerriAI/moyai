@@ -72,3 +72,9 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   context.updateChat(structuredClone(data));
   assert.equal(state.chatRun.events.length,2);assert.equal(state.drafts.chat,'draft kept');assert.equal(node('#followup').value,'draft kept');assert.equal(renders.at(-1).events[1].data.call_id,'a');
 });
+
+test('startup recovery shows a waiting state without claiming active tool work',()=>{
+  const data=run();data.status='reconnecting';data.events.push(event(2,'status','Workspace will reconnect automatically',{phase:'reconnecting'}));
+  const turn=groups(data).get('1');assert.equal(turn.live,true);assert.equal(turn.pulse,false);assert.equal(turn.count,0);
+  assert.match(html(turn),/Reconnecting to workspace/);assert.doesNotMatch(html(turn),/is-live/);
+});
