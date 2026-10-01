@@ -34,7 +34,7 @@ from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills, LoadSkill, TOOL as SKILL_TOOL
-from .attachments import MAX_FILE
+from .attachments import upload_limit
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -188,7 +188,7 @@ def create_app(settings: Settings | None = None):
             return JSONResponse({"detail": "Invalid request length"}, status_code=400)
         limit = MAX_WIRE if request.url.path.startswith('/broker/') and request.headers.get('content-type') == CONTENT_TYPE else MAX_BODY
         if request.method == 'PUT' and request.url.path.startswith('/api/attachments/'):
-            limit = MAX_FILE
+            limit = upload_limit(request.headers.get('content-type', ''))
         if length < 0 or length > limit:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
         response = await call_next(request)

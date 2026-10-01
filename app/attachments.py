@@ -13,12 +13,18 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from .attachment_transport import CONTENT_TYPE, OVERHEAD, unseal_file
+
 MAX_FILE = 10 * 1024 * 1024
 MAX_FILES = 5
 MAX_MESSAGE = 20 * 1024 * 1024
 MAX_DRAFT = 50 * 1024 * 1024
 ID = re.compile(r'^[0-9a-f]{32}$')
 META = 'id,owner_id,message_id,name,size,sha256,media_type,preview_text,created_at'
+
+
+def upload_limit(content_type):
+    return MAX_FILE + OVERHEAD if content_type.split(';', 1)[0].lower() == CONTENT_TYPE else MAX_FILE
 
 
 def filename(value):
@@ -193,18 +199,21 @@ class Attachments:
                 raise HTTPException(429, 'Other files are uploading. Retry this attachment in a moment.')
             async with upload_slots:
                 try:
-                    name = filename(name)
+                    safe_name = filename(name)
+                    limit = upload_limit(request.headers.get('content-type', ''))
                     chunks, size = [], 0
                     async for chunk in request.stream():
                         size += len(chunk)
-                        if size > MAX_FILE:
+                        if size > limit:
                             raise HTTPException(413, 'Each attachment must be 10 MB or smaller.')
                         chunks.append(chunk)
                     raw = b''.join(chunks)
+                    if limit > MAX_FILE:
+                        raw = unseal_file(security.csrf(security.session(request)), attachment_id, name, raw, MAX_FILE)
                     if not raw:
                         raise ValueError('This file is empty.')
                     inspected = await asyncio.to_thread(inspect_file, raw)
-                    return self.save(attachment_id, owner, name, raw, inspected, settings.attachment_storage_limit_mb * 1024 * 1024)
+                    return self.save(attachment_id, owner, safe_name, raw, inspected, settings.attachment_storage_limit_mb * 1024 * 1024)
                 except ValueError as exc:
                     raise HTTPException(422, str(exc)) from None
 

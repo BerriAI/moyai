@@ -675,6 +675,16 @@ outputs private; generated results keep the session's existing sharing.
 
 ## Chat attachments
 
+Browser uploads use session-bound AES-GCM envelopes so code examples inside a
+reference file do not trigger the hosting edge's request firewall. The server
+checks sign-in, origin and CSRF before decrypting, binds each envelope to its
+upload ID and filename, and rejects tampered or older-than-five-minute packets.
+Original file bytes, previews, ownership, quotas and download access are unchanged.
+Retries create a fresh envelope with the same upload ID, so a lost response cannot
+duplicate the file. Old browser tabs can still use the legacy raw upload route;
+refresh once to get the protected uploader. Upload errors remain on the file card
+with a retry action and distinguish hosting failures from file validation errors.
+
 Use the paperclip, drop files onto the composer, or paste clipboard files/images
 with Cmd+V / Ctrl+V. Both new sessions and follow-ups show removable previews
 before sending. Raster images open a larger preview; UTF-8 documents such as

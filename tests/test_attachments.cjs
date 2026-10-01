@@ -14,6 +14,8 @@ function fixture(){
   const form=new Element(),input=new Element(),requests=[],revoked=[];
   input.value='My unsent text';input.required=true;
   const ctx={console,AbortController,Map,Set,Array,URL:{createObjectURL:()=>'blob:test',revokeObjectURL:url=>revoked.push(url)},
+    state:{csrf:'signed-in-session'},attachmentContentType:'application/vnd.moyai.attachment-v1',
+    sealAttachment:async(file,id,name,csrf)=>{assert.equal(csrf,'signed-in-session');assert.equal(name,file.name);return 'sealed file bytes';},
     crypto:{randomUUID:()=>String(requests.length+1).padStart(32,'0')},
     document:Object.assign(new Element(),{createElement:()=>new Element()}),
     esc:value=>String(value).replaceAll('<','&lt;').replaceAll('"','&quot;'),toast:()=>{},
@@ -31,6 +33,9 @@ test('pasted files show immediately, preserve text, and block send until upload 
   assert.equal(f.input.value,'My unsent text');assert.equal(f.input.required,false);
   assert.match(f.form.children[0].innerHTML,/blob:test/);
   assert.throws(()=>f.controller.ids(),/Wait for uploads/);
+  await flush();
+  assert.equal(f.requests[0].options.body,'sealed file bytes');
+  assert.equal(f.requests[0].options.headers['Content-Type'],'application/vnd.moyai.attachment-v1');
   f.requests[0].resolve({id:'1'.padStart(32,'0'),name:f.file.name,size:123,preview_url:'/safe/preview'});await flush();
   assert.deepEqual(Array.from(f.controller.ids()),['1'.padStart(32,'0')]);
   assert.match(f.form.children[0].innerHTML,/123 B/);
@@ -39,8 +44,9 @@ test('pasted files show immediately, preserve text, and block send until upload 
 
 test('ordinary text paste remains native; failed uploads and navigation retain the draft',async()=>{
   const f=fixture();assert.equal(f.paste([]).prevented,undefined);
-  f.paste();f.requests[0].reject(new Error('Network unavailable'));await flush();
+  f.paste();await flush();f.requests[0].reject(new Error('Network unavailable'));await flush();
   assert.match(f.form.children[0].innerHTML,/Upload failed/);
+  assert.match(f.form.children[0].innerHTML,/Network unavailable/);
   assert.throws(()=>f.controller.ids(),/retry\/remove/);
   f.controller.destroy();
   const other=f.ctx.bindAttachments(f.input,f.form,'session-one');
@@ -52,10 +58,35 @@ test('ordinary text paste remains native; failed uploads and navigation retain t
 test('drop uses the same upload flow and attached-file removal never edits the text',async()=>{
   const f=fixture();const event={dataTransfer:{types:['Files'],files:[f.file]},preventDefault(){this.prevented=true;},stopPropagation(){}};
   f.form.listeners.drop(event);assert.equal(event.prevented,true);
+  await flush();
   const id='1'.padStart(32,'0');f.requests[0].resolve({id,name:f.file.name,size:123});await flush();
   f.form.children[0].onclick({target:{closest:()=>({dataset:{remove:id}})}});
   assert.deepEqual(Array.from(f.controller.ids()),[]);assert.equal(f.input.value,'My unsent text');
   assert.equal(f.requests[1].options.method,'DELETE');assert.equal(f.revoked.length,1);
+});
+
+test('failed uploads keep the file ID and encrypt again on retry',async()=>{
+  const f=fixture();let encryptions=0;
+  f.ctx.sealAttachment=async()=>`sealed-${++encryptions}`;
+  f.paste();await flush();f.requests[0].reject(new Error('Temporary service error'));await flush();
+  const id='1'.padStart(32,'0');
+  f.form.children[0].onclick({target:{closest:()=>({dataset:{retry:id}})}});await flush();
+  assert.equal(f.requests[1].path,f.requests[0].path);
+  assert.equal(f.requests[1].options.body,'sealed-2');
+  f.requests[1].resolve({id,name:f.file.name,size:123});await flush();
+  assert.deepEqual(Array.from(f.controller.ids()),[id]);
+  assert.doesNotMatch(f.form.children[0].innerHTML,/Temporary service error/);
+});
+
+test('removing a file during encryption prevents a late upload',async()=>{
+  const f=fixture();let finish;
+  f.ctx.sealAttachment=()=>new Promise(resolve=>{finish=resolve;});
+  f.paste();
+  const id='1'.padStart(32,'0');
+  f.form.children[0].onclick({target:{closest:()=>({dataset:{remove:id}})}});
+  finish('sealed');await flush();
+  assert.equal(f.requests.length,1);assert.equal(f.requests[0].options.method,'DELETE');
+  assert.deepEqual(Array.from(f.controller.ids()),[]);
 });
 
 test('file limits and names cannot inject markup into cards',()=>{

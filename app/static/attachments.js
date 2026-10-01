@@ -42,14 +42,16 @@ function bindAttachments(input,form,key){
   const render=()=>{
     region.hidden=!draft.items.length;button.disabled=!!draft.locked;
     input.required=!draft.items.length;
-    region.innerHTML=draft.items.map(file=>`<div class="draft-attachment ${imageFile(file)?'is-image':''} ${file.status==='error'?'upload-error':''}"><button type="button" class="attachment-open" data-preview="${file.id}" aria-label="Preview ${esc(file.name)}">${fileVisual(file,file.preview_url||file.localUrl)}<span><strong>${esc(file.name)}</strong><small>${file.status==='uploading'?'Uploading…':file.status==='error'?'Upload failed':fileSize(file.size)}</small></span></button><button type="button" class="attachment-remove" data-remove="${file.id}" aria-label="Remove ${esc(file.name)}" ${draft.locked?'disabled':''}>×</button>${file.status==='error'?`<button type="button" class="attachment-retry" data-retry="${file.id}" ${draft.locked?'disabled':''}>Retry</button>`:''}</div>`).join('');
+    region.innerHTML=draft.items.map(file=>`<div class="draft-attachment ${imageFile(file)?'is-image':''} ${file.status==='error'?'upload-error':''}"><button type="button" class="attachment-open" data-preview="${file.id}" aria-label="Preview ${esc(file.name)}">${fileVisual(file,file.preview_url||file.localUrl)}<span><strong>${esc(file.name)}</strong><small>${file.status==='uploading'?'Uploading…':file.status==='error'?'Upload failed':fileSize(file.size)}</small></span></button><button type="button" class="attachment-remove" data-remove="${file.id}" aria-label="Remove ${esc(file.name)}" ${draft.locked?'disabled':''}>×</button>${file.status==='error'?`<p class="attachment-error-detail">${esc(file.error)}</p><button type="button" class="attachment-retry" data-retry="${file.id}" ${draft.locked?'disabled':''}>Retry</button>`:''}</div>`).join('');
   };
   draft.listeners.add(render);render();
   const discard=async item=>{try{await api('/api/attachments/'+item.id,{method:'DELETE'});}catch{/* Unsent uploads expire after 24 hours. */}};
   async function upload(item){
     item.status='uploading';item.abort=new AbortController();notify();
     try{
-      const saved=await api('/api/attachments/'+item.id+'?name='+encodeURIComponent(item.name),{method:'PUT',body:item.file,headers:{'Content-Type':'application/octet-stream'},signal:item.abort.signal});
+      const body=await sealAttachment(item.file,item.id,item.name,state.csrf);
+      if(!draft.items.includes(item))return;
+      const saved=await api('/api/attachments/'+item.id+'?name='+encodeURIComponent(item.name),{method:'PUT',body,headers:{'Content-Type':attachmentContentType},signal:item.abort.signal});
       if(!draft.items.includes(item)){await discard(item);return;}
       Object.assign(item,saved,{status:'ready'});announce.textContent=item.name+' attached';
     }catch(error){if(draft.items.includes(item)){item.status='error';item.error=error.message;toast(error.message);}}

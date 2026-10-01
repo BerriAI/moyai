@@ -6,7 +6,17 @@ const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...options.headers}});
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'The request could not be completed.');
+  if (!response.ok) {
+    const upload = options.method === 'PUT' && path.startsWith('/api/attachments/');
+    const fallback = upload ? (
+      response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
+      response.status === 413 ? 'This file is too large. Attach a file under 10 MB.' :
+      response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
+      response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
+      `Upload failed (HTTP ${response.status}). Retry this file.`
+    ) : `The request could not be completed (HTTP ${response.status}).`;
+    throw new Error(typeof body.detail === 'string' ? body.detail : fallback);
+  }
   return body;
 }
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }

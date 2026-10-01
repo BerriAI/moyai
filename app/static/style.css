@@ -54,6 +54,7 @@
 .attachment-remove{position:absolute;right:-6px;top:-7px;width:24px;height:24px;display:grid;place-items:center;padding:0!important;border:1px solid #e0dce5!important;border-radius:50%;background:#fff!important;box-shadow:0 2px 5px #34264214;font-size:18px;line-height:1;color:#6e6378}
 .attachment-remove:hover{color:#33203f;background:#f6f1fa!important}.attachment-remove:disabled{opacity:.4}
 .upload-error{border-color:#bd7181}.upload-error small{color:#a14860}.attachment-retry{font-size:11px;border:0;background:transparent;color:#7155a4;padding:0 12px 9px!important}
+.attachment-error-detail{font-size:11px;line-height:1.4;color:#a14860;margin:0;padding:0 12px 8px;overflow-wrap:anywhere}
 .attachment-dragging{outline:2px dashed #9e84bd;outline-offset:4px;background:#fbf8ff!important}
 .attachment-dragging:after{content:'Drop files to attach';position:absolute;inset:0;display:grid;place-items:center;background:#f9f5ffef;border-radius:inherit;color:#745191;font-size:15px;font-weight:500;pointer-events:none;z-index:5}
 .message-attachments{display:flex;flex-wrap:wrap;gap:10px;margin-top:13px}
