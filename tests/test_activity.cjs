@@ -48,15 +48,15 @@ test('legacy events use claimed turn markers, with no raw argument or result dum
   const markup=html(groups(data).get('1'));assert.match(markup,/Using read_file/);assert.match(markup,/Saving workspace/);assert.doesNotMatch(markup,/private-marker/);
 });
 
-test('tool details and commentary are escaped; old updates remain expandable',()=>{
+test('tool details are escaped; public commentary is excluded from expandable work history',()=>{
   const data=run();for(let i=2;i<14;i++)data.events.push(tool(i,String(i),'completed',{command:'echo <script>alert(1)</script>'}));data.events.push(event(14,'message','<img onerror=alert(1)>',{turn_id:1}));
-  const markup=html(groups(data).get('1'));assert.match(markup,/Show 6 earlier updates/);assert.doesNotMatch(markup,/<script>|<img/);assert.match(markup,/&lt;script&gt;/);
+  const markup=html(groups(data).get('1'));assert.match(markup,/Show 5 earlier updates/);assert.doesNotMatch(markup,/<script>|<img/);assert.match(markup,/&lt;script&gt;/);
 });
 
 test('timers update only text, while feed sync skips unchanged history and preserves reading position',()=>{
   assert.equal(duration(0,65000),'1m 5s');assert.equal(duration(0,3601000),'1h 0m');assert.equal(duration(100,50),'0s');
   let writes=0;const slot={dataset:{workSlot:'1'},querySelectorAll:()=>[],contains:()=>false,set innerHTML(value){writes++;this.html=value;}};
-  const container={scrollHeight:1000,scrollTop:100,clientHeight:400,querySelectorAll:()=>[slot]};const data=run();data.events.push(tool(2,'a','started'));
+  const container={scrollHeight:1000,scrollTop:100,clientHeight:400,querySelectorAll:selector=>selector==='[data-work-slot]'?[slot]:[]};const data=run();data.events.push(tool(2,'a','started'));
   sync(container,data);sync(container,data);assert.equal(writes,1);assert.equal(container.scrollTop,100);
   const timer={dataset:{workTimer:Date.now()-3000},textContent:''};tick({querySelectorAll:()=>[timer]});assert.equal(timer.textContent,'3s');assert.equal(writes,1);
 });
@@ -67,7 +67,7 @@ test('expanded commands survive incoming events and keep keyboard focus',()=>{
     {dataset:{workKey:'1:a'},open:true,querySelector:()=>({addEventListener:()=>{},focus:()=>{focused=true;}})}];
   let current=nodes();
   const slot={dataset:{workSlot:'1',workLive:'true'},contains:()=>true,querySelectorAll:()=>current,set innerHTML(value){current=nodes().map(node=>({...node,open:false}));}};
-  const container={scrollHeight:1000,scrollTop:50,clientHeight:400,ownerDocument:{activeElement:{closest:()=>current[1]}},querySelectorAll:()=>[slot]};
+  const container={scrollHeight:1000,scrollTop:50,clientHeight:400,ownerDocument:{activeElement:{closest:()=>current[1]}},querySelectorAll:selector=>selector==='[data-work-slot]'?[slot]:[]};
   const data=run();data.events.push(tool(2,'a','started'));
   sync(container,data);assert.equal(current[1].open,true);assert.equal(focused,true);assert.equal(container.scrollTop,50);
   data.events.push(tool(3,'a','completed'));sync(container,data);assert.equal(current[1].open,true);
@@ -79,7 +79,7 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],value:'draft kept',innerHTML:''});return nodes.get(selector);}
   const data=run();data.mode='modal';data.messages[0].content='First request';data.messages[1].content='Next request';
   const state={selected:'chat',sending:new Set(),userId:'user',drafts:{chat:'draft kept'}};
-  const context={state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
   assert.match(node('#conversation').innerHTML,/data-work-slot="1"/);
@@ -109,7 +109,7 @@ test('steering inputs share the original work timeline and do not invent another
   const script=readFileSync('app/static/app.js','utf8');
   const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],innerHTML:''});return nodes.get(selector);}
   data.messages[0].content='Original objective';
-  const context={state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
   const markup=node('#conversation').innerHTML;
@@ -117,6 +117,9 @@ test('steering inputs share the original work timeline and do not invent another
   assert.match(markup,/data-work-slot="1"/);assert.doesNotMatch(markup,/data-work-slot="2"/);
   assert(markup.indexOf('Also check caching')<markup.indexOf('data-work-slot="1"'));
   assert.match(markup,/>Steering</);
+  assert.match(markup,/data-update-slot="1"/);assert.match(markup,/data-update-slot="2"/);
+  assert(markup.indexOf('data-update-slot="1"')<markup.indexOf('Also check caching'));
+  assert(markup.indexOf('Also check caching')<markup.indexOf('data-update-slot="2"'));
 });
 
 test('backgrounded commands do not claim a finished process',()=>{

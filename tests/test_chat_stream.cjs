@@ -82,3 +82,13 @@ test('late callbacks from an old stream cannot change the replacement chat', () 
   assert.equal(b.timers.size, 0);
   assert.deepEqual(b.rendered, []);
 });
+
+test('a steering receipt refreshes its user input before subsequent public updates',()=>{
+  const b=browser();
+  const receipt={id:11,kind:'status',data:{phase:'steering',message_id:42}};
+  b.sources[0].onmessage({data:JSON.stringify(receipt)});
+  b.sources[0].onmessage({data:JSON.stringify({id:12,kind:'message',message:'Answer to the correction.'})});
+  b.sources[0].onmessage({data:JSON.stringify(receipt)});
+  assert.deepEqual(b.refreshes,['chat-a']);
+  assert.deepEqual(b.live.filter(update=>update.event).map(update=>update.event.id),[11,12]);
+});

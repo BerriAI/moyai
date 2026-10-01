@@ -53,25 +53,68 @@
       turn.pulse=turn.live&&!waiting.has(turn.status)&&!run.activity_disconnected;
       turn.summary=running.length?`${running.at(-1).message}${running.length>1?` · ${running.length} tools running`:''}`:
         turn.live&&latest?.data?.phase==='processing'?'Reviewing results and preparing the next step':
-        turn.live&&latest?.kind==='message'?latest.message:turn.live&&latest?latest.message:'';
+        turn.live&&latest?.kind==='message'?'Continuing the task':turn.live&&latest?latest.message:'';
       turn.count=turn.rows.filter(row=>row.kind==='tool').length;
     }
     return turns;
   }
+  function updates(run,turns=groups(run)){
+    const result=new Map();
+    for(const turn of turns.values()){
+      let input=turn.id;
+      for(const event of turn.events){
+        // Delivery receipts place public replies after the correction they
+        // followed, not after a queued input that has not reached the agent.
+        const data=event.data||{};
+        if(data.phase==='steering'&&data.message_id)input=String(data.message_id);
+        if(event.kind!=='message'||data.phase==='processing'||!event.message?.trim())continue;
+        if(!result.has(input))result.set(input,[]);
+        result.get(input).push({id:String(data.activity_id||event.id),content:event.message});
+      }
+    }
+    return result;
+  }
+  function updateHTML(update,markdown=esc){
+    return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">⧉</button></article>`;
+  }
+  function syncUpdates(slot,items,{markdown,copy}){
+    const existing=new Map([...slot.querySelectorAll('[data-update-id]')].map(node=>[node.dataset.updateId,node]));
+    items.forEach((update,index)=>{
+      let node=existing.get(update.id);
+      if(!node||node.dataset.updateContent!==update.content){
+        // Only new/changed updates get new DOM. Incoming tools must not erase
+        // a selected passage, focused link, or copied update the user is reading.
+        const template=slot.ownerDocument.createElement('template');
+        template.innerHTML=updateHTML(update,markdown);
+        const fresh=template.content.firstElementChild;
+        fresh.dataset.updateContent=update.content;
+        if(node)node.replaceWith(fresh);
+        node=fresh;
+        const button=node.querySelector('.copy-update');
+        button.onclick=()=>copy?.(update.content,button);
+        node.querySelectorAll('.copy-code').forEach(button=>button.onclick=()=>copy?.(button.closest('.code-block').querySelector('code').textContent,button));
+      }
+      if(slot.children[index]!==node)slot.insertBefore(node,slot.children[index]||null);
+      existing.delete(update.id);
+    });
+    existing.forEach(node=>node.remove());
+  }
   function rowHTML(row,turn){
-    const icon={command:'⌘',file:'▤'}[row.category]||(row.kind==='message'?'✦':row.kind==='tool'?'◇':'·');
+    const icon={command:'⌘',file:'▤'}[row.category]||(row.kind==='tool'?'◇':'·');
     const status={running:'Running',completed:'Finished',backgrounded:'Moved to background',error:'Error',paused:'Paused',unconfirmed:'No completion received',disconnected:'Reconnecting'}[row.state]||'';
     const detail=row.command||row.path;
     const title=row.path?`${row.message} · ${row.path}`:row.command?`${row.message} · ${row.command.split('\n')[0].slice(0,110)}`:row.message;
     const timer=row.duration_ms!=null?duration(0,row.duration_ms):row.state==='running'?`<span data-work-timer="${Date.parse(row.start)}">${duration(Date.parse(row.start))}</span>`:'';
     const line=`<span class="work-icon" aria-hidden="true">${icon}</span><span class="work-action-title">${esc(title)}</span><span class="work-action-state">${esc(status)}</span><span class="work-action-time">${timer}</span>`;
-    if(row.kind==='message')return `<li class="work-commentary"><span aria-hidden="true">✦</span><p>${esc(row.message)}</p></li>`;
     return `<li class="work-action ${esc(row.state)}">${detail?`<details data-work-key="${esc(turn.id+':'+row.id)}"><summary>${line}</summary><div class="work-action-detail"><span>${row.command?'Command':'File'}</span><pre>${esc(detail)}</pre>${row.exit_code!=null?`<small>Exit code ${esc(row.exit_code)}</small>`:''}</div></details>`:`<div class="work-action-line">${line}</div>`}</li>`;
   }
   function html(turn){
     if(!turn||(!turn.start&&!turn.rows.length))return '';
     const key='turn:'+turn.id;
-    const older=turn.rows.slice(0,-7),recent=turn.rows.slice(-7);
+    // Public assistant text belongs in visible chat updates, never inside a
+    // collapsible tool-history section (including "earlier updates").
+    const rows=turn.rows.filter(row=>row.kind!=='message');
+    const older=rows.slice(0,-7),recent=rows.slice(-7);
     return `<details class="turn-work ${turn.pulse?'is-live':''}" data-work-key="${esc(key)}" data-turn="${esc(turn.id)}" ${turn.live?'open':''}>
       <summary class="work-heading"><span class="work-indicator" aria-hidden="true">${turn.live?'':turn.status==='completed'||turn.status==='idle'?'✓':'!'}</span><span class="work-title">${esc(turn.headline)}</span><span class="work-count">${turn.count?`${turn.count} action${turn.count===1?'':'s'}`:''}</span><time class="work-elapsed" ${turn.live?`data-work-timer="${turn.start}"`:''}>${duration(turn.start,turn.end||Date.now())}</time><span class="work-chevron" aria-hidden="true">›</span></summary>
       <div class="work-body">${older.length?`<details class="work-earlier" data-work-key="earlier:${esc(turn.id)}"><summary>Show ${older.length} earlier updates</summary><ol class="work-list">${older.map(row=>rowHTML(row,turn)).join('')}</ol></details>`:''}
@@ -79,10 +122,12 @@
       ${turn.live?`<div class="work-current" role="status"><span class="work-live-dot" aria-hidden="true"></span><span>${esc(waiting.has(turn.status)?turn.headline:turn.summary||turn.headline)}</span></div>`:''}</div></details>`;
   }
   function tick(container){container?.querySelectorAll('[data-work-timer]').forEach(node=>{node.textContent=duration(Number(node.dataset.workTimer));});}
-  function sync(container,run){
+  function sync(container,run,options={}){
     if(!container)return;
     const nearBottom=container.scrollHeight-container.scrollTop-container.clientHeight<100;
     const turns=groups(run);
+    const byInput=updates(run,turns);
+    container.querySelectorAll('[data-update-slot]').forEach(slot=>syncUpdates(slot,byInput.get(slot.dataset.updateSlot)||[],options));
     container.querySelectorAll('[data-work-slot]').forEach(slot=>{
       const turn=turns.get(slot.dataset.workSlot);
       const signature=JSON.stringify(turn);
@@ -103,6 +148,6 @@
     });
     if(nearBottom)container.scrollTop=container.scrollHeight;
   }
-  const api={groups,html,duration,tick,sync};root.MoyaiActivity=api;
+  const api={groups,updates,updateHTML,html,duration,tick,sync};root.MoyaiActivity=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);

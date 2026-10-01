@@ -177,7 +177,7 @@ function connectChatStream(run){
       if(!current())return;
       const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;renderLiveWork(event,false);
       if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));
-      if(['chat','approval','artifact','context','agents','credential'].includes(event.kind))refreshChat(id).catch(showError);
+      if(['chat','approval','artifact','context','agents','credential'].includes(event.kind)||(event.data?.phase==='steering'&&event.data?.message_id))refreshChat(id).catch(showError);
     };
     source.addEventListener('run-status',e=>{if(current()){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
     source.onerror=()=>{
@@ -192,7 +192,7 @@ function connectChatStream(run){
   connect();
 }
 function updateChatStatus(run){
-  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun);}
+  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});}
   if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
@@ -215,10 +215,12 @@ function updateChat(run,initial=false){
   const signature=JSON.stringify(transcript);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
+    const updateSlots=new Map([...box.querySelectorAll('[data-update-slot]')].map(slot=>[slot.dataset.updateSlot,slot]));
     const workSlots=new Map([...box.querySelectorAll('[data-work-slot]')].map(slot=>[slot.dataset.workSlot,slot]));
-    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const workId=m.steering_parent_id||m.id;const laterSteering=transcript.slice(index+1).some(next=>next.role==='user'&&next.steering_parent_id===workId);const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>${m.role==='user'&&!laterSteering?`<div data-work-slot="${workId}"></div>`:''}`;}).join('')}</div>`;
+    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const workId=m.steering_parent_id||m.id;const laterSteering=transcript.slice(index+1).some(next=>next.role==='user'&&next.steering_parent_id===workId);const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>${m.role==='user'?`<div data-update-slot="${m.id}"></div>`:''}${m.role==='user'&&!laterSteering?`<div data-work-slot="${workId}"></div>`:''}`;}).join('')}</div>`;
+    box.querySelectorAll('[data-update-slot]').forEach(slot=>{const previous=updateSlots.get(slot.dataset.updateSlot);if(previous)slot.replaceWith(previous);});
     box.querySelectorAll('[data-work-slot]').forEach(slot=>{const previous=workSlots.get(slot.dataset.workSlot);if(previous)slot.replaceWith(previous);});
-    MoyaiActivity.sync(box,run);
+    MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
@@ -234,7 +236,7 @@ function renderLiveWork(event,disconnected){
   const run=state.chatRun;if(!run||run.id!==state.selected)return;
   run.activity_disconnected=disconnected;
   if(event&&!run.events.some(existing=>existing.id===event.id))run.events.push(event);
-  MoyaiActivity.sync($('#conversation'),run);
+  MoyaiActivity.sync($('#conversation'),run,{markdown:renderMarkdown,copy:copyText});
 }
 async function copyText(text,button){try{await navigator.clipboard.writeText(text);const label=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=label,1800);}catch{toast('Could not copy. You can select and copy the text.');}}
 function renderAgentDetails(team){
