@@ -22,7 +22,7 @@ async function api(path, options = {}) {
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : min < 1440 ? `${Math.floor(min/60)}h ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; }
+function stopStream(){ clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; }
 function sessionTitle(run){return (run.agent_label||run.prompt||'Session').split('\n')[0].replace(/\s+/g,' ').trim();}
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Hermes Agent';}
 function modelPicker(id,selected,disabled=false){return `<label class="model-picker"><span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label>`;}
@@ -170,17 +170,17 @@ function connectChatStream(run){
     if(state.selected!==id)return;
     const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
     const current=()=>state.selected===id&&state.source===source;
-    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;refreshChat(id).catch(showError);}};
+    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;renderLiveWork(null,false);refreshChat(id).catch(showError);}};
     source.onmessage=e=>{
       if(!current())return;
-      const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;
+      const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;renderLiveWork(event,false);
       if(!['chat','result'].includes(event.kind))$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));
       if(['chat','approval','artifact','context','agents','credential'].includes(event.kind))refreshChat(id).catch(showError);
     };
     source.addEventListener('run-status',e=>{if(current()){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
     source.onerror=()=>{
       if(!current())return;
-      $('#connection-state').hidden=false;
+      $('#connection-state').hidden=false;renderLiveWork(null,true);
       // HTTP errors during a deploy can permanently close native EventSource.
       // Reopen from the last received event without replacing the composer.
       source.close();clearTimeout(state.streamRetry);
@@ -190,6 +190,7 @@ function connectChatStream(run){
   connect();
 }
 function updateChatStatus(run){
+  if(state.chatRun){Object.assign(state.chatRun,run);MoyaiActivity.sync($('#conversation'),state.chatRun);}
   if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected])$('#chat-model').value=run.model;
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
@@ -197,16 +198,22 @@ function updateChatStatus(run){
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?'Follow-ups queue after this response.':'Your conversation and files stay here.';
   if(state.activeParentId)$('#queue-note').textContent='Chatting with this agent directly. Results already sent to the parent stay saved.';
   $('#chat-working').classList.toggle('busy',busy);
-  $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Moyai is working…',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for a provider key. Your work is saved and the sandbox is paused.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  $('#chat-working').textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',running:'Live activity above',saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for a provider key. Your work is saved and the sandbox is paused.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
   if(busy&&run.active_model)$('#chat-working').textContent+=' · '+modelName(run.active_model);
   const item=state.runs.flatMap(r=>[r,...(r.children||[])]).find(r=>r.id===state.selected);if(item&&item.status!==run.status){item.status=run.status;renderSidebar();}
 }
 function updateChat(run,initial=false){
+  const previous=state.chatRun?.id===run.id?state.chatRun:null;
+  run.events=[...new Map([...(run.events||[]),...(previous?.events||[])].map(event=>[event.id,event])).values()].sort((a,b)=>a.id-b.id);
+  run.activity_disconnected=previous?.activity_disconnected||false;state.chatRun=run;
   const box=$('#conversation');const atBottom=initial||box.scrollHeight-box.scrollTop-box.clientHeight<100;
   const signature=JSON.stringify(run.messages);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
-    box.innerHTML=`<div class="conversation-inner">${run.messages.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(run.messages[index-1]?.status)?run.messages[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`;}).join('')}</div>`;
+    const workSlots=new Map([...box.querySelectorAll('[data-work-slot]')].map(slot=>[slot.dataset.workSlot,slot]));
+    box.innerHTML=`<div class="conversation-inner">${run.messages.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(run.messages[index-1]?.status)?run.messages[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>${m.role==='user'?`<div data-work-slot="${m.id}"></div>`:''}`;}).join('')}</div>`;
+    box.querySelectorAll('[data-work-slot]').forEach(slot=>{const previous=workSlots.get(slot.dataset.workSlot);if(previous)slot.replaceWith(previous);});
+    MoyaiActivity.sync(box,run);
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
@@ -217,6 +224,12 @@ function updateChat(run,initial=false){
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
   $('#artifact-area').innerHTML=run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download latest files</a>`:'';
   $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
+}
+function renderLiveWork(event,disconnected){
+  const run=state.chatRun;if(!run||run.id!==state.selected)return;
+  run.activity_disconnected=disconnected;
+  if(event&&!run.events.some(existing=>existing.id===event.id))run.events.push(event);
+  MoyaiActivity.sync($('#conversation'),run);
 }
 async function copyText(text,button){try{await navigator.clipboard.writeText(text);const label=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=label,1800);}catch{toast('Could not copy. You can select and copy the text.');}}
 function renderAgentDetails(team){
@@ -351,3 +364,6 @@ setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()
 boot();
 
 setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected&&state.runs.find(r=>r.id===state.selected)?.children?.some(c=>!terminal.has(c.status)))refreshChat(state.selected).catch(()=>{});},10000);
+
+// Only elapsed labels change between actual events; drafts and expanded rows stay put.
+setInterval(()=>MoyaiActivity.tick($('#conversation')),1000);

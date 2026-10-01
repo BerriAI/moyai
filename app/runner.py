@@ -324,7 +324,7 @@ class RunManager:
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if run.get("snapshot_id"):
-            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py", "attachments.py"):
+            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py", "attachments.py", "activity.py"):
                 await sandbox.filesystem.write_text.aio((SANDBOX_FILES / name).read_text(), f"/opt/workspace-runner/{name}")
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")

@@ -7,7 +7,7 @@ const vm = require('node:vm');
 // close on a deployment's HTTP error, as native EventSource does.
 function browser() {
   const script = readFileSync('app/static/app.js', 'utf8');
-  const sources = [], timers = new Map(), rendered = [], refreshes = [];
+  const sources = [], timers = new Map(), rendered = [], refreshes = [], live = [];
   const notice = {hidden: true};
   const state = {selected: 'chat-a', source: null, drafts: {'chat-a': 'unsent reply'}};
   let nextTimer = 0;
@@ -24,6 +24,7 @@ function browser() {
     eventHTML: event => event.id,
     refreshChat: async id => {refreshes.push(id);},
     updateChatStatus: () => {},
+    renderLiveWork: (event, disconnected) => { live.push({event, disconnected}); },
     showError: error => {throw error;},
     setTimeout: fn => {timers.set(++nextTimer, fn); return nextTimer;},
     clearTimeout: id => timers.delete(id),
@@ -34,7 +35,7 @@ function browser() {
     script.slice(script.indexOf('function connectChatStream('), script.indexOf('function updateChatStatus(')), context);
   context.connectChatStream({id: 'chat-a', events: [{id: 10}]});
   const retry = () => {const [id, fn] = timers.entries().next().value; timers.delete(id); fn();};
-  return {context, state, sources, timers, rendered, refreshes, notice, retry};
+  return {context, state, sources, timers, rendered, refreshes, notice, retry, live};
 }
 
 test('recovers after repeated deployment errors, resumes the cursor, and preserves the draft', () => {
@@ -51,6 +52,8 @@ test('recovers after repeated deployment errors, resumes the cursor, and preserv
   b.sources[2].onmessage({data: JSON.stringify({id: 11, kind: 'tool'})});
   b.sources[2].onmessage({data: JSON.stringify({id: 12, kind: 'tool'})});
   assert.deepEqual(b.rendered, [11, 12]);
+  assert.deepEqual(b.live.filter(update=>update.event).map(update=>update.event.id), [11, 12]);
+  assert.equal(b.live.filter(update=>update.disconnected).length, 2);
   assert.deepEqual(b.refreshes, ['chat-a']);
   assert.equal(b.notice.hidden, true);
   assert.equal(b.state.drafts['chat-a'], 'unsent reply');

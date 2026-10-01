@@ -413,7 +413,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

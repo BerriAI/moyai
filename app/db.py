@@ -388,9 +388,19 @@ class Store:
         self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id))
 
     def event(self, run_id: str, kind: str, message: str, data=None):
+        data = dict(data) if isinstance(data, dict) else {}
+        if kind != 'chat':
+            # A queued user's creation time can precede the current response.
+            # Bind work to the server's claimed turn, never a sandbox-supplied ID.
+            active = self.rows('SELECT active_message_id FROM runs WHERE id=?', (run_id,))
+            data['turn_id'] = active[0]['active_message_id'] if active else 0
         # Keep bounded event history even if an agent floods stdout.
         count = self.rows("SELECT COUNT(*) AS n FROM events WHERE run_id=?", (run_id,))[0]["n"]
-        if count >= 2000 and kind not in {"result", "error", "artifact", "approval", "status"}:
+        if count >= 2000 and kind not in {"result", "error", "artifact", "approval", "status", "chat"}:
+            if not self.rows("SELECT 1 FROM events WHERE run_id=? AND kind='status' AND message='Detailed activity limit reached' LIMIT 1", (run_id,)):
+                self.event(run_id, 'status', 'Detailed activity limit reached',
+                           {'detail': 'Additional tool details are no longer recorded for this session. Response and workspace saves continue.',
+                            'activity_version': 1, 'phase': 'limited'})
             return
         self.execute(
             "INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)",
