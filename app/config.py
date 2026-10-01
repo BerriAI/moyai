@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         # unrelated global gateway key. Containers do not contain the .env file.
         return init_settings, dotenv_settings, env_settings, file_secret_settings
     data_dir: Path = Path(".data")
+    attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False

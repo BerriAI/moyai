@@ -262,8 +262,15 @@ class RunManager:
         return run_id in self.jobs
 
     def spec(self, run):
+        from .attachments import attachment_context
         run_id = run["id"]
+        uploads = self.store.attachments.for_run(run_id, run.get('message_id') or 0)
+        by_message = {}
+        for upload in uploads:
+            by_message.setdefault(upload['message_id'], []).append(upload)
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
+                "attachments": uploads,
+                "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
                 "github_repository": self.settings.allowed_github_repositories()[0] if 'github' in run['plugins'] else '',
                 "github_repositories": self.settings.allowed_github_repositories() if 'github' in run['plugins'] else [],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
@@ -277,7 +284,7 @@ class RunManager:
                 "workspace_warning": run.get("checkpoint_error", ""),
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
-                "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"]} for m in self.store.messages(run_id)
+                "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
                                      if m["id"] < run.get("message_id", 0) and m["status"] not in {"queued", "running"}]}
         return spec
 
@@ -317,7 +324,7 @@ class RunManager:
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if run.get("snapshot_id"):
-            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py"):
+            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py", "attachments.py"):
                 await sandbox.filesystem.write_text.aio((SANDBOX_FILES / name).read_text(), f"/opt/workspace-runner/{name}")
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")

@@ -6,7 +6,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -34,10 +34,12 @@ from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills, LoadSkill, TOOL as SKILL_TOOL
+from .attachments import MAX_FILE
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
 Provider = Literal["linear", "slack", "notion", "github"]
+AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 
 class NewRun(BaseModel):
@@ -48,6 +50,8 @@ class NewRun(BaseModel):
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
+    attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
+    client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
 
     @field_validator("repo_url")
     @classmethod
@@ -87,6 +91,7 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1, max_length=16000)
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
+    attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
 
 
 class ConnectionPolicy(BaseModel):
@@ -158,6 +163,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(credentials.routes())
     app.state.credentials = credentials
     app.include_router(skills.routes())
+    app.include_router(store.attachments.routes(security, settings))
     app.state.skills = skills
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
@@ -181,6 +187,8 @@ def create_app(settings: Settings | None = None):
         except ValueError:
             return JSONResponse({"detail": "Invalid request length"}, status_code=400)
         limit = MAX_WIRE if request.url.path.startswith('/broker/') and request.headers.get('content-type') == CONTENT_TYPE else MAX_BODY
+        if request.method == 'PUT' and request.url.path.startswith('/api/attachments/'):
+            limit = MAX_FILE
         if length < 0 or length > limit:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
         response = await call_next(request)
@@ -191,7 +199,7 @@ def create_app(settings: Settings | None = None):
                 return JSONResponse({"detail": "Cloud persistence could not be confirmed. Refresh before retrying an action."}, status_code=503)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if request.url.path == '/auth/github/register':
             response.headers['Content-Security-Policy'] += ' https://github.com'
         if request.url.path.startswith(("/api/", "/oauth/", "/auth/", "/broker/")):
@@ -324,14 +332,12 @@ def create_app(settings: Settings | None = None):
             connected = {item["id"] for item in connectors.list() if item["connected"] and item["enabled"]}
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
-        pending = store.rows("SELECT COUNT(*) AS n FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')")[0]["n"]
-        if pending >= settings.max_pending_runs:
-            raise HTTPException(429, "The queue is full. Wait for a task to finish.")
         user_id = store.identity(security.session_info(request))
         try:
-            run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id)
+            run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id)
         except ValueError as exc:
-            raise HTTPException(429, str(exc))
+            raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         manager.submit(run)
         return public_run(run)
@@ -369,7 +375,7 @@ def create_app(settings: Settings | None = None):
         try:
             user_id = store.identity(security.session_info(request))
             enqueue = coordinator.enqueue_child if run['parent_run_id'] else slack.chat.enqueue_web
-            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id)
+            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id, body.attachment_ids)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
@@ -658,6 +664,10 @@ def create_app(settings: Settings | None = None):
         run = require_run(run_id, request)
         return {"object": "list", "data": [{"id": run['active_model'] or run['model'] or settings.agent_model, "object": "model", "owned_by": "workspace"}]}
 
+    @app.get('/broker/{run_id}/attachments/{attachment_id}')
+    async def broker_attachment(run_id: str, attachment_id: str, request: Request):
+        return store.attachments.broker_file(require_run(run_id, request), attachment_id)
+
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
         return await slack.receive(request, missing_cloud())
@@ -689,6 +699,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(429, "This run reached its model request limit.")
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
+        payload['messages'] = store.attachments.with_images(run, payload['messages'])
         skill_context = skills.context(run)
         if skill_context:
             # The original platform system instructions stay last and take

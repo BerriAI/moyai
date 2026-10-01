@@ -40,6 +40,20 @@ def drain(app):
     raise AssertionError('Outbox did not drain')
 
 
+def test_web_attachment_mirrors_a_protected_link_once_without_file_bytes(mirror):
+    from test_attachments import upload
+    app, client, run_id = start(mirror)
+    sign_in(app, client)
+    file = upload(client).json()
+    body = {'content': 'Read the document', 'client_id': 'web-file-message', 'attachment_ids': [file['id']]}
+    assert client.post(f'/api/runs/{run_id}/messages', json=body).json()['created'] is True
+    assert client.post(f'/api/runs/{run_id}/messages', json=body).json()['created'] is False
+    rows = app.state.store.rows("SELECT text FROM slack_outbox WHERE kind='input'")
+    assert len(rows) == 1 and 'SKILL.md' in rows[0]['text']
+    assert '/#run=' + run_id in rows[0]['text']
+    assert 'User-provided file' not in rows[0]['text']
+
+
 def test_web_retry_two_sso_senders_and_answer_order(mirror):
     app, client, run_id = start(mirror)
     # A saved answer can precede a web input before the collector runs.

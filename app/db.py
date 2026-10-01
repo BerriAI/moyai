@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .attachments import Attachments
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -162,6 +164,7 @@ class Store:
                 if name not in columns:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
         self.path.chmod(0o600)
+        self.attachments = Attachments(self)
 
     @contextmanager
     def connect(self):
@@ -192,12 +195,20 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id=''):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None):
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
+            if client_id:
+                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                if previous:
+                    if (previous['content'] != prompt or previous['model'] != model or previous['repo_url'] != repo_url
+                            or previous['mode'] != mode or json.loads(previous['plugins']) != plugins
+                            or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
+                        raise ValueError('That submission ID was already used for different content.')
+                    return self.run(previous['run_id'])
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= self.max_pending_runs:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
@@ -206,7 +217,10 @@ class Store:
                 (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id),
             )
             if chat_enabled:
-                conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, user_id))
+                message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).lastrowid
+                self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
+            elif attachment_ids:
+                raise ValueError('Attachments require a chat session.')
         self.event(run_id, "status", "Task queued")
         return self.run(run_id)
 
@@ -239,24 +253,26 @@ class Store:
         return {**context, **row}
 
     def messages(self, run_id):
-        return self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.model,m.user_id,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? ORDER BY m.id", (run_id,))
+        messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.model,m.user_id,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? ORDER BY m.id", (run_id,))
+        return self.attachments.messages(run_id, messages)
 
-    def enqueue_message(self, run_id, content, client_id, model=None, user_id=''):
+    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id)
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id=''):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if not row or not row["chat_enabled"]:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
         existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
         if existing:
-            if existing["content"] != content or existing['user_id'] != user_id or (model is not None and existing['model'] != model):
+            if (existing["content"] != content or existing['user_id'] != user_id or (model is not None and existing['model'] != model)
+                    or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
         if row["status"] == "stopping":
@@ -270,6 +286,7 @@ class Store:
         stamp = now()
         model = model if model is not None else row['model'] or self.default_model
         message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, content, client_id, stamp, model, user_id)).lastrowid
+        self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
         running = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone()
         if not running:

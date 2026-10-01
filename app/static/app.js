@@ -49,6 +49,7 @@ function renderSidebar(){
 }
 function setView(view,title){
   state.skillComposer?.destroy();state.skillComposer=null;
+  state.attachments?.destroy();state.attachments=null;
   document.body.classList.toggle('chat-view',view==='chat');
   document.body.classList.toggle('home-view',view==='tasks');
   document.querySelectorAll('.nav-button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
@@ -60,6 +61,7 @@ function autoSize(input){input.style.height='auto';input.style.height=Math.min(i
 function bindComposer(input,form){
   input.addEventListener('input',()=>autoSize(input));
   const skills=bindInlineSkillPicker(input,form);state.skillComposer=skills;
+  state.attachments=bindAttachments(input,form,input.id==='prompt'?'new':state.selected);
   input.addEventListener('keydown',e=>{if(skills.keydown(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit();}});
   autoSize(input);
 }
@@ -89,9 +91,14 @@ async function renderHome(){
   document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
 }
 async function submitTask(e){
-  e.preventDefault();const button=$('#task-form button[type="submit"]'); button.disabled=true;
-  try{ const run=await api('/api/runs',{method:'POST',body:JSON.stringify({prompt:$('#prompt').value,repo_url:$('#repo').value,mode:$('#mode').value,model:$('#new-model').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)})});state.newDraft={};await refreshRuns();await openRun(run.id); }
-  catch(error){toast(error.message);button.disabled=false;}
+  e.preventDefault();if(state.sending.has('new'))return;
+  const files=state.attachments;let attachment_ids;
+  try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
+  const button=$('#task-form button[type="submit"]');button.disabled=true;state.sending.add('new');files.lock(true);
+  const body={prompt:$('#prompt').value.trim()||(attachment_ids.length?'Please review the attached files.':''),repo_url:$('#repo').value,mode:$('#mode').value,model:$('#new-model').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
+  const signature=JSON.stringify(body);if(state.pendingNew?.signature!==signature)state.pendingNew={signature,client_id:crypto.randomUUID()};
+  try{const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:state.pendingNew.client_id})});files.clear(attachment_ids);state.newDraft={};state.pendingNew=null;await refreshRuns();await openRun(run.id);}
+  catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
 }
 async function openRun(id){
   stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
@@ -134,12 +141,15 @@ function renderChat(run){
   $('#conversation').onscroll=()=>{const box=$('#conversation');$('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;};
   $('#stop-response').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await refreshChat(id);}catch(e){toast(e.message);}};
   $('#message-form').onsubmit=async e=>{
-    e.preventDefault();const content=$('#followup').value.trim();if(!content||state.sending.has(id))return;
-    const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);
+    e.preventDefault();if(state.sending.has(id))return;
+    const files=state.attachments;let attachment_ids;
+    try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
+    const original=$('#followup').value.trim(),content=original||(attachment_ids.length?'Please review the attached files.':'');if(!content)return;
+    const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);files.lock(true);
     const model=$('#chat-model')?.value||run.model||state.config.model;
-    let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model)pending=state.pendingMessages[id]={content,model,client_id:crypto.randomUUID()};
-    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===content)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===content){$('#followup').value='';autoSize($('#followup'));}await refreshChat(id);if(state.selected===id)bottom();}
-    catch(error){toast(error.message);}finally{state.sending.delete(id);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
+    let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model||JSON.stringify(pending.attachment_ids)!==JSON.stringify(attachment_ids))pending=state.pendingMessages[id]={content,model,attachment_ids,client_id:crypto.randomUUID()};
+    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});files.clear(attachment_ids);delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===original){$('#followup').value='';autoSize($('#followup'));}await refreshChat(id);if(state.selected===id)bottom();}
+    catch(error){toast(error.message);}finally{state.sending.delete(id);files.lock(false);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
   };
   updateChat(run,true);
   connectChatStream(run);
@@ -186,7 +196,8 @@ function updateChat(run,initial=false){
   const signature=JSON.stringify(run.messages);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
-    box.innerHTML=`<div class="conversation-inner">${run.messages.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(run.messages[index-1]?.status)?run.messages[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`;}).join('')}</div>`;
+    box.innerHTML=`<div class="conversation-inner">${run.messages.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(run.messages[index-1]?.status)?run.messages[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.status!=='completed'?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>`;}).join('')}</div>`;
+    box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;

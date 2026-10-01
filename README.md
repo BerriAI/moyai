@@ -671,3 +671,38 @@ again on every model call. At most five skills may be loaded per turn, with
 (including archived entries). Skills cannot bypass tool permissions, provide
 credentials, or approve writes. Personal skills do not make shared session
 outputs private; generated results keep the session's existing sharing.
+
+
+## Chat attachments
+
+Use the paperclip, drop files onto the composer, or paste clipboard files/images
+with Cmd+V / Ctrl+V. Both new sessions and follow-ups show removable previews
+before sending. Raster images open a larger preview; UTF-8 documents such as
+`SKILL.md` show a text excerpt. Other documents show a file card and download.
+Clipboard file availability depends on what the browser and source app place
+on the clipboard; the file picker and drag/drop are available as fallbacks.
+
+Limits: five files, 10 MiB each, 20 MiB total per message. Image previews accept
+PNG, JPEG, WebP and GIF up to 25 megapixels (the first GIF frame). Original bytes
+are preserved. Signed-in users own private drafts; sent files share the existing
+organization session visibility. Uploads and message submissions are idempotent,
+and file binding occurs in the same transaction as message admission.
+
+Files and sanitized image previews live in SQLite on Render's persistent disk,
+and are included in database checkpoints. Unsent uploads expire after 24 hours
+on the next upload; draft storage is capped at 50 MiB per user. The total storage
+cap defaults to 256 MiB (`ATTACHMENT_STORAGE_LIMIT_MB`), leaving room on the
+current 1 GB disk for sessions and result archives. Raising it requires enough
+actual disk space. Original downloads require authentication and always use
+attachment disposition; only decoded raster previews render inline.
+
+Each active Modal turn restores its sent files under
+`/workspace/.moyai-attachments/<id>/<filename>` and verifies their size/hash.
+Later queued messages' files are withheld until their turn begins. Referenced
+image previews are added by the server to model requests, using the existing
+Moyai gateway key and spend tracking. Up to ten recent images are included once
+each per request; originals remain available in the sandbox. File content is
+reference data, never additional authority or an automatic skill installation.
+
+Web messages mirrored to Slack include attachment names and a protected session
+link. Files are not uploaded to Slack and require no additional Slack scopes.

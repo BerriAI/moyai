@@ -74,7 +74,7 @@ class SlackChat:
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {})))
 
-    def enqueue_web(self, run_id, content, client_id, model, user_id):
+    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None):
         """Save a verified web input and its mirror in the same transaction.
 
         Only new inputs in an enabled, awake binding are eligible. Retrying a
@@ -84,7 +84,7 @@ class SlackChat:
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids)
             binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
             if created and binding:
                 allowed = enabled and binding['team_id'] == team
@@ -97,6 +97,10 @@ class SlackChat:
                     if user and user['kind'] == 'google' and user['email']:
                         name = f"{name} ({user['email']})" if name != user['email'] else name
                     value = self.scrub(content)
+                    if attachment_ids:
+                        names = [row['name'] for row in conn.execute('SELECT name FROM attachments WHERE message_id=? ORDER BY created_at,id', (message['id'],))]
+                        value += '\n\nAttachments: ' + ', '.join(names) + '\nOpen files in Moyai: ' + self.owner.settings.public_url.rstrip('/') + '/#run=' + run_id
+                    value = self.scrub(value)
                     # Plain-text chunks preserve every character of the input.
                     chunks = [value[i:i + 2600] for i in range(0, len(value), 2600)]
                     for index, chunk in enumerate(chunks):

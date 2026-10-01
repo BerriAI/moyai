@@ -194,7 +194,7 @@ class AgentCoordinator:
             conn.execute("UPDATE agent_groups SET status='completed' WHERE id=? AND status='running'", (group_id,))
         return True
 
-    def enqueue_child(self, run_id, content, client_id, model, user_id):
+    def enqueue_child(self, run_id, content, client_id, model, user_id, attachment_ids=None):
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             child = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
@@ -209,7 +209,7 @@ class AgentCoordinator:
             settled = not conn.execute("SELECT 1 FROM runs r WHERE r.agent_group_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running'))) LIMIT 1", (group['id'],)).fetchone()
             if group['status'] in {'completed', 'cancelled'} and not group['result_snapshot'] and settled:
                 self.snapshot_group_in(conn, group)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids)
         if created:
             self.store.event(run_id, 'chat', 'Message queued', {'message_id': message['id']})
             self.store.event(child['parent_run_id'], 'agents', 'Direct message queued for ' + child['agent_label'],
