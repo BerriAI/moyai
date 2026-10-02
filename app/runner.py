@@ -6,7 +6,9 @@ import time
 from pathlib import Path
 
 import modal
+from fastapi import HTTPException
 
+from .environments import EnvironmentPending
 from .security import digest
 from .message_queue import MessageQueue
 
@@ -208,7 +210,7 @@ class RunManager:
             if self.stopped(run_id):
                 self.store.update_run(run_id, status="cancelled", token_hash="")
             else:
-                message = "Task exceeded its time limit." if isinstance(exc, TimeoutError) else f"Cloud run failed ({type(exc).__name__}). Check runtime configuration and Modal logs."
+                message = str(exc.detail) if isinstance(exc, HTTPException) else ("Task exceeded its time limit." if isinstance(exc, TimeoutError) else f"Cloud run failed ({type(exc).__name__}). Check runtime configuration and Modal logs.")
                 self.store.update_run(run_id, status="failed", token_hash="", error=message)
                 self.store.event(run_id, "error", message)
         finally:
@@ -309,7 +311,19 @@ class RunManager:
         run_id = run["id"]
         self.store.update_run(run_id, status="provisioning")
         self.store.event(run_id, "status", "Provisioning an isolated Modal sandbox")
-        project = self.environments.bind(run_id) if self.environments else {}
+        waiting = ''
+        while self.environments and not self.stopped(run_id):
+            try:
+                await self.environments.prepare(run_id)
+                break
+            except EnvironmentPending as pending:
+                if waiting != pending.build_id:
+                    self.store.event(run_id, 'status', str(pending), {'activity_version': 1, 'phase': 'environment'})
+                    waiting = pending.build_id
+                await asyncio.sleep(5)
+        if self.stopped(run_id):
+            return
+        project = self.environments.context(self.store.run(run_id)) if self.environments else {}
         fresh = self.store.run(run_id)
         run = {**run, 'repo_url': fresh['repo_url'], 'environment_build_id': fresh['environment_build_id']}
         client = await self.client()

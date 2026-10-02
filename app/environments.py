@@ -8,7 +8,7 @@ import json
 import time
 from datetime import datetime
 from typing import Literal
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import modal
 from fastapi import APIRouter, HTTPException, Request
@@ -25,6 +25,7 @@ class Recipe(BaseModel):
     repository: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$')
     ref: str = Field(default='main', min_length=1, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
     clone_access: Literal['public', 'github'] = 'public'
+    setup_mode: Literal['manual', 'detect'] = 'manual'
     apt_packages: list[str] = Field(default_factory=list, max_length=40)
     setup: str = Field(default='', max_length=24000)
     startup: str = Field(default='', max_length=12000)
@@ -51,11 +52,18 @@ class Policy(BaseModel):
     refresh_daily: bool | None = None
 
 
+class EnvironmentPending(Exception):
+    def __init__(self, name, build_id):
+        self.name, self.build_id = name, build_id
+        super().__init__('Preparing project environment: ' + name)
+
+
 class Environments:
     def __init__(self, store, settings, security, manager, connectors, checkpoints):
         self.store, self.settings, self.security = store, settings, security
         self.manager, self.connectors, self.checkpoints = manager, connectors, checkpoints
         self.task = None
+        self.last_sync = 0
         store.execute('''CREATE TABLE IF NOT EXISTS environments (
             id TEXT PRIMARY KEY, recipe TEXT NOT NULL, revision INTEGER NOT NULL,
             active_build TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
@@ -71,22 +79,59 @@ class Environments:
             for name in ('refresh_daily', 'activate_on_ready'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+            if 'resolved_recipe' not in {r['name'] for r in conn.execute('PRAGMA table_info(environment_builds)')}:
+                conn.execute("ALTER TABLE environment_builds ADD COLUMN resolved_recipe TEXT NOT NULL DEFAULT ''")
 
-    def bootstrap(self):
-        """Queue first-time setup atomically; never overwrite an admin's choices."""
-        if not (self.settings.auto_setup_litellm_environment and self.settings.modal_token_id
-                and self.settings.modal_token_secret):
+    async def sync_repositories(self):
+        """Register authorized repos without allocating machines or overriding edits."""
+        if not self.settings.auto_prepare_repositories or not self.connectors:
             return
+        if not any(c['id'] == 'github' and c['connected'] and c['enabled'] for c in self.connectors.list()):
+            return
+        repositories = self.connectors.github.connected_targets(await self.connectors.credentials('github'))
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            if conn.execute('SELECT 1 FROM environments LIMIT 1').fetchone():
-                return
-            identity, build_id, stamp = uuid4().hex, uuid4().hex, now()
-            recipe = Recipe.model_validate(TEMPLATES[0]).model_dump_json()
-            conn.execute('''INSERT INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
-                VALUES(?,?,1,1,?,?)''', (identity, recipe, 'Automatic setup', stamp))
-            conn.execute('''INSERT INTO environment_builds(id,environment_id,revision,recipe,created_at,actor)
-                VALUES(?,?,1,?,?,?)''', (build_id, identity, recipe, stamp, 'Automatic setup'))
+            existing = list(conn.execute('SELECT id,recipe FROM environments'))
+            for repository in repositories:
+                identity = uuid5(NAMESPACE_URL, 'moyai-environment:' + repository.lower()).hex
+                if any(r['id'] == identity or json.loads(r['recipe'])['repository'].lower() == repository.lower() for r in existing):
+                    continue
+                if repository.lower() == 'berriai/litellm':
+                    recipe = Recipe.model_validate({**TEMPLATES[0], 'repository': repository, 'ref': 'HEAD', 'clone_access': 'github'})
+                else:
+                    recipe = Recipe(name=repository.split('/')[1][:68] + ' development', repository=repository,
+                                    ref='HEAD', clone_access='github', setup_mode='detect', verify='git rev-parse --verify HEAD')
+                conn.execute('''INSERT OR IGNORE INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
+                    VALUES(?,?,1,1,?,?)''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
+
+    async def prepare(self, run_id):
+        run = self.store.run(run_id)
+        if (run.get('environment_build_id') or run.get('snapshot_id') or run.get('parent_run_id')
+                or run.get('environment_id') == 'none' or self.store.rows(
+                    "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))):
+            return self.bind(run_id)
+        try:
+            if run.get('repo_url') or run.get('environment_id') not in {'auto', 'none', ''}:
+                await self.sync_repositories()
+            selected = self.choose(run.get('environment_id', 'auto'), run['repo_url'])
+            if selected:
+                recipe = json.loads(self.build(selected['active_build'])['recipe'] if selected['active_build'] else selected['recipe'])
+                if recipe.get('clone_access') == 'github':
+                    if not self.connectors or not any(c['id']=='github' and c['connected'] and c['enabled'] for c in self.connectors.list()):
+                        raise ConnectorError('Enable the GitHub connection to use this repository environment.')
+                    await self.connectors.github.selected_target(run, recipe['repository'])
+                if not selected['active_build']:
+                    if not self.settings.modal_token_id or not self.settings.modal_token_secret:
+                        raise HTTPException(503, 'Configure Modal before preparing this repository.')
+                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY rowid DESC LIMIT 1',
+                                             (selected['id'], selected['revision']))
+                    build = recent[0] if recent else self.enqueue(selected['id'], selected['revision'], 'First session')
+                    if build['phase'] == 'failed':
+                        raise HTTPException(409, 'Project setup failed for ' + recipe['repository'] + '. An administrator can inspect the build log, edit the recipe, and rebuild in Environments.')
+                    raise EnvironmentPending(recipe['name'], build['id'])
+        except ConnectorError as exc:
+            raise HTTPException(409, str(exc)) from None
+        return self.bind(run_id)
 
     def get(self, identity):
         rows = self.store.rows('SELECT * FROM environments WHERE id=?', (identity,))
@@ -108,7 +153,7 @@ class Environments:
                 value['recipe'] = recipe
                 value['builds'] = self.store.rows('''SELECT id,revision,phase,commit_sha,error,created_at,finished_at
                     FROM environment_builds WHERE environment_id=? ORDER BY rowid DESC LIMIT 10''', (row['id'],))
-            if admin or (row['enabled'] and row['active_build']):
+            if admin or row['activate_on_ready'] or (row['enabled'] and row['active_build']):
                 items.append(value)
         return items
 
@@ -164,16 +209,16 @@ class Environments:
             return None
         if selection and selection != 'auto':
             row = self.get(selection)
-            if not row['enabled'] or not row['active_build']:
+            if (not row['enabled'] or not row['active_build']) and not row['activate_on_ready']:
                 raise HTTPException(409, 'Build and enable this environment before starting a session.')
-            recipe = json.loads(self.build(row['active_build'])['recipe'])
+            recipe = json.loads(self.build(row['active_build'])['recipe'] if row['active_build'] else row['recipe'])
             if repo_url and repo_url.removeprefix('https://github.com/').removesuffix('.git').lower() != recipe['repository'].lower():
                 raise HTTPException(422, 'The repository does not match the selected environment.')
             return row
-        rows = self.store.rows("SELECT * FROM environments WHERE enabled=1 AND active_build!='' ORDER BY is_default DESC,updated_at DESC,id")
+        rows = self.store.rows("SELECT * FROM environments WHERE (enabled=1 AND active_build!='') OR activate_on_ready=1 ORDER BY is_default DESC,updated_at DESC,id")
         repository = repo_url.removeprefix('https://github.com/').removesuffix('.git').lower()
         for row in rows:
-            recipe = json.loads(self.build(row['active_build'])['recipe'])
+            recipe = json.loads(self.build(row['active_build'])['recipe'] if row['active_build'] else row['recipe'])
             if (repository and repository == recipe['repository'].lower()) or (not repository and row['is_default']):
                 return row
         return None
@@ -185,6 +230,8 @@ class Environments:
             previous = run.get('snapshot_id') or run.get('parent_run_id') or self.store.rows(
                 "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
             row = None if previous else self.choose(run.get('environment_id', 'auto'), run['repo_url'])
+            if row and not row['active_build']:
+                raise HTTPException(409, 'This repository environment is still being prepared.')
             identity = row['active_build'] if row else 'none'
             self.store.execute("UPDATE runs SET environment_build_id=? WHERE id=? AND environment_build_id=''", (identity, run_id))
             if row:
@@ -197,7 +244,7 @@ class Environments:
         if not identity or identity == 'none':
             return {}
         build = self.build(identity)
-        return {**json.loads(build['recipe']), 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
+        return {**json.loads(build.get('resolved_recipe') or build['recipe']), 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
 
     async def rpc(self, sandbox, action, *, token=''):
         proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/environment_build.py', action,
@@ -251,6 +298,17 @@ class Environments:
             self.update(identity, phase='failed', error=report.get('error', 'Setup or validation failed.'), finished_at=now())
             await sandbox.terminate.aio()
             return
+        try:
+            resolved = Recipe.model_validate(report.get('recipe', recipe))
+        except ValueError:
+            self.update(identity, phase='failed', error='Detected setup is invalid. Edit the environment recipe.', finished_at=now())
+            await sandbox.terminate.aio()
+            return
+        if any(getattr(resolved, k) != recipe.get(k, 'manual' if k == 'setup_mode' else None)
+               for k in ('repository', 'ref', 'clone_access', 'setup_mode')):
+            self.update(identity, phase='failed', error='Resolved setup did not match the requested repository.', finished_at=now())
+            await sandbox.terminate.aio()
+            return
         if not self.progress(identity, phase='saving', commit_sha=report['commit_sha']):
             return
         snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds)
@@ -259,21 +317,25 @@ class Environments:
             # Respect a cancellation that arrived while snapshotting.
             if conn.execute('SELECT phase FROM environment_builds WHERE id=?', (identity,)).fetchone()['phase'] == 'cancelling':
                 return
-            conn.execute("UPDATE environment_builds SET phase='ready',snapshot_id=?,finished_at=?,error='' WHERE id=?", (snapshot.object_id, now(), identity))
+            conn.execute("UPDATE environment_builds SET phase='ready',snapshot_id=?,finished_at=?,error='',resolved_recipe=? WHERE id=?", (snapshot.object_id, now(), resolved.model_dump_json(), identity))
             # A build of an older edited revision never takes over the default.
             conn.execute('UPDATE environments SET active_build=?,updated_at=? WHERE id=? AND revision=?',
                          (identity, now(), build['environment_id'], build['revision']))
             row = conn.execute('SELECT * FROM environments WHERE id=?', (build['environment_id'],)).fetchone()
             if row['activate_on_ready'] and row['revision'] == build['revision']:
-                has_default = conn.execute('SELECT 1 FROM environments WHERE is_default=1 AND enabled=1 LIMIT 1').fetchone()
-                conn.execute('UPDATE environments SET enabled=1,is_default=?,activate_on_ready=0 WHERE id=?',
-                             (not bool(has_default), row['id']))
+                conn.execute('UPDATE environments SET enabled=1,activate_on_ready=0 WHERE id=?', (row['id'],))
         await self.checkpoints.flush()
         await sandbox.terminate.aio()
         self.update(identity, sandbox_id='')
 
     async def watch(self):
         while True:
+            if time.monotonic() - self.last_sync > 60:
+                try:
+                    await self.sync_repositories()
+                except ConnectorError:
+                    pass  # Connection setup is shown in Connections; retry discovery later.
+                self.last_sync = time.monotonic()
             self.queue_refreshes()
             builds = self.store.rows("SELECT * FROM environment_builds WHERE phase NOT IN ('ready','failed') OR sandbox_id!='' ORDER BY rowid LIMIT 1")
             for build in builds:
@@ -300,7 +362,6 @@ class Environments:
                 self.enqueue(row['id'], row['revision'], 'Automatic refresh')
 
     def start(self):
-        self.bootstrap()
         self.task = asyncio.create_task(self.watch())
 
     async def close(self):
@@ -324,8 +385,12 @@ class Environments:
         @router.get('/api/admin/environments')
         async def administration(request: Request):
             self.security.require(request, admin=True)
+            try:
+                await self.sync_repositories()
+            except ConnectorError:
+                pass
             return {'environments': self.catalog(admin=True), 'templates': TEMPLATES,
-                    'automatic_setup': self.settings.auto_setup_litellm_environment,
+                    'automatic_setup': self.settings.auto_prepare_repositories,
                     'modal_configured': bool(self.settings.modal_token_id and self.settings.modal_token_secret)}
 
         @router.post('/api/admin/environments', status_code=201)

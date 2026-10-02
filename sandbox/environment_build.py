@@ -5,6 +5,10 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+try:
+    from .detect_environment import detect, DetectionError
+except ImportError:
+    from detect_environment import detect, DetectionError
 
 ROOT = Path('/tmp/moyai-environment-build')
 REPO = Path('/workspace/repo')
@@ -35,6 +39,12 @@ def build(recipe):
     # Publication still rechecks live repository access and ancestry on the server.
     (REPO / '.git/moyai.json').write_text(json.dumps({'repository': recipe['repository'],
         'base_sha': sha, 'default_branch': recipe['ref']}))
+    if recipe.get('setup_mode') == 'detect':
+        recipe = detect(REPO, recipe)
+        if recipe.get('apt_packages'):
+            subprocess.run(['apt-get', 'update'], check=True, timeout=180)
+            subprocess.run(['apt-get', 'install', '-y', '--no-install-recommends', *recipe['apt_packages']], check=True, timeout=600)
+        print('Resolved repository setup', flush=True)
     try:
         for name in ('setup', 'startup', 'verify'):
             print('\n== ' + name + ' ==', flush=True)
@@ -42,7 +52,7 @@ def build(recipe):
     finally:
         print('\n== shutdown before snapshot ==', flush=True)
         shell(recipe['shutdown'], REPO, timeout=90)
-    return sha
+    return sha, recipe
 
 
 def supervise():
@@ -59,10 +69,12 @@ def supervise():
             os.dup2(log.fileno(), 1)
             os.dup2(log.fileno(), 2)
             try:
-                sha = build(json.loads(Path('/tmp/moyai-environment.json').read_text()))
-                result = {'done': True, 'success': True, 'commit_sha': sha}
+                sha, recipe = build(json.loads(Path('/tmp/moyai-environment.json').read_text()))
+                result = {'done': True, 'success': True, 'commit_sha': sha, 'recipe': recipe}
             except Exception as exc:
                 print('Build failed: ' + type(exc).__name__, flush=True)
+                if isinstance(exc, DetectionError):
+                    print(str(exc), flush=True)
                 result = {'done': True, 'success': False, 'error': 'Project setup or validation failed. Inspect the build log and edit the recipe.'}
             temp = ROOT / 'result.tmp'
             temp.write_text(json.dumps(result))

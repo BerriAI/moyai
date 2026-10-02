@@ -814,15 +814,53 @@ link. Files are not uploaded to Slack and require no additional Slack scopes.
 
 ## Prepared project environments
 
-LiteLLM is prepared automatically on the first app startup with Modal credentials:
-Moyai creates the starter recipe, queues its build, and enables the verified image
-as the workspace default. New web and Slack sessions then use it without choosing
-an environment. While the initial build is running or if it fails, sessions can
-still use the base tools. A failed build is shown in **Environments** for a manual
-retry; app restarts do not repeatedly rebuild it. Existing environments, admin
-edits, cancellations, disabled environments, and another chosen default are
-preserved. Local previews without Modal credentials never start cloud builds.
-Set `AUTO_SETUP_LITELLM_ENVIRONMENT=false` before initial setup to opt out.
+Each repository added to Moyai's shared GitHub connection appears automatically
+in **Environments**. Discovery uses the intersection of the configured allowlist
+and repositories approved for that connection; it never expands GitHub access.
+Registration does not allocate a machine. The first new session that selects the
+repository or its environment queues a build and waits for validation, sharing
+the same build with other waiting sessions. An admin can also prebuild it.
+Temporal records the wait and uses timers without occupying a session sandbox
+or sandbox-capacity slot; deployment does not lose that wait. Once the build
+passes, matching sessions get isolated copies of its snapshot. Failed builds
+produce an actionable session error and need a manual retry, avoiding retry loops.
+
+Sessions without a repository use base tools unless an administrator explicitly
+chooses a workspace default. LiteLLM is an optimized preset for `BerriAI/litellm`,
+not a default injected into unrelated work. Existing session checkpoints, admin
+edits, cancellations and disabled environments are preserved. New private-repo
+sessions recheck the live GitHub connection before using a prepared snapshot.
+Set `AUTO_PREPARE_REPOSITORIES=false` to opt out of automatic discovery.
+
+Automatic setup recognizes root-level `uv.lock`, `pyproject.toml`, Python
+requirements files, npm lockfiles and pnpm lockfiles with an exact `packageManager`
+version. Frozen installs are used where a supported lockfile is present. Python
+uses a separate `.venv`; Node uses an official binary verified against its SHA-256
+checksum, with numeric `.nvmrc`/`.node-version` selectors or an LTS default.
+Dependency integrity checks run before publication. These checks do not replace
+the tests or application health checks required by an individual task.
+
+Custom services or other stacks can commit `.moyai/environment.json`, for example:
+
+```json
+{
+  "apt_packages": ["postgresql"],
+  "setup": "./scripts/install-development.sh",
+  "startup": "./scripts/start-development.sh",
+  "verify": "./scripts/check-development.sh",
+  "shutdown": "service postgresql stop",
+  "instructions": "Use the local development database and run the project tests."
+}
+```
+
+This file takes precedence over dependency detection. Commands execute inside
+the isolated build with no model or app credentials. The resolved recipe is
+saved with the build, so service startup survives session restoration. Admins
+can instead choose **Custom commands** in the recipe editor. Devcontainer/Docker
+execution, Yarn/Poetry and other unsupported runtimes need an explicit recipe;
+the build reports that requirement instead of claiming their services are ready.
+Source-only repositories get the checked-out source and base tools, with that
+limited preparation stated in the agent's project instructions.
 
 Admins can open **Environments** to create an organization recipe from the LiteLLM
 starter or a custom project. Configure a GitHub repository and branch/tag/commit,
@@ -844,8 +882,9 @@ recipe over a newer one. Named build sandboxes, a detached supervisor, and the
 SQLite journal allow the web worker to reattach after deployment without rerunning
 installation steps. Lost machines require a new build. Cleanup is retried.
 
-Enable a successful environment to make it selectable under **Context & tools**
-in a new session. **Automatic** matches an explicit repository; with no repository,
+Discovered environments are selectable under **Context & tools** before their
+first build, and become enabled after validation. Custom manual environments
+must be built and enabled. **Automatic** matches an explicit repository; with no repository,
 it selects the administrator's workspace default. This includes new Slack
 sessions. **Base tools only** opts out. **Use by default** enables the environment
 and selects it for sessions without a repository. Existing sessions keep their

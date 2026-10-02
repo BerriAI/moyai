@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
     modal_vm_runtime: bool = False
-    auto_setup_litellm_environment: bool = True
+    auto_prepare_repositories: bool = True
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
     max_concurrent_runs: int = Field(default=100, ge=1, le=100)
     max_pending_runs: int = Field(default=1000, ge=100, le=5000)

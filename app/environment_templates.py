@@ -87,4 +87,8 @@ Chromium and Playwright are available from the base image. Check process startup
     'name': 'Custom project', 'repository': 'BerriAI/moyai-devin', 'ref': 'main',
     'apt_packages': [], 'setup': '', 'startup': '', 'verify': 'git status --short',
     'shutdown': '', 'instructions': 'Repository: /workspace/repo. Add the project build and test commands here.',
+}, {
+    'name': 'Repository development', 'repository': '', 'ref': 'HEAD', 'setup_mode': 'detect',
+    'apt_packages': [], 'setup': '', 'startup': '', 'verify': 'git rev-parse --verify HEAD',
+    'shutdown': '', 'instructions': '',
 }]
