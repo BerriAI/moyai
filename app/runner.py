@@ -227,6 +227,9 @@ class RunManager:
                 self.store.update_run(run_id, status="cancelled")
             self.store.update_run(run_id, token_hash="")
             self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
+            if not run.get('chat_enabled') and self.store.tracing:
+                row = self.store.run(run_id)
+                self.store.tracing.finish_turn(run_id, None, row['summary'] or row['error'], row['status'])
             await self.persist()
 
     async def demo(self, run):
@@ -286,6 +289,7 @@ class RunManager:
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
                 "activity_input_id": delivered[0]['id'] if delivered else run.get('message_id'),
+                "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
                 "is_child_agent": bool(run.get('parent_run_id')),
                 "fresh_child": bool(run.get('parent_run_id')) and not run.get('continuation') and not any(m['role'] == 'assistant' for m in self.store.messages(run_id)),
                 "chat_enabled": bool(run.get("chat_enabled")),
@@ -332,7 +336,7 @@ class RunManager:
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if run.get("snapshot_id"):
-            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py", "attachments.py", "activity.py"):
+            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py", "attachments.py", "activity.py", "trace_content.py"):
                 await sandbox.filesystem.write_text.aio((SANDBOX_FILES / name).read_text(), f"/opt/workspace-runner/{name}")
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
@@ -372,6 +376,8 @@ class RunManager:
                             result["message_id"] = run.get("message_id")
                             self.store.update_run(run_id, summary=str(result.get("message", "")), pending_result=json.dumps(result))
                             await self.persist()
+                        elif event.get('kind') == 'trace' and self.store.tracing:
+                            self.store.tracing.tool(run_id, event.get('data'))
                         elif event.get("kind") in {"tool", "status", "error", "message"}:
                             self.store.event(run_id, event["kind"], str(event.get("message", "")), event.get("data", {}))
                     except (ValueError, TypeError):

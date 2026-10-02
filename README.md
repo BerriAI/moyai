@@ -30,6 +30,33 @@ For cutover, wait for every old session to settle, stop the old Modal web servic
 
 Update the Slack Events request URL and Slack/Notion OAuth redirect URLs to the new origin, then verify a real Slack mention and an existing chat follow-up. Keep the original Modal Volume as a migration backup. If reverting after accepting new work on Render, export the current Render database and artifacts first; the frozen old Modal checkpoint is no longer current.
 
+## Agent Traces in LiteLLM
+
+Set `LITELLM_TRACE_ENDPOINT=https://gateway-dev.litellm-sandbox.ai/v1/traces` and a
+dedicated `LITELLM_TRACE_API_KEY` in Render's private environment. Both are required;
+leave the key empty to disable export. The inference gateway and its key remain
+configured separately through `LITELLM_API_BASE` and `LITELLM_API_KEY`.
+
+The control plane sends standard OTLP/HTTP protobuf with the OpenTelemetry SDK.
+Each response produces a `moyai-devin` agent span containing the task and final
+answer, with child model and tool spans including timing, status, token counts,
+and bounded tool inputs/results. Follow-ups have separate trace IDs and a shared
+session ID. Active delegated agents attach beneath their coordinator; machine
+renewals retain the current turn's trace identity. Sandbox events never receive
+the trace credential and trace payloads are separate from public chat activity.
+
+System prompts, loaded skills, private reasoning, images and credential-tool
+payloads are excluded. Known credentials and common secret fields are redacted;
+ordinary task/tool text is sent to the configured gateway. Text is capped at
+16,000 characters per field. Export is best effort through a bounded SDK queue:
+an exporter outage or process crash can lose spans but does not fail the task.
+
+The destination must enable `general_settings.tracing.store: clickhouse` and
+`CLICKHOUSE_URL`. ClickHouse is required for Agent Traces itself. A Lens worker
+is only needed for automated investigations. After deployment, run a short task
+that uses a file or terminal tool, open **Logs → Agent Traces**, and look for
+`moyai-devin`; verify the task, tool result and final answer in the trace tree.
+
 ## Start locally
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
