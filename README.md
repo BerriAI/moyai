@@ -951,3 +951,33 @@ billing attribution for the person who sends the message. They do not steer the
 main agent, share its live browser/files, or mirror into its Slack thread. They
 remain available in the add-tab menu and session list after closing the tab.
 Approvals and credential requests can be completed through **Open session**.
+
+### Scheduled automations
+
+Open **Automations** to save a workflow, repository/environment, model, selected
+connections, and an hourly/daily/weekday/weekly schedule with an IANA timezone.
+Definitions start paused; **Run now** tests one occurrence, then **Enable schedule**
+activates recurring work. Editing pauses the schedule again. Each run appears in
+history and opens as a normal, durable chat with its own workspace and owner spend.
+Owners can edit/run/enable their automations; administrators can also pause them.
+Pausing prevents future launches; stop existing work from its session.
+
+Temporal Cloud Schedules keep the clock while Render is offline. A small workflow
+launches the existing durable session runner and waits for it to finish, including
+approval/input waits. Overlap policy is **SKIP**, with a 15-minute catch-up window;
+occurrences delayed longer than 15 minutes are also skipped at admission. Pending
+schedule edits retry from SQLite after restart. Launch receipts, the new session,
+its initial message, and the Temporal wake are committed together, so retries do
+not create additional sessions. Temporal history contains IDs/status only, not the
+saved workflow text. No sandbox is allocated just to wait for the next occurrence.
+
+The **My Linear tickets → PR** template reads tickets assigned to the requester's
+verified Google email (`linear_my_issues`), reserves an issue identifier with
+`automation_claim_item`, implements/tests at most one ticket per run, and requests
+normal PR publication approval. Claims persist even after failure: continue or
+review the original session instead of silently attempting a second PR. Templates
+are editable instructions, not a guarantee that a model will follow every step.
+Existing tool approvals and connection policies still apply. This version does
+not grant unattended publication, PR approval, merge rights, or new Slack posting
+rights. Shared-password users need a Google-linked identity for “my tickets.”
+Local previews can manually run simulated automations without Temporal or LLM use.

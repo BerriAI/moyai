@@ -10,6 +10,7 @@ from temporalio.worker import Worker
 
 from .durable_runner import DurableRunner
 from .session_workflow import SessionWorkflow
+from .automation_workflow import AutomationWorkflow
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class TemporalRunManager(DurableRunner):
 
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
-                      workflows=[SessionWorkflow], activities=[self.advance_session],
+                      workflows=[SessionWorkflow, AutomationWorkflow], activities=[self.advance_session, self.launch_automation, self.automation_finished],
                       max_concurrent_activities=self.settings.max_concurrent_runs + 20,
                       max_cached_workflows=200,
                       graceful_shutdown_timeout=timedelta(seconds=1))
@@ -137,6 +138,22 @@ class TemporalRunManager(DurableRunner):
         finally:
             pulse.cancel()
             await asyncio.gather(pulse, return_exceptions=True)
+
+    @activity.defn(name='launch_automation')
+    async def launch_automation(self, automation_id: str, revision: int, occurrence: str, expires_at: str) -> dict:
+        try:
+            return await self.automations.launch(automation_id, revision, occurrence, expires_at)
+        except Exception as exc:
+            from temporalio.exceptions import ApplicationError
+            raise ApplicationError('Automation launch temporarily unavailable', type=type(exc).__name__) from None
+
+    @activity.defn(name='automation_finished')
+    async def automation_finished(self, run_id: str) -> bool:
+        try:
+            return self.automations.finished(run_id)
+        except Exception as exc:
+            from temporalio.exceptions import ApplicationError
+            raise ApplicationError('Automation status temporarily unavailable', type=type(exc).__name__) from None
 
     async def shutdown(self):
         self.closing = True

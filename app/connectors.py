@@ -54,6 +54,7 @@ class NotionAppend(NotionPage):
 
 TOOLS = {
     **GITHUB_TOOLS,
+    "linear_my_issues": ("linear", False, Args, "Read up to 50 open Linear tickets assigned to the authenticated person running this session, using their verified work email. Never uses the shared connection owner as the assignee."),
     "linear_teams": ("linear", False, Args, "List up to 50 accessible Linear teams and their IDs. Use before creating an issue; ask if the right team is ambiguous."),
     "linear_search": ("linear", False, Search, "Search Linear issue titles by text. Returns at most 20 issues."),
     "linear_issue": ("linear", False, LinearIssue, "Read a Linear issue's description, status, and recent comments."),
@@ -204,7 +205,29 @@ class Connectors:
             headers["Notion-Version"] = "2025-09-03"
         return headers
 
+    async def my_linear_issues(self, run):
+        user_id = run.get('active_user_id') or run.get('owner_id')
+        rows = self.store.rows("""SELECT COALESCE(linked.email,u.email) AS email,
+            COALESCE(linked.kind,u.kind) AS kind FROM users u
+            LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE u.id=?""", (user_id,))
+        if not rows or rows[0]['kind'] != 'google' or not rows[0]['email']:
+            raise ConnectorError('Sign in with Google or link your Slack identity before using My Linear tickets.')
+        if rows[0]['email'].rpartition('@')[2] not in self.settings.google_domains():
+            raise ConnectorError('Your work email is no longer allowed in this workspace.')
+        if not self.allowed('linear_my_issues'):
+            raise ConnectorError('The Linear connection is disabled.')
+        headers = self.headers('linear', await self.credentials('linear'))
+        query = """query($email:String!){issues(first:50,filter:{assignee:{email:{eq:$email}},
+            state:{type:{nin:["completed","canceled"]}}}){
+            nodes{id identifier title description url priority updatedAt state{name type} team{key name}}
+            pageInfo{hasNextPage endCursor}}}"""
+        result = await self.request('POST', 'https://api.linear.app/graphql', headers=headers,
+                                    json={'query': query, 'variables': {'email': rows[0]['email']}})
+        return result['data']
+
     async def call(self, name, arguments):
+        if name == 'linear_my_issues':
+            raise ConnectorError('My Linear tickets requires an authenticated session owner.')
         provider, _, schema, _ = TOOLS[name]
         args = schema.model_validate(arguments).model_dump()
         headers = self.headers(provider, await self.credentials(provider))

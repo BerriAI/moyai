@@ -39,6 +39,7 @@ from .environments import Environments
 from .tracing import AgentTracing
 from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
+from .automations import Automations
 from .computer import Computer
 from . import captures
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
@@ -156,6 +157,8 @@ def create_app(settings: Settings | None = None):
     identities = SlackIdentities(store, connectors, settings, security, checkpoints)
     slack.identities = identities
     manager.prepare_context = slack.prepare
+    automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
+    manager.automations = automations
     login_attempts = []
 
     @asynccontextmanager
@@ -165,12 +168,14 @@ def create_app(settings: Settings | None = None):
         slack.recover()
         identities.start()
         environments.start()
+        automations.start()
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         tracing.start()
         try:
             yield
         finally:
+            await automations.close()
             await environments.close()
             await identities.close()
             await slack.shutdown()
@@ -198,6 +203,8 @@ def create_app(settings: Settings | None = None):
     manager.computer = computer
     app.state.computer = computer
     app.include_router(computer.routes())
+    app.state.automations = automations
+    app.include_router(automations.routes())
     app.state.skills = skills
     app.state.environments = environments
     app.include_router(environments.routes())
@@ -627,7 +634,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return automations.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -637,6 +644,13 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'automation_claim_item':
+            try:
+                result = automations.claim(run, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Invalid item key.') from None
+            await checkpoints.flush()
+            return result
         if body.name in {'skills_load','skills_save','skills_read_file'}:
             try:
                 result = skills.call(run,body.name,body.arguments)
@@ -718,6 +732,7 @@ def create_app(settings: Settings | None = None):
             await checkpoints.flush()
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
+                      else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
                       else await connectors.call(body.name, arguments))
             if approval_id:
                 store.execute("UPDATE approvals SET status='completed',result=? WHERE id=?", (json.dumps(result)[:12000], approval_id))

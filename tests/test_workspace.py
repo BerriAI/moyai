@@ -195,7 +195,7 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
-    assert names == {"linear_teams", "linear_search", "linear_issue"}
+    assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"}
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
                        json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).status_code == 403
     client.patch("/api/connections/linear/policy", json={"enabled": False, "read_only": True})
