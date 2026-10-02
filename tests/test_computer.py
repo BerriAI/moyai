@@ -147,3 +147,34 @@ def test_capture_paths_and_urls_cannot_escape_workspace(monkeypatch,tmp_path):
     for url in ['file:///etc/passwd','javascript:alert(1)','https://user:pass@example.com']:
         with pytest.raises(ValueError):computer.valid_url(url)
     assert computer.valid_url('http://localhost:3000') == 'http://localhost:3000'
+
+
+@pytest.mark.asyncio
+async def test_restored_display_removes_stale_files_but_preserves_live_server(monkeypatch):
+    import socket
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='moyai-x-',dir='/tmp') as folder:
+        endpoint=Path(folder)/'X99'
+        lock=Path(folder)/'.X99-lock'
+        monkeypatch.setattr(computer,'DISPLAY_SOCKET',endpoint)
+        monkeypatch.setattr(computer,'DISPLAY_LOCK',lock)
+        # A filesystem snapshot includes a dead socket and the old PID lock.
+        stale=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+        stale.bind(str(endpoint));stale.close()
+        lock.write_text('old-pid')
+        servers=[]
+        def launch(*args,**kwargs):
+            assert not endpoint.exists() and not lock.exists()
+            server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            server.bind(str(endpoint));server.listen(5);servers.append(server)
+            return SimpleNamespace(poll=lambda:None)
+        monkeypatch.setattr(computer.subprocess,'Popen',launch)
+        try:
+            c=computer.Computer()
+            await c.ensure_display()
+            assert len(servers)==1 and computer.display_alive()
+            # A service restart must reuse a live display, not unlink it.
+            await computer.Computer().ensure_display()
+            assert len(servers)==1 and endpoint.exists()
+        finally:
+            for server in servers:server.close()

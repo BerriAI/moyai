@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -21,6 +22,8 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 PORT = 18765
+DISPLAY_SOCKET = Path('/tmp/.X11-unix/X99')
+DISPLAY_LOCK = Path('/tmp/.X99-lock')
 WIDTH, HEIGHT = 1280, 720
 CAPTURES = Path('/workspace/moyai-captures')
 MEDIA_LIMIT = 32 * 1024 * 1024
@@ -72,6 +75,16 @@ def valid_url(url):
     return url
 
 
+def display_alive():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(.2)
+            probe.connect(str(DISPLAY_SOCKET))
+        return True
+    except OSError:
+        return False
+
+
 class Computer:
     def __init__(self):
         self.page = self.context = self.browser = self.playwright = None
@@ -100,13 +113,7 @@ class Computer:
                                                             stderr=asyncio.subprocess.DEVNULL)
                 if await asyncio.wait_for(proc.wait(), 240) != 0:
                     raise RuntimeError('Browser capture dependencies could not be prepared. Try again.')
-        if not self.display or self.display.poll() is not None:
-            self.display = subprocess.Popen(['Xvfb', ':99', '-screen', '0', f'{WIDTH}x{HEIGHT}x24', '-ac', '-nolisten', 'tcp'],
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(50):
-                if Path('/tmp/.X11-unix/X99').exists():
-                    break
-                await asyncio.sleep(.1)
+        await self.ensure_display()
         from playwright.async_api import async_playwright
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(executable_path='/usr/bin/chromium', headless=False,
@@ -118,6 +125,25 @@ class Computer:
         self.context.on('page', self.new_page)
         self.notice = ''
         await self.refresh_frame()
+
+    async def ensure_display(self):
+        if not self.display or self.display.poll() is not None:
+            # Filesystem snapshots preserve X lock/socket files, not the live
+            # display process. Probe before reusing a socket or removing stale
+            # files, otherwise a resumed workspace can never open Chromium.
+            if not display_alive():
+                DISPLAY_LOCK.unlink(missing_ok=True)
+                DISPLAY_SOCKET.unlink(missing_ok=True)
+                self.display = subprocess.Popen(['Xvfb', ':99', '-screen', '0', f'{WIDTH}x{HEIGHT}x24', '-ac', '-nolisten', 'tcp'],
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(50):
+                    if display_alive():
+                        break
+                    if self.display.poll() is not None:
+                        raise RuntimeError('The browser display could not start. Try a new response to restore the workspace.')
+                    await asyncio.sleep(.1)
+                else:
+                    raise RuntimeError('The browser display is still starting. Try again shortly.')
 
     def new_page(self, page):
         self.page = page
