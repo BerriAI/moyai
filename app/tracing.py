@@ -92,7 +92,7 @@ class AgentTracing:
         if message:
             inputs += [m['content'] for m in self.store.rows(
                 'SELECT content FROM messages WHERE run_id=? AND steering_parent_id=? ORDER BY id', (run_id, message_id))]
-        self.emit(run, message_id, 'Moyai Devin', '', datetime.fromisoformat(started).timestamp() * 1e9,
+        self.emit(run, message_id, 'moyai-devin', '', datetime.fromisoformat(started).timestamp() * 1e9,
                   time.time_ns(), {'gen_ai.agent.name': 'moyai-devin', 'gen_ai.operation.name': 'invoke_agent',
                   'openinference.span.kind': 'AGENT', 'input.value': self.content('\n\n'.join(inputs)),
                   'output.value': self.content(output), 'moyai.status': status}, root=True,
