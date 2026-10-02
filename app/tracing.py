@@ -69,7 +69,7 @@ class AgentTracing:
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False):
         trace_id, agent_id, parent_id, session = self.identity(run, message_id)
         parent_id = parent_id if root else agent_id
-        attributes = {'session.id': session, 'moyai.run_id': run['id'],
+        attributes = {'session.id': session, 'agent.name': 'moyai-devin', 'moyai.run_id': run['id'],
                       'moyai.turn_id': str(message_id or 0),
                       'moyai.session_url': self.settings.public_url.rstrip('/') + '/#run=' + run['id'], **attrs}
         self.processor.on_end(ReadableSpan(
@@ -130,6 +130,7 @@ class AgentTracing:
                 if isinstance(call, dict)]})
         attrs = {'gen_ai.operation.name': 'chat', 'openinference.span.kind': 'LLM',
                  'gen_ai.request.model': run.get('active_model') or run.get('model', ''),
+                 'llm.model_name': run.get('active_model') or run.get('model', ''),
                  'gen_ai.response.id': request_id, 'input.value': self.content(inputs),
                  'output.value': self.content(outputs), 'moyai.status': status}
         for source, target in [('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens')]:

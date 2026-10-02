@@ -58,6 +58,8 @@ def test_trace_tree_contains_task_model_tool_and_answer_with_stable_turn_ids(tmp
     assert model.attributes['gen_ai.usage.input_tokens'] == 10
     assert 'private-thought' not in str(model.attributes)
     assert root.attributes['gen_ai.agent.name'] == 'moyai-devin'
+    assert {span.attributes['agent.name'] for span in processor.spans} == {'moyai-devin'}
+    assert model.attributes['llm.model_name'] == (run.get('active_model') or run['model'])
     # The real OTLP encoder accepts every span (IDs, timestamps, attributes).
     assert len(encode_spans(processor.spans).SerializeToString()) > 0
     # Duplicate turn saves do not emit duplicate roots; resumed tool events
