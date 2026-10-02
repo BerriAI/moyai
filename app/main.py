@@ -159,6 +159,7 @@ def create_app(settings: Settings | None = None):
         identities.start()
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+        tracing.start()
         try:
             yield
         finally:
