@@ -340,9 +340,11 @@ class Store:
                 conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
                 if status != 'steered':
                     conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
+                if self.tracing:
+                    # Commit the answer and its pending span together. A crash
+                    # after saving the answer must not lose its root trace.
+                    self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
-        if changed and self.tracing:
-            self.tracing.finish_turn(run_id, message_id, content, status)
 
     def has_queued_messages(self, run_id):
         return bool(self.rows("SELECT id FROM messages WHERE run_id=? AND status='queued' LIMIT 1", (run_id,)))

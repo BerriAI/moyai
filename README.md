@@ -38,18 +38,26 @@ leave the key empty to disable export. The inference gateway and its key remain
 configured separately through `LITELLM_API_BASE` and `LITELLM_API_KEY`.
 
 The control plane sends standard OTLP/HTTP protobuf with the OpenTelemetry SDK.
-Each response produces a `moyai-devin` agent span containing the task and final
+Each response produces an agent span containing the task and final
 answer, with child model and tool spans including timing, status, token counts,
 and bounded tool inputs/results. Follow-ups have separate trace IDs and a shared
 session ID. Active delegated agents attach beneath their coordinator; machine
 renewals retain the current turn's trace identity. Sandbox events never receive
 the trace credential and trace payloads are separate from public chat activity.
+The service name remains `moyai-devin`; workers use their saved agent labels.
+Each turn keeps its original trace, parent and name across recovery.
 
 System prompts, loaded skills, private reasoning, images and credential-tool
 payloads are excluded. Known credentials and common secret fields are redacted;
 ordinary task/tool text is sent to the configured gateway. Text is capped at
-16,000 characters per field. Export is best effort through a bounded SDK queue:
-an exporter outage or process crash can lose spans but does not fail the task.
+16,000 characters per field. Moyai writes encoded spans to a SQLite outbox on
+Render's persistent disk before export. A background worker retries delivery after
+outages and restarts using the same IDs. It keeps delivery receipts and removes
+acknowledged payloads. The gateway must deduplicate by trace/span ID if it accepted
+a batch but its acknowledgment was lost. Pending payloads occupy disk until delivery;
+back up and protect that disk with the rest of the workspace data. A crash before
+capture, a lost disk, or a model response that never reaches Moyai can still leave
+gaps; this outbox does not recover missing inference responses or billing receipts.
 
 The destination must enable `general_settings.tracing.store: clickhouse` and
 `CLICKHOUSE_URL`. ClickHouse is required for Agent Traces itself. A Lens worker
