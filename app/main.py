@@ -39,6 +39,8 @@ from .environments import Environments
 from .tracing import AgentTracing
 from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
+from .computer import Computer
+from . import captures
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -191,6 +193,10 @@ def create_app(settings: Settings | None = None):
     app.include_router(skills.routes())
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
+    computer = Computer(settings, store, security, manager, credentials.same_requester)
+    manager.computer = computer
+    app.state.computer = computer
+    app.include_router(computer.routes())
     app.state.skills = skills
     app.state.environments = environments
     app.include_router(environments.routes())
@@ -388,7 +394,7 @@ def create_app(settings: Settings | None = None):
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "has_captures": bool(captures.listing(settings, run_id)), "slack_source": store.slack_source(run_id)}
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):

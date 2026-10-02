@@ -260,7 +260,7 @@ class RunManager:
         if not re.fullmatch(r"[0-9a-f]{40}", revision):
             raise ValueError("HERMES_REVISION must be a full commit SHA")
         return (modal.Image.debian_slim(python_version="3.14")
-                .apt_install("git", "chromium", "ca-certificates", "build-essential", "libffi-dev", "ripgrep", "nodejs", "npm")
+                .apt_install("git", "chromium", "xvfb", "ffmpeg", "ca-certificates", "build-essential", "libffi-dev", "ripgrep", "nodejs", "npm")
                 .pip_install("playwright==1.58.0")
                 .env({"HERMES_RUNTIME_DIR": "/opt/hermes-tools", "PYTHONPATH": "/opt/hermes"})
                 .run_commands(f"git init /opt/hermes && cd /opt/hermes && git remote add origin https://github.com/NousResearch/hermes-agent.git && git fetch --depth 1 origin {revision} && git checkout --detach FETCH_HEAD",
@@ -453,6 +453,8 @@ class RunManager:
             await asyncio.gather(drain, return_exceptions=True)
 
     async def save_artifact(self, sandbox, run_id):
+        if getattr(self, 'computer', None):
+            await self.computer.save_before_release(sandbox, run_id)
         try:
             info = await sandbox.filesystem.stat.aio("/artifacts/result.zip")
             if info.size > 20 * 1024 * 1024:

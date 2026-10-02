@@ -921,3 +921,17 @@ create equivalent isolated datasets for the exact base/head revisions. The known
 local database password in the recipe is solely for this sandbox's development
 database; it is not a provider or production credential. Template setup is
 editable because dependency requirements can change with the source revision.
+
+### Computer preview and browser captures
+
+Open **Computer** in a cloud session to watch its sandbox browser. **Take control** lets the requester or an administrator click, scroll, navigate, and type into the same browser; agent browser actions wait while a person holds control. Closing the panel releases control, and an abandoned lease expires after 60 seconds. Human interaction refreshes the existing five-minute idle window, without extending the sandbox's absolute lifetime. An asleep workspace starts again when you send Moyai a message.
+
+Ask Moyai to take a screenshot or record a browser flow. Its MCP tools include `browser_screenshot`, `browser_record_start`, and `browser_record_stop`. The web panel has the same capture controls. Completed captures appear in **Computer** and **Files**, with image previews, video playback, and individual downloads. Captures share the session's saved-file visibility. The live screen and controls are restricted to its requester or an administrator.
+
+- PNG screenshots and WebM video, 1280 × 720, no audio.
+- Each clip stops at 10 minutes or roughly 25 MB; 64 MB of saved captures per session.
+- Recordings finish before a response checkpoint or idle sandbox shutdown. Incomplete files remain `.partial` and are never offered as finished videos.
+- Completed captures are copied to the app's persistent disk, separately from code ZIPs, and included in optional cloud checkpoints. Existing downloads do not need a running sandbox.
+- The browser runs on Xvfb inside Modal. Render uses private Modal exec to control it; no public desktop, VNC, or debugging port is exposed. A restored older sandbox installs Xvfb/ffmpeg on first use.
+
+This is a preview of the sandbox **browser**, not a full desktop or the user's local browser. Browser process/login state is warm for the sandbox's lifetime; saved media survives shutdown. Do not record secrets or credentials.

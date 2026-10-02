@@ -150,6 +150,13 @@ class DurableRunner(RunManager):
         # and never publishes the previous answer a second time.
         state.update(phase='warm_cleanup', idle_reason=reason)
         self.save(run_id, state)
+        if getattr(self, 'computer', None):
+            try:
+                sandbox = await self.sandbox(state)
+                async with self.computer.locks.setdefault(run_id, asyncio.Lock()):
+                    await self.computer.save_before_release(sandbox, run_id)
+            except LostExecution:
+                pass
         await self.cleanup(state)
         state.update(phase='idle', sandbox_id='')
         state.pop('idle_until', None)
@@ -159,6 +166,11 @@ class DurableRunner(RunManager):
 
     async def warm(self, run_id, state):
         row = self.store.run(run_id)
+        if getattr(self, 'computer', None) and state.get('phase') == 'warm':
+            touched = self.computer.touched(run_id)
+            if touched and state.get('idle_until') is not None:
+                state['idle_until'] = max(state['idle_until'], touched + self.settings.sandbox_idle_seconds)
+                self.save(run_id, state)
         stopping = row['status'] in {'stopping', 'cancelled', 'interrupted'}
         queued = self.store.has_queued_messages(run_id)
         expired = (time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds

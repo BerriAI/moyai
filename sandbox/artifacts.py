@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import zipfile
 
-EXCLUDED = {"node_modules", "__pycache__", "venv", "env", "site-packages", "dist", "build"}
+EXCLUDED = {"moyai-captures", "node_modules", "__pycache__", "venv", "env", "site-packages", "dist", "build"}
 FILE_LIMIT = 2 * 1024 * 1024
 TOTAL_LIMIT = 15 * 1024 * 1024
 

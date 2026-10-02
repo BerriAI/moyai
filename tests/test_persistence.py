@@ -15,6 +15,9 @@ async def test_checkpoint_restores_committed_database_and_results(tmp_path):
     archives = settings.data_dir / "artifacts"
     archives.mkdir()
     (archives / f"{run['id']}.zip").write_bytes(b"immutable result archive")
+    media = archives / (run['id'] + '-captures')
+    media.mkdir()
+    (media / 'flow.webm').write_bytes(b'saved recording')
     calls = []
     async def commit():
         calls.append(True)
@@ -27,6 +30,7 @@ async def test_checkpoint_restores_committed_database_and_results(tmp_path):
     assert (settings.data_dir / "artifacts" / f"{run['id']}.zip").read_bytes() == b"immutable result archive"
     with restored.connect() as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert (settings.data_dir / 'artifacts' / (run['id'] + '-captures') / 'flow.webm').read_bytes() == b'saved recording'
     assert calls == [True]
 
 

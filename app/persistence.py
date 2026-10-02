@@ -65,6 +65,18 @@ class Checkpoints:
                         staged = target.with_suffix(".tmp")
                         shutil.copy2(source, staged)
                         staged.replace(target)
+                for source_dir in archives.glob('*-captures'):
+                    if not source_dir.is_dir() or source_dir.is_symlink():
+                        continue
+                    dest = target_dir / source_dir.name
+                    dest.mkdir(exist_ok=True, mode=0o700)
+                    for source in source_dir.iterdir():
+                        target = dest / source.name
+                        if source.suffix not in {'.png', '.webm'} or source.is_symlink() or target.exists():
+                            continue
+                        staged = target.with_suffix('.next')
+                        shutil.copy2(source, staged)
+                        staged.replace(target)
             await self.commit()
             # Writes during the commit await remain dirty for the next flush.
             self.saved_generation = generation

@@ -11,6 +11,7 @@ import uuid
 try:
     from .broker_relay import BrokerRelay
     from .artifacts import collect_archive
+    from .computer import request as computer_request
     from .continuation import RotationDeadline, AgentWait, ActiveTurnSteering, resumed_context
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
@@ -20,6 +21,7 @@ try:
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
+    from computer import request as computer_request
     from continuation import RotationDeadline, AgentWait, ActiveTurnSteering, resumed_context
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
@@ -220,6 +222,11 @@ def run_agent(spec, relay):
             "If source context is unavailable or incomplete, state the limitation and ask only for details you actually need. "
             "For Linear ticket requests, look up the team and use the issue creation tool to prepare the exact ticket for approval, when available. "
             "Never copy credentials into artifacts or messages. Use browser tools for web pages. "
+            "The Computer panel shows your sandbox browser live. Use browser_screenshot for a named PNG and "
+            "browser_record_start/browser_record_stop to record a flow as WebM; start before the actions and stop afterwards. "
+            "These record the sandbox browser, not the user's own browser or desktop. Captures are shared with session viewers. "
+            "Do not capture passwords or secrets. Link returned /workspace/moyai-captures paths in your reply. "
+            "If a person takes browser control, continue other useful work or wait for their next message; do not repeatedly retry browser actions. "
             "If a task needs a separate provider API key, use credentials_request with a reason and stable request_key. "
             "Never ask the user to paste keys into chat or Slack. The secure web form offers session-only, personal and organization storage and provider setup links. "
             "Request credentials in their own tool round; a pending request automatically saves and pauses this session. "
@@ -281,6 +288,12 @@ def run_agent(spec, relay):
     finally:
         steering.close()
         agent.close()
+        try:
+            capture = computer_request({'action': 'finish'}, start=False)
+            if capture.get('error'):
+                emit('error', capture['error'])
+        except Exception:
+            emit('error', 'Browser recording could not be finalized; any partial file remains in the workspace.')
     collect_archive(workspace, artifacts, os.environ["WORKSPACE_RUN_TOKEN"].encode())
     return 0 if completed or continuing or steered else 1
 

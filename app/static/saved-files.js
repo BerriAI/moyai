@@ -38,14 +38,14 @@
     }
     function update(){
       const button=query('#files-button');
-      if(button){button.hidden=!run?.has_artifact;button.textContent='Files'+(catalog?' · '+catalog.files.length:'');button.onclick=()=>open();}
+      if(button){button.hidden=!(run?.has_artifact||run?.has_captures);button.textContent='Files'+(catalog?' · '+catalog.files.length:'');button.onclick=()=>open();}
       const area=query('#artifact-area');
-      if(area)area.innerHTML=run?.has_artifact?`<button type="button" class="quiet browse-files">Browse saved files${catalog?' · '+catalog.files.length:''}</button><a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download workspace ZIP</a>`:'';
+      if(area)area.innerHTML=(run?.has_artifact||run?.has_captures)?`<button type="button" class="quiet browse-files">Browse saved files${catalog?' · '+catalog.files.length:''}</button>${run.has_artifact?`<a class="session-download" href="/api/runs/${run.id}/artifact">↓ Download workspace ZIP</a>`:''}`:'';
       if(area?.querySelector('.browse-files'))area.querySelector('.browse-files').onclick=()=>open();
       decorate(query('#conversation'));
     }
     async function load(force=false){
-      if(!run?.has_artifact)return;
+      if(!(run?.has_artifact||run?.has_captures))return;
       const next=run.id+':'+(run.events||[]).filter(e=>e.kind==='artifact').at(-1)?.id;
       if(!force&&key===next)return loading;
       key=next;const id=++requestId,rid=run.id;
@@ -76,6 +76,10 @@
       query('#saved-file-path').textContent=file.path;
       const download=query('#saved-file-download');download.href=file.url;download.hidden=false;download.setAttribute('download',file.name);
       query('#saved-file-preview').innerHTML='<p class="saved-file-empty" role="status">Opening file…</p>';
+      if(file.inline_url&&['image','video'].includes(file.kind)){
+        query('#saved-file-preview').innerHTML=file.kind==='image'?`<img class="saved-capture" src="${esc(file.inline_url)}" alt="${esc(file.name)}">`:`<video class="saved-capture" src="${esc(file.inline_url)}" controls preload="metadata"></video>`;
+        return;
+      }
       try{
         const result=await api(file.preview_url);if(id!==previewId||!dialog.open)return;
         const target=query('#saved-file-preview');
@@ -86,14 +90,14 @@
       }catch(error){if(id===previewId&&dialog.open)query('#saved-file-preview').innerHTML=`<p class="saved-file-empty" role="alert">${esc(error.message)}</p>`;}
     }
     async function open(file=null){
-      if(!run?.has_artifact)return;
-      if(!dialog){dialog=doc.createElement('dialog');dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;});}
+      if(!(run?.has_artifact||run?.has_captures))return;
+      if(!dialog){dialog=doc.createElement('dialog');dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;dialog.querySelectorAll('video').forEach(video=>video.pause());});}
       const rid=run.id,viewing=++viewId;
       dialog.innerHTML=`<header class="saved-files-heading"><div><h2 id="saved-files-heading">Saved files</h2><p>Latest saved version of this workspace</p></div><button type="button" class="icon-button" aria-label="Close saved files">×</button></header><div class="saved-files-loading" role="status">Loading saved files…</div>`;
       dialog.querySelector('button').onclick=()=>dialog.close();
       if(!dialog.open)dialog.showModal();
       await load(true);if(run?.id!==rid||!dialog.open||viewing!==viewId)return;
-      dialog.querySelector('.saved-files-loading').outerHTML=`<div class="saved-files-body"><aside class="saved-files-nav"><input id="saved-file-search" type="search" placeholder="Find a file…" aria-label="Find a saved file"><div id="saved-file-list"></div></aside><section class="saved-file-view"><div class="saved-file-heading"><div><h3 id="saved-file-title">Select a file</h3><p id="saved-file-path"></p></div><a id="saved-file-download" class="small" hidden>↓ Download</a></div><div id="saved-file-preview"><p class="saved-file-empty">Choose a file to preview.</p></div></section></div><footer class="saved-files-footer"><span>${esc(catalog?.error||catalog?.note||'')}${catalog?.limited?' Some entries cannot be previewed.':''}</span><a href="/api/runs/${rid}/artifact">Download ZIP</a></footer>`;
+      dialog.querySelector('.saved-files-loading').outerHTML=`<div class="saved-files-body"><aside class="saved-files-nav"><input id="saved-file-search" type="search" placeholder="Find a file…" aria-label="Find a saved file"><div id="saved-file-list"></div></aside><section class="saved-file-view"><div class="saved-file-heading"><div><h3 id="saved-file-title">Select a file</h3><p id="saved-file-path"></p></div><a id="saved-file-download" class="small" hidden>↓ Download</a></div><div id="saved-file-preview"><p class="saved-file-empty">Choose a file to preview.</p></div></section></div><footer class="saved-files-footer"><span>${esc(catalog?.error||catalog?.note||'')}${catalog?.limited?' Some entries cannot be previewed.':''}</span>${run.has_artifact?`<a href="/api/runs/${rid}/artifact">Download ZIP</a>`:''}</footer>`;
       selected=null;drawList();query('#saved-file-search').oninput=drawList;
       const choice=file?catalog.files.find(item=>item.archive_path===file.archive_path):catalog.files.find(item=>item.workspace_path)||catalog.files[0];
       if(choice)select(choice);

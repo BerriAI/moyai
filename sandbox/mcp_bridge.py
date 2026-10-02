@@ -12,9 +12,10 @@ from urllib.error import HTTPError
 from urllib.parse import urlparse
 
 try:
-    from . import github_tools
+    from . import github_tools, computer
 except ImportError:
     import github_tools
+    import computer
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -30,29 +31,10 @@ def broker(path, body=None):
 
 
 def browser_tool(name, args):
-    global browser, page, playwright
-    if page is None:
-        from playwright.sync_api import sync_playwright
-        playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(executable_path="/usr/bin/chromium", headless=True, args=["--no-sandbox"])
-        page = browser.new_page(viewport={"width": 1365, "height": 900})
-        page.set_default_timeout(20000)
-    if name == "browser_open":
-        parsed = urlparse(args["url"])
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-            raise ValueError("Only HTTP(S) browser URLs without credentials are allowed.")
-        page.goto(args["url"], wait_until="domcontentloaded")
-    elif name == "browser_click":
-        page.get_by_role(args["role"], name=args["name"], exact=True).click()
-    elif name == "browser_fill":
-        page.get_by_label(args["label"], exact=True).fill(args["value"])
-    elif name != "browser_read":
-        raise ValueError("Unknown browser tool")
-    Path("/artifacts").mkdir(exist_ok=True)
-    page.screenshot(path="/artifacts/browser.png", full_page=False)
-    return {"url": page.url, "title": page.title(), "text": page.locator("body").inner_text()[:24000],
-            "elements": page.locator('a,button,input,select,textarea').evaluate_all("els => els.slice(0,60).map(e => ({tag:e.tagName,role:e.getAttribute('role'),name:e.innerText||e.getAttribute('aria-label')||e.getAttribute('placeholder'),type:e.type}))"),
-            "screenshot": "Latest screenshot will be included in the result archive."}
+    action = name.removeprefix('browser_')
+    if name not in {tool['name'] for tool in BROWSER_TOOLS}:
+        raise ValueError('Unknown browser tool')
+    return computer.request({'action': action, 'actor': 'agent', 'args': args})
 
 
 def schema(properties, required):
@@ -64,6 +46,11 @@ BROWSER_TOOLS = [
     {"name": "browser_read", "description": "Read the current browser page and save its screenshot.", "inputSchema": schema({}, [])},
     {"name": "browser_click", "description": "Click a visible element by its accessible role and exact name. Can perform website actions.", "inputSchema": schema({"role": "Accessible role, such as button or link", "name": "Exact accessible name"}, ["role", "name"])},
     {"name": "browser_fill", "description": "Fill a form field by its exact accessible label.", "inputSchema": schema({"label": "Field's accessible label", "value": "Text to enter"}, ["label", "value"])},
+    {"name": "browser_screenshot", "description": "Save a named PNG screenshot of the current browser viewport. Return its workspace path as a Markdown link so the user can preview/download it.", "inputSchema": schema({"name": "Short descriptive capture name"}, ["name"])},
+    {"name": "browser_record_start", "description": "Start recording the sandbox browser flow as WebM. Open the page first, then start recording, perform the flow, and stop recording. No audio. Maximum 10 minutes/25 MB per clip.", "inputSchema": schema({"name": "Short descriptive recording name"}, ["name"])},
+    {"name": "browser_record_stop", "description": "Stop and save the browser video. Link the returned workspace path in your answer. Active recordings are also finalized when your response ends.", "inputSchema": schema({}, [])},
+    {"name": "browser_key", "description": "Press a browser key: Enter, Tab, Shift+Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Control+a or Space.", "inputSchema": schema({"key": "Key to press"}, ["key"])},
+    {"name": "browser_scroll", "description": "Scroll the browser viewport vertically.", "inputSchema": {"type":"object", "properties":{"dy":{"type":"integer", "description":"Pixels to scroll, negative for up"}}, "required":["dy"], "additionalProperties":False}},
 ]
 
 
@@ -122,10 +109,4 @@ def serve():
 
 
 if __name__ == "__main__":
-    try:
-        serve()
-    finally:
-        if browser:
-            browser.close()
-        if playwright:
-            playwright.stop()
+    serve()

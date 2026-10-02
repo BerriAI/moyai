@@ -16,6 +16,7 @@ import zlib
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
+from . import captures
 
 MAX_ARCHIVE = 20 * 1024 * 1024
 MAX_TOTAL = 32 * 1024 * 1024
@@ -77,11 +78,14 @@ def routes(settings, store, security):
     @router.get('/api/runs/{run_id}/files')
     def list_files(run_id: str, request: Request):
         security.require(request)
+        media = captures.listing(settings, run_id) if store.run(run_id) else []
+        if media and not (settings.data_dir / 'artifacts' / (run_id + '.zip')).exists():
+            return {'revision': 'captures', 'files': media, 'limited': False, 'note': 'Saved browser captures.'}
         with saved_archive(settings, store, run_id) as (_, files, revision, skipped):
             ordered = sorted(files.values(), key=lambda i: (not i.filename.startswith('new-files/'), i.filename.casefold()))
-            return {'revision': revision, 'files': [file_info(run_id, i, revision) for i in ordered[:MAX_LIST]],
+            return {'revision': revision, 'files': media + [file_info(run_id, i, revision) for i in ordered[:MAX_LIST]],
                     'limited': len(ordered) > MAX_LIST or bool(skipped),
-                    'note': 'Latest saved files. Tracked repository edits are included as patches in the ZIP.'}
+                    'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}
 
     @router.get('/api/runs/{run_id}/files/content')
     def content(run_id: str, request: Request, path: str = Query(max_length=1024),
