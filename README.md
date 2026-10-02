@@ -814,6 +814,16 @@ link. Files are not uploaded to Slack and require no additional Slack scopes.
 
 ## Prepared project environments
 
+LiteLLM is prepared automatically on the first app startup with Modal credentials:
+Moyai creates the starter recipe, queues its build, and enables the verified image
+as the workspace default. New web and Slack sessions then use it without choosing
+an environment. While the initial build is running or if it fails, sessions can
+still use the base tools. A failed build is shown in **Environments** for a manual
+retry; app restarts do not repeatedly rebuild it. Existing environments, admin
+edits, cancellations, disabled environments, and another chosen default are
+preserved. Local previews without Modal credentials never start cloud builds.
+Set `AUTO_SETUP_LITELLM_ENVIRONMENT=false` before initial setup to opt out.
+
 Admins can open **Environments** to create an organization recipe from the LiteLLM
 starter or a custom project. Configure a GitHub repository and branch/tag/commit,
 Debian packages, install commands, idempotent service startup, verification,

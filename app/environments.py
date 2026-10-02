@@ -67,8 +67,26 @@ class Environments:
             commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
         with store.connect() as conn:
-            if 'refresh_daily' not in {r['name'] for r in conn.execute('PRAGMA table_info(environments)')}:
-                conn.execute('ALTER TABLE environments ADD COLUMN refresh_daily INTEGER NOT NULL DEFAULT 0')
+            columns = {r['name'] for r in conn.execute('PRAGMA table_info(environments)')}
+            for name in ('refresh_daily', 'activate_on_ready'):
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+
+    def bootstrap(self):
+        """Queue first-time setup atomically; never overwrite an admin's choices."""
+        if not (self.settings.auto_setup_litellm_environment and self.settings.modal_token_id
+                and self.settings.modal_token_secret):
+            return
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute('SELECT 1 FROM environments LIMIT 1').fetchone():
+                return
+            identity, build_id, stamp = uuid4().hex, uuid4().hex, now()
+            recipe = Recipe.model_validate(TEMPLATES[0]).model_dump_json()
+            conn.execute('''INSERT INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
+                VALUES(?,?,1,1,?,?)''', (identity, recipe, 'Automatic setup', stamp))
+            conn.execute('''INSERT INTO environment_builds(id,environment_id,revision,recipe,created_at,actor)
+                VALUES(?,?,1,?,?,?)''', (build_id, identity, recipe, stamp, 'Automatic setup'))
 
     def get(self, identity):
         rows = self.store.rows('SELECT * FROM environments WHERE id=?', (identity,))
@@ -86,6 +104,7 @@ class Environments:
                 active_recipe = json.loads(self.build(row['active_build'])['recipe'])
                 value.update(name=active_recipe['name'], repository=active_recipe['repository'])
             if admin:
+                value['activate_on_ready'] = row['activate_on_ready']
                 value['recipe'] = recipe
                 value['builds'] = self.store.rows('''SELECT id,revision,phase,commit_sha,error,created_at,finished_at
                     FROM environment_builds WHERE environment_id=? ORDER BY rowid DESC LIMIT 10''', (row['id'],))
@@ -105,7 +124,7 @@ class Environments:
             # An edit retains the last good build until the new revision validates.
             conn.execute('''INSERT INTO environments(id,recipe,revision,updated_by,updated_at) VALUES(?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET recipe=excluded.recipe,revision=excluded.revision,
-                updated_by=excluded.updated_by,updated_at=excluded.updated_at''',
+                updated_by=excluded.updated_by,updated_at=excluded.updated_at,activate_on_ready=0''',
                          (identity, body.recipe.model_dump_json(), body.revision + 1, actor, now()))
         saved = self.get(identity)
         if saved['enabled'] and saved['refresh_daily']:
@@ -244,6 +263,11 @@ class Environments:
             # A build of an older edited revision never takes over the default.
             conn.execute('UPDATE environments SET active_build=?,updated_at=? WHERE id=? AND revision=?',
                          (identity, now(), build['environment_id'], build['revision']))
+            row = conn.execute('SELECT * FROM environments WHERE id=?', (build['environment_id'],)).fetchone()
+            if row['activate_on_ready'] and row['revision'] == build['revision']:
+                has_default = conn.execute('SELECT 1 FROM environments WHERE is_default=1 AND enabled=1 LIMIT 1').fetchone()
+                conn.execute('UPDATE environments SET enabled=1,is_default=?,activate_on_ready=0 WHERE id=?',
+                             (not bool(has_default), row['id']))
         await self.checkpoints.flush()
         await sandbox.terminate.aio()
         self.update(identity, sandbox_id='')
@@ -276,6 +300,7 @@ class Environments:
                 self.enqueue(row['id'], row['revision'], 'Automatic refresh')
 
     def start(self):
+        self.bootstrap()
         self.task = asyncio.create_task(self.watch())
 
     async def close(self):
@@ -299,7 +324,9 @@ class Environments:
         @router.get('/api/admin/environments')
         async def administration(request: Request):
             self.security.require(request, admin=True)
-            return {'environments': self.catalog(admin=True), 'templates': TEMPLATES}
+            return {'environments': self.catalog(admin=True), 'templates': TEMPLATES,
+                    'automatic_setup': self.settings.auto_setup_litellm_environment,
+                    'modal_configured': bool(self.settings.modal_token_id and self.settings.modal_token_secret)}
 
         @router.post('/api/admin/environments', status_code=201)
         async def create(body: SaveRecipe, request: Request):
@@ -332,7 +359,7 @@ class Environments:
                     raise HTTPException(422, 'Enable an environment before making it the default.')
                 if body.is_default:
                     conn.execute('UPDATE environments SET is_default=0')
-                conn.execute('UPDATE environments SET enabled=?,is_default=?,refresh_daily=? WHERE id=?',
+                conn.execute('UPDATE environments SET enabled=?,is_default=?,refresh_daily=?,activate_on_ready=0 WHERE id=?',
                              (body.enabled, body.is_default, row['refresh_daily'] if body.refresh_daily is None else body.refresh_daily, identity))
             return {'ok': True}
 
@@ -345,7 +372,10 @@ class Environments:
         async def cancel(identity: str, request: Request):
             actor(request)
             self.build(identity)
-            self.store.execute("UPDATE environment_builds SET phase='cancelling' WHERE id=? AND phase NOT IN ('ready','failed')", (identity,))
+            with self.store.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                if conn.execute("UPDATE environment_builds SET phase='cancelling' WHERE id=? AND phase NOT IN ('ready','failed')", (identity,)).rowcount:
+                    conn.execute('UPDATE environments SET activate_on_ready=0 WHERE id=(SELECT environment_id FROM environment_builds WHERE id=?)', (identity,))
             return {'ok': True}
 
         return router

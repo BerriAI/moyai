@@ -30,6 +30,7 @@ def slack_app(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, data_dir=tmp_path, public_url="https://workspace.example",
                         workspace_password="admin-test-password", modal_token_id="modal-test-id",
                         modal_token_secret="modal-test-secret", litellm_api_key="model-test-key",
+                        auto_setup_litellm_environment=False,
                         litellm_api_base="https://gateway.example/v1", agent_model="test-model",
                         slack_bot_enabled=True, slack_signing_secret="slack-test-signing-secret", slack_session_users="*")
     app = create_app(settings)
