@@ -12,7 +12,7 @@ def public_text(value, limit=2000):
     text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)', '[redacted]', text, flags=re.S)
     text = re.sub(r'(?i)\b(?:sk-[\w-]{8,}|xox[baprs]-[\w-]+|gh[pousr]_[\w]+|github_pat_[\w]+)', '[redacted]', text)
     text = re.sub(r'(?i)(authorization\s*[:=]\s*[\"\']?(?:bearer|basic)\s+)[^\s\"\']+', r'\1[redacted]', text)
-    text = re.sub(r'(?i)((?:[\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)[\"\']?\s*[:=]\s*)(?:\"[^\"]*\"|\'[^\']*\'|[^\s,;&]+)', r'\1[redacted]', text)
+    text = re.sub(r'(?i)(\b(?:[\w-]*(?:token|secret|password|api[_-]?key)[\w-]*)[\"\']?\s*[:=]\s*)(?:\"[^\"]*\"|\'[^\']*\'|[^\s,;&]+)', r'\1[redacted]', text)
     text = re.sub(r'(https?://)[^/\s@]+@', r'\1[redacted]@', text)
     return text[:limit] + ('…' if len(text) > limit else '')
 
@@ -63,16 +63,20 @@ def tool_summary(name, arguments):
 
 
 class ActivityReporter:
-    def __init__(self, emit):
+    def __init__(self, emit, *, tracing=False):
         self.emit = emit
         self.prefix = uuid.uuid4().hex
         self.starts = {}
         self.lock = threading.Lock()
+        self.tracing = tracing
+        self.trace_starts = {}
 
     def start(self, call_id, name, args):
         data = tool_summary(name, args)
         with self.lock:
             self.starts[str(call_id)] = (time.monotonic(), data)
+            if self.tracing:
+                self.trace_starts[str(call_id)] = time.time_ns()
         self.emit('tool', data['label'], {**data, 'activity_version': 1,
                   'call_id': self.prefix + ':' + str(call_id), 'phase': 'started'})
 
@@ -86,6 +90,23 @@ class ActivityReporter:
         if code is not None:
             data['exit_code'] = code
         self.emit('tool', data['label'], data)
+        if self.tracing:
+            # Separate events never enter the public activity stream. Capture
+            # only after the tool completed; observation must not break work.
+            try:
+                try:
+                    from .trace_content import trace_content
+                except ImportError:
+                    from trace_content import trace_content
+                with self.lock:
+                    start = self.trace_starts.pop(str(call_id), time.time_ns())
+                private = data['tool'].startswith(('credentials_', 'skills_'))
+                self.emit('trace', '', {'tool': data['tool'], 'call_id': data['call_id'],
+                          'start_ns': start, 'end_ns': time.time_ns(), 'status': phase,
+                          'input': '[private tool payload omitted]' if private else trace_content(args),
+                          'output': '[private tool payload omitted]' if private else trace_content(result)})
+            except Exception:
+                pass
 
     def commentary(self, text, *args, **kwargs):
         # Hermes' interim callback contains public assistant text, never its

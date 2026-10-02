@@ -121,7 +121,7 @@ def run_agent(spec, relay):
     waiting = AgentWait(relay)
     steering = ActiveTurnSteering(relay, lambda item: prepare_attachments(
         {**spec, 'attachments': item.get('attachments', [])}, os.environ['WORKSPACE_RUN_TOKEN']))
-    activity = ActivityReporter(emit)
+    activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')))
     def step(*args):
         waiting.step(agent)
         if not waiting.requested:

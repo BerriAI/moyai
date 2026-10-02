@@ -18,6 +18,7 @@ class Store:
         self.max_pending_runs = max_pending_runs
         self.generation = 0
         self.default_model = default_model
+        self.tracing = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         with self.connect() as conn:
@@ -340,6 +341,8 @@ class Store:
                 if status != 'steered':
                     conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
+        if changed and self.tracing:
+            self.tracing.finish_turn(run_id, message_id, content, status)
 
     def has_queued_messages(self, run_id):
         return bool(self.rows("SELECT id FROM messages WHERE run_id=? AND status='queued' LIMIT 1", (run_id,)))

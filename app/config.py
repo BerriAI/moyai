@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     litellm_api_base: str = ""
     litellm_api_key: str = ""
+    # Separate destination/key; enabling traces never reroutes inference.
+    litellm_trace_endpoint: str = ""
+    litellm_trace_api_key: str = ""
     agent_model: str = ""
     agent_models: str = "openai/gpt-6-astra,anthropic/claude-opus-5-5"
     modal_token_id: str = ""
@@ -75,6 +78,16 @@ class Settings(BaseSettings):
     github_repository: str = Field(default="BerriAI/litellm", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
     # Explicit allowlist; empty preserves the original single-repository setting.
     github_repositories: str = ""
+
+    @field_validator('litellm_trace_endpoint')
+    @classmethod
+    def validate_trace_endpoint(cls, value):
+        from urllib.parse import urlsplit
+        parsed = urlsplit(value)
+        if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
+                      parsed.password or parsed.query or parsed.fragment or parsed.path != '/v1/traces'):
+            raise ValueError('Use an HTTPS trace endpoint ending in /v1/traces, without credentials or query parameters.')
+        return value
 
     @field_validator('github_repositories')
     @classmethod

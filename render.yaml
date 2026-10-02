@@ -20,6 +20,10 @@ services:
         value: "1"
       - key: DATA_DIR
         value: /var/data/moyai
+      - key: LITELLM_TRACE_ENDPOINT
+        value: https://gateway-dev.litellm-sandbox.ai/v1/traces
+      - key: LITELLM_TRACE_API_KEY
+        sync: false
       - key: RENDER_MIGRATION_STAGE
         value: "false"
       - key: BOOTSTRAP_MODAL_VOLUME

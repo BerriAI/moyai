@@ -379,6 +379,8 @@ class DurableRunner(RunManager):
                         output = output.replace(value, '[redacted]')
                 report = json.loads(output)
                 for event in report['events']:
+                    if event.get('kind') == 'trace' and self.store.tracing:
+                        self.store.tracing.tool(run_id, event.get('data'))
                     if event.get('kind') in {'tool', 'status', 'error', 'message'}:
                         self.store.event(run_id, event['kind'], str(event.get('message', '')), event.get('data', {}))
                     event_phase = event.get('data', {}).get('phase')

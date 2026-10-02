@@ -36,6 +36,7 @@ from .github_setup import routes as github_routes
 from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
 from .environments import Environments
+from .tracing import AgentTracing
 from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
@@ -136,6 +137,8 @@ def create_app(settings: Settings | None = None):
     manager.environments = environments
     spend = Spend(store, settings, security, checkpoints)
     coordinator = AgentCoordinator(store, settings, manager)
+    tracing = AgentTracing(store, settings)
+    store.tracing = tracing
     manager.coordinator = coordinator
     credentials = Credentials(store, security, settings, manager, checkpoints)
     manager.credentials = credentials
@@ -168,6 +171,7 @@ def create_app(settings: Settings | None = None):
             await identities.close()
             await slack.shutdown()
             await manager.shutdown()
+            await tracing.close()
             if watcher:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
@@ -189,6 +193,7 @@ def create_app(settings: Settings | None = None):
     app.state.skills = skills
     app.state.environments = environments
     app.include_router(environments.routes())
+    app.state.tracing = tracing
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
@@ -784,6 +789,8 @@ def create_app(settings: Settings | None = None):
         await checkpoints.flush()
         capture = UsageCapture(False)
         status = 'unknown'
+        trace_started = time.time_ns()
+        trace_response = {}
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
                 async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
@@ -803,6 +810,7 @@ def create_app(settings: Settings | None = None):
                     if not capture.done:
                         raise HTTPException(502, 'Model gateway returned an invalid completion.')
                     status = 'completed'
+                    trace_response = json.loads(raw_response)
             except httpx.HTTPError:
                 raise HTTPException(502, 'Model gateway could not be reached.')
             except asyncio.CancelledError:
@@ -812,6 +820,7 @@ def create_app(settings: Settings | None = None):
                 # Account before returning any data, including if the sandbox
                 # stopped while the already-submitted inference was completing.
                 spend.finish(request_id, capture, status)
+                tracing.model(run, request_id, trace_started, body['messages'], trace_response, status)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:
