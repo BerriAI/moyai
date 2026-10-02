@@ -5,11 +5,9 @@ Provider credentials never enter this process.
 """
 import json
 import os
-from pathlib import Path
 import sys
 import urllib.request
 from urllib.error import HTTPError
-from urllib.parse import urlparse
 
 try:
     from . import github_tools, computer
@@ -20,7 +18,6 @@ except ImportError:
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
 GIT_BROKER = os.environ.get('WORKSPACE_GIT_BROKER_URL', BROKER)
-browser = page = playwright = None
 
 
 def broker(path, body=None):

@@ -14,6 +14,7 @@ function browser() {
   const context = {
     state,
     savedFiles: {reset() {}},
+    computer: {closed:false,close() {this.closed=true;}},
     EventSource: class {
       constructor(url) { this.url = url; this.handlers = {}; sources.push(this); }
       addEventListener(name, handler) { this.handlers[name] = handler; }
@@ -64,6 +65,7 @@ test('leaving a chat cancels a pending reconnect', () => {
   const b = browser();
   b.sources[0].onerror();
   b.context.stopStream();
+  assert.equal(b.context.computer.closed,true);
   b.state.selected = 'chat-b';
   assert.equal(b.timers.size, 0);
   b.sources[0].onerror();

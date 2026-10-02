@@ -273,3 +273,23 @@ def test_runtime_reports_effective_idle_setting(workspace):
     app.state.settings.temporal_enabled = True
     app.state.manager.ready = asyncio.Event()
     assert client.get('/api/config').json()['sandbox_idle_seconds'] == 300
+
+
+async def test_computer_activity_extends_idle_but_flushes_captures_before_release(durable, monkeypatch):
+    manager, cloud, root = durable
+    manager.settings.sandbox_idle_seconds = 300
+    tick = clock(monkeypatch)
+    await drive(manager, root, phase='warm')
+    touched = tick.now + 250
+    calls = []
+    async def save(machine, run_id):
+        assert machine.alive
+        assert run_id == root
+        calls.append('saved')
+    manager.computer = SimpleNamespace(touched=lambda _: touched, locks={}, save_before_release=save)
+    tick.now += 300
+    assert (await manager.advance(root))['idle_seconds'] == 250
+    assert cloud.machines[0].alive
+    tick.now += 250
+    assert await manager.advance(root) is False
+    assert calls == ['saved'] and not cloud.machines[0].alive

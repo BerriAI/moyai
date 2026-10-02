@@ -100,7 +100,9 @@ class Computer:
 
     async def save_before_release(self, sandbox, run_id):
         try:
-            await self.execute(sandbox, 'request', json.dumps({'action': 'finish'}))
+            result = await self.execute(sandbox, 'request', json.dumps({'action': 'finish'}))
+            if result.get('error'):
+                self.store.event(run_id, 'error', 'Browser recording could not be finalized. Any partial capture remains in the workspace.')
             await self.sync(sandbox, run_id)
         except Exception:
             self.store.event(run_id, 'error', 'Browser captures could not be copied from the sandbox. Any completed captures remain in its workspace snapshot.')
@@ -117,6 +119,7 @@ class Computer:
                     try:
                         sandbox = await self.sandbox(run)
                         value = await self.execute(sandbox, 'request', '{"action":"state"}') if sandbox else {'available': False}
+                        value['has_sandbox'] = sandbox is not None
                         if sandbox:
                             try:
                                 await self.sync(sandbox, run_id, value.get('media', []))
@@ -127,7 +130,7 @@ class Computer:
                     if len(self.cache) >= 32:
                         self.cache.pop(min(self.cache, key=lambda key: self.cache[key][0]), None)
                     self.cache[run_id] = (time.monotonic(), run.get('sandbox_id'), value)
-                return {**value, 'has_sandbox': bool(run.get('sandbox_id')), 'actor': actor,
+                return {**value, 'has_sandbox': value.get('has_sandbox', False), 'actor': actor,
                         'captures': captures.listing(self.settings, run_id)}
 
         @router.post('/api/runs/{run_id}/computer')
