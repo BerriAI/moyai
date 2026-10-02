@@ -35,6 +35,7 @@ from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
+from .environments import Environments
 from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
@@ -50,6 +51,7 @@ class NewRun(BaseModel):
     repo_url: str = Field(default="", max_length=500)
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
+    environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
@@ -130,6 +132,8 @@ def create_app(settings: Settings | None = None):
     else:
         manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
+    environments = Environments(store, settings, security, manager, connectors, checkpoints)
+    manager.environments = environments
     spend = Spend(store, settings, security, checkpoints)
     coordinator = AgentCoordinator(store, settings, manager)
     manager.coordinator = coordinator
@@ -154,11 +158,13 @@ def create_app(settings: Settings | None = None):
         await checkpoints.flush()
         slack.recover()
         identities.start()
+        environments.start()
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         try:
             yield
         finally:
+            await environments.close()
             await identities.close()
             await slack.shutdown()
             await manager.shutdown()
@@ -181,6 +187,8 @@ def create_app(settings: Settings | None = None):
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     app.state.skills = skills
+    app.state.environments = environments
+    app.include_router(environments.routes())
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
@@ -348,10 +356,12 @@ def create_app(settings: Settings | None = None):
             connected = {item["id"] for item in connectors.list() if item["connected"] and item["enabled"]}
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
+        if body.mode == "modal":
+            environments.choose(body.environment_id, body.repo_url)
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -365,7 +375,9 @@ def create_app(settings: Settings | None = None):
         if not run:
             raise HTTPException(404, "Task not found")
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
+        project = environments.context(run)
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
+                'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None,
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),

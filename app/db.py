@@ -128,6 +128,9 @@ class Store:
                 for name in names:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            for name, default in [('environment_id', 'auto'), ('environment_build_id', '')]:
+                if name not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+                    conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(users)')}
             for name in ('link_method', 'link_status', 'profile_checked_at'):
                 if name not in columns:
@@ -207,17 +210,17 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto'):
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins,r.environment_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
                     if (previous['content'] != prompt or previous['model'] != model or previous['repo_url'] != repo_url
-                            or previous['mode'] != mode or json.loads(previous['plugins']) != plugins
+                            or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
                     return self.run(previous['run_id'])
@@ -225,8 +228,8 @@ class Store:
             if pending >= self.max_pending_runs:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
             conn.execute(
-                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id),
+                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id),
             )
             if chat_enabled:
                 message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).lastrowid

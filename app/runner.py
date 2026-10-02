@@ -38,6 +38,7 @@ class RunManager:
         self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
         self.closing = False
         self.prepare_context = None
+        self.environments = None
         self.coordinator = None
         self.credentials = None
         self.message_queue = MessageQueue(store)
@@ -294,12 +295,19 @@ class RunManager:
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
                                      if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "deleted"}]}
+        if self.environments:
+            spec["project_environment"] = self.environments.context(run)
+            if spec['project_environment']:
+                spec['repo_url'] = 'https://github.com/' + spec['project_environment']['repository']
         return spec
 
     async def cloud(self, run):
         run_id = run["id"]
         self.store.update_run(run_id, status="provisioning")
         self.store.event(run_id, "status", "Provisioning an isolated Modal sandbox")
+        project = self.environments.bind(run_id) if self.environments else {}
+        fresh = self.store.run(run_id)
+        run = {**run, 'repo_url': fresh['repo_url'], 'environment_build_id': fresh['environment_build_id']}
         client = await self.client()
         app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
         if self.stopped(run_id):
@@ -308,7 +316,8 @@ class RunManager:
         self.store.update_run(run_id, token_hash=digest(token))
         secret = modal.Secret.from_dict({"WORKSPACE_RUN_TOKEN": token})
         # Shield provisioning so cancellation cannot discard a successfully-created sandbox ID.
-        image = modal.Image.from_id(run["snapshot_id"], client=client) if run.get("chat_enabled") and run.get("snapshot_id") else self.image()
+        snapshot_id = run.get("snapshot_id") or project.get("snapshot_id")
+        image = modal.Image.from_id(snapshot_id, client=client) if snapshot_id else self.image()
         provision = asyncio.create_task(modal.Sandbox.create.aio(
             app=app, client=client, image=image, secrets=[secret],
             env={"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_HOME": "/tmp/hermes-home",
@@ -331,9 +340,9 @@ class RunManager:
         spec = self.spec(run)
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
-        if run.get("snapshot_id"):
-            for name in ("agent.py", "artifacts.py", "continuation.py", "mcp_bridge.py", "broker_relay.py", "broker_transport.py", "github_tools.py", "attachments.py", "activity.py"):
-                await sandbox.filesystem.write_text.aio((SANDBOX_FILES / name).read_text(), f"/opt/workspace-runner/{name}")
+        if snapshot_id:
+            for path in SANDBOX_FILES.glob("*.py"):
+                await sandbox.filesystem.write_text.aio(path.read_text(), f"/opt/workspace-runner/{path.name}")
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
         self.store.event(run_id, "status", "Sandbox ready. Starting Hermes Agent.")

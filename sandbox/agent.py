@@ -16,6 +16,7 @@ try:
     from .attachments import prepare_attachments
     from .activity import ActivityReporter
     from .startup import StartupUnavailable
+    from .project_environment import prepare_project
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -24,6 +25,7 @@ except ImportError:
     from attachments import prepare_attachments
     from activity import ActivityReporter
     from startup import StartupUnavailable
+    from project_environment import prepare_project
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -88,6 +90,12 @@ def run_agent(spec, relay):
             emit("tool", "Cloning the repository", {"command": f"git clone --depth 1 {spec['repo_url']}"})
             subprocess.run(["git", "clone", "--depth", "1", "--", spec["repo_url"], str(workspace / "repo")], check=True, timeout=120)
         workspace /= "repo"
+    try:
+        prepare_project(spec, emit)
+    except Exception:
+        emit('final', 'The prepared project services did not start successfully. Your workspace is preserved. '
+             'Ask an administrator to check the environment startup command before continuing.', completed=False)
+        return 1
     os.chdir(workspace)
     home = Path(os.environ["HERMES_HOME"])
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -236,6 +244,9 @@ def run_agent(spec, relay):
             "Do not claim a check passed unless you ran it. For work tasks, summarize work done, verification, and limitations. "
             "For conversational questions, answer directly and naturally without status preambles or a routine work summary."
         )
+        if spec.get("project_environment"):
+            project = spec["project_environment"]
+            system_message += "\nPrepared project environment (admin configuration):\n" + project.get("instructions", "")
         while True:
             result = agent.run_conversation(prompt, conversation_history=history, system_message=system_message)
             # A correction can race with the last response boundary. Hermes

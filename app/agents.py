@@ -289,10 +289,10 @@ class AgentCoordinator:
                 for label, prompt in assignments:
                     child_id, stamp = uuid4().hex, now()
                     conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,
-                        model,active_model,owner_id,active_user_id,snapshot_id,parent_run_id,agent_group_id,agent_label)
-                        VALUES(?,?,?,'modal','queued',?,?,?,1,?,?,?,?,?,?,?,?)''',
+                        model,active_model,owner_id,active_user_id,snapshot_id,parent_run_id,agent_group_id,agent_label,environment_id,environment_build_id)
+                        VALUES(?,?,?,'modal','queued',?,?,?,1,?,?,?,?,?,?,?,?,?,?)''',
                         (child_id, prompt, run['repo_url'], json.dumps(run['plugins']), stamp, stamp, model, model,
-                         run['active_user_id'], run['active_user_id'], snapshot, parent_id, group_id, label))
+                         run['active_user_id'], run['active_user_id'], snapshot, parent_id, group_id, label, run.get('environment_id', 'auto'), run.get('environment_build_id', 'none')))
                     conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)",
                                  (child_id, prompt, stamp, model, run['active_user_id']))
                     # Child creation and its Temporal wake are one durable write.

@@ -3,10 +3,11 @@
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Chat with Moyai Devin. Work with your team's context in a cloud workspace.">
-  <title>Moyai Devin</title><link rel="icon" href="/static/favicon.svg?v=agent-2"><link rel="stylesheet" href="/static/style.css?v=users-1">
+  <title>Moyai Devin</title><link rel="icon" href="/static/favicon.svg?v=agent-2"><link rel="stylesheet" href="/static/style.css?v=environments-1">
   <script src="/static/vendor/marked.js" defer></script><script src="/static/vendor/purify.js" defer></script>
-  <script src="/static/users.js?v=users-1" defer></script>
-  <script src="/static/saved-files.js?v=saved-files-1" defer></script><script src="/static/markdown.js?v=saved-files-1" defer></script><script src="/static/spend.js?v=identities-1" defer></script><script src="/static/credentials.js?v=skills-inline-1" defer></script><script src="/static/skills.js?v=skills-inline-1" defer></script><script src="/static/skill-composer.js?v=skills-inline-1" defer></script><script src="/static/attachment-transport.js?v=attachments-2" defer></script><script src="/static/attachments.js?v=queue-1" defer></script><script src="/static/activity.js?v=steering-timeline-1" defer></script><script src="/static/message-queue.js?v=steering-timeline-1" defer></script><script src="/static/app.js?v=users-1" defer></script>
+  <script src="/static/environments.js?v=environments-1" defer></script>
+  <script src="/static/users.js?v=environments-1" defer></script>
+  <script src="/static/saved-files.js?v=saved-files-1" defer></script><script src="/static/markdown.js?v=saved-files-1" defer></script><script src="/static/spend.js?v=identities-1" defer></script><script src="/static/credentials.js?v=skills-inline-1" defer></script><script src="/static/skills.js?v=skills-inline-1" defer></script><script src="/static/skill-composer.js?v=skills-inline-1" defer></script><script src="/static/attachment-transport.js?v=attachments-2" defer></script><script src="/static/attachments.js?v=queue-1" defer></script><script src="/static/activity.js?v=steering-timeline-1" defer></script><script src="/static/message-queue.js?v=steering-timeline-1" defer></script><script src="/static/app.js?v=environments-1" defer></script>
 </head>
 <body>
   <button id="sidebar-scrim" class="sidebar-scrim" aria-label="Close sidebar" hidden></button>
@@ -16,7 +17,7 @@
     <label class="session-search"><span aria-hidden="true">⌕</span><input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions" autocomplete="off"></label>
     <div class="sessions-label">Sessions <span id="task-count">0</span></div>
     <nav id="session-list" class="session-list" aria-label="Recent sessions"></nav>
-    <nav class="workspace-nav" aria-label="Workspace settings"><button class="nav-button" data-view="spend" id="spend-nav" hidden><span aria-hidden="true">◷</span> Spend</button><button class="nav-button" data-view="users" id="users-nav" hidden><span aria-hidden="true">♙</span> Users</button><button class="nav-button" data-view="connections"><span aria-hidden="true">◇</span> Connections</button><button class="nav-button" data-view="skills"><span aria-hidden="true">✦</span> Skills</button><button class="nav-button" data-view="secrets"><span aria-hidden="true">⚿</span> Secrets</button><button class="nav-button" data-view="runtime"><span aria-hidden="true">▧</span> Runtime</button></nav>
+    <nav class="workspace-nav" aria-label="Workspace settings"><button class="nav-button" data-view="spend" id="spend-nav" hidden><span aria-hidden="true">◷</span> Spend</button><button class="nav-button" data-view="users" id="users-nav" hidden><span aria-hidden="true">♙</span> Users</button><button class="nav-button" data-view="connections"><span aria-hidden="true">◇</span> Connections</button><button class="nav-button" data-view="skills"><span aria-hidden="true">✦</span> Skills</button><button class="nav-button" data-view="secrets"><span aria-hidden="true">⚿</span> Secrets</button><button class="nav-button" data-view="environments" id="environments-nav" hidden><span aria-hidden="true">▧</span> Environments</button><button class="nav-button" data-view="runtime"><span aria-hidden="true">▧</span> Runtime</button></nav>
     <div class="rail-foot"><span class="avatar">L</span><div><span id="workspace-name">Workspace</span><small>Private workspace</small></div></div>
   </aside>
   <div class="workspace">

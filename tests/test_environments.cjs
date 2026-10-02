@@ -1,0 +1,11 @@
+const assert = require('node:assert/strict');
+const {test} = require('node:test');
+const {readFileSync} = require('node:fs');
+const vm = require('node:vm');
+function context(){const c={esc:s=>String(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]))};vm.createContext(c);vm.runInContext(readFileSync('app/static/environments.js','utf8'),c);return c;}
+function item(fields={}){return {id:'e'.repeat(32),name:'Project',repository:'owner/repo',revision:2,enabled:true,is_default:true,active_build:'ready-build',builds:[{id:'new-build',revision:2,phase:'failed',error:'Dependency failed'}],...fields};}
+test('environment and build data are escaped before rendering',()=>{const c=context();const html=c.environmentCard(item({name:'<img onerror=x>',builds:[{id:'x',revision:2,phase:'failed',error:'<script>bad</script>'}]}));assert.doesNotMatch(html,/<img|<script>/);assert.match(html,/&lt;script&gt;/);});
+test('failed rebuild makes last-good fallback visible',()=>{const html=context().environmentCard(item());assert.match(html,/Build needs attention/);assert.match(html,/last successful build/);assert.match(html,/Workspace default/);});
+test('unsaved build revision stays visibly distinct from active recipe',()=>{const html=context().environmentCard(item({builds:[{id:'ready-build',revision:1,phase:'ready'}]}));assert.match(html,/Recipe v2/);assert.match(html,/Recipe v1/);assert.match(html,/last successful build/);});
+test('busy builds cannot launch a duplicate from the same card',()=>{const html=context().environmentCard(item({builds:[{id:'busy',phase:'building',revision:2}]}));assert.match(html,/data-rebuild-environment="[^"]+" disabled/);assert.match(html,/Cancel build/);});
+test('new session choice includes auto, opt out, and an explicit environment',()=>{const html=context().environmentOptions([item()], 'e'.repeat(32));assert.match(html,/value="auto"/);assert.match(html,/value="none"/);assert.match(html,/value="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" selected/);});

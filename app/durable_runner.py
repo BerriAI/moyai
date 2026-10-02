@@ -10,6 +10,7 @@ import json
 import time
 
 import modal
+from fastapi import HTTPException
 
 from .runner import RunManager, SANDBOX_FILES, SAVE_WARNING, TERMINAL, safe_error_detail
 from .security import digest
@@ -110,6 +111,11 @@ class DurableRunner(RunManager):
             except ValueError:
                 self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
                           'An administrator must check the selected model and runtime settings.')
+                return True
+            except HTTPException as exc:
+                # A disabled/deleted selection is a configuration failure, not
+                # a transient provider error for Temporal to retry indefinitely.
+                self.fail(run_id, state, str(exc.detail))
                 return True
 
     def begin_turn(self, run_id, row, warm=None):
@@ -216,13 +222,15 @@ class DurableRunner(RunManager):
         return sandbox
 
     async def provision(self, run_id, state):
+        project = self.environments.bind(run_id) if self.environments else {}
         client = await self.client()
         name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
         try:
             sandbox = await modal.Sandbox.from_name.aio(self.settings.modal_app_name, name, client=client)
         except modal.exception.NotFoundError:
             app = await modal.App.lookup.aio(self.settings.modal_app_name, create_if_missing=True, client=client)
-            image = modal.Image.from_id(state['snapshot_id'], client=client) if state['snapshot_id'] else self.image()
+            snapshot_id = state['snapshot_id'] or project.get('snapshot_id')
+            image = modal.Image.from_id(snapshot_id, client=client) if snapshot_id else self.image()
             try:
                 sandbox = await modal.Sandbox.create.aio(
                     app=app, client=client, name=name, image=image,
