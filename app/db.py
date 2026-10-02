@@ -153,10 +153,11 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
@@ -211,20 +212,35 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto'):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of=''):
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins,r.environment_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins,r.environment_id,r.side_chat_of FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
                     if (previous['content'] != prompt or previous['model'] != model or previous['repo_url'] != repo_url
-                            or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id
+                            or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
                     return self.run(previous['run_id'])
+            context = ''
+            if side_chat_of:
+                parent = conn.execute('SELECT prompt,summary FROM runs WHERE id=?', (side_chat_of,)).fetchone()
+                if not parent:
+                    raise ValueError('The original session no longer exists.')
+                recent = conn.execute("SELECT role,content FROM messages WHERE run_id=? AND status NOT IN ('queued','deleted') ORDER BY id DESC LIMIT 30", (side_chat_of,)).fetchall()
+                context_data = {'task': parent['prompt'][:4000], 'latest_result': parent['summary'][:8000],
+                                'conversation': [dict(row) | {'content': row['content'][:3000]} for row in reversed(recent)]}
+                while len(json.dumps(context_data, ensure_ascii=False)) > 48000:
+                    if context_data['conversation']:
+                        context_data['conversation'].pop(0)
+                    else:
+                        field = max(('task', 'latest_result'), key=lambda key: len(context_data[key]))
+                        context_data[field] = context_data[field][:len(context_data[field]) // 2]
+                context = json.dumps(context_data, ensure_ascii=False)
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= self.max_pending_runs:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
@@ -232,6 +248,8 @@ class Store:
                 "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id),
             )
+            if side_chat_of:
+                conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))
             if chat_enabled:
                 message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).lastrowid
                 self.attachments.bind_in(conn, attachment_ids, message_id, user_id)

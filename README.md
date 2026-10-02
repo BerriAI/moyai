@@ -935,3 +935,19 @@ Ask Moyai to take a screenshot or record a browser flow. Its MCP tools include `
 - The browser runs on Xvfb inside Modal. Render uses private Modal exec to control it; no public desktop, VNC, or debugging port is exposed. A restored older sandbox installs Xvfb/ffmpeg on first use.
 
 This is a preview of the sandbox **browser**, not a full desktop or the user's local browser. Browser process/login state is warm for the sandbox's lifetime; saved media survives shutdown. Do not record secrets or credentials.
+
+### Session workspace panel
+
+Cloud sessions have a collapsible right-side workspace. Open **Computer** or
+**Files**, or use **+** to add a computer, file browser, activity view, or side
+chat. Each selected file gets its own preview tab. Tabs can be closed, resized,
+expanded, and reopened; their layout and side-chat drafts are saved per user and
+session in that browser. Hiding or leaving the Computer tab releases human
+control and stops preview polling. Closing a tab does not stop its agent.
+
+Side chats are independent durable sessions. They start with a bounded snapshot
+of the original conversation and use a separate workspace, message queue, and
+billing attribution for the person who sends the message. They do not steer the
+main agent, share its live browser/files, or mirror into its Slack thread. They
+remain available in the add-tab menu and session list after closing the tab.
+Approvals and credential requests can be completed through **Open session**.

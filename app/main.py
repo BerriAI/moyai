@@ -59,6 +59,7 @@ class NewRun(BaseModel):
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
+    side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
 
     @field_validator("repo_url")
     @classmethod
@@ -358,6 +359,12 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         security.require(request, mutation=True)
+        if body.side_chat_of:
+            parent = store.run(body.side_chat_of)
+            if not parent:
+                raise HTTPException(404, 'Original session not found.')
+            if not body.chat_enabled:
+                raise HTTPException(422, 'Side chats require a chat session.')
         try:
             model = settings.resolve_model(body.model)
         except ValueError as exc:
@@ -373,12 +380,19 @@ def create_app(settings: Settings | None = None):
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         manager.submit(run)
         return public_run(run)
+
+    @app.get('/api/runs/{run_id}/side-chats')
+    async def side_chats(run_id: str, request: Request):
+        security.require(request)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Session not found.')
+        return store.rows('SELECT id,prompt,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? ORDER BY created_at,id', (run_id,))
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request):
@@ -848,7 +862,7 @@ def create_app(settings: Settings | None = None):
 
 
 def public_run(run):
-    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result"}}
+    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context"}}
 
 
 app = create_app()

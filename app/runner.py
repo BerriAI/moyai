@@ -297,6 +297,7 @@ class RunManager:
                 "fresh_child": bool(run.get('parent_run_id')) and not run.get('continuation') and not any(m['role'] == 'assistant' for m in self.store.messages(run_id)),
                 "chat_enabled": bool(run.get("chat_enabled")),
                 "workspace_warning": run.get("checkpoint_error", ""),
+                "side_chat_context": run.get('side_chat_context', ''),
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)

@@ -19,7 +19,7 @@
     const matches=files.filter(file=>file.workspace_path&&file.name===path);
     return matches.length===1?matches[0]:null;
   }
-  function create({api,markdown,escape:esc,size}){
+  function create({api,markdown,escape:esc,size,onOpen}){
     let run=null,catalog=null,key='',loading=null,requestId=0,previewId=0,viewId=0,selected=null,dialog=null;
     const doc=document;
     const query=selector=>doc.querySelector(selector);
@@ -90,6 +90,7 @@
       }catch(error){if(id===previewId&&dialog.open)query('#saved-file-preview').innerHTML=`<p class="saved-file-empty" role="alert">${esc(error.message)}</p>`;}
     }
     async function open(file=null){
+      if(onOpen?.(file))return;
       if(!(run?.has_artifact||run?.has_captures))return;
       if(!dialog){dialog=doc.createElement('dialog');dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;dialog.querySelectorAll('video').forEach(video=>video.pause());});}
       const rid=run.id,viewing=++viewId;
