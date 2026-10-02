@@ -30,9 +30,12 @@ if test -f schema.prisma; then .venv/bin/prisma db push --schema=schema.prisma -
 import os
 import psycopg
 with psycopg.connect(os.environ['DATABASE_URL']) as conn:
-    conn.execute('CREATE TABLE IF NOT EXISTS moyai_seed_cases (id integer PRIMARY KEY, prompt text NOT NULL)')
-    conn.execute("INSERT INTO moyai_seed_cases SELECT n, 'Synthetic benchmark case ' || n FROM generate_series(1,100) n ON CONFLICT DO NOTHING")
-    count = conn.execute('SELECT count(*) FROM moyai_seed_cases').fetchone()[0]
+    # Keep fixtures outside the public schema managed by Prisma, so repeating
+    # verification does not make Prisma try to drop populated fixture tables.
+    conn.execute('CREATE SCHEMA IF NOT EXISTS moyai_benchmark')
+    conn.execute('CREATE TABLE IF NOT EXISTS moyai_benchmark.cases (id integer PRIMARY KEY, prompt text NOT NULL)')
+    conn.execute("INSERT INTO moyai_benchmark.cases SELECT n, 'Synthetic benchmark case ' || n FROM generate_series(1,100) n ON CONFLICT DO NOTHING")
+    count = conn.execute('SELECT count(*) FROM moyai_benchmark.cases').fetchone()[0]
     assert count == 100
     print('Postgres ready with 100 synthetic benchmark case records')
 PY
@@ -71,7 +74,7 @@ PY
 For subprocesses such as Prisma, export PATH="/workspace/repo/.venv/bin:$PATH".
 Postgres runs locally on port 5432. Development-only DATABASE_URL:
 postgresql://moyai_dev:local-development-only@127.0.0.1:5432/moyai_dev
-The schema is initialized and moyai_seed_cases contains 100 synthetic case records.
+The schema is initialized and moyai_benchmark.cases contains 100 synthetic case records.
 These are small starter fixtures, not production-representative traffic. Create task-specific data for a benchmark.
 For before/after work, resolve exact base/head SHAs and use separate worktrees and equivalent isolated databases.
 Dependencies match the prepared commit. After changing revisions, refresh dependencies for that revision in a separate virtual environment.
