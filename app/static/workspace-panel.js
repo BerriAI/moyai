@@ -89,7 +89,7 @@
     }
     function openFile(file){return open('file',{path:file.archive_path,title:file.name});}
     function decorate(element,files){
-      element.querySelectorAll('[data-file-ref]').forEach(link=>{const file=MoyaiFiles.resolve(link.dataset.fileRef,files);if(file){link.href=file.url;link.onclick=e=>{if(e.metaKey||e.ctrlKey)return;e.preventDefault();openFile(file);};}});
+      MoyaiFiles.decorate(element,files,{onOpen:openFile});
       element.querySelectorAll('.copy-code').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(b.closest('.code-block').querySelector('code').textContent);b.textContent='Copied';}catch{b.textContent='Select to copy';}});
     }
     function mountChat(t){

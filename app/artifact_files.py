@@ -17,6 +17,7 @@ import zlib
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from . import captures
+from .attachments import inspect_file
 
 MAX_ARCHIVE = 20 * 1024 * 1024
 MAX_TOTAL = 32 * 1024 * 1024
@@ -67,9 +68,11 @@ def saved_archive(settings, store, run_id, revision=None):
 def file_info(run_id, info, revision):
     path = info.filename.removeprefix('new-files/')
     url = f'/api/runs/{run_id}/files/content?' + urlencode({'path': info.filename, 'revision': revision})
+    image = PurePosixPath(path).suffix.lower() in {'.png', '.jpg', '.jpeg', '.webp', '.gif'}
     return {'path': path, 'archive_path': info.filename, 'name': PurePosixPath(path).name,
             'workspace_path': path if info.filename.startswith('new-files/') else None,
-            'size': info.file_size, 'url': url, 'preview_url': url + '&preview=true'}
+            'size': info.file_size, 'url': url, 'preview_url': url + '&preview=true',
+            **({'kind': 'image', 'inline_url': url + '&inline=true'} if image else {})}
 
 
 def routes(settings, store, security):
@@ -89,16 +92,30 @@ def routes(settings, store, security):
 
     @router.get('/api/runs/{run_id}/files/content')
     def content(run_id: str, request: Request, path: str = Query(max_length=1024),
-                revision: str | None = Query(default=None, max_length=64), preview: bool = False):
+                revision: str | None = Query(default=None, max_length=64), preview: bool = False, inline: bool = False):
         security.require(request)
         with saved_archive(settings, store, run_id, revision) as (archive, files, _, __):
             info = files.get(path)
             if info is None:
                 raise HTTPException(404, 'This file is not available in the saved archive.')
             # Read through ZipExtFile with a hard cap, even if metadata lies.
-            limit = MAX_PREVIEW if preview else MAX_FILE
+            limit = MAX_PREVIEW if preview and not inline else MAX_FILE
             with archive.open(info) as stream:
                 raw = stream.read(limit + 1)
+            if inline:
+                if len(raw) > MAX_FILE:
+                    raise HTTPException(413, 'This file exceeds the preview size limit.')
+                try:
+                    _, image, _ = inspect_file(raw)
+                except ValueError:
+                    raise HTTPException(415, 'This file cannot be previewed as an image.') from None
+                if not image:
+                    raise HTTPException(415, 'This file cannot be previewed as an image.')
+                # Reuse upload decoding/size limits; only re-encoded raster
+                # pixels are served inline. Originals keep their download URL.
+                return Response(image, media_type='image/jpeg', headers={
+                    'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store',
+                })
             if preview:
                 truncated = len(raw) > limit
                 try:

@@ -19,22 +19,52 @@
     const matches=files.filter(file=>file.workspace_path&&file.name===path);
     return matches.length===1?matches[0]:null;
   }
+  function decorateReferences(container,files,{runId,onOpen}={}){
+    if(!container)return;
+    container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code').forEach(node=>{
+      if(node.closest('pre')||(!node.matches('[data-file-ref]')&&(node.closest('a')||node.children.length)))return;
+      const ref=node.dataset.fileRef||node.textContent,file=resolve(ref,files);
+      if(!file){
+        if(node.dataset.savedFile){
+          node.removeAttribute('href');delete node.dataset.savedFile;delete node.dataset.fileRun;
+          node.classList.remove('saved-file-link','saved-image-link');node.onclick=null;
+          if(node.dataset.fileImage)node.textContent=node.dataset.fileLabel;
+        }
+        return;
+      }
+      let link=node;
+      if(node.tagName!=='A'){link=node.ownerDocument.createElement('a');link.textContent=node.textContent;node.replaceChildren(link);}
+      link.href=file.url;link.classList.add('saved-file-link');link.dataset.fileRef=ref;link.dataset.savedFile=file.archive_path;
+      if(runId)link.dataset.fileRun=runId;else delete link.dataset.fileRun;
+      link.removeAttribute('target');link.removeAttribute('rel');link.title='Preview '+file.path;
+      if(link.dataset.fileImage){
+        const label=link.dataset.fileLabel??=link.textContent||file.name;
+        if(file.kind==='image'&&file.inline_url){
+          link.classList.add('saved-image-link');
+          if(link.querySelector('img')?.getAttribute('src')!==file.inline_url){
+            const image=link.ownerDocument.createElement('img');image.src=file.inline_url;image.alt=label;image.loading='lazy';image.decoding='async';
+            const caption=link.ownerDocument.createElement('span');caption.className='saved-image-caption';caption.textContent=label;
+            const hint=link.ownerDocument.createElement('span');hint.textContent='Open preview ↗';caption.append(hint);
+            image.onerror=()=>{image.hidden=true;link.classList.remove('saved-image-link');};
+            link.replaceChildren(image,caption);
+          }
+        }else{link.textContent=label;link.classList.remove('saved-image-link');}
+      }
+      if(onOpen)link.onclick=event=>{
+        if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey||event.button)return;
+        event.preventDefault();onOpen(file);
+      };
+    });
+  }
   function create({api,markdown,escape:esc,size,onOpen}){
     let run=null,catalog=null,key='',loading=null,requestId=0,previewId=0,viewId=0,selected=null,dialog=null;
     const doc=document;
     const query=selector=>doc.querySelector(selector);
     function decorate(container){
       if(!container||!catalog||!run)return;
-      container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code').forEach(node=>{
-        if(node.closest('pre')||(!node.matches('[data-file-ref]')&&(node.closest('a')||node.children.length)))return;
-        const ref=node.dataset.fileRef||node.textContent;
-        const file=resolve(ref,catalog.files);
-        if(!file){if(node.dataset.savedFile){node.removeAttribute('href');delete node.dataset.savedFile;delete node.dataset.fileRun;node.classList.remove('saved-file-link');}return;}
-        let link=node;
-        if(node.tagName!=='A'){link=doc.createElement('a');link.textContent=node.textContent;node.replaceChildren(link);}
-        link.href=file.url;link.classList.add('saved-file-link');link.dataset.fileRef=ref;link.dataset.savedFile=file.archive_path;link.dataset.fileRun=run.id;
-        link.removeAttribute('target');link.removeAttribute('rel');link.title='Preview '+file.path;
-      });
+      const following=container.id==='conversation'&&container.scrollHeight-container.scrollTop-container.clientHeight<100;
+      decorateReferences(container,catalog.files,{runId:run.id});
+      if(following)container.scrollTop=container.scrollHeight;
     }
     function update(){
       const button=query('#files-button');
@@ -111,5 +141,5 @@
     });
     return {sync,decorate,reset,open};
   }
-  return {reference,resolve,create};
+  return {reference,resolve,decorate:decorateReferences,create};
 });

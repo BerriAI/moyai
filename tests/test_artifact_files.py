@@ -2,8 +2,10 @@ import os
 import stat
 import warnings
 import zipfile
+from io import BytesIO
 
 import pytest
+from PIL import Image
 
 from app import artifact_files
 from test_workspace import workspace
@@ -100,6 +102,43 @@ def test_a_new_checkpoint_cannot_silently_change_an_open_download(workspace):
     assert client.get(old['preview_url']).status_code == 409
     new = client.get(url).json()['files'][0]
     assert client.get(new['url']).content == b'newest'
+
+
+@pytest.mark.parametrize('format,extension', [('PNG', 'png'), ('JPEG', 'jpg'), ('WEBP', 'webp'), ('GIF', 'gif')])
+def test_saved_raster_preview_is_decoded_authenticated_and_revision_pinned(workspace, format, extension):
+    raw = BytesIO()
+    Image.new('RGB', (24, 16), 'purple').save(raw, format=format)
+    client, url, path = saved(workspace, [(f'new-files/screenshot.{extension}', raw.getvalue())])
+    file = client.get(url).json()['files'][0]
+    assert file['kind'] == 'image'
+    response = client.get(file['inline_url'])
+    assert response.status_code == 200 and response.headers['content-type'] == 'image/jpeg'
+    assert response.headers['content-disposition'] == 'inline'
+    assert response.headers['cache-control'] == 'no-store' and response.headers['x-content-type-options'] == 'nosniff'
+    with Image.open(BytesIO(response.content)) as decoded:
+        assert decoded.size == (24, 16) and decoded.format == 'JPEG'
+    assert client.get(file['url']).content == raw.getvalue(), 'Download must preserve original bytes'
+    replacement = path.with_suffix('.next.zip')
+    with zipfile.ZipFile(replacement, 'w') as archive:
+        archive.writestr(f'new-files/screenshot.{extension}', raw.getvalue())
+        archive.writestr('new-files/other.txt', 'changed')
+    os.replace(replacement, path)
+    assert client.get(file['inline_url']).status_code == 409
+    current = next(f for f in client.get(url).json()['files'] if f.get('kind') == 'image')
+    client.cookies.clear()
+    assert client.get(current['inline_url']).status_code == 401
+
+
+def test_inline_preview_rejects_active_content_and_mislabeled_images(workspace):
+    client, url, _ = saved(workspace, [('new-files/page.html', '<script>alert(1)</script>'),
+                                     ('new-files/vector.svg', '<svg onload="alert(1)"/>'),
+                                     ('new-files/fake.png', '<script>alert(1)</script>'),
+                                     ('new-files/broken.png', b'\x89PNG\r\n\x1a\ninvalid')])
+    for file in client.get(url).json()['files']:
+        if file['name'].endswith(('.html', '.svg')):
+            assert 'inline_url' not in file
+        assert client.get(file['url'] + '&inline=true').status_code == 415
+        assert client.get(file['url']).headers['content-type'] == 'application/octet-stream'
 
 
 @pytest.mark.parametrize('kind', ['missing', 'corrupt', 'archive_size', 'expanded_size', 'entry_count'])

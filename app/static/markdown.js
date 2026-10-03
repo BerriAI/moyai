@@ -7,13 +7,21 @@ function renderMarkdown(content) {
     // Placeholders survive sanitization; only our code adds the data attribute.
     // No local path is ever used as a browser URL.
     if(MoyaiFiles.reference(token.href)) {
-      fileReferences.push(token.href);
+      fileReferences.push({href:token.href});
       return defaultLink.call(this,{...token,href:'#saved-file-'+(fileReferences.length-1)});
     }
     return defaultLink.call(this,token);
   };
   renderer.html = token => esc(token.text);
-  renderer.image = token => esc(token.text || 'Image');
+  renderer.image = token => {
+    const label=esc(token.text || 'Image');
+    if(MoyaiFiles.reference(token.href)){
+      fileReferences.push({href:token.href,image:true});
+      return `<a href="#saved-file-${fileReferences.length-1}">${label}</a>`;
+    }
+    // External images are explicit links, never automatic image requests.
+    return `<a href="${esc(token.href)}">${label}</a>`;
+  };
   const template = document.createElement('template');
   template.innerHTML = DOMPurify.sanitize(marked.parse(String(content || ''), {renderer, gfm:true, breaks:false}), {
     ALLOWED_TAGS:['p','br','strong','em','del','a','code','pre','h1','h2','h3','h4','h5','h6','ul','ol','li','blockquote','hr','table','thead','tbody','tr','th','td'],
@@ -22,7 +30,8 @@ function renderMarkdown(content) {
   template.content.querySelectorAll('a').forEach(link => {
     const href = link.getAttribute('href') || '';
     const fileIndex = href.match(/^#saved-file-(\d+)$/)?.[1];
-    if(fileIndex!==undefined&&fileReferences[fileIndex])link.dataset.fileRef=fileReferences[fileIndex];
+    const file=fileIndex!==undefined?fileReferences[fileIndex]:null;
+    if(file){link.dataset.fileRef=file.href;if(file.image)link.dataset.fileImage='true';}
     if (!/^(https?:\/\/|mailto:)/i.test(href)) link.removeAttribute('href');
     else { link.target='_blank'; link.rel='noopener noreferrer'; }
   });
