@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 
 from app.db import Store
 from app.security import digest
@@ -10,12 +11,16 @@ from test_slack_chat import start, send
 
 ASTRA = 'openai/gpt-6-astra'
 OPUS = 'anthropic/claude-opus-5-5'
+GLM = 'fireworks_ai/glm-5p3'
 
 
-def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspace, monkeypatch):
+@pytest.mark.parametrize('alias, selected', [('claude/opus-5-5', OPUS), ('glm-5.3', GLM), (GLM, GLM)])
+def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspace, monkeypatch, alias, selected):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
-    assert {x['id'] for x in client.get('/api/config').json()['models']} >= {ASTRA, OPUS}
+    models = client.get('/api/config').json()['models']
+    assert {x['id'] for x in models} >= {ASTRA, OPUS, GLM}
+    assert {'id': GLM, 'name': 'GLM-5.3'} in models
     before = len(app.state.store.rows('SELECT id FROM runs'))
     assert client.post('/api/runs', json={'prompt': 'Invalid model', 'model': 'unapproved'}).status_code == 422
     assert len(app.state.store.rows('SELECT id FROM runs')) == before
@@ -23,23 +28,23 @@ def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspac
     assert run['model'] == ASTRA
     first = app.state.store.claim_message(run['id'])
     endpoint = f"/api/runs/{run['id']}/messages"
-    followup = {'content': 'Use the same files', 'client_id': 'switch-model-1', 'model': 'claude/opus-5-5'}
+    followup = {'content': 'Use the same files', 'client_id': 'switch-model-1', 'model': alias}
     response = client.post(endpoint, json=followup)
-    assert response.status_code == 202 and response.json()['model'] == OPUS
+    assert response.status_code == 202 and response.json()['model'] == selected
     assert app.state.store.run(run['id'])['active_model'] == ASTRA
-    assert app.state.store.run(run['id'])['model'] == OPUS
+    assert app.state.store.run(run['id'])['model'] == selected
     assert client.post(endpoint, json=followup).json()['created'] is False
     assert client.post(endpoint, json={**followup, 'model': ASTRA}).status_code == 409
     assert client.post(endpoint, json={**followup, 'client_id': 'invalid-model', 'model': 'unapproved'}).status_code == 422
     # Omitting the model inherits the session preference at admission.
-    assert client.post(endpoint, json={'content':'Third turn', 'client_id':'switch-model-2'}).json()['model'] == OPUS
+    assert client.post(endpoint, json={'content':'Third turn', 'client_id':'switch-model-2'}).json()['model'] == selected
     app.state.store.finish_message(run['id'], first['id'], 'First response')
     second = app.state.store.claim_message(run['id'])
-    assert second['model'] == OPUS
-    assert app.state.store.run(run['id'])['active_model'] == OPUS
+    assert second['model'] == selected
+    assert app.state.store.run(run['id'])['active_model'] == selected
     reopened = Store(app.state.settings.data_dir, default_model=ASTRA)
-    assert reopened.run(run['id'])['model'] == OPUS
-    assert reopened.run(run['id'])['active_model'] == OPUS
+    assert reopened.run(run['id'])['model'] == selected
+    assert reopened.run(run['id'])['active_model'] == selected
     assert next(m for m in reopened.messages(run['id']) if m['role'] == 'assistant')['model'] == ASTRA
 
 
@@ -54,7 +59,7 @@ def test_gateway_pins_active_model_despite_future_switch_or_sandbox_override(wor
         return httpx.Response(200, json={'choices':[{'message':{'content':'Done'}}]})
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kwargs: actual(transport=httpx.MockTransport(upstream), **kwargs))
-    for selected, future in [(ASTRA, OPUS), (OPUS, ASTRA)]:
+    for selected, future in [(ASTRA, OPUS), (OPUS, ASTRA), (GLM, ASTRA), (ASTRA, GLM)]:
         run = app.state.store.create_run('Pinned turn', '', 'modal', [], chat_enabled=True, model=selected)
         app.state.store.claim_message(run['id'])
         app.state.store.update_run(run['id'], status='running', token_hash=digest('capability'))
@@ -67,17 +72,18 @@ def test_gateway_pins_active_model_despite_future_switch_or_sandbox_override(wor
         assert captured[-1]['model'] == selected and 'api_base' not in captured[-1]
 
 
-def test_slack_model_commands_do_not_run_the_agent_and_keep_queued_models(slack_app):
+@pytest.mark.parametrize('alias, selected', [('opus', OPUS), ('glm-5.3', GLM), ('glm', GLM), ('glm-5p3', GLM)])
+def test_slack_model_commands_do_not_run_the_agent_and_keep_queued_models(slack_app, alias, selected):
     app, client, run_id = start(slack_app)
     original = app.state.store.messages(run_id)[0]['model']
-    send(client, 1, '<@U99999999> model opus')
+    send(client, 1, f'<@U99999999> model {alias}')
     assert len(app.state.store.messages(run_id)) == 1
-    assert app.state.store.run(run_id)['model'] == OPUS
+    assert app.state.store.run(run_id)['model'] == selected
     assert app.state.store.messages(run_id)[0]['model'] == original
     send(client, 2, '<@U99999999> Continue with the selected model')
-    assert app.state.store.messages(run_id)[-1]['model'] == OPUS
+    assert app.state.store.messages(run_id)[-1]['model'] == selected
     send(client, 3, '<@U99999999> model unapproved')
-    assert app.state.store.run(run_id)['model'] == OPUS
+    assert app.state.store.run(run_id)['model'] == selected
     assert len(app.state.store.messages(run_id)) == 2
     assert 'Choose' in app.state.store.rows("SELECT text FROM slack_outbox WHERE dedupe_key='command:EvChat3'")[0]['text']
 

@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     litellm_trace_endpoint: str = ""
     litellm_trace_api_key: str = ""
     agent_model: str = ""
-    agent_models: str = "openai/gpt-6-astra,anthropic/claude-opus-5-5"
+    agent_models: str = "openai/gpt-6-astra,anthropic/claude-opus-5-5,fireworks_ai/glm-5p3"
     modal_token_id: str = ""
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
@@ -128,6 +128,8 @@ class Settings(BaseSettings):
             'openai/6-astra': 'openai/gpt-6-astra', 'gpt-6-astra': 'openai/gpt-6-astra',
             'opus': 'anthropic/claude-opus-5-5', 'opus-5-5': 'anthropic/claude-opus-5-5',
             'claude/opus-5-5': 'anthropic/claude-opus-5-5', 'claude-opus-5-5': 'anthropic/claude-opus-5-5',
+            'glm': 'fireworks_ai/glm-5p3', 'glm-5.3': 'fireworks_ai/glm-5p3',
+            'glm-5p3': 'fireworks_ai/glm-5p3',
         }
         selected = value if value is not None else fallback or self.agent_model or (self.allowed_models() or [''])[0]
         selected = aliases.get(selected.strip().lower(), selected.strip())
@@ -136,7 +138,8 @@ class Settings(BaseSettings):
         return selected
 
     def model_choices(self) -> list[dict[str, str]]:
-        names = {'openai/gpt-6-astra': 'GPT-6 Astra', 'anthropic/claude-opus-5-5': 'Claude Opus 5.5'}
+        names = {'openai/gpt-6-astra': 'GPT-6 Astra', 'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
+                 'fireworks_ai/glm-5p3': 'GLM-5.3'}
         return [{'id': model, 'name': names.get(model, model)} for model in self.allowed_models()]
 
     def google_domains(self) -> set[str]:
