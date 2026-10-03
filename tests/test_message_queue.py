@@ -62,6 +62,21 @@ def test_members_only_edit_their_own_pending_messages_and_started_messages_are_i
     assert client.patch(f'/api/runs/{run_id}/messages/{message}',json={'action':'delete','revision':0},headers={'X-CSRF-Token':''}).status_code==403
 
 
+def test_cancelled_unstarted_messages_keep_chronological_position(tmp_path):
+    store=Store(tmp_path);run=store.create_run('First','','demo',[],chat_enabled=True,user_id='owner')
+    first=store.claim_message(run['id'])
+    store.enqueue_message(run['id'],'Cancelled before start','cancel-me',user_id='owner')
+    store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'",(run['id'],))
+    store.execute("UPDATE messages SET status='completed' WHERE id=?",(first['id'],))
+    store.execute("UPDATE runs SET status='idle' WHERE id=?",(run['id'],))
+    store.enqueue_message(run['id'],'Later request','later',user_id='owner')
+    store.enqueue_message(run['id'],'Still queued','pending',user_id='owner')
+    later=store.claim_message(run['id'])
+    order=[m['content'] for m in store.messages(run['id'])]
+    assert later['content']=='Later request' and first['content']=='First'
+    assert order==['First','Cancelled before start','Later request','Still queued']
+
+
 def test_edit_race_with_claim_never_changes_inflight_prompt(tmp_path):
     store=Store(tmp_path);run=store.create_run('Queued old text','','demo',[],chat_enabled=True,user_id='owner')
     message=store.messages(run['id'])[0];queue=MessageQueue(store)

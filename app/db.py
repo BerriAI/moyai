@@ -288,6 +288,14 @@ class Store:
 
     def messages(self, run_id):
         messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,m.user_id,m.revision,m.queue_locked,m.steering_parent_id,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? AND m.status!='deleted' ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,COALESCE(NULLIF(m.started_at,''),m.created_at),m.id", (run_id,))
+        # Inputs that never started (cancelled/failed while waiting) stay where
+        # they were sent: before the first later-sent input that did run.
+        ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]
+        for orphan in (m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] != 'queued'):
+            index = next((i for i, m in enumerate(ordered) if m['role'] == 'user' and m['started_at']
+                          and (m['created_at'], m['id']) > (orphan['created_at'], orphan['id'])), len(ordered))
+            ordered.insert(index, orphan)
+        messages = ordered + [m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] == 'queued']
         return self.attachments.messages(run_id, messages)
 
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False):
