@@ -2,7 +2,7 @@
 import json
 from sqlite3 import Connection
 
-from sandbox.activity import public_text
+from sandbox.activity import focus_text, public_text
 
 
 MAX_UPDATES = 2
@@ -19,6 +19,54 @@ def active_turn(conn: Connection, run_id: str) -> int | None:
     message = conn.execute("SELECT id FROM messages WHERE run_id=? AND id=? AND role='user' AND status='running'",
                            (run_id, run['active_message_id'])).fetchone()
     return message['id'] if message else None
+
+
+def active_input(conn: Connection, run_id: str, turn_id: int) -> int:
+    # A locked input has been delivered but may not yet be acknowledged. After
+    # acknowledgement use receipt order, not message creation/enqueue order.
+    pending = conn.execute("""SELECT id FROM messages WHERE run_id=? AND steering_parent_id=?
+        AND status='queued' AND queue_locked=1 LIMIT 1""", (run_id, turn_id)).fetchone()
+    if pending:
+        return pending['id']
+    receipt = conn.execute("""SELECT m.id AS input_id FROM events e JOIN messages m
+        ON m.id=json_extract(e.data,'$.message_id') AND m.run_id=e.run_id
+        WHERE e.run_id=? AND e.kind='status' AND json_extract(e.data,'$.phase')='steering'
+        AND json_extract(e.data,'$.turn_id')=? AND m.steering_parent_id=? AND m.status='injected'
+        ORDER BY e.id DESC LIMIT 1""", (run_id, turn_id, turn_id)).fetchone()
+    return receipt['input_id'] if receipt else turn_id
+
+
+def current_focus(conn: Connection, run_id: str) -> str:
+    turn_id = active_turn(conn, run_id)
+    if turn_id is None:
+        return ''
+    input_id = active_input(conn, run_id, turn_id)
+    row = conn.execute("""SELECT message FROM events WHERE run_id=? AND kind='status'
+        AND json_extract(data,'$.live_status')=1 AND json_extract(data,'$.turn_id')=?
+        AND json_extract(data,'$.input_id')=? ORDER BY id DESC LIMIT 1""",
+        (run_id, turn_id, input_id)).fetchone()
+    return row['message'] if row else ''
+
+
+def record_focus(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:
+    """Admit task focus independently of the durable chat-message allowance."""
+    turn_id = active_turn(conn, run_id)
+    message = focus_text(message)
+    if turn_id is None or not message:
+        return
+    input_id = active_input(conn, run_id, turn_id)
+    if turn_id and (type(data.get('input_id')) is not int or data['input_id'] != input_id):
+        return
+    identity = data.get('activity_id')
+    if not isinstance(identity, str) or not identity or len(identity) > 100:
+        return
+    if conn.execute("""SELECT 1 FROM events WHERE run_id=? AND kind='status'
+        AND json_extract(data,'$.activity_id')=? LIMIT 1""", (run_id, identity)).fetchone():
+        return
+    metadata = {'phase': 'focus', 'activity_version': 1, 'live_status': True,
+                'turn_id': turn_id, 'input_id': input_id, 'activity_id': identity}
+    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,?,?)",
+                 (run_id, message, json.dumps(metadata), stamp))
 
 
 def record(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:

@@ -2,9 +2,10 @@
 (function(root){
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const settled=new Set(['idle','completed','failed','cancelled','interrupted','steered']);
-  const waiting=new Set(['reconnecting','awaiting_approval','waiting_children','waiting_credential']);
+  const waiting=new Set(['reconnecting','awaiting_approval','waiting_children','waiting_credential','stopping']);
   const visible=new Set(['tool','message','status','error','plan','agents','credential','approval','artifact']);
-  const labels={reconnecting:'Reconnecting to workspace',running:'Working',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
+  const labels={reconnecting:'Reconnecting to workspace',running:'Reviewing the task',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
+  const isFocus=event=>event.kind==='status'&&event.data?.phase==='focus';
   function duration(start,end=Date.now()){
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;
     return seconds<60?`${seconds}s`:seconds<3600?`${Math.floor(seconds/60)}m ${seconds%60}s`:`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`;
@@ -33,9 +34,18 @@
       turn.live=!settled.has(turn.status)&&turn.status!=='save_failed'&&!!turn.start&&!turn.end;
       turn.start||=Date.parse(turn.events[0]?.created_at)||0;
       turn.end||=turn.live?0:Date.parse(turn.events.at(-1)?.created_at)||turn.start;
+      // Match the server's delivered-input owner: an offered, locked child,
+      // otherwise the latest receipt. Enqueue order is not delivery order.
+      const receipts=turn.events.filter(event=>event.kind==='status'&&event.data?.phase==='steering'&&event.data.message_id);
+      const offered=(run.messages||[]).find(message=>String(message.steering_parent_id)===turn.id&&message.status==='queued'&&message.queue_locked&&
+        !receipts.some(event=>String(event.data.message_id)===String(message.id)));
+      turn.input=String(offered?.id||receipts.at(-1)?.data.message_id||turn.id);
+      const focus=isCurrent&&run.status==='running'?turn.events.findLast(event=>isFocus(event)&&event.data.live_status===true&&event.data.activity_version===1&&
+        String(event.data.turn_id)===turn.id&&String(event.data.input_id)===turn.input&&typeof event.message==='string'&&event.message.trim()):null;
       turn.rows=[];const tools=new Map();
       for(const event of turn.events){
         const data=event.data||{};
+        if(isFocus(event))continue;
         if(event.kind==='tool'&&data.activity_version===1&&data.call_id){
           let row=tools.get(data.call_id);
           if(!row){row={id:data.call_id,eventId:String(event.id),kind:'tool',start:event.created_at};tools.set(data.call_id,row);turn.rows.push(row);}
@@ -49,15 +59,17 @@
         }
       }
       turn.rows=turn.rows.map(row=>({...row,state:row.phase==='started'?(turn.live&&run.activity_disconnected?'disconnected':turn.live&&!waiting.has(turn.status)?'running':turn.live?'paused':'unconfirmed'):row.phase==='error'?'error':row.phase==='completed'?'completed':row.phase==='backgrounded'?'backgrounded':'recorded'}));
-      const latest=turn.events.at(-1),running=turn.rows.filter(row=>row.state==='running');
-      turn.headline=run.activity_disconnected&&turn.live?'Connection lost · reconnecting':labels[turn.status]||'Work history';
+      turn.headline=run.activity_disconnected&&turn.live?'Connection lost · reconnecting':
+        turn.status==='running'?(focus?.message||labels.running):labels[turn.status]||'Work history';
       turn.pulse=turn.live&&!waiting.has(turn.status)&&!run.activity_disconnected;
-      turn.summary=running.length?`${running.at(-1).message}${running.length>1?` · ${running.length} tools running`:''}`:
-        turn.live&&latest?.data?.phase==='processing'?'Reviewing results and preparing the next step':
-        turn.live&&latest?.kind==='message'?'Continuing the task':turn.live&&latest?latest.message:'';
+      turn.summary=turn.live?turn.headline:'';
       turn.count=turn.rows.filter(row=>row.kind==='tool').length;
     }
     return turns;
+  }
+  function current(run){
+    const turns=groups(run),turn=turns.get(String(run.active_message_id));
+    return turn?.start?turn:{headline:labels[run.status]||'',input:run.active_message_id,pulse:false};
   }
   function timeline(run,turns=groups(run)){
     const result=new Map();
@@ -83,6 +95,7 @@
       input(delivered);
       for(const event of turn.events){
         const data=event.data||{},at=Date.parse(event.created_at)||turn.start;
+        if(isFocus(event))continue;
         if(data.phase==='steering'&&data.message_id){
           close(input(delivered),at);delivered=String(data.message_id);input(delivered);continue;
         }
@@ -166,7 +179,7 @@
     // collapsible tool-history section (including "earlier updates").
     const rows=turn.rows.filter(row=>row.kind!=='message');
     const older=rows.slice(0,-7),recent=rows.slice(-7);
-    return `<details class="turn-work ${turn.pulse?'is-live':''}" data-work-key="${esc(key)}" data-turn="${esc(turn.id)}" ${turn.live?'open':''}>
+    return `<details class="turn-work ${turn.pulse?'is-live':''}" data-work-key="${esc(key)}" data-turn="${esc(turn.id)}">
       <summary class="work-heading"><span class="work-indicator" aria-hidden="true">${turn.live?'':turn.status==='completed'||turn.status==='idle'?'✓':['failed','cancelled','interrupted','save_failed'].includes(turn.status)?'!':''}</span><span class="work-title">${esc(turn.headline)}</span><span class="work-count">${turn.count?`${turn.count} action${turn.count===1?'':'s'}`:''}</span><time class="work-elapsed" ${turn.live?`data-work-timer="${turn.start}"`:''}>${duration(turn.start,turn.end||Date.now())}</time><span class="work-chevron" aria-hidden="true">›</span></summary>
       <div class="work-body">${older.length?`<details class="work-earlier" data-work-key="earlier:${esc(turn.id)}"><summary>Show ${older.length} earlier updates</summary><ol class="work-list">${older.map(row=>rowHTML(row,turn)).join('')}</ol></details>`:''}
       <ol class="work-list">${recent.map(row=>rowHTML(row,turn)).join('')}</ol>
@@ -197,6 +210,6 @@
     container.querySelectorAll('[data-activity-slot]').forEach(slot=>syncItems(slot,byInput.get(slot.dataset.activitySlot)||[],options));
     if(nearBottom)container.scrollTop=container.scrollHeight;
   }
-  const api={groups,timeline,updates,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
+  const api={groups,current,isFocus,timeline,updates,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);

@@ -15,7 +15,7 @@ try:
     from .continuation import RotationDeadline, AgentWait, ActiveTurnSteering, resumed_context
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
-    from .activity import ActivityReporter
+    from .activity import ActivityReporter, split_focus
     from .startup import StartupUnavailable
     from .project_environment import prepare_project
     from .memory_history import scrub_memory_history
@@ -26,7 +26,7 @@ except ImportError:
     from continuation import RotationDeadline, AgentWait, ActiveTurnSteering, resumed_context
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
-    from activity import ActivityReporter
+    from activity import ActivityReporter, split_focus
     from startup import StartupUnavailable
     from project_environment import prepare_project
     from memory_history import scrub_memory_history
@@ -196,6 +196,12 @@ def run_agent(spec, relay):
         system_message = (
             "You are Moyai Devin, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "
+            "Before each meaningful phase of a multi-step task, begin your public interim text with <status>a short description of the current work</status>. "
+            "For example: <status>Auditing UI and schema changes</status> or <status>Verifying the corrected behavior</status>. "
+            "Use at most 120 characters, plain language, and describe the actual task focus, not individual tools. "
+            "This live status replaces the previous one in Slack and on the web without posting a chat message. "
+            "Update it when the focus changes, including after a user correction; do not repeat it for every tool call. "
+            "Do not include commands, paths, URLs, code, credentials, private reasoning, or skill contents. Never include status tags in your final answer. "
             "Keep progress sparse: for a multi-step task, give one brief opening update, then at most one meaningful milestone if needed, then the final answer. "
             "For a quick task, just give the final answer. Do not narrate individual tool calls, edits, or routine checks. "
             "Describe concrete actions and findings without private reasoning, credentials, or loaded skill contents. "
@@ -307,7 +313,7 @@ def run_agent(spec, relay):
                    "Access is needed. Connect securely through the form in this session, not in chat." if continuing and wait_credential else
                    "Parallel agents are working; the coordinator will resume with their results." if continuing and wait_group else
                    "Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
-                   str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))
+                   split_focus(str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))[1])
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,

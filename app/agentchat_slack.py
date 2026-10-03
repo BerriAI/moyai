@@ -127,6 +127,8 @@ class SlackWebhookChannel:
                 or rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id')
                 or not threaded(rows[0]) or (status and rows[0]['paused'])):
             raise RuntimeError('Slack destination changed before working status.')
+        if status != self.owner.chat.activity.desired_status(run_id):
+            raise RuntimeError('Task activity changed before working status.')
         await self.owner.connectors.request('POST', 'https://slack.com/api/assistant.threads.setStatus',
             headers={'Authorization': f'Bearer {token}'},
             json={'channel_id': rows[0]['channel'], 'thread_ts': rows[0]['thread_ts'], 'status': status})

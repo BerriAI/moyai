@@ -100,11 +100,16 @@
       input.value=t.draft||'';input.oninput=()=>{t.draft=input.value;save();};
       function showEmpty(){if(!t.chatId)log.innerHTML='<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>';}
       function drawChat(data){
-        current=data;const next=JSON.stringify([data.messages,data.events,data.status]);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
-        if(signature!==next){signature=next;log.innerHTML=MoyaiQueue.presentation(data).transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai Devin'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join('');MoyaiActivity.sync(log,data,{markdown,copy:async(text)=>{try{await navigator.clipboard.writeText(text);}catch{toast('Select the text to copy.');}}});if(bottom)log.scrollTop=log.scrollHeight;}
+        current=data;const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
+        if(signature!==next){
+          signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
+          log.innerHTML=transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai Devin'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join('');
+          log.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=slots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
+        }
+        MoyaiActivity.sync(log,data,{markdown,copy:async(text)=>{try{await navigator.clipboard.writeText(text);}catch{toast('Select the text to copy.');}}});MoyaiActivity.tick(log);if(bottom)log.scrollTop=log.scrollHeight;
         const working=!['idle','completed','failed','cancelled','interrupted'].includes(data.status)||data.active;
         const queued=data.messages.filter(m=>m.role==='user'&&m.status==='queued').length;
-        status.textContent=data.error||({queued:'Waiting to start…',provisioning:'Opening side-chat workspace…',running:'Moyai is working in this side chat…',saving:'Saving…',reconnecting:'Reconnecting…'}[data.status])||'';
+        status.textContent=data.error||({queued:'Waiting to start…',provisioning:'Opening side-chat workspace…',running:MoyaiActivity.current(data).headline,saving:'Saving…',reconnecting:'Reconnecting…'}[data.status])||'';
         if(working&&queued)status.textContent+=(status.textContent?' · ':'')+queued+' queued';
         stop.hidden=!working;send.title=working?'Queue side message':'Send side message';link.hidden=false;link.href='/#run='+t.chatId;
         if(data.approvals?.some(a=>a.status==='pending')||data.credential_requests?.length)status.textContent='Action needed. Open this side chat as a full session to continue.';

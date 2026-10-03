@@ -280,8 +280,9 @@ class RunManager:
         by_message = {}
         for upload in uploads:
             by_message.setdefault(upload['message_id'], []).append(upload)
-        delivered = self.store.rows("SELECT id FROM messages WHERE run_id=? AND steering_parent_id=? AND status='injected' ORDER BY started_at DESC,id DESC LIMIT 1",
-                                    (run_id, run.get('message_id')))
+        from .progress import active_input
+        with self.store.connect() as conn:
+            activity_input_id = active_input(conn, run_id, run.get('message_id') or 0)
         spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "attachments": uploads,
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
@@ -292,7 +293,7 @@ class RunManager:
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
-                "activity_input_id": delivered[0]['id'] if delivered else run.get('message_id'),
+                "activity_input_id": activity_input_id,
                 "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
                 "is_child_agent": bool(run.get('parent_run_id')),
                 "fresh_child": bool(run.get('parent_run_id')) and not run.get('continuation') and not any(m['role'] == 'assistant' for m in self.store.messages(run_id)),

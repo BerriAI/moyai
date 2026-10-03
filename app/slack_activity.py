@@ -7,6 +7,8 @@ import asyncio
 import logging
 import time
 
+from .progress import current_focus
+
 
 logger = logging.getLogger(__name__)
 STATUSES = {
@@ -33,6 +35,23 @@ class SlackActivity:
         self.owner = owner
         self.store = owner.store
 
+    def status_for(self, row):
+        state = 'queued' if row['queued'] and row['run_status'] in {'idle', 'completed'} else row['run_status']
+        if row['paused']:
+            return ''
+        if state == 'running':
+            with self.store.connect() as conn:
+                focus = current_focus(conn, row['run_id'])
+            if focus:
+                return self.owner.chat.scrub(focus)
+        return STATUSES.get(state, '')
+
+    def desired_status(self, run_id):
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,
+            EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
+            FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?''', (run_id,))
+        return self.status_for(rows[0]) if rows else ''
+
     async def sync(self):
         if not self.owner.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
             # A disabled/replaced connection cannot send. Slack's TTL clears it.
@@ -49,8 +68,11 @@ class SlackActivity:
         for row in rows:
             if not threaded(row):
                 continue
-            state = 'queued' if row['queued'] and row['run_status'] in {'idle', 'completed'} else row['run_status']
-            status = '' if row['paused'] else STATUSES.get(state, '')
+            status = self.status_for(row)
+            # Coalesce changing focus without delaying lifecycle transitions.
+            if status and status not in STATUSES.values() and row['last_status'] not in STATUSES.values():
+                if (row['retry_at'] or 0) > stamp or (row['refreshed_at'] or 0) > stamp - 5:
+                    continue
             if status == row['last_status'] and (row['retry_at'] or 0) > stamp:
                 continue
             if not status and row['last_status'] is None:

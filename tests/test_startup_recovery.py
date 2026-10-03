@@ -102,12 +102,19 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     class FakeAgent:
         tools = []
         valid_tool_names = []
-        def __init__(self, **kwargs): pass
+        def __init__(self, **kwargs: object) -> None:
+            callback = kwargs['interim_assistant_callback']
+            assert callable(callback)
+            self.commentary = callback
         def close(self): calls.append('closed')
         def run_conversation(self, *args, **kwargs):
             assert any(e[2].get('phase') == 'execution_started' for e in events)
             calls.append('inference')
-            return {'final_response': 'Done', 'messages': [], 'completed': True}
+            self.commentary('<status>Auditing UI and schema changes</status>')
+            self.commentary('<status>Verifying the corrected behavior</status>One public milestone.',
+                            already_streamed=False)
+            return {'final_response': '<status>Finishing the task</status>Done',
+                    'messages': [], 'completed': True}
     relay = SimpleNamespace(url='http://loopback', startup_failure=StartupUnavailable('workspace_tools', 'HTTP 503'),
                             close=lambda: None, control=lambda body=None: {}, last_error='', wait_group='', wait_credential='')
     relay.start = lambda: relay
@@ -143,6 +150,11 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     agent.run(spec)
     assert 'inference' in calls
     assert not any(e[3].get('startup_retry') for e in events)
+    assert [(kind, message) for kind, message, data, _ in events if data.get('phase') == 'focus'] == [
+        ('status', 'Auditing UI and schema changes'), ('status', 'Verifying the corrected behavior')]
+    assert [message for kind, message, _, _ in events if kind == 'message'] == ['One public milestone.']
+    assert [message for kind, message, _, _ in events if kind == 'final'] == ['Done']
+    assert (tmp_path / 'artifacts/result.md').read_text() == 'Done'
 
 
 def startup_report(*, events=None, exit_code=75):

@@ -5,6 +5,7 @@ import pytest
 
 from app.db import Store
 from app.slack_activity import SlackActivity
+from sandbox.activity import ActivityReporter
 from test_slack import event, signed, slack_app
 from test_slack_chat import ROOT, dm_event, finish, start
 
@@ -150,3 +151,82 @@ def test_historical_idle_sessions_are_not_backfilled_and_refresh_is_bounded(acti
     sync(app)
     assert len(activity[3]) == 12
     assert len({row['thread_ts'] for row in activity[3]}) == 12
+
+
+def test_focus_changes_coalesce_in_native_indicator_without_posting_messages(activity):
+    app, _, run_id = start(activity)
+    turn = app.state.store.claim_message(run_id)
+    app.state.store.update_run(run_id, status='running')
+    sync(app)
+    sequence = iter(range(10))
+    def emit(kind, text, data):
+        app.state.store.event(run_id, kind, text, {**data, 'activity_id': str(next(sequence)), 'input_id': turn['id']})
+    reporter = ActivityReporter(emit)
+    reporter.commentary('<status>Auditing UI changes</status>')
+    sync(app)
+    assert activity[3][-1]['status'] == 'Auditing UI changes'
+    reporter.commentary('<status>Checking schema changes</status>')
+    reporter.commentary('<status>Verifying the fix</status>')
+    sync(app)
+    assert activity[3][-1]['status'] == 'Auditing UI changes'
+    app.state.store.execute('UPDATE slack_activity SET refreshed_at=?', (time.time() - 6,))
+    sync(app)
+    assert activity[3][-1]['status'] == 'Verifying the fix'
+    app.state.slack.chat.collect()
+    assert not app.state.store.rows("SELECT 1 FROM slack_outbox WHERE kind='progress'")
+    assert not any('text' in item for item in activity[3])
+    assert not any(item['kind'] == 'message' for item in app.state.store.events(run_id))
+    # Process reconstruction and Slack's TTL refresh reuse the latest focus.
+    app.state.slack.chat.activity = SlackActivity(app.state.slack)
+    app.state.store.execute('UPDATE slack_activity SET refreshed_at=?', (time.time() - 61,))
+    sync(app)
+    assert activity[3][-1]['status'] == 'Verifying the fix'
+    for state, expected in [('awaiting_approval', 'is waiting for approval in the web session'),
+                            ('reconnecting', 'is reconnecting to the workspace…'),
+                            ('saving', 'is saving the work…'), ('cancelled', '')]:
+        app.state.store.update_run(run_id, status=state)
+        sync(app)
+        assert activity[3][-1]['status'] == expected
+
+
+def test_focus_retry_uses_latest_value_and_does_not_delay_clearing(activity, monkeypatch):
+    app, _, run_id = start(activity)
+    turn = app.state.store.claim_message(run_id)
+    app.state.store.update_run(run_id, status='running')
+    original = app.state.connectors.request
+    attempts = []
+    async def fail(*args, **kwargs):
+        attempts.append(kwargs['json'])
+        raise TimeoutError('Uncertain delivery')
+    monkeypatch.setattr(app.state.connectors, 'request', fail)
+    def focus(text):
+        app.state.store.event(run_id, 'status', text, {'phase': 'focus', 'activity_id': text, 'input_id': turn['id']})
+    focus('Inspecting the UI')
+    sync(app)
+    focus('Verifying the fix')
+    sync(app)
+    assert len(attempts) == 1
+    monkeypatch.setattr(app.state.connectors, 'request', original)
+    app.state.store.execute('UPDATE slack_activity SET retry_at=0')
+    sync(app)
+    assert activity[3][-1]['status'] == 'Verifying the fix'
+    app.state.store.update_run(run_id, status='cancelled')
+    sync(app)
+    assert activity[3][-1]['status'] == ''
+
+
+def test_token_refresh_cannot_send_focus_from_a_finished_turn(activity, monkeypatch):
+    app, _, run_id = start(activity)
+    turn = app.state.store.claim_message(run_id)
+    app.state.store.update_run(run_id, status='running')
+    app.state.store.event(run_id, 'status', 'Auditing UI changes',
+                          {'phase': 'focus', 'activity_id': 'focus', 'input_id': turn['id']})
+    async def finish_during_refresh():
+        app.state.store.finish_message(run_id, turn['id'], 'Done')
+        app.state.store.update_run(run_id, status='idle')
+        return 'separate-bot-secret'
+    monkeypatch.setattr(app.state.connectors, 'slack_bot_token', finish_during_refresh)
+    sync(app)
+    assert activity[3] == []
+    sync(app)
+    assert activity[3] == [{'channel_id': 'C12345678', 'thread_ts': ROOT, 'status': ''}]

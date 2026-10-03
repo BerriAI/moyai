@@ -17,6 +17,22 @@ def public_text(value, limit=2000):
     return text[:limit] + ('…' if len(text) > limit else '')
 
 
+def focus_text(value):
+    """A short public description, never a command/Markdown preview."""
+    text = public_text(value, 500).strip()
+    if not text or re.search(r'[<>`{}\[\]\\/]|https?:|\b(?:curl|git|pytest|npm|python)\s', text, re.I):
+        return ''
+    return ' '.join(text.split())[:120]
+
+
+def split_focus(text):
+    """Read only an explicit leading envelope; remove malformed tags as well."""
+    match = re.match(r'^\s*<status>\s*(.*?)\s*</status>', text, re.S | re.I)
+    focus = focus_text(match[1]) if match else ''
+    prose = re.sub(r'<status\b[^>]*>.*?(?:</status>|$)', '', text, flags=re.S | re.I)
+    return focus, prose.strip()
+
+
 def result_status(result):
     """Read explicit machine status only; tool output may mention unrelated errors."""
     if isinstance(result, str):
@@ -111,5 +127,10 @@ class ActivityReporter:
     def commentary(self, text, *args, **kwargs):
         # Hermes' interim callback contains public assistant text, never its
         # separate reasoning_callback. Strip tagged reasoning defensively too.
-        if isinstance(text, str) and (text := public_text(text, 3000).strip()):
-            self.emit('message', text, {'activity_version': 1, 'phase': 'commentary'})
+        if isinstance(text, str):
+            focus, prose = split_focus(text)
+            prose = public_text(prose, 3000).strip()
+            if focus:
+                self.emit('status', focus, {'activity_version': 1, 'phase': 'focus'})
+            if prose:
+                self.emit('message', prose, {'activity_version': 1, 'phase': 'commentary'})

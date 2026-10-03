@@ -449,6 +449,16 @@ class Store:
         # Publication is a server decision, shared by both web renderers and Slack.
         data.pop('public_update', None)
         data.pop('public_reply_to', None)
+        data.pop('live_status', None)
+        if kind == 'status' and data.get('phase') == 'steering':
+            # Only MessageQueue.acknowledge can publish a delivered-input receipt.
+            data.pop('message_id', None)
+        if kind == 'status' and data.get('phase') == 'focus':
+            from .progress import record_focus
+            with self.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                record_focus(conn, run_id, message, data, now())
+            return
         if kind == 'message' and data.get('phase') != 'processing':
             from .progress import record
             with self.connect() as conn:

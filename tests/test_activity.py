@@ -5,6 +5,7 @@ import pytest
 
 from app.db import Store
 from app.message_queue import MessageQueue
+from app.progress import active_input, current_focus
 from sandbox.activity import ActivityReporter, public_text, result_status
 from test_durable import durable, drive  # noqa: F401
 
@@ -83,6 +84,9 @@ async def test_durable_journal_preserves_structured_activity_and_redacts_secrets
             report['events'] += [{'kind': 'message', 'message': f'Public milestone {i}',
                                  'data': {'phase': 'commentary', 'activity_id': f'public-{i}'}}
                                 for i in range(3)]
+            report['events'].append({'kind': 'status', 'message': 'Verifying the fix', 'data': {
+                'phase': 'focus', 'activity_id': 'durable-focus',
+                'input_id': manager.state(run_id)['message_id']}})
             return json.dumps(report)
         return report
     manager.command = command
@@ -93,6 +97,8 @@ async def test_durable_journal_preserves_structured_activity_and_redacts_secrets
     assert event['data']['phase'] == 'completed'
     assert [e['message'] for e in manager.store.events(run_id) if e['kind'] == 'message'] == [
         'Public milestone 0', 'Public milestone 1']
+    assert [(e['message'], e['data']['input_id']) for e in manager.store.events(run_id)
+            if e['data'].get('live_status')] == [('Verifying the fix', event['data']['turn_id'])]
 
 
 @pytest.mark.parametrize('chat_enabled', [False, True])
@@ -181,3 +187,98 @@ def test_selected_updates_survive_detail_cap_and_leave_essential_events(tmp_path
     assert [e['message'] for e in events if e['kind'] == 'message'] == ['Tests passed']
     assert {'error', 'approval'} <= {e['kind'] for e in events}
     assert store.messages(run_id)[-1]['content'] == 'Final answer'
+
+
+def test_focus_replaces_status_without_spending_chat_budget_and_replay_cannot_rewind(tmp_path):
+    store = Store(tmp_path)
+    run_id = store.create_run('Audit schema and UI changes', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)
+    store.update_run(run_id, status='running')
+    events = []
+    def emit(kind, text, data):
+        data = {**data, 'activity_id': str(len(events)), 'input_id': turn['id']}
+        events.append((kind, text, data))
+        store.event(run_id, kind, text, data)
+    reporter = ActivityReporter(emit)
+    for text in ('Auditing UI changes', 'Auditing UI changes', 'Checking schema changes', 'Verifying the fix'):
+        reporter.commentary(f'<status>{text}</status>')
+    reporter.commentary('Opening update')
+    reporter.commentary('One useful milestone')
+    reporter.commentary('Extra narration')
+    store = Store(tmp_path)
+    for event in events[:2]:
+        store.event(run_id, *event)
+    with store.connect() as conn:
+        assert current_focus(conn, run_id) == 'Verifying the fix'
+    saved = store.events(run_id)
+    assert len([e for e in saved if e['data'].get('live_status')]) == 4
+    assert [e['message'] for e in saved if e['kind'] == 'message'] == ['Opening update', 'One useful milestone']
+    assert all(e['data']['turn_id'] == turn['id'] for e in saved if e['data'].get('live_status'))
+    store.finish_message(run_id, turn['id'], 'Done')
+    store.event(run_id, 'status', 'Late update', {'phase': 'focus', 'activity_id': 'late', 'input_id': turn['id']})
+    following, _ = store.enqueue_message(run_id, 'New task', 'next-focus')
+    store.claim_message(run_id)
+    with store.connect() as conn:
+        assert current_focus(conn, run_id) == ''
+    store.event(run_id, 'status', 'Old turn', {'phase': 'focus', 'activity_id': 'old', 'input_id': turn['id']})
+    assert not any(e['message'] in {'Late update', 'Old turn'} for e in store.events(run_id))
+
+
+@pytest.mark.parametrize('text', ['<think>private</think>', 'curl --header secret', 'Read /workspace/private.py',
+                                  'https://example.org', '`command`', 'API_KEY=secret-marker', '<b>markup</b>'])
+def test_focus_rejects_private_or_raw_details_at_callback_and_store(tmp_path, text):
+    emitted = []
+    ActivityReporter(lambda *event: emitted.append(event)).commentary(f'<status>{text}</status>')
+    assert not emitted
+    store = Store(tmp_path)
+    run_id = store.create_run('Task', '', 'demo', [], chat_enabled=False)['id']
+    store.update_run(run_id, status='running')
+    store.event(run_id, 'status', text, {'phase': 'focus', 'activity_id': 'raw'})
+    assert not any(e['data'].get('live_status') for e in store.events(run_id))
+
+
+def test_focus_follows_actual_steering_order_including_unacknowledged_input(tmp_path):
+    store = Store(tmp_path)
+    run_id = store.create_run('Task', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)
+    store.update_run(run_id, status='running')
+    older, _ = store.enqueue_message(run_id, 'Older queued input', 'older')
+    newer, _ = store.enqueue_message(run_id, 'Newer queued input', 'newer')
+    queue = MessageQueue(store)
+    def focus(input_id, label):
+        store.event(run_id, 'status', label, {'phase': 'focus', 'activity_id': label, 'input_id': input_id, 'turn_id': 999})
+    focus(turn['id'], 'Original task')
+    for message, label in ((newer, 'Newer input'), (older, 'Older input delivered last')):
+        queue.change(run_id, message['id'], '', False, 0, 'steer')
+        assert queue.live_control(run_id, turn['id'], [])['input']['id'] == message['id']
+        with store.connect() as conn:
+            assert current_focus(conn, run_id) == ''
+        focus(message['id'], label)
+        queue.acknowledge(run_id, turn['id'], [message['id']])
+        with store.connect() as conn:
+            assert active_input(conn, run_id, turn['id']) == message['id']
+            assert current_focus(conn, run_id) == label
+    store.event(run_id, 'status', 'Saving before switching requester or model.',
+                {'phase': 'steering', 'message_id': newer['id']})
+    assert 'message_id' not in store.events(run_id)[-1]['data']
+    focus(newer['id'], 'Late newer input')
+    with store.connect() as conn:
+        assert current_focus(conn, run_id) == 'Older input delivered last'
+    for state in ('stopping', 'cancelled', 'completed', 'failed', 'interrupted', 'idle'):
+        store.update_run(run_id, status=state)
+        focus(older['id'], 'Late ' + state)
+        with store.connect() as conn:
+            assert current_focus(conn, run_id) == ''
+    assert not any(e['message'].startswith('Late') for e in store.events(run_id))
+
+
+def test_focus_envelope_is_bounded_and_never_becomes_a_chat_update():
+    events = []
+    reporter = ActivityReporter(lambda *event: events.append(event))
+    reporter.commentary('<status>' + 'Reviewing changes ' * 20 + '</status>\nA useful milestone')
+    assert len(events[0][1]) == 120 and events[0][0] == 'status'
+    assert events[1] == ('message', 'A useful milestone', {'activity_version': 1, 'phase': 'commentary'})
+    reporter.commentary('<status>Incomplete envelope')
+    reporter.commentary('<status>API_KEY=secret-marker</status>Visible message')
+    assert events[-1][1] == 'Visible message'
+    assert '<status>' not in json.dumps(events) and 'secret-marker' not in json.dumps(events)
