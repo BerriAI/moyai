@@ -35,6 +35,8 @@ from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
+from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
+from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
 from .attachments import upload_limit
@@ -147,6 +149,7 @@ def create_app(settings: Settings | None = None):
     credentials = Credentials(store, security, settings, manager, checkpoints)
     manager.credentials = credentials
     skills = Skills(store, security, credentials.same_requester)
+    memory = Memory(store, security, credentials.same_requester, checkpoints)
     model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
@@ -198,6 +201,8 @@ def create_app(settings: Settings | None = None):
     app.include_router(credentials.routes())
     app.state.credentials = credentials
     app.include_router(skills.routes())
+    app.include_router(memory.routes())
+    app.state.memory = memory
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
@@ -637,7 +642,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return automations.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -647,6 +652,13 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in MEMORY_TOOLS:
+            try:
+                result = memory.call(run, body.name, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Invalid memory arguments. Check the current turn, text limits and tool schema.') from None
+            await checkpoints.flush()
+            return result
         if body.name == 'automation_claim_item':
             try:
                 result = automations.claim(run, body.arguments)
@@ -812,7 +824,12 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(429, "This run reached its model request limit.")
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
-        payload['messages'] = store.attachments.with_images(run, payload['messages'])
+        payload['messages'] = store.attachments.with_images(run, scrub_memory_history(payload['messages']))
+        memory_context = memory.context(run)
+        if memory_context:
+            # Resolve references for the current requester on every inference.
+            # No retrieved note body goes into sandbox history or tool output.
+            payload['messages'] = [{'role':'system','content':memory_context}, *payload['messages']]
         skill_context = skills.context(run)
         if skill_context:
             # The original platform system instructions stay last and take

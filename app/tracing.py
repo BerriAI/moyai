@@ -11,6 +11,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from sandbox.trace_content import trace_content
+from sandbox.memory_history import private_memory as is_memory_tool
 from .trace_outbox import TraceOutbox
 
 log = logging.getLogger(__name__)
@@ -133,10 +134,11 @@ class AgentTracing:
         if not (0 < start <= end <= now + 60_000_000_000):
             return
         name = str(data['tool'])[:120]
+        private_memory = is_memory_tool(name)
         self.emit(run, run.get('active_message_id'), name, str(data['call_id']), start, end,
                   {'gen_ai.operation.name': 'execute_tool', 'openinference.span.kind': 'TOOL',
-                   'tool.name': name, 'input.value': self.content(data.get('input')),
-                   'output.value': self.content(data.get('output')),
+                   'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if private_memory else data.get('input')),
+                   'output.value': self.content('[private tool payload omitted]' if private_memory else data.get('output')),
                    'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
 
     @best_effort

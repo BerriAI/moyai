@@ -2,6 +2,7 @@ const settingsGroups = [
   {id:'workflows', title:'Workflows', items:[
     ...(typeof renderAutomations === 'function' ? [{view:'automations', title:'Automations', description:'Schedule recurring work and review past runs.'}] : []),
     {view:'skills', title:'Skills', description:'Save instructions for yourself or your team.'},
+    {view:'memory', title:'Memory', description:'Review what Moyai remembers for your future sessions.'},
   ]},
   {id:'integrations', title:'Integrations', items:[
     {view:'connections', title:'Connections', description:'Connect GitHub, Slack, Linear, and Notion.'},
@@ -22,6 +23,7 @@ function settingsIcon(view) {
   const paths = {
     automations:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     skills:'<path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z"/>',
+    memory:'<path d="M8 3h10v18H8a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Zm0 0v18M11 8h4m-4 4h4m-4 4h2"/>',
     connections:'<path d="m10 13 4-4M8 15l-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 3 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0" transform="translate(1 0)"/>',
     secrets:'<circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-4-4 3-3m-6 3 3-3"/>',
     runtime:'<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4M7 8l3 3-3 3m6 0h4"/>',

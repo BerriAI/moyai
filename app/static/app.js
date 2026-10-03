@@ -87,9 +87,9 @@ function bindComposer(input,form){
 }
 async function navigate(view) {
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
-  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills'}[view]);
+  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
-  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else await renderRuntime();
+  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
 }
 async function refreshRuns(){const focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';state.runs=await api('/api/runs'+(focus?'?focus='+encodeURIComponent(focus):''));renderSidebar();}
 async function renderHome(){

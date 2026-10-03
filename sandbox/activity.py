@@ -100,7 +100,7 @@ class ActivityReporter:
                     from trace_content import trace_content
                 with self.lock:
                     start = self.trace_starts.pop(str(call_id), time.time_ns())
-                private = data['tool'].startswith(('credentials_', 'skills_'))
+                private = data['tool'].startswith(('credentials_', 'skills_', 'memory_'))
                 self.emit('trace', '', {'tool': data['tool'], 'call_id': data['call_id'],
                           'start_ns': start, 'end_ns': time.time_ns(), 'status': phase,
                           'input': '[private tool payload omitted]' if private else trace_content(args),

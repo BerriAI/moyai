@@ -15,6 +15,7 @@ import pytest
 
 from sandbox.agent import hermes_config
 from test_workspace import cloud_capability, wait_for, workspace  # noqa: F401
+from test_spend import sign_in, active
 
 
 def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_path, monkeypatch):
@@ -27,7 +28,11 @@ def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_
     run_id, headers = cloud_capability(app, ['linear', 'github', 'slack', 'notion'])
     # Exercise a complete parent catalog without starting Temporal or Modal.
     app.state.settings.temporal_enabled = True
-    app.state.store.execute("UPDATE runs SET chat_enabled=1,active_user_id='google:fixture',active_message_id=1 WHERE id=?", (run_id,))
+    actor = sign_in(app, client)
+    app.state.store.execute('UPDATE runs SET chat_enabled=1 WHERE id=?', (run_id,))
+    message, _ = app.state.store.enqueue_message(run_id, 'Keep benchmark summaries short.', 'memory-fixture', user_id=actor)
+    app.state.store.claim_message(run_id)
+    app.state.store.update_run(run_id, status='running')
     provider_calls, broker_calls = [], []
     async def provider(name, arguments):
         provider_calls.append(name)
@@ -89,6 +94,7 @@ def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_
     (profile / 'config.yaml').write_text(json.dumps(config))
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'TMPDIR') if key in os.environ}
     env.update(HERMES_HOME=str(profile), PYTHONPATH=source, HERMES_RUNTIME_DIR=str(tmp_path / 'runtimes'))
+    env['MOYAI_TEST_TURN_ID'] = str(message['id'])
     try:
         result = subprocess.run([python, str(root / 'tests/hermes_tool_search_probe.py')],
             env=env, cwd=tmp_path, text=True, capture_output=True, timeout=120)
@@ -96,10 +102,17 @@ def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_
         proof = next(line.removeprefix('TOOL_SEARCH_PROOF ') for line in result.stdout.splitlines()
                      if line.startswith('TOOL_SEARCH_PROOF '))
         print(proof)
+        assert {'memory_save', 'memory_search'} <= set(broker_calls)
+        assert 'short-benchmark-memory' in app.state.memory.context(app.state.store.run(run_id))
+        # New run, same identity: storage outlives a sandbox's tool process.
+        next_run = active(app)
+        assert 'short-benchmark-memory' not in app.state.memory.context(next_run)
+        app.state.memory.call(next_run, 'memory_search', {'turn_id': next_run['active_message_id'], 'query': 'benchmark'})
+        assert 'short-benchmark-memory' in app.state.memory.context(next_run)
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
     assert provider_calls == ['linear_search', 'github_repositories', 'slack_search']
-    assert broker_calls == [*provider_calls, 'slack_search', 'linear_comment']
+    assert broker_calls == ['memory_save', 'memory_search', *provider_calls, 'slack_search', 'linear_comment']
     assert app.state.store.approvals(run_id)[0]['status'] == 'denied'

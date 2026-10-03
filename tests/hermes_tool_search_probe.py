@@ -3,6 +3,7 @@
 Uses only the local fixture broker; no model or external provider is called.
 """
 import json
+import os
 
 from run_agent import AIAgent
 from model_tools import get_tool_definitions, handle_function_call
@@ -49,6 +50,21 @@ def main():
         assert {'directory', 'title', 'body', 'request_key'} <= fields.keys()
         assert 'files' not in fields
 
+        memory = ['mcp__workspace__memory_search', 'mcp__workspace__memory_save']
+        found = dispatch('tool_search', {'queries': ['memory search', 'memory save']})
+        assert all(name in found['tools'] for name in memory), found
+        described = dispatch('tool_describe', {'names': memory})['tools']
+        assert 'source_quote' in described[memory[1]]['parameters']['properties']
+        turn = int(os.environ['MOYAI_TEST_TURN_ID'])
+        saved = dispatch('tool_call', {'calls': [{'name': memory[1], 'arguments': {
+            'turn_id': turn, 'source_message_id': turn, 'source_quote': 'Keep benchmark summaries short.',
+            'key': 'short-benchmark-memory', 'title': 'Benchmark summaries', 'content': 'Keep benchmark summaries short.',
+            'kind': 'preference', 'request_id': 'hermes-memory-save'}}]})
+        assert '"saved": true' in json.dumps(saved).replace('\\"', '"'), saved
+        recalled = dispatch('tool_call', {'calls': [{'name': memory[0], 'arguments': {'turn_id': turn, 'query': 'benchmark'}}]})
+        assert '"loaded": 1' in json.dumps(recalled).replace('\\"', '"'), recalled
+        assert 'Keep benchmark summaries short.' not in json.dumps(recalled)
+
         for name in targets:
             args = {} if name.endswith('repositories') else {'query': 'fixture'}
             call = {'calls': [{'name': name, 'arguments': args}]}
@@ -73,7 +89,7 @@ def main():
         assert 'denied' in json.dumps(denied_write).lower()
         print('TOOL_SEARCH_PROOF ' + json.dumps({'before_schema_chars': len(before),
             'after_schema_chars': len(after), 'raw_tool_count': len(raw),
-            'visible_tool_count': len(agent.tools), 'verified_services': ['linear', 'github', 'slack']}))
+            'visible_tool_count': len(agent.tools), 'verified_services': ['linear', 'github', 'slack', 'personal_memory']}))
     finally:
         agent.close()
 

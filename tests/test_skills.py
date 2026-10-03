@@ -216,7 +216,7 @@ def test_broker_injects_authorized_skills_without_persisting_definitions_in_run(
     def upstream(request):
         messages=json.loads(request.content)['messages']
         assert INSTRUCTIONS in json.loads(messages[0]['content'].split('\n',1)[1])['loaded'][0]['instructions']
-        assert messages[1]=={'role':'system','content':'Platform rules stay authoritative'}
+        assert messages[-1]=={'role':'system','content':'Platform rules stay authoritative'}
         return httpx.Response(200,json={'id':'response','choices':[{'message':{'role':'assistant','content':'Reviewed'}}],'usage':{'total_tokens':10}})
     actual=httpx.AsyncClient
     monkeypatch.setattr('app.main.httpx.AsyncClient',lambda **kw:actual(transport=httpx.MockTransport(upstream),**kw))

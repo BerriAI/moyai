@@ -93,6 +93,16 @@ def test_sensitive_content_is_redacted_and_private_tools_are_omitted(monkeypatch
     assert next(event for event in events if event[0] == 'trace')[2]['output'] == '[private tool payload omitted]'
 
 
+@pytest.mark.parametrize('name', ['memory_save', 'mcp_workspace_memory_save', 'mcp__workspace__memory_search'])
+def test_server_drops_memory_payload_even_if_sandbox_did_not_scrub_it(tmp_path, name):
+    store, tracing, processor, run, _ = setup(tmp_path)
+    stamp = time.time_ns()
+    tracing.tool(run['id'], {'tool': name, 'call_id': 'memory', 'start_ns': stamp, 'end_ns': stamp,
+                            'input': 'private-memory-marker', 'output': 'private-memory-marker'})
+    assert len(processor.spans) == 1
+    assert 'private-memory-marker' not in str(processor.spans[0].attributes)
+
+
 def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
     store, tracing, processor, run, message = setup(tmp_path)
     def broken(span):

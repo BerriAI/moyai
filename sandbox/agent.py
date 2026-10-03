@@ -18,6 +18,7 @@ try:
     from .activity import ActivityReporter
     from .startup import StartupUnavailable
     from .project_environment import prepare_project
+    from .memory_history import scrub_memory_history
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -28,6 +29,7 @@ except ImportError:
     from activity import ActivityReporter
     from startup import StartupUnavailable
     from project_environment import prepare_project
+    from memory_history import scrub_memory_history
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -157,6 +159,7 @@ def run_agent(spec, relay):
     history = spec.get("history_fallback", [])
     if spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning") and not spec.get('fresh_child'):
         history = json.loads(history_path.read_text())
+    history = scrub_memory_history(history)
     try:
         from model_tools import get_tool_definitions
         workspace_tools = get_tool_definitions(enabled_toolsets=["mcp-workspace"],
@@ -206,6 +209,9 @@ def run_agent(spec, relay):
             "describe the matching exact tool names to get their arguments, then invoke them through tool_call. "
             "If an exact name is already in the tool catalog, you can describe it without searching first. "
             "This also applies to browser, skills, credentials, and agent coordination tools. "
+            "Personal cross-session memory is managed by the broker, not local memory files. "
+            "Use tool_search to discover memory_search, memory_save and memory_forget when the broker says memory is enabled. "
+            "The broker supplies the current turn and user-message IDs. Follow its capture setting; never store secrets or another participant’s information. "
             "A deferred tool is not a missing connection: search before claiming a capability is unavailable. "
             "Use one workspace invocation per tool_call; batch tool_describe when you need several schemas. "
             "The model gateway provides a skills catalog scoped to the current requester. Follow explicitly requested loaded skills; "
@@ -310,7 +316,7 @@ def run_agent(spec, relay):
                 raise RuntimeError("Hermes did not return conversation history")
             history_path.parent.mkdir(exist_ok=True, mode=0o700)
             temporary = history_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(result["messages"]))
+            temporary.write_text(json.dumps(scrub_memory_history(result["messages"])))
             temporary.chmod(0o600)
             temporary.replace(history_path)
     finally:
