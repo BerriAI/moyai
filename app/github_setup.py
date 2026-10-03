@@ -97,7 +97,7 @@ def routes(connectors, security, store, settings):
         return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai Devin</title>'
             '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
             '<h1>Connect GitHub for your organization</h1><p>Repositories: <strong>' + html.escape(', '.join(github.targets())) + '</strong></p>'
-            '<p>Moyai can read code and publish normal pull requests after administrator approval. It cannot approve or merge pull requests, '
+            '<p>Moyai can read code and create normal pull requests without an administrator approval step. It cannot approve or merge pull requests, '
             'enable auto-merge, update existing branches, or change workflow and access-control files.</p>'
             '<p>GitHub combines these operations under Contents and Pull requests write permissions. The credential stays on the server; '
             'Moyai agents receive only the specific operations listed above. No personal GitHub sign-in is needed for teammates.</p>'
@@ -135,7 +135,7 @@ def routes(connectors, security, store, settings):
         connectors.expire_approvals('github')
         connectors.save('github', credentials, label)
         connectors.record_check('github', 'healthy')
-        connectors.audit('github', 'Connected ' + label + ': normal PR publishing; approvals and merges blocked')
+        connectors.audit('github', 'Connected ' + label + ': normal PR publishing; PR reviews and merges blocked')
         return RedirectResponse('/?connection=success#connections', status_code=303)
 
     return router

@@ -531,7 +531,9 @@ def create_app(settings: Settings | None = None):
                       (provider, body.enabled, body.read_only))
         if not body.enabled or body.read_only:
             connectors.expire_approvals(provider)
-        action = "Paused for all sessions" if not body.enabled else "Enabled: read only" if body.read_only else "Enabled: writes require admin approval"
+        action = ("Paused for all sessions" if not body.enabled else "Enabled: read only" if body.read_only
+                  else "Enabled: read code and create pull requests" if provider == 'github'
+                  else "Enabled: writes require admin approval")
         connectors.audit(provider, action)
         return connectors.policy(provider)
 
@@ -680,7 +682,7 @@ def create_app(settings: Settings | None = None):
         if provider == 'github':
             run = {**run, 'github_connection_version': connectors.github.connection_version()}
         approval_id = None
-        if write:
+        if connectors.requires_approval(body.name):
             approval_id = uuid4().hex
             store.execute("INSERT INTO approvals(id,run_id,tool,arguments,status,created_at) VALUES(?,?,?,?,?,?)",
                           (approval_id, run_id, body.name, json.dumps(arguments), "pending", now()))

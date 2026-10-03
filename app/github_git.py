@@ -25,7 +25,7 @@ def routes(github, require_run):
                          and list(request.query_params.multi_items()) == [('service', 'git-upload-pack')])
         pack = request.method == 'POST' and operation == 'git-upload-pack' and not request.query_params
         if not (advertisement or pack):
-            raise HTTPException(403, 'Only read-only Git fetch is available. Use the approved PR tool to publish changes.')
+            raise HTTPException(403, 'Only read-only Git fetch is available. Use github_create_pull_request to publish changes.')
         try:
             target = await github.selected_target(run, f'{owner}/{repository}' if owner else '')
         except ConnectorError as exc:

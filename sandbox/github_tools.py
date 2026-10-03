@@ -44,7 +44,7 @@ def metadata(directory):
     try:
         data = json.loads((directory / '.git/moyai.json').read_text())
     except (OSError, ValueError):
-        raise GitHubToolError('Use github_checkout first to record the approved repository and base.') from None
+        raise GitHubToolError('Use github_checkout first to record the repository and base.') from None
     if not re.fullmatch(r'[0-9a-f]{40}', data.get('base_sha', '')):
         raise GitHubToolError('Checkout metadata is invalid. Inspect the base before publishing.')
     return data
@@ -85,7 +85,7 @@ def checkout(broker, remote, token, directory='', repository=''):
     data = {'repository': repo['repository'], 'base_sha': base, 'default_branch': repo['default_branch']}
     (target / '.git/moyai.json').write_text(json.dumps(data))
     return {**data, 'directory': str(target), 'reused': False,
-            'instruction': 'Work here, then use github_create_pull_request to package actual files for approval. Git push is unavailable.'}
+            'instruction': 'Work here, then use github_create_pull_request to publish actual files as a normal PR without an administrator approval step. Git push is unavailable.'}
 
 
 def collect(directory, title, body, request_key):
