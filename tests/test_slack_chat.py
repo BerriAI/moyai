@@ -158,6 +158,25 @@ def test_stop_revokes_active_capabilities_and_approvals_before_ack(slack_app):
     assert len(app.state.store.messages(run_id)) == 2
 
 
+def test_slack_replies_during_a_turn_guide_it_in_order_without_send_now(slack_app):
+    from app.message_queue import MessageQueue
+    app, client, run_id = start(slack_app)
+    store, q = app.state.store, MessageQueue(app.state.store)
+    first = store.claim_message(run_id)['id']
+    store.update_run(run_id, status='running')
+    web, _ = store.enqueue_message(run_id, 'Web queue stays queued', 'web-pending', user_id=store.run(run_id)['active_user_id'])
+    send(client, 1, 'Use opus instead')
+    send(client, 2, 'And skip the docs')
+    replies = [m['id'] for m in store.messages(run_id) if m['content'].startswith('Slack reply')]
+    for reply in replies:
+        packet = q.live_control(run_id, first, [])
+        assert packet['input']['id'] == reply
+        assert q.live_control(run_id, first, [reply])['steer_message_id'] is None
+    assert q.live_control(run_id, first, []) == {'steer_message_id': None}
+    status = {m['id']: m['status'] for m in store.messages(run_id)}
+    assert [status[r] for r in replies] == ['injected', 'injected'] and status[web['id']] == 'queued'
+
+
 def test_plain_yes_never_grants_external_write_approval(slack_app):
     app, client, run_id = start(slack_app)
     app.state.store.claim_message(run_id)

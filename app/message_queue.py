@@ -60,6 +60,11 @@ class MessageQueue:
             if not run or run['active_message_id'] != active_message_id or run['status'] in {'stopping','cancelled','failed','interrupted'}:
                 return None
             row = conn.execute("SELECT * FROM messages WHERE run_id=? AND id=? AND status='queued'", (run_id, run['steer_message_id'])).fetchone()
+            if not row:
+                # Slack has no Send now control, so its oldest reply takes a free slot.
+                row = conn.execute("SELECT m.* FROM messages m JOIN slack_receipts s ON s.run_id=m.run_id AND s.message_id=m.id WHERE m.run_id=? AND m.status='queued' ORDER BY m.id LIMIT 1", (run_id,)).fetchone()
+                if row and row['id'] != active_message_id:
+                    conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (row['id'], run_id))
             if not row or row['id'] == active_message_id:
                 return None
             conn.execute('UPDATE messages SET queue_locked=1 WHERE id=?', (row['id'],))

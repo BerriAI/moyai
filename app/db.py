@@ -101,6 +101,7 @@ class Store:
                     message_id INTEGER, command TEXT NOT NULL DEFAULT '', handled INTEGER NOT NULL DEFAULT 1,
                     UNIQUE(team_id,channel,message_ts)
                 );
+                CREATE INDEX IF NOT EXISTS idx_slack_receipts_message ON slack_receipts(run_id,message_id);
                 CREATE TABLE IF NOT EXISTS slack_outbox (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id),
                     dedupe_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, text TEXT NOT NULL,
