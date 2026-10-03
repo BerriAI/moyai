@@ -56,6 +56,63 @@ function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',
   return {ctx,element,posts,gets,submit,elements};
 }
 
+test('request selector maps each exclusive choice to explicit sharing and reuse',async()=>{
+  for(const [choice,scope,lifetime] of [['session','personal','session'],['personal','personal','persistent'],['organization','organization','persistent']]){
+    const f=fixture({kind:'key'});
+    await f.ctx.openCredentialDialog({id:'key',provider:'fireworks',reason:'Benchmark',can_personal:true,can_organization:true});
+    assert.equal(f.element('secret-scope').value,'personal');assert.equal(f.element('secret-lifetime').value,'persistent');
+    const radio=f.element('secret-use-'+choice);radio.checked=true;radio.onchange();
+    f.element('secret-value').value='synthetic-key';
+    await f.element('credential-form').onsubmit({preventDefault(){}});
+    assert.equal(f.posts[0].body.scope,scope);assert.equal(f.posts[0].body.lifetime,lifetime);
+  }
+});
+
+test('an admin supplying a teammate request must explicitly choose organization',async()=>{
+  const f=fixture({kind:'key'});
+  await f.ctx.openCredentialDialog({id:'key',provider:'fireworks',reason:'Benchmark',can_personal:false,can_organization:true});
+  assert.equal(f.element('secret-use-personal').disabled,true);assert.equal(f.element('secret-use-session').disabled,true);
+  assert.equal(f.element('secret-scope').value,'');
+  f.element('secret-value').value='synthetic-key';await f.element('credential-form').onsubmit({preventDefault(){}});
+  assert.equal(f.posts.length,0);
+});
+
+test('single token input is masked and serialized without asking the user for JSON',async()=>{
+  const f=fixture({kind:'key'});
+  await f.ctx.openCredentialDialog({id:'token',provider:'generic',name:'service',format:'env',reason:'Read service logs',can_personal:true,input_fields:[{name:'SERVICE_TOKEN',label:'Access token',secret:true,required:true}]});
+  assert.equal(f.element('secret-input-0').type,'password');assert.equal(f.elements.has('secret-value'),false);
+  f.element('secret-input-0').value='test-token-with-"quotes';
+  assert.equal(f.element('secret-scope').value,'personal');assert.equal(f.element('secret-lifetime').value,'persistent');
+  f.element('secret-scope').value='personal';f.element('secret-lifetime').value='session';
+  await f.element('credential-form').onsubmit({preventDefault(){}});
+  assert.deepEqual(JSON.parse(f.posts[0].body.value),{SERVICE_TOKEN:'test-token-with-"quotes'});
+  assert.equal(f.elements.has('secret-input-0'),false);
+});
+
+test('AWS fields enforce required values and omit an empty optional session token',async()=>{
+  const f=fixture({kind:'key'});
+  await f.ctx.openCredentialDialog({id:'aws',provider:'generic',name:'aws',format:'env',reason:'Investigate AWS logs',can_personal:true});
+  assert.equal(f.elements.has('secret-value'),false);
+  assert.equal(f.element('secret-input-1').type,'password');assert.equal(f.element('secret-input-2').required,false);
+  f.element('secret-scope').value='personal';f.element('secret-lifetime').value='persistent';
+  await f.element('credential-form').onsubmit({preventDefault(){}});assert.equal(f.posts.length,0);
+  f.element('secret-input-0').value='test-id';f.element('secret-input-1').value='test-secret';f.element('secret-input-3').value='us-west-2';
+  await f.element('credential-form').onsubmit({preventDefault(){}});
+  assert.deepEqual(JSON.parse(f.posts[0].body.value),{AWS_ACCESS_KEY_ID:'test-id',AWS_SECRET_ACCESS_KEY:'test-secret',AWS_DEFAULT_REGION:'us-west-2'});
+});
+
+test('saved access and decline never transmit labeled input drafts',async()=>{
+  const saved={id:'existing',provider:'generic',name:'service',format:'env',label:'Saved',scope:'personal'};
+  for(const decline of [true,false]){
+    const f=fixture({kind:'key',saved:[saved]});
+    await f.ctx.openCredentialDialog({id:'token',provider:'generic',name:'service',format:'env',reason:'Read logs',can_personal:true,input_fields:[{name:'SERVICE_TOKEN',label:'Access token'}]});
+    f.element('secret-input-0').value='draft-only';
+    if(decline)await f.element('decline-secret').onclick();
+    else{f.element('secret-source').value='existing';f.element('secret-source').onchange();assert.equal(f.element('secret-input-0').value,'');assert.equal(f.element('secret-input-0').disabled,true);await f.element('credential-form').onsubmit({preventDefault(){}});}
+    assert.equal('value' in f.posts[0].body,false);
+  }
+});
+
 test('new skill asks for scope and cannot submit until a choice is made',async()=>{
   const f=fixture();await f.ctx.openSkillEditor();
   const scope=f.element('skill-scope'),form=f.element('skill-form');
@@ -98,7 +155,7 @@ test('choosing a saved key disables the unused scope field and keeps its existin
   source.value='existing-key';source.onchange();
   assert.equal(scope.required,false);assert.equal(scope.disabled,true);
   assert.equal(f.element('secret-lifetime').required,false);assert.equal(f.element('secret-lifetime').disabled,true);
-  assert.equal(f.element('secret-expiry').disabled,true);assert.equal(f.element('secret-value').disabled,true);
+  assert.equal(f.elements.has('secret-expiry'),false);assert.equal(f.element('secret-value').disabled,true);
   f.element('credential-form').onsubmit({preventDefault(){}});await flush();
   assert.equal(f.posts[0].body.secret_id,'existing-key');assert.equal('scope' in f.posts[0].body,false);
 });
@@ -107,9 +164,9 @@ test('choosing a saved key disables the unused scope field and keeps its existin
 test('declining a key request does not require a scope or transmit a draft key',async()=>{
   const f=fixture({kind:'key'});
   await f.ctx.openCredentialDialog({id:'request-one',provider:'fireworks',reason:'Benchmark',can_personal:true});
-  assert.equal(f.element('secret-scope').value,'');
-  assert.equal(f.element('secret-scope').options.some(option=>option.value==='session'),false);
-  assert.ok(f.element('secret-lifetime').options.some(option=>option.value==='session'));
+  assert.equal(f.element('secret-scope').value,'personal');
+  assert.equal(f.element('secret-use-session').value,'session');
+  assert.equal(f.element('secret-lifetime').value,'persistent');
   f.element('secret-value').value='do-not-transmit-this-draft';
   f.element('decline-secret').onclick();await flush();
   assert.equal(f.posts[0].body.decision,'decline');assert.equal(f.posts[0].body.generation,0);assert.equal('scope' in f.posts[0].body,false);
@@ -138,9 +195,8 @@ test('a generic file request can grant organization access for this session only
     assert.equal(f.element(name).disabled,true);assert.equal(f.element(name).required,false);
   }
   assert.equal(f.element('secret-env-var').value,'KUBECONFIG');
-  assert.equal(f.element('secret-optional-options').tagName,'DETAILS');assert.equal(f.element('secret-optional-options').open,false);
-  assert.equal(f.element('secret-expiry').disabled,false);assert.equal(f.element('secret-value').required,true);
-  f.element('secret-expiry').oninvalid();assert.equal(f.element('secret-optional-options').open,true);
+  assert.equal(f.elements.has('secret-optional-options'),false);
+  assert.equal(f.elements.has('secret-expiry'),false);assert.equal(f.element('secret-value').required,true);
   assert.equal(f.element('secret-scope').required,true);assert.equal(f.element('secret-lifetime').required,true);
   const file=f.element('secret-file');file.value='synthetic-upload';
   await file.onchange({target:{...file,files:[{size:30,text:async()=> 'apiVersion: v1\nclusters: []\n'}]}});
@@ -222,17 +278,20 @@ test('members cannot choose organization sharing; setup URLs cannot execute scri
   assert.equal(f.ctx.credentialSetupUrl('https://example.com/connect'), 'https://example.com/connect');
 });
 
-test('access card and secure form show the same service setup destination and escaped steps',async()=>{
+test('compact access card defers setup details to the secure form',async()=>{
   const f=fixture({kind:'key'}),target=f.element('credential-requests');
-  const request={id:'aws',provider:'generic',name:'aws dev access',reason:'Investigate the outage',format:'env',can_personal:true,
+  const request={id:'aws',provider:'generic',name:'aws dev access',reason:'Investigate the outage. Longer permissions explanation.',format:'env',can_personal:true,
     setup_url:'https://docs.aws.amazon.com/singlesignon/latest/userguide/howtogetcredentials.html',
     setup_instructions:'Open your AWS access portal.\nChoose the permitted account and role. <script>not executable</script>'};
   f.ctx.renderCredentialRequests([request]);
-  assert.ok(target.innerHTML.includes('href="'+request.setup_url+'"'));assert.match(target.innerHTML,/Setup guide · docs.aws.amazon.com/);
-  assert.match(target.innerHTML,/How to get access/);assert.match(target.innerHTML,/&lt;script>/);assert.doesNotMatch(target.innerHTML,/<script>|Get a key|href=""/);
+  assert.match(target.innerHTML,/Provide Secret/);assert.match(target.innerHTML,/aria-controls="credential-dialog"/);
+  assert.match(target.innerHTML,/Credentials requested:/);assert.doesNotMatch(target.innerHTML,/Longer permissions explanation/);
+  assert.doesNotMatch(target.innerHTML,/How to get access|<script>|<a\b|<input|<textarea/);
+  assert.equal(f.element('credential-dialog').open,undefined);
   await f.ctx.openCredentialDialog(request);
   assert.equal(f.element('secret-setup').href,request.setup_url);assert.equal(f.element('secret-setup-row').hidden,false);
   assert.match(f.element('credential-form').innerHTML,/Choose the permitted account and role/);
+  assert.match(f.element('credential-form').innerHTML,/Longer permissions explanation/);
   assert.match(f.element('credential-form').innerHTML,/&lt;script>/);
 });
 
@@ -244,7 +303,7 @@ test('missing or unsafe setup URLs never navigate to Moyai or leave a stale form
     'https://user:password@example.com', 'https://example.com/white space', 'https://example.com\\path']){
     assert.equal(f.ctx.credentialSetupUrl(url),'');
     f.ctx.renderCredentialRequests([{...request,setup_url:url}]);
-    assert.doesNotMatch(target.innerHTML,/<a\b/);assert.match(target.innerHTML,/Ask the service administrator/);
+    assert.doesNotMatch(target.innerHTML,/<a\b/);assert.match(target.innerHTML,/Provide Secret/);
   }
   await f.ctx.openCredentialDialog({...request,setup_url:'https://example.com/setup'});
   assert.equal(f.element('secret-setup').href,'https://example.com/setup');

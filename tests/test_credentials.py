@@ -19,6 +19,39 @@ from test_workspace import workspace
 KEY = 'test-provider-secret-438912'
 
 
+def test_labeled_token_request_round_trip(workspace, monkeypatch):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    fields = [{'name': 'SERVICE_TOKEN', 'label': 'Access token', 'secret': True, 'required': True}]
+    args = CredentialRequest(provider='generic', name='service', reason='Read service logs', request_key='token', input_fields=fields)
+    vault = app.state.credentials
+    request = vault.request(run, args)
+    assert vault.request(run, args)['request_id'] == request['request_id']
+    assert client.get('/api/runs/'+run['id']).json()['credential_requests'][0]['input_fields'] == fields
+    changed = args.model_copy(update={'input_fields': []})
+    with pytest.raises(ValueError, match='original credential inputs'):
+        vault.request(run, changed)
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    response = client.post('/api/credentials/requests/'+request['request_id'], json={
+        'decision': 'provide', 'generation': 0, 'scope': 'personal', 'lifetime': 'session',
+        'value': json.dumps({'SERVICE_TOKEN': KEY})})
+    assert response.status_code == 200
+    secret = app.state.store.rows('SELECT * FROM provider_secrets')[0]
+    assert json.loads(app.state.security.decrypt(secret['encrypted'])) == {'SERVICE_TOKEN': KEY}
+    assert KEY not in client.get('/api/runs/'+run['id']).text
+
+
+@pytest.mark.parametrize('fields', [
+    [{'name': 'PATH', 'label': 'Token'}],
+    [{'name': 'SERVICE_TOKEN', 'label': 'Token', 'value': 'must-not-accept-values'}],
+    [{'name': 'SERVICE_TOKEN', 'label': 'Token'}]*2,
+])
+def test_credential_input_metadata_is_validated(fields):
+    with pytest.raises(ValueError):
+        CredentialRequest(provider='generic', name='service', reason='Read logs', request_key='token', input_fields=fields)
+
+
 def requested(app, run, key='bench'):
     return app.state.credentials.request(run,CredentialRequest(provider='fireworks',reason='Benchmark the requested models',request_key=key))
 

@@ -83,14 +83,31 @@ class Capability(Arguments):
         return self
 
 
+class CredentialInput(Arguments):
+    name: str = Field(max_length=128, description='Exact environment variable consumed by the authorized command; never a secret value.')
+    label: str = Field(min_length=1, max_length=80, description='Human-readable field label, e.g. Access token or AWS access key ID.')
+    secret: bool = True
+    required: bool = True
+
+    @model_validator(mode='after')
+    def valid_name(self):
+        environment_name(self.name)
+        return self
+
+
 class CredentialRequest(Capability):
     reason: str = Field(min_length=3, max_length=1000)
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{1,80}$')
     setup_url: str = Field(default='', max_length=2048, description='Verified service documentation or console URL for obtaining this access. HTTPS only; no secrets. Inference provider setup links remain fixed.')
     setup_instructions: str = Field(default='', max_length=3000, description='Concise task-specific steps to obtain the requested access, including the relevant account/role or administrator action. No secret values.')
+    input_fields: list[CredentialInput] = Field(default_factory=list, max_length=32, description='For generic env access, declare the exact required inputs so users never need to write JSON. Single token: [{name: SERVICE_TOKEN, label: Access token}]. AWS: separate AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, and region fields. Mark optional fields required=false. Do not include values.')
 
     @model_validator(mode='after')
     def setup_guidance(self):
+        if self.input_fields and (self.provider != 'generic' or self.format != 'env'):
+            raise ValueError('Labeled inputs are only supported for generic environment access.')
+        if len({field.name for field in self.input_fields}) != len(self.input_fields):
+            raise ValueError('Credential input names must be unique.')
         self.setup_url = self.setup_url.strip()
         self.setup_instructions = self.setup_instructions.strip()
         if self.setup_url:
@@ -204,7 +221,7 @@ class UpdateSecret(Arguments):
 
 TOOLS = {
     'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized metadata only, including reuse scope, expiry and connection status; never secret values.'),
-    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure JSON environment-variable map, format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
+    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
     'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
     'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication opens a secure replacement request and pauses the session. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
     'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
@@ -247,7 +264,7 @@ class Credentials:
                     'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
                     'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
                     'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
-                    'setup_instructions': "TEXT NOT NULL DEFAULT ''"},
+                    'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'"},
             }.items():
                 columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
                 for field, declaration in fields.items():
@@ -442,6 +459,9 @@ class Credentials:
                                  (run['id'], run['active_message_id'], args.request_key)).fetchone()
             if prior and any(prior[key] != getattr(args, key) for key in ('provider', 'reason', 'name', 'format', 'env_var')):
                 raise ValueError('Use the original arguments when retrying this credential request.')
+            input_fields = json.dumps([field.model_dump() for field in args.input_fields])
+            if prior and json.loads(prior['input_fields']) != json.loads(input_fields):
+                raise ValueError('Use the original credential inputs when retrying this request.')
             if not prior:
                 prior = conn.execute("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'",
                                      (run['id'], run['active_message_id'])).fetchone()
@@ -471,7 +491,7 @@ class Credentials:
                 choices = private or candidates
                 secret = choices[0] if len(choices) == 1 else None
                 row = {'id': uuid4().hex, 'run_id': run['id'], 'message_id': run['active_message_id'], 'actor_id': actor,
-                       **args.model_dump(), 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
+                       **args.model_dump(), 'input_fields': input_fields, 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
                        'created_at': now(), 'resolved_at': now() if secret else '', 'generation': 0, 'failure': '',
                        'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
                 conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
@@ -491,6 +511,7 @@ class Credentials:
             return []
         rows = self.store.rows("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'", (run['id'], run['active_message_id']))
         return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure')},
+                 'input_fields': json.loads(row['input_fields']),
                  'root_id': self.root(run), 'can_personal': self.same_requester(user_id, row['actor_id']), 'can_organization': admin,
                  **self.setup(row), 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
                 for row in rows]
@@ -524,6 +545,14 @@ class Credentials:
                     if body.scope != 'organization' and not own:
                         raise HTTPException(403, 'Personal credentials can only be supplied for your own requests.')
                     try:
+                        inputs = json.loads(row['input_fields'])
+                        if inputs:
+                            values = json.loads(body.value.get_secret_value())
+                            if not isinstance(values, dict) or any(
+                                field['required'] and (not isinstance(values.get(field['name']), str) or not values[field['name']].strip())
+                                for field in inputs
+                            ):
+                                raise ValueError('Missing required credential input.')
                         data = SaveSecret(**{key: row[key] for key in ('provider', 'name', 'format', 'env_var')},
                             scope=body.scope, lifetime=body.lifetime, expires_at=body.expires_at,
                             label=body.label.strip() or row['name'] or PROVIDERS[row['provider']]['name'] + ' key',

@@ -17,6 +17,20 @@ function credentialSetupInstructions(request){
 function credentialSetupLabel(url){
   return 'Setup guide · '+new URL(url).hostname+' ↗';
 }
+function credentialInputFields(request){
+  if(!request||request.provider!=='generic'||request.format==='file')return [];
+  if(request.input_fields?.length)return request.input_fields;
+  // Compatibility for pending requests created before labeled inputs existed.
+  const text=[request.name,request.reason,request.setup_instructions].join(' ');
+  if(/\baws\b/i.test(text))return [
+    {name:'AWS_ACCESS_KEY_ID',label:'Access key ID',secret:true,required:true},
+    {name:'AWS_SECRET_ACCESS_KEY',label:'Secret access key',secret:true,required:true},
+    {name:'AWS_SESSION_TOKEN',label:'Session token',secret:true,required:false},
+    {name:/\bAWS_REGION\b/.test(text)&&!/\bAWS_DEFAULT_REGION\b/.test(text)?'AWS_REGION':'AWS_DEFAULT_REGION',label:'Region',secret:false,required:true}
+  ];
+  const names=[...new Set(text.match(/\b[A-Z][A-Z0-9_]*(?:_TOKEN|_API_KEY|_ACCESS_TOKEN)\b/g)||[])];
+  return names.length===1?[{name:names[0],label:'Access token',secret:true,required:true}]:[];
+}
 function credentialMatches(secret,request,rootId){
   if(secret.provider!==request.provider||credentialStatus(secret)!=='active')return false;
   if(secret.scope!=='organization'&&!request.can_personal)return false;
@@ -27,11 +41,15 @@ function renderCredentialRequests(requests){
   const target=document.querySelector('#credential-requests');if(!target)return;
   const signature=JSON.stringify(requests);if(target.dataset.signature===signature)return;target.dataset.signature=signature;
   target.innerHTML=requests.map(r=>{
-    const generic=r.provider==='generic',setup=credentialSetupUrl(r.setup_url);
-    const failure={expired:'The saved credential has expired. Update access to continue.',invalid:'The saved credential no longer works. Update access to continue.',permission:'The saved credential does not grant the access needed for this task.'}[r.failure]||'';
-    return `<section class="credential-request" aria-label="Access requested"><div><strong>${esc(generic?r.name:r.provider_name)} access needed</strong><p>${esc(r.reason)}</p>${failure?`<p>${esc(failure)}</p>`:''}${credentialSetupInstructions(r)}<small>Connect securely here. Never paste credentials into chat or Slack.</small></div><div class="credential-actions">${r.can_personal||r.can_organization?`<button type="button" data-provide-key="${esc(r.id)}">Connect access</button>`:'<small>Waiting for the requester or an organization admin.</small>'}${setup?`<a href="${esc(setup)}" target="_blank" rel="noopener noreferrer">${esc(credentialSetupLabel(setup))}</a>`:''}</div></section>`;
+    const generic=r.provider==='generic';
+    const failure={expired:'Saved access expired.',invalid:'Saved access needs updating.',permission:'Saved access needs additional permissions.'}[r.failure]||'';
+    const fields=credentialInputFields(r),name=fields.length===1?fields[0].name:generic?r.name:(r.provider_name||r.provider)+' API key';
+    return `<section class="credential-request" aria-label="Credentials requested"><div class="credential-request-heading"><span aria-hidden="true">⚿</span><span>Credentials requested: <strong>${esc(name)}</strong></span></div>${failure?`<p class="credential-request-failure">${esc(failure)}</p>`:''}<div class="credential-request-footer">${r.can_personal||r.can_organization?`<button type="button" data-provide-key="${esc(r.id)}" aria-haspopup="dialog" aria-controls="credential-dialog">Provide Secret</button>`:'<small>Waiting for the requester or an organization admin.</small>'}</div></section>`;
   }).join('');
-  target.querySelectorAll('[data-provide-key]').forEach(button=>button.onclick=()=>openCredentialDialog(requests.find(r=>r.id===button.dataset.provideKey)).catch(showError));
+  target.querySelectorAll('[data-provide-key]').forEach(button=>button.onclick=()=>{
+    const request=requests.find(r=>r.id===button.dataset.provideKey);
+    openCredentialDialog(request).catch(showError);
+  });
 }
 
 async function renderSecrets(){
@@ -63,20 +81,35 @@ async function openCredentialDialog(request=null,secret=null){
   const fixed=request||secret,providers=fixed?providerList.filter(p=>p.id===fixed.provider):providerList;
   const existingScope=secret?(secret.scope==='session'?'personal':secret.scope):'';
   const existingLifetime=secret?credentialLifetime(secret):'';
+  const inputFields=credentialInputFields(request);
+  const useSelector=request?`<fieldset class="secret-use-field"><legend>Who can use this secret?</legend><div class="secret-use-selector" role="radiogroup" aria-label="Secret availability"><span class="secret-use-highlight" aria-hidden="true"></span>${[['session','Session only'],['personal','Personal'],['organization','Organization']].map(([value,label])=>`<label><input id="secret-use-${value}" type="radio" name="secret-use" value="${value}" ${value==='personal'&&canPersonal?'checked':''} ${(value==='organization'?!canOrganization:!canPersonal)?'disabled':''}><span>${label}</span></label>`).join('')}</div><p id="secret-use-description" class="secret-use-description">${canPersonal?'Only you, across future sessions.':'Choose Organization to share access with your organization.'}</p></fieldset><input id="secret-scope" type="hidden" value="${canPersonal?'personal':''}"><input id="secret-lifetime" type="hidden" value="${canPersonal?'persistent':''}">`:'';
   const localExpiry=secret?.expires_at?new Date(Date.parse(secret.expires_at)-new Date(secret.expires_at).getTimezoneOffset()*60000).toISOString().slice(0,16):'';
   const labelField=`<div class="field"><label for="secret-label">Display name</label><input id="secret-label" maxlength="80" placeholder="My service access" autocomplete="off" value="${esc(secret?.label||'')}"></div>`,expiryField=`<div class="field"><label for="secret-expiry">Provider expiry (optional, your local time)</label><input id="secret-expiry" type="datetime-local" value="${esc(localExpiry)}"><small>Leave blank if unknown or if the credential does not expire.</small></div>`;
-  const requestContext=request?`<p class="credential-context"><strong>${esc(request.provider==='generic'?request.name:(request.provider_name||providers[0]?.name||request.provider))}</strong><br><small>${request.provider==='generic'?(request.format==='file'?'Credential file · '+esc(request.env_var):'Environment variables (JSON)'):'Provider API key'}</small></p>`:'';
-  form.innerHTML=`<button class="dialog-close" type="button" aria-label="Close credential form">×</button><h2>${secret?'Edit saved access':request?'Connect access':'Save a credential'}</h2>${requestContext}${request?`<p class="subtext">${esc(request.reason)}</p>`:''}${credentialSetupInstructions(request)}<div id="secret-provider-field" class="field" ${request?'hidden':''}><label for="secret-provider">Service</label><select id="secret-provider" ${fixed?'disabled':''}>${providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></div><p id="secret-setup-row"><a id="secret-setup" target="_blank" rel="noopener noreferrer">Set up access ↗</a></p>${saved.length?`<div class="field"><label for="secret-source">Credential to use</label><select id="secret-source"><option value="">Provide a new credential</option>${saved.map(s=>`<option value="${esc(s.id)}">${esc(s.label)} · ${esc(credentialScope(s.scope))} · ${credentialLifetime(s)==='session'?'This session only':'Future sessions'}</option>`).join('')}</select></div>`:''}<div id="secret-new-fields"><div id="secret-generic-fields"><div class="field"><label for="secret-name">Service or capability name</label><input id="secret-name" maxlength="80" placeholder="production-cluster" autocomplete="off" value="${esc(fixed?.name||'')}" ${fixed?'disabled':''}></div><div class="field"><label for="secret-format">Credential format</label><select id="secret-format" ${fixed?'disabled':''}><option value="env" ${fixed?.format==='file'?'':'selected'}>Environment variables (JSON)</option><option value="file" ${fixed?.format==='file'?'selected':''}>Credential file</option></select></div><div id="secret-env-var-field" class="field"><label for="secret-env-var">Environment variable for the file path</label><input id="secret-env-var" maxlength="128" pattern="[A-Z_][A-Z0-9_]*" placeholder="KUBECONFIG" autocomplete="off" value="${esc(fixed?.env_var||'')}" ${fixed?'disabled':''}></div></div>${request?'':labelField}<div id="secret-value-fields"></div><div ${request?'class="credential-choice-row"':''}><div class="field"><label for="secret-scope">Who can use it?</label><select id="secret-scope" required><option value="" disabled ${secret?'':'selected'}>${request?'Choose who can use it':'Choose Personal or Organization'}</option>${canPersonal?`<option value="personal" ${existingScope==='personal'?'selected':''}>Personal · my requests</option>`:''}<option value="organization" ${existingScope==='organization'?'selected':''} ${canOrganization?'':'disabled'}>Organization · everyone${canOrganization?'':' (admin only)'}</option></select></div><div class="field"><label for="secret-lifetime">When can Moyai use it?</label><select id="secret-lifetime" required><option value="" disabled ${secret?'':'selected'}>${request?'Choose when to use it':'Choose when it can be used'}</option><option value="session" ${existingLifetime==='session'?'selected':''}>This session only</option><option value="persistent" ${existingLifetime==='persistent'?'selected':''}>Across future sessions</option></select></div></div>${request?'':`<div id="secret-root-field" class="field" hidden><label for="secret-root">Session to allow</label><select id="secret-root" disabled><option value="" disabled ${rootId?'':'selected'}>Choose a session</option>${rootId?`<option value="${esc(rootId)}" selected>Saved session · ${esc(rootId.slice(0,8))}</option>`:''}</select><small id="secret-root-note"></small><button id="secret-root-reload" type="button" class="quiet">Reload sessions</button></div>`}${request?`<details id="secret-optional-options" class="credential-options"><summary>Display name and expiry (optional)</summary>${labelField}${expiryField}</details>`:expiryField}</div><p id="secret-form-note" class="secret-form-note"></p><p id="secret-form-error" role="alert"></p><div class="credential-actions"><button type="submit">${secret?'Save changes':request?'Connect and continue':'Save credential'}</button>${request?'<button type="button" class="quiet" id="decline-secret">Continue without this access</button>':''}</div>`;
+  const requestContext=request?`<p class="credential-context">${esc(inputFields.length===1?inputFields[0].name:request.provider==='generic'?request.name:(request.provider_name||providers[0]?.name||request.provider)+' API key')}</p>`:'';
+  form.innerHTML=`<button class="dialog-close" type="button" aria-label="Close credential form">×</button><h2 id="credential-dialog-title">${secret?'Edit saved access':request?'Provide Secret':'Save a credential'}</h2>${requestContext}${request?`<details class="credential-request-details"><summary>Why is this needed?</summary><p class="subtext credential-request-reason">${esc(request.reason)}</p>${credentialSetupInstructions(request)}</details>`:''}<div id="secret-provider-field" class="field" ${request?'hidden':''}><label for="secret-provider">Service</label><select id="secret-provider" ${fixed?'disabled':''}>${providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('')}</select></div><p id="secret-setup-row"><a id="secret-setup" target="_blank" rel="noopener noreferrer">Set up access ↗</a></p>${saved.length?`<div class="field"><label for="secret-source">Credential to use</label><select id="secret-source"><option value="">Provide a new credential</option>${saved.map(s=>`<option value="${esc(s.id)}">${esc(s.label)} · ${esc(credentialScope(s.scope))} · ${credentialLifetime(s)==='session'?'This session only':'Future sessions'}</option>`).join('')}</select></div>`:''}<div id="secret-new-fields"><div id="secret-generic-fields"><div class="field"><label for="secret-name">Service or capability name</label><input id="secret-name" maxlength="80" placeholder="production-cluster" autocomplete="off" value="${esc(fixed?.name||'')}" ${fixed?'disabled':''}></div><div class="field"><label for="secret-format">Credential format</label><select id="secret-format" ${fixed?'disabled':''}><option value="env" ${fixed?.format==='file'?'':'selected'}>Environment variables (JSON)</option><option value="file" ${fixed?.format==='file'?'selected':''}>Credential file</option></select></div><div id="secret-env-var-field" class="field"><label for="secret-env-var">Environment variable for the file path</label><input id="secret-env-var" maxlength="128" pattern="[A-Z_][A-Z0-9_]*" placeholder="KUBECONFIG" autocomplete="off" value="${esc(fixed?.env_var||'')}" ${fixed?'disabled':''}></div></div>${request?'':labelField}<div id="secret-value-fields"></div>${request?useSelector:`<div><div class="field"><label for="secret-scope">Who can use it?</label><select id="secret-scope" required><option value="" disabled ${secret?'':'selected'}>${request?'Choose who can use it':'Choose Personal or Organization'}</option>${canPersonal?`<option value="personal" ${existingScope==='personal'?'selected':''}>Personal · my requests</option>`:''}<option value="organization" ${existingScope==='organization'?'selected':''} ${canOrganization?'':'disabled'}>Organization · everyone${canOrganization?'':' (admin only)'}</option></select></div><div class="field"><label for="secret-lifetime">When can Moyai use it?</label><select id="secret-lifetime" required><option value="" disabled ${secret?'':'selected'}>${request?'Choose when to use it':'Choose when it can be used'}</option><option value="session" ${existingLifetime==='session'?'selected':''}>This session only</option><option value="persistent" ${existingLifetime==='persistent'?'selected':''}>Across future sessions</option></select></div></div>`}${request?'':`<div id="secret-root-field" class="field" hidden><label for="secret-root">Session to allow</label><select id="secret-root" disabled><option value="" disabled ${rootId?'':'selected'}>Choose a session</option>${rootId?`<option value="${esc(rootId)}" selected>Saved session · ${esc(rootId.slice(0,8))}</option>`:''}</select><small id="secret-root-note"></small><button id="secret-root-reload" type="button" class="quiet">Reload sessions</button></div>`}${request?'':expiryField}</div><p id="secret-form-note" class="secret-form-note"></p><p id="secret-form-error" role="alert"></p><div class="credential-actions"><button type="submit">${secret?'Save changes':request?'Submit':'Save credential'}</button>${request?'<button type="button" class="quiet" id="decline-secret">Continue without this access</button>':''}</div>`;
   let uploadGeneration=0;
-  const clearValue=()=>{uploadGeneration++;if($('#secret-value'))$('#secret-value').value='';if($('#secret-file'))$('#secret-file').value='';};
+  const clearValue=()=>{uploadGeneration++;if($('#secret-value'))$('#secret-value').value='';if($('#secret-file'))$('#secret-file').value='';inputFields.forEach((field,i)=>{const input=$('#secret-input-'+i);if(input)input.value='';});};
   const clear=()=>{clearValue();form.reset();form.innerHTML='';};
   dialog.onclose=clear;dialog.oncancel=clear;
   form.querySelector('[aria-label="Close credential form"]').onclick=()=>dialog.close();
+  if(request){
+    for(const [value,scope,lifetime,description] of [
+      ['session','personal','session','Only for this session and its subagents. Not reused in other sessions.'],
+      ['personal','personal','persistent','Only you, across future sessions.'],
+      ['organization','organization','persistent','Everyone in your organization, across future sessions.']
+    ])$('#secret-use-'+value).onchange=()=>{
+      if(!$('#secret-use-'+value).checked||$('#secret-use-'+value).disabled)return;
+      $('#secret-scope').value=scope;$('#secret-lifetime').value=lifetime;$('#secret-use-description').textContent=description;
+    };
+  }
   const sourceChanged=()=>{
     const existing=!!$('#secret-source')?.value,generic=$('#secret-provider').value==='generic',file=generic&&$('#secret-format').value==='file';
     $('#secret-new-fields').hidden=existing;
     for(const id of ['secret-scope','secret-lifetime']){$('#'+id).required=!existing;$('#'+id).disabled=existing;}
-    $('#secret-value').required=!existing&&!secret;$('#secret-value').disabled=existing;$('#secret-expiry').disabled=existing;
+    document.querySelectorAll?.('[name="secret-use"]').forEach(input=>input.disabled=existing||(input.value==='organization'?!canOrganization:!canPersonal));
+    if($('#secret-value')){$('#secret-value').required=!existing&&!secret;$('#secret-value').disabled=existing;}
+    inputFields.forEach((field,i)=>{const input=$('#secret-input-'+i);input.required=!existing&&field.required!==false;input.disabled=existing;});
+    if($('#secret-expiry'))$('#secret-expiry').disabled=existing;
     $('#secret-name').required=generic&&!existing&&!fixed;
     $('#secret-env-var').required=file&&!existing&&!fixed;
     clearValue();
@@ -87,13 +120,14 @@ async function openCredentialDialog(request=null,secret=null){
     $('#secret-generic-fields').hidden=!generic||!!request;$('#secret-env-var-field').hidden=!file;
     // Hidden fields must not participate in native form validation.
     $('#secret-name').disabled=!generic||!!fixed;$('#secret-format').disabled=!generic||!!fixed;$('#secret-env-var').disabled=!file||!!fixed;
-    const title=secret?'Replacement credential (optional)':generic?(file?'Credential file contents':'Environment variables (JSON)'):'API key';
+    const title=secret?'Replacement credential (optional)':generic?(file?'Credential file contents':'Environment variables (JSON)'):'Access token';
     $('#secret-value-fields').innerHTML=`<div class="field"><label for="secret-value">${title}</label>${generic?`<textarea id="secret-value" rows="${request?4:6}" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="131072" ${secret?'':'required'} placeholder="${file?'Paste the file contents here':'{&quot;SERVICE_TOKEN&quot;: &quot;your-token&quot;}'}"></textarea>`:`<input id="secret-value" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="4096" ${secret?'':'required'} placeholder="${secret?'Leave blank to keep the saved value':'Paste the key here'}">`}${file?'<label for="secret-file">Or choose a credential file</label><input id="secret-file" type="file" autocomplete="off">':''}<small>${secret?'Leave the replacement blank to keep the current value. ':''}${generic?(file?'File contents are sent securely and made available only while the authorized command runs.':'Use a JSON object mapping environment variable names to string values.'):''}</small></div>`;
+    if(inputFields.length)$('#secret-value-fields').innerHTML=inputFields.map((field,i)=>`<div class="field"><label for="secret-input-${i}">${esc(inputFields.length===1&&field.secret!==false?'Access token':field.label)}${field.required===false?' (optional)':''}</label><input id="secret-input-${i}" type="${field.secret===false?'text':'password'}" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="131072" ${field.required===false?'':'required'} placeholder="${field.secret===false?'Enter '+esc(field.label.toLowerCase()):'Paste here'}"></div>`).join('');
     const setup=credentialSetupUrl(request?.setup_url||providers.find(p=>p.id===$('#secret-provider').value)?.setup_url);
     $('#secret-setup-row').hidden=!setup;
     if(setup){$('#secret-setup').href=setup;$('#secret-setup').textContent=credentialSetupLabel(setup);}
     else $('#secret-setup').removeAttribute('href');
-    $('#secret-form-note').textContent=request&&generic?'Stored encrypted. Moyai can use this access for approved commands. Session-only access includes subagents and does not change provider expiry.':generic?'Stored encrypted. Approved commands can use this access in the sandbox. Sharing access does not reveal the saved credential. Session-only use does not change the provider’s expiry.':'Stored encrypted and used for model calls to this provider. Keys stay out of the sandbox. Sharing access does not reveal the saved key. Provider usage is billed separately.';
+    $('#secret-form-note').textContent=request?'Stored encrypted. The value is never shown in chat.':generic?'Stored encrypted. Approved commands can use this access in the sandbox. Sharing access does not reveal the saved credential. Session-only use does not change the provider’s expiry.':'Stored encrypted and used for model calls to this provider. Keys stay out of the sandbox. Sharing access does not reveal the saved key. Provider usage is billed separately.';
     if($('#secret-file'))$('#secret-file').onchange=async event=>{
       const input=event.target,file=input.files?.[0],generation=++uploadGeneration;if(!file)return;
       $('#secret-value').value='';
@@ -109,7 +143,7 @@ async function openCredentialDialog(request=null,secret=null){
     sourceChanged();
   };
   drawValue();$('#secret-provider').onchange=drawValue;$('#secret-format').onchange=drawValue;
-  $('#secret-expiry').oninvalid=()=>{if($('#secret-optional-options'))$('#secret-optional-options').open=true;};
+  if($('#secret-expiry'))$('#secret-expiry').oninvalid=()=>{};
   if($('#secret-source'))$('#secret-source').onchange=sourceChanged;
   let sessions=null,sessionLoad=null;
   const lifetimeChanged=async(reload=false)=>{
@@ -143,14 +177,22 @@ async function openCredentialDialog(request=null,secret=null){
   const clientId=crypto.randomUUID();
   const resolve=async decision=>{
     const existing=$('#secret-source')?.value||'',isNew=decision==='provide'&&!existing;
-    if(isNew&&!$('#secret-scope').value){$('#secret-form-error').textContent='Choose Personal or Organization before saving the credential.';$('#secret-scope').focus();return;}
+    if(isNew&&!$('#secret-scope').value){$('#secret-form-error').textContent='Choose Personal or Organization before saving the credential.';$(request?'#secret-use-organization':'#secret-scope').focus();return;}
     if(isNew&&!$('#secret-lifetime').value){$('#secret-form-error').textContent='Choose when Moyai can use this credential before saving.';$('#secret-lifetime').focus();return;}
     const chosenRoot=request?rootId:($('#secret-root')?.value||'');
     if(isNew&&!request&&$('#secret-lifetime').value==='session'&&!chosenRoot){$('#secret-form-error').textContent='Choose a session for session-only access before saving.';$('#secret-root').focus();return;}
-    const expiry=isNew?$('#secret-expiry').value:'';
+    const expiry=isNew&&$('#secret-expiry')?$('#secret-expiry').value:'';
     if(expiry&&!Number.isFinite(Date.parse(expiry))){$('#secret-expiry').oninvalid();$('#secret-form-error').textContent='Enter a valid provider expiry.';$('#secret-expiry').focus();return;}
-    const fields=isNew?{scope:$('#secret-scope').value,lifetime:$('#secret-lifetime').value,label:$('#secret-label').value.trim(),expires_at:secret&&expiry===localExpiry?(secret.expires_at||''):(expiry?new Date(expiry).toISOString():'')}:{};
-    if(isNew&&(!secret||$('#secret-value').value))fields.value=$('#secret-value').value;
+    const fields=isNew?{scope:$('#secret-scope').value,lifetime:$('#secret-lifetime').value,label:$('#secret-label')?.value.trim()||'',expires_at:secret&&expiry===localExpiry?(secret.expires_at||''):(expiry?new Date(expiry).toISOString():'')}:{};
+    if(isNew&&inputFields.length){
+      const values=Object.create(null);
+      for(const [i,field] of inputFields.entries()){
+        const input=$('#secret-input-'+i);
+        if(field.required!==false&&!input.value.trim()){$('#secret-form-error').textContent='Enter '+field.label.toLowerCase()+'.';input.focus();return;}
+        if(input.value)values[field.name]=input.value;
+      }
+      fields.value=JSON.stringify(values);
+    }else if(isNew&&(!secret||$('#secret-value').value))fields.value=$('#secret-value').value;
     if(!request&&fields.lifetime==='session')fields.root_id=chosenRoot;
     const provider=$('#secret-provider').value;
     const body=secret?{revision:secret.revision,...fields}:request?{decision,generation:request.generation||0,...(decision==='provide'?(existing?{secret_id:existing}:fields):{})}:{provider,...fields,client_id:clientId,...(provider==='generic'?{name:$('#secret-name').value.trim(),format:$('#secret-format').value,...($('#secret-format').value==='file'?{env_var:$('#secret-env-var').value.trim()}:{} )}:{})};
