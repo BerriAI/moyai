@@ -264,7 +264,7 @@ class SlackChat:
         return {'queued': 'Your message is queued.', 'provisioning': 'Opening the cloud workspace…',
                 'running': 'I’m working through your request…', 'saving': 'Saving the conversation and workspace…',
                 'waiting_children': 'The parallel agents are working. I’ll combine their results when they finish.',
-                'waiting_credential': 'I need a provider key. Use the secure form in the web session; do not paste it in Slack.',
+                'waiting_credential': 'I need access to continue. Use the secure form in the web session; do not paste credentials in Slack.',
                 'awaiting_approval': 'I need an administrator’s approval in the web app before making that change.',
                 'stopping': 'Stopping and cleaning up the cloud workspace…', 'idle': 'Ready for your next message.',
                 'completed': 'Finished. Ready for your next message.', 'failed': 'The response failed. Send a follow-up to continue.',

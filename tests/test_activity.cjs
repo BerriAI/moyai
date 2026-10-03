@@ -39,7 +39,7 @@ test('parallel tools and journal replay pair once, even after rotation or reconn
 test('interruption does not invent tool completion; disconnected and waiting work do not pulse',()=>{
   const data=run();data.events.push(tool(2,'a','started'));data.status='failed';
   let turn=groups(data).get('1');assert.equal(turn.rows[0].state,'unconfirmed');assert.equal(turn.live,false);assert.match(html(turn),/No completion received/);
-  data.status='waiting_credential';turn=groups(data).get('1');assert.equal(turn.rows[0].state,'paused');assert.equal(turn.pulse,false);assert.match(html(turn),/Waiting for a key/);
+  data.status='waiting_credential';turn=groups(data).get('1');assert.equal(turn.rows[0].state,'paused');assert.equal(turn.pulse,false);assert.match(html(turn),/Waiting for access/);
   data.status='running';data.activity_disconnected=true;turn=groups(data).get('1');assert.equal(turn.rows[0].state,'disconnected');assert.equal(turn.pulse,false);assert.match(html(turn),/reconnecting/);
 });
 

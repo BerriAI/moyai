@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
 from .db import now
 
@@ -86,6 +86,20 @@ class Capability(Arguments):
 class CredentialRequest(Capability):
     reason: str = Field(min_length=3, max_length=1000)
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{1,80}$')
+    setup_url: str = Field(default='', max_length=2048, description='Verified service documentation or console URL for obtaining this access. HTTPS only; no secrets. Inference provider setup links remain fixed.')
+    setup_instructions: str = Field(default='', max_length=3000, description='Concise task-specific steps to obtain the requested access, including the relevant account/role or administrator action. No secret values.')
+
+    @model_validator(mode='after')
+    def setup_guidance(self):
+        self.setup_url = self.setup_url.strip()
+        self.setup_instructions = self.setup_instructions.strip()
+        if self.setup_url:
+            url = HttpUrl(self.setup_url)
+            if (not self.setup_url.startswith('https://') or url.username or url.password
+                    or re.search(r'[\s\\\x00-\x1f\x7f]', self.setup_url)):
+                raise ValueError('Use an absolute HTTPS setup URL without login details.')
+            self.setup_url = str(url)
+        return self
 
 
 class ListCredentials(Arguments):
@@ -190,7 +204,7 @@ class UpdateSecret(Arguments):
 
 TOOLS = {
     'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized metadata only, including reuse scope, expiry and connection status; never secret values.'),
-    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure JSON environment-variable map, format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Never ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
+    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure JSON environment-variable map, format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
     'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
     'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication opens a secure replacement request and pauses the session. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
     'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
@@ -232,7 +246,8 @@ class Credentials:
                 'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
                     'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
                     'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
-                    'secret_revision': 'INTEGER NOT NULL DEFAULT 1'},
+                    'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
+                    'setup_instructions': "TEXT NOT NULL DEFAULT ''"},
             }.items():
                 columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
                 for field, declaration in fields.items():
@@ -361,9 +376,13 @@ class Credentials:
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema()}
                 for name, (schema, description) in TOOLS.items()]
 
+    def setup(self, row):
+        return {'setup_url': PROVIDERS[row['provider']]['setup'] or row['setup_url'],
+                'setup_instructions': row['setup_instructions']}
+
     def pending_result(self, row):
         return {'status': 'pending', 'request_id': row['id'], 'moyai_wait_credential': row['id'],
-                'failure': row['failure'], 'generation': row['generation'],
+                'failure': row['failure'], 'generation': row['generation'], **self.setup(row),
                 'message': 'Access is needed. Pause for the secure form; never ask for credentials in chat.',
                 'session_url': self.settings.public_url.rstrip('/') + '/#run=' + row['run_id']}
 
@@ -373,7 +392,7 @@ class Credentials:
         if request['status'] == 'declined':
             return {'status': 'declined', 'request_id': request['id'], 'provider': request['provider'],
                     'instructions': 'The user declined this access request. Continue without it, explain any limitation, and do not request it again unless the user asks.'}
-        result = {'status': request['status'], 'request_id': request['id'], 'provider': request['provider']}
+        result = {'status': request['status'], 'request_id': request['id'], 'provider': request['provider'], **self.setup(request)}
         if request['provider'] == 'generic':
             return {**result, 'name': request['name'], 'format': request['format'], 'env_var': request['env_var'],
                     'instructions': 'Use credentials_run with this request_id to verify access and continue the task. Credential values are supplied only to that command. Report confirmed authentication failures with the returned revision; never replay potentially completed writes automatically.'}
@@ -432,6 +451,16 @@ class Credentials:
                     secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (row['secret_id'],)).fetchone()
                     if not secret or not self.permitted(secret, run, run['active_user_id']) or self.status(secret) != 'active':
                         row = self.reopen_in(conn, row, self.status(secret) if secret else 'unavailable')
+                # An exact retry may add guidance to an older pending request.
+                # Another pending capability must never inherit these details.
+                if row['status'] == 'pending' and row['request_key'] == args.request_key:
+                    for field in ('setup_url', 'setup_instructions'):
+                        value = getattr(args, field)
+                        if value and row[field] and row[field] != value:
+                            raise ValueError('Use the original setup guidance when retrying this credential request.')
+                        if value and not row[field]:
+                            conn.execute(f'UPDATE credential_requests SET {field}=? WHERE id=?', (value, row['id']))
+                            row[field] = value
             else:
                 actor = run['active_user_id']
                 if not actor or not run['active_message_id']:
@@ -463,7 +492,7 @@ class Credentials:
         rows = self.store.rows("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'", (run['id'], run['active_message_id']))
         return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure')},
                  'root_id': self.root(run), 'can_personal': self.same_requester(user_id, row['actor_id']), 'can_organization': admin,
-                 'setup_url': PROVIDERS[row['provider']]['setup'], 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
+                 **self.setup(row), 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
                 for row in rows]
 
     def resolve(self, request_id, body, user_id, admin):

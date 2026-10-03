@@ -314,6 +314,57 @@ def generic_value(format):
     return 'apiVersion: v1\nusers:\n- token: private-test-token\n' if format=='file' else json.dumps({'AWS_ACCESS_KEY_ID':'synthetic-access','AWS_SECRET_ACCESS_KEY':'synthetic-secret'})
 
 
+async def test_generic_setup_guidance_migrates_enriches_and_survives_renewal(workspace,monkeypatch):
+    from app.credentials import ReportFailure
+    app,client=workspace
+    sign_in(app,client)
+    run=active(app)
+    vault=app.state.credentials
+    original=access_request(vault,run)
+    with app.state.store.connect() as conn:
+        for field in ('setup_url','setup_instructions'):
+            conn.execute('ALTER TABLE credential_requests DROP COLUMN '+field)
+    for _ in range(2):
+        vault=Credentials(app.state.store,vault.security,vault.settings,vault.manager,vault.checkpoints)
+    assert vault.resolution(run['id'],original['request_id'])['setup_url']==''
+    body={'provider':'generic','name':'production cluster','reason':'Investigate the outage','request_key':'cluster',
+          'setup_url':'https://docs.aws.amazon.com/singlesignon/latest/userguide/howtogetcredentials.html',
+          'setup_instructions':'Open the AWS access portal and select the permitted account and role.'}
+    result=await vault.call(run,'credentials_request',body)
+    assert result['request_id']==original['request_id']
+    assert result['setup_url']==body['setup_url'] and result['setup_instructions']==body['setup_instructions']
+    pending=client.get('/api/runs/'+run['id']).json()['credential_requests'][0]
+    assert pending['setup_url']==result['setup_url'] and pending['setup_instructions']==result['setup_instructions']
+    assert access_request(vault,run)['setup_url']==body['setup_url'], 'An older retry must retain guidance'
+    with pytest.raises(ValueError,match='original setup guidance'):
+        await vault.call(run,'credentials_request',{**body,'setup_url':'https://example.com/different'})
+    other=await vault.call(run,'credentials_request',{**body,'name':'different service','request_key':'other',
+                                               'setup_url':'https://example.com/another'})
+    assert other['request_id']==result['request_id'] and other['setup_url']==body['setup_url']
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    assert client.post('/api/credentials/requests/'+result['request_id'],json={
+        'scope':'personal','lifetime':'persistent','value':generic_value('env')}).status_code==200
+    assert vault.resolution(run['id'],result['request_id'])['setup_url']==body['setup_url']
+    renewed=vault.report_failure(run,ReportFailure(request_id=result['request_id'],revision=1,failure='invalid'))
+    assert renewed['status']=='pending' and renewed['setup_url']==body['setup_url']
+    assert renewed['setup_instructions']==body['setup_instructions']
+
+
+async def test_setup_urls_are_https_without_login_details_and_provider_destinations_stay_fixed(workspace):
+    body={'provider':'generic','name':'aws','reason':'Investigate the outage','request_key':'setup'}
+    for url in ['/', '#', '/#run=one', 'javascript:alert(1)', 'http://example.com',
+                'https://user:password@example.com', 'https://example.com/white space', 'https://example.com\\path']:
+        with pytest.raises(ValueError):
+            CredentialRequest(**body,setup_url=url)
+    assert CredentialRequest(**body,setup_instructions='Ask the service administrator.').setup_url==''
+    app,client=workspace
+    sign_in(app,client)
+    run=active(app)
+    result=await app.state.credentials.call(run,'credentials_request',{'provider':'fireworks','reason':'Run benchmark',
+        'request_key':'inference','setup_url':'https://example.com/unrelated'})
+    assert result['setup_url']=='https://app.fireworks.ai/settings/users/api-keys'
+
+
 @pytest.mark.parametrize('scope',['personal','organization'])
 @pytest.mark.parametrize('lifetime',['session','persistent'])
 @pytest.mark.parametrize('format',['env','file'])

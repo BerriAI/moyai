@@ -14,6 +14,7 @@ function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',
     let html='',children=[];
     const el={id,value:'',textContent:'',disabled:false,required:false,hidden:false,dataset:{},
       focus(){this.focused=true;},reset(){},showModal(){this.open=true;},close(){this.open=false;this.onclose?.();},
+      removeAttribute(name){delete this[name];},
       querySelector:selector=>selector==='[type="submit"]'?submit:closeButton,
       querySelectorAll:()=>[],
       get innerHTML(){return html;},
@@ -219,6 +220,38 @@ test('members cannot choose organization sharing; setup URLs cannot execute scri
   assert.equal(f.element('secret-scope').options.find(o=>o.value==='organization').disabled,true);
   assert.equal(f.ctx.credentialSetupUrl('javascript:alert(1)'), '');
   assert.equal(f.ctx.credentialSetupUrl('https://example.com/connect'), 'https://example.com/connect');
+});
+
+test('access card and secure form show the same service setup destination and escaped steps',async()=>{
+  const f=fixture({kind:'key'}),target=f.element('credential-requests');
+  const request={id:'aws',provider:'generic',name:'aws dev access',reason:'Investigate the outage',format:'env',can_personal:true,
+    setup_url:'https://docs.aws.amazon.com/singlesignon/latest/userguide/howtogetcredentials.html',
+    setup_instructions:'Open your AWS access portal.\nChoose the permitted account and role. <script>not executable</script>'};
+  f.ctx.renderCredentialRequests([request]);
+  assert.ok(target.innerHTML.includes('href="'+request.setup_url+'"'));assert.match(target.innerHTML,/Setup guide · docs.aws.amazon.com/);
+  assert.match(target.innerHTML,/How to get access/);assert.match(target.innerHTML,/&lt;script>/);assert.doesNotMatch(target.innerHTML,/<script>|Get a key|href=""/);
+  await f.ctx.openCredentialDialog(request);
+  assert.equal(f.element('secret-setup').href,request.setup_url);assert.equal(f.element('secret-setup-row').hidden,false);
+  assert.match(f.element('credential-form').innerHTML,/Choose the permitted account and role/);
+  assert.match(f.element('credential-form').innerHTML,/&lt;script>/);
+});
+
+test('missing or unsafe setup URLs never navigate to Moyai or leave a stale form link',async()=>{
+  const f=fixture({kind:'key'}),target=f.element('credential-requests');
+  const request={id:'service',provider:'generic',name:'internal service',reason:'Investigate the outage',format:'env',can_personal:true,
+    setup_instructions:'Ask the service administrator for access.'};
+  for(const url of ['', '/', '#', '/#run=somewhere', 'javascript:alert(1)', 'http://example.com',
+    'https://user:password@example.com', 'https://example.com/white space', 'https://example.com\\path']){
+    assert.equal(f.ctx.credentialSetupUrl(url),'');
+    f.ctx.renderCredentialRequests([{...request,setup_url:url}]);
+    assert.doesNotMatch(target.innerHTML,/<a\b/);assert.match(target.innerHTML,/Ask the service administrator/);
+  }
+  await f.ctx.openCredentialDialog({...request,setup_url:'https://example.com/setup'});
+  assert.equal(f.element('secret-setup').href,'https://example.com/setup');
+  await f.ctx.openCredentialDialog(request);
+  assert.equal(f.element('secret-setup-row').hidden,true);assert.equal(f.element('secret-setup').href,undefined);
+  await f.ctx.openCredentialDialog({id:'inference',provider:'fireworks',reason:'Run a benchmark',can_personal:true});
+  assert.equal(f.element('secret-setup').href,'https://example.com/');
 });
 
 test('standalone session-only saving requires an explicit eligible root and preserves the draft until chosen',async()=>{

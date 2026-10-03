@@ -720,6 +720,14 @@ the conversation/files, release the Modal sandbox and wait for a Temporal wake.
 Providing or declining access resumes the same message. Slack and subagent
 requests link to the same secure web flow; never paste credentials into chat.
 
+For generic services, requests can include a verified service `setup_url` and
+plain-text `setup_instructions`. These appear in both the access card and secure
+form. The agent should explain the actual access method, such as an AWS access
+portal and permitted role, instead of assuming every task needs a new API key.
+Only absolute HTTPS setup links are shown; a missing link is omitted. Inference
+providers retain their fixed setup destinations. An exact retry can add missing
+guidance to an older pending request without creating a second access request.
+
 The form requires two independent choices:
 
 | Choice | Options |
