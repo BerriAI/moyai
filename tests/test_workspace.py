@@ -107,15 +107,20 @@ def test_tokens_are_validated_encrypted_and_never_returned(workspace, monkeypatc
 
 
 @pytest.mark.parametrize("decision,expected_calls", [("approve", 1), ("deny", 0)])
-def test_writes_wait_for_exactly_one_decision(workspace, monkeypatch, decision, expected_calls):
+@pytest.mark.parametrize('provider,name,arguments', [
+    ('slack', 'slack_send', {'channel': 'C12345678', 'text': 'An approved test message'}),
+    ('linear', 'linear_comment', {'issue_id': 'LIT-123', 'body': 'An approved test comment'}),
+    ('notion', 'notion_append', {'page_id': 'a' * 32, 'text': 'An approved test note'}),
+])
+def test_writes_wait_for_exactly_one_decision(workspace, monkeypatch, decision, expected_calls, provider, name, arguments):
     app, client = workspace
-    run_id, headers = cloud_capability(app, ["slack"])
+    run_id, headers = cloud_capability(app, [provider])
     calls = []
     async def call(name, arguments):
         calls.append((name, arguments))
         return {"ok": True, "ts": "1234567890.123456"}
     monkeypatch.setattr(app.state.connectors, "call", call)
-    body = {"name": "slack_send", "arguments": {"channel": "C12345678", "text": "An approved test message"}}
+    body = {"name": name, "arguments": arguments}
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(client.post, f"/broker/{run_id}/tools/call", json=body, headers=headers)
         approval = wait_for(lambda: app.state.store.approvals(run_id))[-1]
