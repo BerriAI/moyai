@@ -1,6 +1,8 @@
 """Completed browser captures, stored independently of sandbox lifetime."""
 from pathlib import Path
+import os
 import re
+import stat
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -44,16 +46,24 @@ def listing(settings, run_id):
     return result
 
 
-def response(path: Path, request, download=False):
+def read(path: Path) -> tuple[bytes, str]:
+    """Read bounded media without following a replaced file's symlink."""
     if path.is_symlink() or not path.is_file():
         raise HTTPException(404, 'Capture not found.')
-    if path.stat().st_size > MAX_FILE:
-        raise HTTPException(413, 'Capture exceeds the size limit.')
-    with path.open('rb') as stream:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise HTTPException(404, 'Capture not found.')
+        if info.st_size > MAX_FILE:
+            raise HTTPException(413, 'Capture exceeds the size limit.')
         raw = stream.read(MAX_FILE + 1)
     if len(raw) > MAX_FILE:
         raise HTTPException(413, 'Capture exceeds the size limit.')
-    mime = media_type(path.name, raw)
+    return raw, media_type(path.name, raw)
+
+
+def response(path: Path, request, download=False):
+    raw, mime = read(path)
     headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes',
                'Content-Disposition': ('attachment' if download else 'inline') + "; filename*=UTF-8''" + quote(path.name)}
     status = 200

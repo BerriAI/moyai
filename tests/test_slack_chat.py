@@ -1,6 +1,8 @@
 import asyncio
 import json
 import time
+
+import pytest
 from concurrent.futures import ThreadPoolExecutor
 
 from app.db import Store, now
@@ -28,6 +30,55 @@ def finish(app, run_id, answer):
     app.state.store.finish_message(run_id, message['id'], answer)
     app.state.store.update_run(run_id, status='idle', summary=answer)
     app.state.slack.chat.collect()
+
+
+def publication(app, run_id, number=100, title='Show the completed demo'):
+    result = {'number': number, 'url': f'https://github.com/BerriAI/moyai-devin/pull/{number}',
+              'repository': 'BerriAI/moyai-devin', 'title': title, 'draft': False}
+    app.state.store.execute('''INSERT INTO github_publications
+        (id,run_id,message_id,arguments_hash,branch,result,connection_version,created_at)
+        VALUES(?,?,0,'test','test',?,'test',?)''', (f'{run_id}-{number}', run_id, json.dumps(result), now()))
+    return result['url']
+
+
+def test_pr_completion_uses_confirmed_receipt_and_preserves_plain_replies(slack_app):
+    app, client, run_id = start(slack_app)
+    url = publication(app, run_id, title='Fix <@U88888888> & preview')
+    finish(app, run_id, f'Working demo verified. [View PR]({url})')
+    wait_for(lambda: any(message.get('attachments') for message in slack_app[3]))
+    posted = next(message for message in slack_app[3] if message.get('attachments'))
+    assert posted['channel'] == 'C12345678' and posted['thread_ts'] == ROOT
+    card = posted['attachments'][0]
+    assert card['color'] == '#5B3FD1'
+    assert '<@U88888888>' not in json.dumps(card)
+    actions = next(block['elements'] for block in card['blocks'] if block['type'] == 'actions')
+    assert [item['url'] for item in actions] == [url, url + '/files', f'https://workspace.example/#run={run_id}']
+    send(client, 1, 'An unrelated follow-up')
+    finish(app, run_id, 'No new pull request.')
+    wait_for(lambda: any('No new pull request.' in message.get('text', '') for message in slack_app[3]))
+    assert len([message for message in slack_app[3] if message.get('attachments')]) == 1
+
+
+def test_capture_handoff_selects_only_referenced_saved_files_and_handles_old_grant(slack_app):
+    from app import captures
+    app, _, run_id = start(slack_app)
+    url = publication(app, run_id)
+    root = captures.directory(app.state.settings, run_id)
+    root.mkdir(parents=True)
+    (root / 'demo.webm').write_bytes(b'\x1aE\xdf\xa3webm-recording-fixture')
+    (root / 'result.png').write_bytes(b'\x89PNG\r\n\x1a\nscreenshot-fixture')
+    (root / 'unrelated.png').write_bytes(b'\x89PNG\r\n\x1a\nunrelated-private-content')
+    finish(app, run_id, f'[PR]({url})\n[Video](/workspace/moyai-captures/demo.webm)\n'
+           '![Screenshot](/workspace/moyai-captures/result.png)')
+    rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' ORDER BY id")
+    media = next(json.loads(row['metadata']) for row in rows if 'captures' in json.loads(row['metadata']))
+    assert [capture['name'] for capture in media['captures']] == ['demo.webm', 'result.png']
+    assert any(f'https://workspace.example/api/runs/{run_id}/computer/captures/demo.webm' in row['text'] for row in rows)
+    assert not any('/workspace/moyai-captures/' in row['text'] for row in rows)
+    wait_for(lambda: any('Reconnect Slack' in message.get('text', '') for message in slack_app[3]))
+    assert not any('unrelated.png' in json.dumps(message) for message in slack_app[3])
+    app.state.slack.chat.collect()
+    assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer'")) == len(rows)
 
 
 def test_thread_followups_and_both_slack_event_types_share_one_session(slack_app):
@@ -390,7 +441,7 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     app, _, _, _ = slack_app
     app.state.settings.slack_client_id = 'test-client'
     scope = parse_qs(urlparse(app.state.connectors.authorization_url('slack','state')).query)['scope'][0]
-    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history','reactions:write','assistant:write','users:read','users:read.email'}
+    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history','reactions:write','assistant:write','files:write','users:read','users:read.email'}
 
 
 def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):
@@ -483,3 +534,173 @@ def test_agent_panel_threads_stay_separate_from_each_other_and_plain_dms(slack_a
         assert source.conversation_id.endswith(':'+root)
         asyncio.run(channel.reply(source, 'Panel answer'))
         assert sent[-1]['thread_ts'] == root
+
+
+@pytest.fixture
+def media_delivery(slack_app, monkeypatch):
+    from app import captures
+    from agentchat.channels import slack_media
+    app, client, runs, sent = slack_app
+    app.state.connectors.save('slack', {'access_token': 'provider-user-secret', 'bot': {
+        'access_token': 'separate-bot-secret', 'team': {'id': 'T12345678'},
+        'bot_user_id': 'U99999999', 'scope': 'reactions:write,files:write'}}, 'Test organization')
+    client.portal.call(app.state.slack.chat.shutdown)
+    calls, uploaded = [], []
+
+    async def request(method: str, url: str, **kwargs) -> dict:
+        assert kwargs['headers']['Authorization'] == 'Bearer separate-bot-secret'
+        calls.append((url.rsplit('/', 1)[-1], kwargs))
+        if url.endswith('getUploadURLExternal'):
+            assert method == 'POST'
+            name = kwargs['data']['filename']
+            return {'ok': True, 'file_id': name, 'upload_url': 'https://files.slack.com/upload/' + name}
+        if url.endswith('completeUploadExternal'):
+            return {'ok': True, 'files': kwargs['json']['files']}
+        sent.append(kwargs['json'])
+        return {'ok': True, 'ts': '1790719999.123456'}
+
+    async def upload(url: str, raw: bytes) -> None:
+        uploaded.append((url, raw))
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    monkeypatch.setattr(slack_media, 'upload_bytes', upload)
+
+    def prepare(dm: bool = False) -> tuple:
+        payload = dm_event(20, 'Finish a coding PR') if dm else event()
+        assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+        run_id = runs[0]['id']
+        app.state.store.execute("UPDATE slack_outbox SET status='skipped'")
+        root = captures.directory(app.state.settings, run_id)
+        root.mkdir(parents=True)
+        (root / 'demo.webm').write_bytes(b'\x1aE\xdf\xa3webm-demo')
+        (root / 'result.png').write_bytes(b'\x89PNG\r\n\x1a\nresult')
+        url = publication(app, run_id)
+        answer = f'[PR]({url}) [Video](/workspace/moyai-captures/demo.webm) '
+        answer += '![Result](/workspace/moyai-captures/result.png)'
+        return run_id, answer
+
+    return app, prepare, calls, uploaded
+
+
+def drain_answers(app) -> None:
+    while app.state.store.rows("SELECT 1 FROM slack_outbox WHERE status='pending'"):
+        app.state.slack.chat.last_post.clear()
+        asyncio.run(app.state.slack.chat.deliver_one())
+
+
+@pytest.mark.parametrize('dm', [False, True])
+def test_native_media_batch_then_one_card_and_dm_notice(media_delivery, dm):
+    app, prepare, calls, uploaded = media_delivery
+    run_id, answer = prepare(dm)
+    finish(app, run_id, ('Verified behavior. ' * 200) + answer)
+    drain_answers(app)
+    completions = [kwargs['json'] for method, kwargs in calls if method == 'files.completeUploadExternal']
+    assert len(completions) == 1
+    assert [f['id'] for f in completions[0]['files']] == ['demo.webm', 'result.png']
+    assert completions[0]['channel_id'].startswith('D' if dm else 'C')
+    assert completions[0].get('thread_ts') == (None if dm else ROOT)
+    assert [raw for _, raw in uploaded] == [b'\x1aE\xdf\xa3webm-demo', b'\x89PNG\r\n\x1a\nresult']
+    replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
+    assert len(replies) == 2 and not replies[0].get('attachments') and replies[1]['attachments']
+    assert ('signed-in BerriAI teammates' in replies[-1]['text']) == dm
+    assert all(row['status'] == 'sent' for row in app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'"))
+    prior = len(calls)
+    app.state.slack.chat.collect()
+    drain_answers(app)
+    assert len(calls) == prior
+
+
+@pytest.mark.parametrize('boundary', ['refresh', 'url', 'bytes'])
+@pytest.mark.parametrize('change', ['pause', 'team', 'bot'])
+def test_media_rechecks_destination_after_awaits(media_delivery, monkeypatch, boundary, change):
+    from agentchat.channels import slack_media
+    app, prepare, calls, uploaded = media_delivery
+    run_id, answer = prepare()
+    finish(app, run_id, answer)
+
+    def revoke() -> None:
+        if change == 'pause':
+            app.state.store.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
+        else:
+            app.state.connectors.save('slack', {'bot': {'access_token': 'replacement',
+                'team': {'id': 'T87654321' if change == 'team' else 'T12345678'},
+                'bot_user_id': 'U00000000' if change == 'bot' else 'U99999999', 'scope': 'files:write'}}, 'Changed')
+
+    original_token = app.state.connectors.slack_bot_token
+    original_request = app.state.connectors.request
+    original_upload = slack_media.upload_bytes
+
+    async def refresh() -> str:
+        token = await original_token()
+        if boundary == 'refresh':
+            revoke()
+        return token
+
+    async def request(method: str, url: str, **kwargs) -> dict:
+        result = await original_request(method, url, **kwargs)
+        if boundary == 'url' and url.endswith('getUploadURLExternal'):
+            revoke()
+        return result
+
+    async def upload(url: str, raw: bytes) -> None:
+        await original_upload(url, raw)
+        if boundary == 'bytes':
+            revoke()
+
+    monkeypatch.setattr(app.state.connectors, 'slack_bot_token', refresh)
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    monkeypatch.setattr(slack_media, 'upload_bytes', upload)
+    app.state.slack.chat.last_post.clear()
+    asyncio.run(app.state.slack.chat.deliver_one())
+    assert not any(method == 'files.completeUploadExternal' for method, _ in calls)
+    assert len(uploaded) == (1 if boundary == 'bytes' else 0)
+    media = app.state.store.rows("SELECT status FROM slack_outbox WHERE dedupe_key LIKE '%:media'")
+    assert media[0]['status'] == 'uncertain'
+
+
+def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_delivery, monkeypatch):
+    app, prepare, calls, uploaded = media_delivery
+    run_id, answer = prepare()
+    finish(app, run_id, answer)
+    original = app.state.connectors.request
+
+    async def request(method: str, url: str, **kwargs) -> dict:
+        result = await original(method, url, **kwargs)
+        if url.endswith('completeUploadExternal'):
+            raise TimeoutError('Provider acknowledgment lost')
+        return result
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    drain_answers(app)
+    reopened = Store(app.state.settings.data_dir)
+    assert reopened.rows("SELECT status FROM slack_outbox WHERE dedupe_key LIKE '%:media'")[0]['status'] == 'uncertain'
+    assert any(kwargs['json'].get('attachments') for method, kwargs in calls if method == 'chat.postMessage')
+    async def restart() -> None:
+        app.state.slack.recover()
+        await app.state.slack.chat.shutdown()
+    asyncio.run(restart())
+    app.state.slack.chat.collect()
+    drain_answers(app)
+    assert sum(method == 'files.completeUploadExternal' for method, _ in calls) == 1
+    assert len(uploaded) == 2
+
+
+def test_cancelled_final_does_not_start_media_delivery(media_delivery):
+    app, prepare, calls, uploaded = media_delivery
+    run_id, answer = prepare()
+    message = app.state.store.claim_message(run_id)
+    app.state.store.finish_message(run_id, message['id'], answer, status='cancelled')
+    app.state.slack.chat.collect()
+    drain_answers(app)
+    assert not uploaded and not any(method.startswith('files.') for method, _ in calls)
+
+
+def test_explicit_capture_followup_delivers_without_a_new_pr(media_delivery):
+    app, prepare, calls, uploaded = media_delivery
+    run_id, _ = prepare()
+    finish(app, run_id, '[Video](/workspace/moyai-captures/demo.webm) '
+           '![Screenshot](/workspace/moyai-captures/result.png)')
+    drain_answers(app)
+    assert len(uploaded) == 2
+    replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
+    assert len(replies) == 1 and not replies[0].get('attachments')

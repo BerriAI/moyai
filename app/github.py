@@ -345,6 +345,6 @@ class GitHub:
                                     json={'title': args.title, 'body': args.body, 'head': branch, 'base': repo['default_branch'],
                                           'draft': False, 'maintainer_can_modify': True})
         result = {'number': pr['number'], 'url': pr['html_url'], 'branch': branch, 'commit': commit,
-                  'draft': pr['draft'], 'state': pr['state'], 'repository': target}
+                  'draft': pr['draft'], 'state': pr['state'], 'repository': target, 'title': pr.get('title') or args.title}
         self.store.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
         return result

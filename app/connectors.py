@@ -289,7 +289,7 @@ class Connectors:
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history,chat:write")
             if self.settings.slack_bot_enabled:
-                params["scope"] = "app_mentions:read,chat:write,reactions:write,assistant:write"
+                params["scope"] = "app_mentions:read,chat:write,reactions:write,assistant:write,files:write"
                 if self.settings.slack_identity_linking_enabled:
                     params["scope"] += ",users:read,users:read.email"
                 if self.settings.slack_thread_chat_enabled:

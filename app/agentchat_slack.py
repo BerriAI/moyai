@@ -6,14 +6,23 @@ needed. AgentChat owns normalized dispatch, conversation locks and reply routing
 SQLite receipts, sessions and the outbox remain the authoritative durable state.
 """
 import asyncio
+import hashlib
+from collections.abc import Sequence
 from types import MappingProxyType
 from weakref import WeakValueDictionary
 
 from agentchat import AgentChat
 from agentchat.channels.slack_mirror import mirror_payload
-from agentchat.models import Message, Sender
+from agentchat.models import Message, RichReply, Sender, UploadedFile, UploadFile
+from agentchat.channels.slack_media import rich_payload, upload_slack_files
+from fastapi import HTTPException
 
+from . import captures, pr_delivery
 from .slack_activity import threaded
+
+
+class MissingFileScope(RuntimeError):
+    pass
 
 
 class SessionState:
@@ -86,36 +95,110 @@ class SlackWebhookChannel:
                               'missing_cloud': tuple(missing_cloud)}))
         await self._receiver(self, message)
 
-    def source_for_run(self, run_id):
+    def source_for_run(self, run_id, delivery=None):
         binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (run_id,))[0]
         conversation = f"slack:{binding['team_id']}:{binding['channel']}"
         if not binding['channel'].startswith('D') or binding['thread_ts'] != binding['started_ts']:
             conversation += ':' + binding['thread_ts']
         return Message(id='moyai:' + run_id, conversation_id=conversation, channel=self.name,
-                       sender=Sender(id='moyai'), text='', role='user', metadata=MappingProxyType({'run_id': run_id}))
+                       sender=Sender(id='moyai'), text='', role='user',
+                       metadata=MappingProxyType({'run_id': run_id, 'delivery': delivery or {}}))
 
-    async def reply(self, source, content):
-        # Resolve the destination from our saved binding, never model output.
-        binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (source.metadata['run_id'],))[0]
-        if not self.owner.status()['enabled'] or binding['team_id'] != self.owner.connectors.slack_installation().get('team_id'):
-            raise RuntimeError('Slack connection changed before delivery.')
+    def destination(self, source, identity, *, files=False):
+        rows = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (source.metadata['run_id'],))
+        installation = self.owner.connectors.slack_installation()
+        delivery = source.metadata.get('delivery', {})
+        if (not rows or not self.owner.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
+                or (installation.get('team_id'), installation.get('user_id')) != identity
+                or rows[0]['team_id'] != identity[0]
+                or (rows[0]['paused'] and delivery.get('kind') in {'answer', 'input_update', 'progress', 'approval'})
+                or (files and 'files:write' not in installation.get('scopes', []))):
+            raise RuntimeError('Slack destination changed before delivery.')
+        binding = rows[0]
+        conversation = f"slack:{binding['team_id']}:{binding['channel']}"
+        if threaded(binding):
+            conversation += ':' + binding['thread_ts']
+        if conversation != source.conversation_id:
+            raise RuntimeError('Slack session binding changed before delivery.')
+        return binding
+
+    async def upload_files(self, source: Message, files: Sequence[UploadFile]) -> tuple[UploadedFile, ...]:
+        installation = self.owner.connectors.slack_installation()
+        identity = (installation.get('team_id'), installation.get('user_id'))
         token = await self.owner.connectors.slack_bot_token()
+        binding = self.destination(source, identity)
+        if 'files:write' not in self.owner.connectors.slack_installation().get('scopes', []):
+            raise MissingFileScope('Reconnect Slack with file upload permission')
+
+        async def guard() -> None:
+            self.destination(source, identity, files=True)
+
+        async def request(api: str, payload: dict[str, object]) -> dict:
+            body = {'data': payload} if api == 'files.getUploadURLExternal' else {'json': payload}
+            return await self.owner.connectors.request('POST', 'https://slack.com/api/' + api,
+                headers={'Authorization': f'Bearer {token}'}, **body)
+
+        return await upload_slack_files(files, request=request, channel_id=binding['channel'],
+            thread_ts=binding['thread_ts'] if threaded(binding) else None, before_send=guard)
+
+    async def upload_captures(self, source, selected):
+        # Moyai owns saved-file eligibility and frozen bytes; AgentChat owns transport.
+        run_id = source.metadata['run_id']
+        batch = []
+        if len(selected) > 2:
+            raise ValueError('Too many captures')
+        try:
+            for value in selected:
+                capture = pr_delivery.Capture.model_validate(value)
+                raw, _ = captures.read(captures.directory(self.owner.settings, run_id) / capture.name)
+                if hashlib.sha256(raw).hexdigest() != capture.sha256:
+                    raise ValueError('Saved capture changed before delivery')
+                batch.append(UploadFile(filename=capture.name, content=raw))
+        except (OSError, HTTPException, ValueError):
+            return False
+        await self.owner.agentchat.upload_files(self, source, batch)
+        return True
+
+    async def deliver_captures(self, source, selected):
+        try:
+            if await self.upload_captures(source, selected):
+                return ''
+            content = 'Saved demo captures are unavailable or changed. Open Moyai to inspect the result.'
+        except MissingFileScope:
+            content = 'Reconnect Slack with file upload permission to preview the saved demo here. Captures remain in Moyai.'
+        response = await self.owner.agentchat.reply(self, source,
+            content + '\n\n' + self.owner.chat.link(source.metadata['run_id']))
+        return response.metadata['slack_ts']
+
+    def rich_reply(self, source, content, pull_requests=()):
         link = self.owner.chat.link(source.metadata['run_id'])
         body = content.removesuffix('\n\n' + link)
         blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
         if body != content:
             blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
+        cards = tuple(pr_delivery.attachment(pr_delivery.PullRequest.model_validate(pr),
+            self.owner.settings.public_url, source.metadata['run_id']) for pr in pull_requests)
+        return RichReply(text=content, blocks=tuple(blocks) if len(body) <= 3000 else (), attachments=cards)
+
+    async def reply(self, source, content):
+        return await self.reply_rich(source, self.rich_reply(source, content))
+
+    async def reply_rich(self, source: Message, content: RichReply) -> Message:
+        # Resolve the destination from our saved binding, never model output.
+        installation = self.owner.connectors.slack_installation()
+        identity = (installation.get('team_id'), installation.get('user_id'))
+        token = await self.owner.connectors.slack_bot_token()
+        binding = self.destination(source, identity)
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
-            headers={'Authorization': f'Bearer {token}'}, json={
-                'channel': binding['channel'],
-                'thread_ts': None if binding['channel'].startswith('D') and binding['thread_ts'] == binding['started_ts'] else binding['thread_ts'],
-                'text': content,
-                'blocks': blocks if len(body) <= 3000 else None,
-                'unfurl_links': False, 'unfurl_media': False, 'parse': 'none', 'link_names': False})
-        return Message(id=f"slack:{binding['channel']}:{response.get('ts', '')}",
+            headers={'Authorization': f'Bearer {token}'}, json={**rich_payload(content),
+                'channel': binding['channel'], 'thread_ts': binding['thread_ts'] if threaded(binding) else None})
+        timestamp = response.get('ts')
+        if response.get('ok') is not True or not isinstance(timestamp, str) or not timestamp:
+            raise RuntimeError('Slack reply delivery could not be confirmed.')
+        return Message(id=f"slack:{binding['channel']}:{timestamp}",
                        conversation_id=source.conversation_id, channel=self.name,
-                       sender=Sender(id='moyai'), text=content, role='assistant',
-                       metadata=MappingProxyType({'slack_ts': response.get('ts', '')}))
+                       sender=Sender(id='moyai'), text=content.text, role='assistant',
+                       metadata=MappingProxyType({'slack_ts': timestamp}))
 
     async def set_status(self, source, status):
         run_id = source.metadata['run_id']

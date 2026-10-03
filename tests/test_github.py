@@ -114,6 +114,7 @@ def test_publish_normal_pr_once_across_lost_ack_and_new_turn(workspace, monkeypa
     run = app.state.store.run(run_id)
     result = asyncio.run(github.publish(run, args))
     assert result['draft'] is False and result['number'] == 100
+    assert result['title'] == args.title
     assert asyncio.run(github.publish(run, args)) == result
     assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/pulls')]) == 1
     assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/git/refs')]) == 1

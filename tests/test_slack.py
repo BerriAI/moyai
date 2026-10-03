@@ -44,7 +44,7 @@ def slack_app(tmp_path, monkeypatch):
     async def request(method, url, **kwargs):
         assert kwargs["headers"]["Authorization"] == "Bearer separate-bot-secret"
         messages.append(kwargs["json"])
-        return {"ok": True}
+        return {"ok": True, "ts": "1790719999.123456"}
     monkeypatch.setattr(app.state.connectors, "request", request)
     with TestClient(app, base_url=settings.public_url) as client:
         yield app, client, runs, messages

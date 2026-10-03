@@ -12,6 +12,7 @@ from agentchat.models import Message, Sender
 
 from .db import now
 from .progress import active_turn
+from .pr_delivery import link_captures, select_captures, select_prs
 from .security import digest
 from .slack_activity import SlackActivity, threaded
 
@@ -330,13 +331,23 @@ class SlackChat:
                     value = 'Response ' + message['status'] + ':\n\n' + value
                 if len(value) > 32000:
                     value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
+                prs = select_prs(conn, run_id, value)
+                for pr in prs:
+                    pr.title = self.scrub(pr.title)
+                media = select_captures(self.settings, run_id, value) if message['status'] == 'completed' else []
+                value = link_captures(self.settings, run_id, value, media)
                 if binding['channel'].startswith('D') and not conn.execute(
                     "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
                     value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
+                if media:
+                    self.queue(conn, run_id, f"answer:{message['id']}:media", 'answer',
+                               'Saved demo captures.\n\n' + self.link(run_id),
+                               {'captures': [item.model_dump() for item in media]})
                 chunks = split_reply(slack_text(value, self.mentionable_in(conn, run_id)))
                 for index, chunk in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
-                    self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix)
+                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else None
+                    self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
             conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
 
     def collect(self):
@@ -395,9 +406,17 @@ class SlackChat:
                     response = await self.owner.agentchat.mirror(self.owner.channel, source, message, origin='Moyai web')
                     sent_ts = response.metadata['slack_ts']
                 else:
-                    response = await self.owner.agentchat.reply(self.owner.channel,
-                        self.owner.channel.source_for_run(row['run_id']), row['text'])
-                    sent_ts = response.metadata['slack_ts']
+                    data = json.loads(row['metadata'])
+                    source = self.owner.channel.source_for_run(row['run_id'], {**data, 'kind': row['kind']})
+                    if data.get('captures'):
+                        sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
+                    else:
+                        if data.get('pull_requests'):
+                            content = self.owner.channel.rich_reply(source, row['text'], data['pull_requests'])
+                            response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
+                        else:
+                            response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
+                        sent_ts = response.metadata['slack_ts']
                 self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
                 if row['kind'] != 'reaction':
                     self.activity.posted(row['run_id'])
