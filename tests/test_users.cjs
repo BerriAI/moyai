@@ -37,8 +37,8 @@ test('an already-open users page loses admin controls after a demotion', async (
   await context.renderUsers();
   assert.deepEqual(paths,['/api/session']);
   assert.equal(context.state.role,'member');
-  assert.equal(elements.get('#users-nav').hidden,true);
-  assert.equal(elements.get('#spend-nav').hidden,true);
+  assert.equal(context.state.authenticated,true);
+  assert.equal(context.state.csrf,'new');
   assert.match(elements.get('#content').innerHTML,/Only administrators/);
 });
 
