@@ -5,6 +5,15 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# Keep picker IDs and labels in code so a stale deployment environment cannot
+# hide models added by a release. AGENT_MODEL only chooses the default.
+MODEL_CATALOG: dict[str, str] = {
+    'openai/gpt-6-astra': 'GPT-6 Astra',
+    'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
+    'fireworks_ai/glm-5p3': 'GLM-5.3',
+}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -35,7 +44,6 @@ class Settings(BaseSettings):
     litellm_trace_endpoint: str = ""
     litellm_trace_api_key: str = ""
     agent_model: str = ""
-    agent_models: str = "openai/gpt-6-astra,anthropic/claude-opus-5-5,fireworks_ai/glm-5p3"
     modal_token_id: str = ""
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
@@ -120,7 +128,8 @@ class Settings(BaseSettings):
         return bool(self.google_client_id and self.google_client_secret)
 
     def allowed_models(self) -> list[str]:
-        return list(dict.fromkeys(x.strip() for x in [self.agent_model, *self.agent_models.split(',')] if x.strip()))
+        # Preserve custom gateway defaults without replacing the shared catalog.
+        return list(dict.fromkeys(x.strip() for x in [self.agent_model, *MODEL_CATALOG] if x.strip()))
 
     def resolve_model(self, value: str | None = None, fallback: str = '') -> str:
         aliases = {
@@ -138,9 +147,7 @@ class Settings(BaseSettings):
         return selected
 
     def model_choices(self) -> list[dict[str, str]]:
-        names = {'openai/gpt-6-astra': 'GPT-6 Astra', 'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
-                 'fireworks_ai/glm-5p3': 'GLM-5.3'}
-        return [{'id': model, 'name': names.get(model, model)} for model in self.allowed_models()]
+        return [{'id': model, 'name': MODEL_CATALOG.get(model, model)} for model in self.allowed_models()]
 
     def google_domains(self) -> set[str]:
         return {value.strip().lower() for value in self.google_allowed_domains.split(",") if value.strip()}

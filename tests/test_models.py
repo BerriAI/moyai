@@ -3,6 +3,7 @@ import json
 import httpx
 import pytest
 
+from app.config import MODEL_CATALOG
 from app.db import Store
 from app.security import digest
 from test_workspace import workspace
@@ -12,6 +13,16 @@ from test_slack_chat import start, send
 ASTRA = 'openai/gpt-6-astra'
 OPUS = 'anthropic/claude-opus-5-5'
 GLM = 'fireworks_ai/glm-5p3'
+
+
+def test_code_catalog_addition_reaches_picker_and_model_validation(workspace, monkeypatch):
+    app, client = workspace
+    monkeypatch.setitem(MODEL_CATALOG, 'example/new-model', 'New model')
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    assert {'id': 'example/new-model', 'name': 'New model'} in client.get('/api/config').json()['models']
+    response = client.post('/api/runs', json={'prompt': 'Use the new model', 'model': 'example/new-model'})
+    assert response.status_code == 201
+    assert response.json()['model'] == 'example/new-model'
 
 
 @pytest.mark.parametrize('alias, selected', [('claude/opus-5-5', OPUS), ('glm-5.3', GLM), (GLM, GLM)])

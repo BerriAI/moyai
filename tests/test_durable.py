@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import modal
 import pytest
 
-from app.config import Settings
+from app.config import MODEL_CATALOG, Settings
 from app.db import Store
 from app.durable_runner import DurableRunner
 from app.temporal_runtime import TemporalRunManager
@@ -157,10 +157,10 @@ async def test_every_step_can_lose_worker_and_launch_ack_without_repeating_work(
     assert [m['content'] for m in manager.store.messages(run_id) if m['role'] == 'assistant'] == ['Saved answer']
 
 
-async def test_queued_followup_restores_checkpoint_and_has_own_user_and_model(durable):
+async def test_queued_followup_restores_checkpoint_and_has_own_user_and_model(durable, monkeypatch):
     manager, cloud, run_id = durable
     await drive(manager, run_id, phase='monitor')
-    manager.settings.agent_models = 'test-model,second-model'
+    monkeypatch.setitem(MODEL_CATALOG, 'second-model', 'Second test model')
     manager.store.enqueue_message(run_id, 'Follow up', 'follow-up-id', model='second-model', user_id='second-user')
     await drive(manager, run_id)
     await drive(manager, run_id, phase='launch')

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.db import Store
+from app.config import MODEL_CATALOG
 from app.durable_runner import DurableRunner
 from app.security import digest
 from app.temporal_runtime import TemporalRunManager
@@ -33,7 +34,7 @@ def answers(manager, run_id):
 async def test_followup_reuses_machine_with_new_user_model_and_capability(durable, monkeypatch, queued_before_finish):
     manager, cloud, run_id = durable
     manager.settings.sandbox_idle_seconds = 300
-    manager.settings.agent_models = 'test-model,second-model'
+    monkeypatch.setitem(MODEL_CATALOG, 'second-model', 'Second test model')
     tick = clock(monkeypatch)
     await drive(manager, run_id, phase='monitor')
     first_token = cloud.launch_tokens[0]
