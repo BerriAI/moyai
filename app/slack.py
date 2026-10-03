@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import re
 import time
 from decimal import Decimal, InvalidOperation
@@ -13,6 +14,8 @@ from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
+
+log = logging.getLogger(__name__)
 
 
 class SlackSessions:
@@ -68,7 +71,7 @@ class SlackSessions:
         if payload.get("type") != "event_callback" or not self.status()["enabled"]:
             return {"ok": True}
         event = payload.get("event", {})
-        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message", "reaction_added"}
+        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message", "reaction_added", "reaction_removed"}
                 or payload.get("is_ext_shared_channel") or event.get("is_ext_shared_channel")):
             return {"ok": True}
         bot = self.connectors.slack_installation()
@@ -80,9 +83,12 @@ class SlackSessions:
         event_id = payload.get('event_id', '')
         if not isinstance(event_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', event_id):
             raise HTTPException(400, 'Invalid Slack event identifier.')
-        if self.automation_events:
+        if self.automation_events and event.get('type') != 'reaction_removed':
             await self.automation_events.slack(payload)
-        if (event.get('type') == 'reaction_added' or event.get('bot_id') or event.get('bot_profile')
+        if event.get('type') in {'reaction_added', 'reaction_removed'}:
+            self.reaction_feedback(payload['team_id'], event)
+            return {'ok': True}
+        if (event.get('bot_id') or event.get('bot_profile')
                 or event.get('subtype') not in {None, 'file_share'}):
             return {'ok': True}
         event_id, channel, user = payload.get("event_id", ""), event.get("channel", ""), event.get("user", "")
@@ -116,6 +122,24 @@ class SlackSessions:
             ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
             direct_message=direct_message, missing_cloud=missing_cloud)
         return {'ok': True}
+
+    def reaction_feedback(self, team, event):
+        """👍/👎 on a delivered Moyai answer becomes feedback; other reactions are ignored."""
+        feedback = getattr(self, 'feedback', None)
+        item = event.get('item')
+        if not feedback or not isinstance(item, dict) or item.get('type') != 'message':
+            return
+        channel, ts, user, reaction = item.get('channel'), item.get('ts'), event.get('user'), event.get('reaction')
+        if not (isinstance(channel, str) and re.fullmatch(r"[CGD][A-Z0-9]{7,30}", channel)
+                and isinstance(ts, str) and re.fullmatch(r"\d{10,16}\.\d{1,9}", ts)
+                and isinstance(user, str) and re.fullmatch(r"[UW][A-Z0-9]{7,30}", user)
+                and isinstance(reaction, str) and len(reaction) <= 100):
+            return
+        try:
+            feedback.slack_reaction(team, channel, ts, user, reaction.split('::')[0], event['type'] == 'reaction_added')
+        except Exception as exc:
+            # Feedback must never break event acknowledgement.
+            log.warning('Slack feedback was not recorded (%s)', type(exc).__name__)
 
     async def accept_message(self, *, team, event_id, channel, ts, root, user, prompt,
                              mentioned, direct_message, missing_cloud):

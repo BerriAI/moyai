@@ -227,11 +227,12 @@ function updateChat(run,initial=false){
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
     const activitySlots=new Map([...box.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}</div>`;
+    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(m.user_id&&m.user_id===state.userId?'You':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=agent-2" alt="">Moyai Devin'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<div class="message-actions"><button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">⧉</button>${run.mode==='demo'?'':feedbackButtons(m)}</div>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}</div>`;
     box.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=activitySlots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
     MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
+    box.querySelectorAll('.feedback-button').forEach(b=>b.onclick=()=>sendFeedback(run,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
@@ -249,6 +250,23 @@ function renderLiveWork(event,disconnected){
   savedFiles.decorate($('#conversation'));
 }
 async function copyText(text,button){try{await navigator.clipboard.writeText(text);const label=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=label,1800);}catch{toast('Could not copy. You can select and copy the text.');}}
+function feedbackButtons(m){
+  if(['failed','cancelled','interrupted','steered'].includes(m.status))return '';
+  const f=m.feedback||{};const count=n=>n?`<span>${n}</span>`:'';
+  return [['up','👍','Helpful',f.up],['down','👎','Not helpful',f.down]].map(([rating,icon,label,n])=>`<button class="feedback-button quiet ${f.mine===rating?'selected':''}" data-message="${m.id}" data-rating="${rating}" aria-pressed="${f.mine===rating}" aria-label="${label}" title="${label} — sent to Lens with this run's trace">${icon}${count(n)}</button>`).join('');
+}
+async function sendFeedback(run,button){
+  const id=Number(button.dataset.message),message=run.messages.find(m=>m.id===id);if(!message)return;
+  const mine=message.feedback?.mine;const rating=mine===button.dataset.rating?null:button.dataset.rating;
+  let comment='';
+  if(rating==='down'){const value=prompt('What went wrong? (optional — helps Lens find the pattern)');if(value===null)return;comment=value.trim().slice(0,2000);}
+  button.disabled=true;
+  try{
+    const result=await api(`/api/runs/${run.id}/messages/${id}/feedback`,{method:'POST',body:JSON.stringify({rating,comment})});
+    message.feedback=result.summary||null;$('#conversation').dataset.messages='';updateChat(run);
+    toast(rating?'Thanks — feedback recorded.':'Feedback removed.');
+  }catch(error){toast(error.message||'Could not save feedback.');button.disabled=false;}
+}
 function renderAgentDetails(team){
   const target=$('#agent-details');if(!target)return;
   const signature=JSON.stringify(team);if(target.dataset.team===signature)return;target.dataset.team=signature;

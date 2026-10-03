@@ -65,6 +65,23 @@ is only needed for automated investigations. After deployment, run a short task
 that uses a file or terminal tool, open **Logs → Agent Traces**, and look for
 `moyai-devin`; verify the task, tool result and final answer in the trace tree.
 
+### Human feedback for Lens
+
+Every Moyai answer has 👍 / 👎 buttons next to Copy in the web chat. 👎 asks for
+an optional comment ("what went wrong"). In Slack, reacting 👍 (`+1`) or 👎 (`-1`)
+on a Moyai answer does the same; removing the reaction clears it. Each person
+gets one vote per answer, and only their latest choice counts. Feedback is saved in
+`message_feedback`. If tracing is on, each change also sends a `human_feedback`
+child span under that turn's agent span, in the same trace. Attributes:
+`feedback.rating` (`up`/`down`/`cleared`), `feedback.score` (1/0/-1),
+`feedback.comment`, `feedback.source` (`web`/`slack`) and `feedback.user_id`.
+The span's input is the rated answer and its output is the verdict text. Lens
+already reads span input/output, so the human verdict shows up as evidence
+right next to the run it judges. Answers from before tracing are saved but not
+exported. Slack reactions need the bot `reactions:read` scope and the
+`reaction_added` / `reaction_removed` event subscriptions. Reconnect Slack after
+adding them.
+
 ## Personal memory across sessions
 
 **Settings → Memory** holds personal preferences, corrections, project context,
