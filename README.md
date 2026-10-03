@@ -116,6 +116,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 | Hermes | Source pinned to commit `7968c72a3cb80beaae51948378944dd6e3423b96`; dependencies prepared through Hermes PM; terminal, file, and workspace MCP tools. |
 | Model access | OpenAI Chat Completions through your LiteLLM-compatible gateway. The control plane pins the model, caps output and request count, and keeps the model key outside sandboxes. |
 | Native connections | First-class Linear, Slack, Notion, and GitHub cards; OAuth when app clients are configured; validated personal/integration-token alternative; encrypted token storage and OAuth refresh. |
+| Tool discovery | Hermes keeps terminal/file tools direct and exposes workspace MCP tools through `tool_search`, `tool_describe`, and `tool_call`. Full connector schemas load on demand; the upfront catalog listing has a 600 estimated-token budget. |
 | Organization controls | Shared connections, separate admin/member access, enabled/paused and read-only policies, health checks, and an audit history of connection changes. |
 | Slack sessions | Mention @Moyai Devin in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. AgentChat routes mentions, thread follow-ups, and direct messages into saved conversations. Threads show native working status, then the answer; plain DMs retain eyes acknowledgment. |
 | External writes | GitHub PRs are created directly in authorized repositories. Other connected-app writes show exact arguments for one-time admin approval; denied/expired actions are not sent. Ambiguous write failures are recorded as uncertain and never retried automatically. |
@@ -123,6 +124,22 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 | Results | Summary, tracked changes as a patch, eligible new files, and latest browser screenshot. Up to 2 MB per artifact file / 15 MB collected content / 20 MB archive download. Hidden files and symlinks are skipped. |
 | Saved workspace | Each response saves Hermes conversation history and a Modal filesystem snapshot. With Temporal, follow-ups reuse the sandbox for five idle minutes; later responses restore saved files and tool history. Warm sandboxes consume compute. Filesystem snapshots do not preserve running background processes or browser tabs. |
 | Restart handling | Saved chats and workspace snapshots survive deployments. Unfinished responses/queued messages are interrupted, capabilities revoked, and known sandboxes cleaned up. Send a new message to resume from the last saved workspace; unfinished external actions are never silently replayed. |
+
+Linear, GitHub, Slack, and Notion tools are Moyai adapters exposed through the
+workspace MCP server. Hermes discovers their authorized definitions locally at
+startup, but the model sees a compact catalog and the search bridge instead of
+every parameter schema. Browser, skills, credentials, and agent-coordination
+tools use the same path. Search finds capabilities; describe returns selected
+schemas; call invokes the existing tool. Repeated calls can reuse a schema
+already in the conversation. Server-side permissions, revocation checks, and
+write approvals still apply to every invocation.
+
+To verify this against the pinned Hermes runtime without model or provider
+requests, set `HERMES_TEST_SOURCE` to its checkout and `HERMES_TEST_PYTHON` to
+its Python interpreter (prepared with the `mcp` extra), then run
+`python -m pytest -q -s tests/test_tool_discovery.py`. The test uses the real
+stdio bridge and Moyai broker with fixture providers, checks the model-visible
+schema size, and exercises scope restrictions, revocation, and denied writes.
 
 ## Enable cloud runs
 

@@ -98,7 +98,7 @@ def test_reconnecting_capability_still_works_and_stop_revokes_it(workspace):
 
 
 def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
-    events, calls = [], []
+    events, calls, workspace_tools = [], [], []
     class FakeAgent:
         tools = []
         valid_tool_names = []
@@ -118,6 +118,11 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, 'emit', lambda kind, message, data=None, **extra: events.append((kind, message, data or {}, extra)))
     monkeypatch.setitem(sys.modules, 'run_agent', SimpleNamespace(AIAgent=FakeAgent))
     monkeypatch.setitem(sys.modules, 'tools.mcp_tool_discovery', SimpleNamespace(discover_mcp_tools=lambda **kwargs: []))
+    def definitions(**kwargs):
+        assert kwargs == {'enabled_toolsets': ['mcp-workspace'], 'quiet_mode': True,
+                          'skip_tool_search_assembly': True}
+        return workspace_tools
+    monkeypatch.setitem(sys.modules, 'model_tools', SimpleNamespace(get_tool_definitions=definitions))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     monkeypatch.setenv('HERMES_HOME', '/home')
     monkeypatch.chdir(tmp_path)
@@ -129,7 +134,11 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     relay.startup_failure = None
     with pytest.raises(RuntimeError, match='MCP tools were not loaded'):
         agent.run(spec)
-    FakeAgent.tools = [{'function': {'name':'browser_open'}}]
+    workspace_tools.append({'function': {'name':'mcp_workspace_browser_open'}})
+    with pytest.raises(RuntimeError, match='tool discovery was not enabled'):
+        agent.run(spec)
+    FakeAgent.valid_tool_names = {'tool_search', 'tool_describe', 'tool_call'}
+    FakeAgent.tools = [{'function': {'name': name}} for name in FakeAgent.valid_tool_names]
     events.clear()
     agent.run(spec)
     assert 'inference' in calls
