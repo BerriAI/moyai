@@ -21,6 +21,7 @@ class SlackSessions:
         self.checkpoints, self.settings = checkpoints, settings
         self.jobs = set()
         self.identities = None
+        self.automation_events = None
         self.chat = SlackChat(self)
         self.agentchat, self.channel = connect_agentchat(self)
 
@@ -67,8 +68,7 @@ class SlackSessions:
         if payload.get("type") != "event_callback" or not self.status()["enabled"]:
             return {"ok": True}
         event = payload.get("event", {})
-        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message"}
-                or event.get("bot_id") or event.get("bot_profile") or event.get("subtype") not in {None, "file_share"}
+        if (not isinstance(event, dict) or event.get("type") not in {"app_mention", "message", "reaction_added"}
                 or payload.get("is_ext_shared_channel") or event.get("is_ext_shared_channel")):
             return {"ok": True}
         bot = self.connectors.slack_installation()
@@ -77,6 +77,14 @@ class SlackSessions:
             return {"ok": True}
         if event.get("user") == bot.get("user_id"):
             return {"ok": True}
+        event_id = payload.get('event_id', '')
+        if not isinstance(event_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', event_id):
+            raise HTTPException(400, 'Invalid Slack event identifier.')
+        if self.automation_events:
+            await self.automation_events.slack(payload)
+        if (event.get('type') == 'reaction_added' or event.get('bot_id') or event.get('bot_profile')
+                or event.get('subtype') not in {None, 'file_share'}):
+            return {'ok': True}
         event_id, channel, user = payload.get("event_id", ""), event.get("channel", ""), event.get("user", "")
         mention_ts = event.get("ts", "")
         thread_ts = event.get("thread_ts") or mention_ts

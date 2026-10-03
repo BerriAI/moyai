@@ -952,32 +952,119 @@ main agent, share its live browser/files, or mirror into its Slack thread. They
 remain available in the add-tab menu and session list after closing the tab.
 Approvals and credential requests can be completed through **Open session**.
 
-### Scheduled automations
+### Automations
 
-Open **Automations** to save a workflow, repository/environment, model, selected
-connections, and an hourly/daily/weekday/weekly schedule with an IANA timezone.
-Definitions start paused; **Run now** tests one occurrence, then **Enable schedule**
-activates recurring work. Editing pauses the schedule again. Each run appears in
-history and opens as a normal, durable chat with its own workspace and owner spend.
-Owners can edit/run/enable their automations; administrators can also pause them.
-Pausing prevents future launches; stop existing work from its session.
+Open **Automations** to save a workflow, repository/environment, model,
+connections, and one or more triggers. Triggers are **OR-ed**: any matching trigger
+can start the workflow. An event matching several triggers starts one session.
 
-Temporal Cloud Schedules keep the clock while Render is offline. A small workflow
-launches the existing durable session runner and waits for it to finish, including
-approval/input waits. Overlap policy is **SKIP**, with a 15-minute catch-up window;
-occurrences delayed longer than 15 minutes are also skipped at admission. Pending
-schedule edits retry from SQLite after restart. Launch receipts, the new session,
-its initial message, and the Temporal wake are committed together, so retries do
-not create additional sessions. Temporal history contains IDs/status only, not the
-saved workflow text. No sandbox is allocated just to wait for the next occurrence.
+| Source | Triggers |
+| --- | --- |
+| Schedule | Hourly, daily, weekdays, weekly, numeric five-field cron, one-time |
+| Slack | New channel messages, optional thread replies, reactions |
+| GitHub | Issues, issue comments, PRs, reviews, review comments, completed CI checks, pushes |
+| GitLab | Merge requests, MR comments, issues, issue comments, pushes, pipelines |
+| Linear | Issue creation, labels added, status/priority/assignment changes, moves to a team |
+| Jira | Issue creation/updates, labels added, status/assignment changes, comments created/edited |
+| Pylon | Issue creation, tags added, status changes via Pylon’s Send webhook action |
+| PagerDuty | Incidents triggered, acknowledged, resolved, updated |
+| Generic webhook | JSON events, optional event name and payload regex |
+
+Each automation has **one rolling hourly invocation limit across all its triggers**:
+50 by default, or 150 for Slack message watching. Set another positive number or
+clear the field for no per-automation cap. Manual runs count toward the same cap.
+The limit controls new sessions, not session runtime. There is no separate
+organization-wide hourly invocation ceiling; session capacity, billing controls,
+and inbox capacity still apply.
+
+Saved definitions and edits start paused. **Test filters** checks a sample without
+launching or charging for inference. **Run now** starts a manual session. Configure
+any event sources, then **Enable**. Owners can edit/run/enable; administrators can
+also pause. Pausing prevents future launches; stop existing work from its session.
+Runs use the owner's credentials and spend attribution and appear in linked history.
+Session content, including event context, is visible to signed-in teammates.
+
+#### Connecting event sources
+
+Use **Set up webhook** to select a provider, copy its URL, and store its secret.
+Secrets are encrypted per automation and provider; generated secrets are shown
+once. Saving or rotating a secret pauses the automation and invalidates the old
+secret. Removing a provider deletes its credential. An existing app connection
+does not automatically register a provider's webhooks.
+
+- **GitHub:** repository Webhooks, JSON content, selected events, HMAC-SHA256
+  `X-Hub-Signature-256`. Filter to an exact repository.
+- **GitLab:** project Webhooks, selected events. Supports Standard Webhooks
+  (`whsec_` signing token, signed ID/timestamp/body) or `X-Gitlab-Token`.
+- **Linear:** Settings → API → Webhooks, Issues subscription. Paste the issued
+  signing secret; Moyai checks `Linear-Signature` and the signed timestamp.
+- **Jira:** register a webhook for the selected events with a signing secret;
+  Moyai checks `X-Hub-Signature: sha256=...`.
+- **PagerDuty:** V3 webhook subscription and its issued signing secret;
+  Moyai checks `X-PagerDuty-Signature`.
+- **Pylon:** Settings → Webhooks, URL and `Authorization: Bearer <secret>` or
+  `X-Webhook-Secret`. In Settings → Triggers, select the kickoff and **Send webhook**.
+  Template the body with `event_type` (`issue.created`, `issue.tag_added`, or
+  `issue.status_changed`) and `data: {id, title, description, status, tags, url}`.
+  Include an `event_id` or `occurred_at` in the body so later changes to the same
+  issue have distinct receipts. Keep it stable on retries.
+  This uses [Pylon's documented configurable webhook action](https://docs.usepylon.com/pylon-docs/developer/webhooks).
+- **Slack:** uses the existing signed `/hooks/slack/events` endpoint and installed
+  team/user allowlist. Add the bot to watched channels; subscribe to
+  `message.channels` / `message.groups` with the matching history scopes, and
+  `reaction_added` with `reactions:read`. Reactions filter by channel and emoji;
+  their payload does not contain the message text. Own-bot and external shared
+  channel events are excluded. This PR does not install new live Slack scopes.
+
+Generic webhooks accept a JSON object using `Authorization: Bearer <secret>` or
+`X-Webhook-Secret`. Send a stable `X-Moyai-Event-Id` for retry deduplication. Without
+it, identical JSON payloads deduplicate. Optional timestamped HMAC authentication:
+
+```text
+X-Moyai-Event-Id: unique-event-id
+X-Moyai-Timestamp: Unix seconds
+X-Moyai-Signature: sha256=<hex HMAC-SHA256 digest>
+
+Signed bytes: timestamp + "." + eventId + "." + rawBody
+```
+
+Retry with the same event ID and a fresh timestamp. Use the unchanged raw body
+when signing. Provider body-only signatures use a canonical payload hash for
+replay protection because their delivery-ID headers are not signed. Intake checks
+authentication before parsing/storing content, accepts at most 256 KiB, and supplies
+bounded event context to the agent as external data, never as authorization.
+
+#### Recovery and concurrency
+
+Temporal Cloud keeps schedule clocks while Render is offline. Each schedule
+trigger has its own durable schedule; one-time triggers consume one occurrence
+and cannot be rearmed by routine sync. Dates are stored in UTC and displayed in
+local time. Custom schedules use numeric cron, not raw RRULE.
+
+A schedule workflow launches the existing durable session runner and waits for
+it to finish, including approval/input waits. Scheduled occurrences skip overlap
+and have a 15-minute catch-up window. Event deliveries persist before acknowledgement
+and queue while a previous run (including children) is active, the automation's
+hourly limit is full, or session capacity is unavailable. Queued events expire
+after 24 hours. A stopped/replaced worker resumes dispatch from SQLite.
+
+Launch receipts, the session, its initial message, and its Temporal wake commit
+atomically. A retry returns the same session. Pending edits retry after outages;
+removed schedules are deleted and stale deliveries cannot launch old instructions.
+Only IDs/status enter Temporal history, not workflow/event text. No sandbox runs
+while waiting for a trigger. Intake capacity is 120 deliveries/minute per automation
+and 1,000 pending deliveries across the workspace; these are backpressure controls,
+not organization-wide hourly run limits. Delivery history explains queued/skipped
+outcomes. Providers must retry failed HTTP deliveries (GitHub requires redelivery
+or a relay); events never delivered successfully cannot be recovered locally.
 
 The **My Linear tickets → PR** template reads tickets assigned to the requester's
 verified Google email (`linear_my_issues`), reserves an issue identifier with
-`automation_claim_item`, implements/tests at most one ticket per run, and requests
-normal PR publication approval. Claims persist even after failure: continue or
-review the original session instead of silently attempting a second PR. Templates
-are editable instructions, not a guarantee that a model will follow every step.
-Existing tool approvals and connection policies still apply. This version does
-not grant unattended publication, PR approval, merge rights, or new Slack posting
-rights. Shared-password users need a Google-linked identity for “my tickets.”
-Local previews can manually run simulated automations without Temporal or LLM use.
+`automation_claim_item`, implements/tests one ticket, and calls the GitHub PR
+publication tool under the organization’s connection policy. Claims survive failure: continue or review the original
+session instead of silently attempting another PR. Templates are instructions,
+not a guarantee that a model follows every step. Tool approval requirements and connection policies apply to automation runs just
+as they do to interactive sessions. Automations do not gain extra connection
+permissions or the ability to approve or merge PRs. Shared-password users need a Google-linked identity for
+“my tickets.” Local previews can manually run simulations without Temporal or LLM
+use. Provider setup is manual; the code and local tests do not install live triggers.

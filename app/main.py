@@ -159,6 +159,7 @@ def create_app(settings: Settings | None = None):
     manager.prepare_context = slack.prepare
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
     manager.automations = automations
+    slack.automation_events = automations.events
     login_attempts = []
 
     @asynccontextmanager

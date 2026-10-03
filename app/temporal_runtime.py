@@ -140,9 +140,9 @@ class TemporalRunManager(DurableRunner):
             await asyncio.gather(pulse, return_exceptions=True)
 
     @activity.defn(name='launch_automation')
-    async def launch_automation(self, automation_id: str, revision: int, occurrence: str, expires_at: str) -> dict:
+    async def launch_automation(self, automation_id: str, revision: int, occurrence: str, expires_at: str, trigger_id: str = 'default') -> dict:
         try:
-            return await self.automations.launch(automation_id, revision, occurrence, expires_at)
+            return await self.automations.launch(automation_id, revision, occurrence, expires_at, trigger_id=trigger_id)
         except Exception as exc:
             from temporalio.exceptions import ApplicationError
             raise ApplicationError('Automation launch temporarily unavailable', type=type(exc).__name__) from None
