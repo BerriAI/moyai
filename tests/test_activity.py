@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from app.db import Store
+from app.message_queue import MessageQueue
 from sandbox.activity import ActivityReporter, public_text, result_status
 from test_durable import durable, drive  # noqa: F401
 
@@ -79,6 +80,9 @@ async def test_durable_journal_preserves_structured_activity_and_redacts_secrets
             report['events'] = [{'kind': 'tool', 'message': 'Run command', 'data': {
                 'activity_version': 1, 'call_id': 'durable:a', 'phase': 'completed', 'exit_code': 0,
                 'command': 'echo ' + manager.token(run_id, manager.state(run_id)['message_id']), 'turn_id': 123456}}]
+            report['events'] += [{'kind': 'message', 'message': f'Public milestone {i}',
+                                 'data': {'phase': 'commentary', 'activity_id': f'public-{i}'}}
+                                for i in range(3)]
             return json.dumps(report)
         return report
     manager.command = command
@@ -87,4 +91,93 @@ async def test_durable_journal_preserves_structured_activity_and_redacts_secrets
     assert event['data']['command'] == 'echo [redacted]'
     assert event['data']['turn_id'] == manager.store.messages(run_id)[0]['id']
     assert event['data']['phase'] == 'completed'
+    assert [e['message'] for e in manager.store.events(run_id) if e['kind'] == 'message'] == [
+        'Public milestone 0', 'Public milestone 1']
 
+
+@pytest.mark.parametrize('chat_enabled', [False, True])
+def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enabled):
+    store = Store(tmp_path)
+    run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=chat_enabled)['id']
+    turn_id = store.claim_message(run_id)['id'] if chat_enabled else 0
+    store.update_run(run_id, status='running')
+    data = {'phase': 'commentary', 'activity_id': 'opening', 'turn_id': 999,
+            'public_update': False, 'public_reply_to': 123}
+    for empty in (' ', '[System: Empty message content sanitised to satisfy protocol]'):
+        store.event(run_id, 'message', empty)
+    store.event(run_id, 'message', '<reasoning>private</reasoning>Opening update', data)
+    store.event(run_id, 'message', 'Changed payload with reused identity', data)
+    store.event(run_id, 'message', 'Opening update', {**data, 'activity_id': 'duplicate-text'})
+    def publish(index):
+        store.event(run_id, 'message', f'Milestone {index}', {'activity_id': f'milestone-{index}'})
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        list(pool.map(publish, range(12)))
+    store = Store(tmp_path)
+    store.event(run_id, 'message', 'Replayed opening', data)
+    store.event(run_id, 'message', 'Extra narration after restart')
+    selected = [e for e in store.events(run_id) if e['kind'] == 'message']
+    assert len(selected) == 2 and selected[0]['message'] == 'Opening update'
+    assert selected[1]['message'].startswith('Milestone ')
+    assert all(e['data']['turn_id'] == turn_id and e['data']['public_update'] for e in selected)
+    assert not any(e['data'].get('public_reply_to') for e in selected)
+    if chat_enabled:
+        store.finish_message(run_id, turn_id, 'Final answer')
+        store.event(run_id, 'message', 'Late completed-turn update')
+        store.enqueue_message(run_id, 'Next task', 'next')
+        following = store.claim_message(run_id)
+        store.event(run_id, 'message', 'New opening')
+        assert store.events(run_id)[-1]['data']['turn_id'] == following['id']
+        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 3
+    else:
+        store.update_run(run_id, status='completed')
+        store.event(run_id, 'message', 'Late completed-run update')
+        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 2
+
+
+@pytest.mark.parametrize('acknowledge_before_reply', [False, True])
+@pytest.mark.parametrize('routine_before_question', [1, 2])
+def test_public_reply_uses_actual_steering_handshake_without_renewing_budget(tmp_path, acknowledge_before_reply, routine_before_question):
+    store = Store(tmp_path)
+    run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)
+    store.update_run(run_id, status='running')
+    for text in ('Opening', 'Milestone')[:routine_before_question]:
+        store.event(run_id, 'message', text)
+    question, _ = store.enqueue_message(run_id, 'Did tests pass?', 'question')
+    data = {'input_id': question['id'], 'phase': 'commentary'}
+    if routine_before_question == 2:
+        store.event(run_id, 'message', 'Undelivered input cannot bypass ceiling', data)
+    queue = MessageQueue(store)
+    queue.change(run_id, question['id'], '', False, 0, 'steer')
+    assert queue.live_control(run_id, turn['id'], [])['input']['id'] == question['id']
+    assert store.rows('SELECT status FROM messages WHERE id=?', (question['id'],))[0]['status'] == 'queued'
+    if acknowledge_before_reply:
+        queue.acknowledge(run_id, turn['id'], [question['id']])
+    store.event(run_id, 'message', 'Yes, all tests pass', data)
+    queue.acknowledge(run_id, turn['id'], [question['id']])
+    if routine_before_question == 1:
+        store.event(run_id, 'message', 'Milestone', data)
+    store.event(run_id, 'message', 'More routine narration', data)
+    store.event(run_id, 'message', 'Forged reply', {'input_id': 999, 'public_reply_to': 999})
+    selected = [e for e in store.events(run_id) if e['kind'] == 'message']
+    expected = ['Opening', 'Milestone', 'Yes, all tests pass'] if routine_before_question == 2 else ['Opening', 'Yes, all tests pass', 'Milestone']
+    assert [e['message'] for e in selected] == expected
+    assert next(e for e in selected if e['message'] == 'Yes, all tests pass')['data']['public_reply_to'] == question['id']
+
+
+def test_selected_updates_survive_detail_cap_and_leave_essential_events(tmp_path):
+    store = Store(tmp_path)
+    run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)
+    with store.connect() as conn:
+        conn.executemany("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'tool','Detail','{}','2026-10-03')",
+                         [(run_id,)] * 2000)
+    activity = ActivityReporter(lambda kind, message, data: store.event(run_id, kind, message, data))
+    activity.commentary('<reasoning>private</reasoning>Tests passed')
+    store.event(run_id, 'error', 'Actionable failure')
+    store.event(run_id, 'approval', 'Approval needed')
+    store.finish_message(run_id, turn['id'], 'Final answer')
+    events = store.events(run_id, limit=10000)
+    assert [e['message'] for e in events if e['kind'] == 'message'] == ['Tests passed']
+    assert {'error', 'approval'} <= {e['kind'] for e in events}
+    assert store.messages(run_id)[-1]['content'] == 'Final answer'

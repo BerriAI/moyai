@@ -446,6 +446,15 @@ class Store:
 
     def event(self, run_id: str, kind: str, message: str, data=None):
         data = dict(data) if isinstance(data, dict) else {}
+        # Publication is a server decision, shared by both web renderers and Slack.
+        data.pop('public_update', None)
+        data.pop('public_reply_to', None)
+        if kind == 'message' and data.get('phase') != 'processing':
+            from .progress import record
+            with self.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                record(conn, run_id, message, data, now())
+            return
         if kind != 'chat':
             # A queued user's creation time can precede the current response.
             # Bind work to the server's claimed turn, never a sandbox-supplied ID.

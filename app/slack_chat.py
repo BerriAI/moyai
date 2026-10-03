@@ -11,6 +11,7 @@ from uuid import uuid4
 from agentchat.models import Message, Sender
 
 from .db import now
+from .progress import active_turn
 from .security import digest
 from .slack_activity import SlackActivity, threaded
 
@@ -101,6 +102,7 @@ class SlackChat:
                 # Preserve chronology when the previous answer has been saved
                 # but the background collector has not seen it yet.
                 self.collect_answers_in(conn, binding, allowed)
+                self.collect_progress_in(conn, binding, allowed)
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
                     name = user['name'] if user else 'Web user'
@@ -209,6 +211,8 @@ class SlackChat:
                 conn.execute('INSERT INTO slack_threads(team_id,channel,thread_ts,run_id,started_ts,last_message_id,last_progress) VALUES(?,?,?,?,?,?,?)',
                              (team, channel, root, run_id, ts, cursor, time.time()))
                 binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+                # An adopted session may already have web-only updates.
+                self.collect_progress_in(conn, binding, False)
             run_id = binding['run_id']
             if Decimal(ts) < Decimal(binding['started_ts']):
                 return None
@@ -218,6 +222,7 @@ class SlackChat:
                 # Replies completed while asleep must not be backfilled even
                 # when wake arrives before the periodic collector runs.
                 conn.execute('UPDATE slack_threads SET last_message_id=(SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?) WHERE run_id=?', (run_id, run_id))
+                self.collect_progress_in(conn, binding, False)
             message_id, submit = None, False
             if command:
                 if command == 'model' and not model_error:
@@ -298,6 +303,23 @@ class SlackChat:
         found = {match[1] for text in texts if isinstance(text, str) for match in USER_MENTION.finditer(text)}
         return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
 
+    def collect_progress_in(self, conn, binding, allowed):
+        run_id = binding['run_id']
+        turn_id = active_turn(conn, run_id)
+        # Completed-turn progress is obsolete; its final answer is authoritative.
+        conn.execute("""UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='progress'
+            AND status='pending' AND json_extract(metadata,'$.turn_id') IS NOT ?""", (run_id, turn_id))
+        events = conn.execute("""SELECT id,message FROM events WHERE run_id=? AND kind='message'
+            AND json_extract(data,'$.public_update')=1 AND json_extract(data,'$.turn_id')=? ORDER BY id""",
+                              (run_id, turn_id)).fetchall()
+        for event in events:
+            key = f"progress:{event['id']}"
+            text = slack_text(self.scrub(event['message']))
+            self.queue(conn, run_id, key, 'progress', text + '\n\n' + self.link(run_id),
+                       {'event_id': event['id'], 'turn_id': turn_id})
+            if not allowed or binding['paused']:
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
+
     def collect_answers_in(self, conn, binding, allowed):
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
@@ -328,6 +350,7 @@ class SlackChat:
                 if not allowed:
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
                 self.collect_answers_in(conn, binding, allowed)
+                self.collect_progress_in(conn, binding, allowed)
                 if not allowed or binding['paused']:
                     continue
                 for approval in conn.execute("SELECT id FROM approvals WHERE run_id=? AND status='pending'", (run_id,)).fetchall():
@@ -343,6 +366,8 @@ class SlackChat:
 
     async def deliver_one(self):
         for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending' ORDER BY o.id LIMIT 100"):
+            if self.skip_stale_progress(row):
+                continue
             if self.last_post.get(row['channel'], 0) > time.monotonic() - 1.1:
                 continue
             if (not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
@@ -356,6 +381,8 @@ class SlackChat:
                 # Persist before external side effects. Ambiguous sends are
                 # marked uncertain and never replayed automatically.
                 await self.owner.checkpoints.flush()
+                if self.skip_stale_progress(row):
+                    continue
                 if row['kind'] == 'reaction':
                     await self.owner.channel.acknowledge(row['run_id'], row['text'])
                     sent_ts = row['text']
@@ -391,6 +418,16 @@ class SlackChat:
                 await self.owner.checkpoints.flush()
             return
 
+    def skip_stale_progress(self, row):
+        if row['kind'] != 'progress':
+            return False
+        with self.store.connect() as conn:
+            current = active_turn(conn, row['run_id'])
+            if current is not None and json.loads(row['metadata']).get('turn_id') == current:
+                return False
+            conn.execute("UPDATE slack_outbox SET status='skipped' WHERE id=? AND status IN ('pending','sending')", (row['id'],))
+        return True
+
     async def watch(self):
         while True:
             try:
@@ -415,7 +452,8 @@ class SlackChat:
     def recover(self):
         self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'")
         self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND "
-                           "(kind IN ('ack','progress') OR (kind='control' AND dedupe_key LIKE 'received:%'))")
+                           "(kind='ack' OR (kind='progress' AND json_extract(metadata,'$.event_id') IS NULL) "
+                           "OR (kind='control' AND dedupe_key LIKE 'received:%'))")
         if not self.watcher or self.watcher.done():
             self.watcher = asyncio.create_task(self.watch())
 
