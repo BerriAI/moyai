@@ -89,7 +89,7 @@ TOOLS = {
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
     'github_checkout': ('github', False, Repository, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
-    'github_create_pull_request': ('github', True, Publish, 'Publish reviewed local text changes to a new Moyai branch and open a normal, ready-for-review pull request. Requires exact-action administrator approval. Cannot update existing branches, change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Cannot update existing branches, change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
 }
 
 
@@ -286,7 +286,7 @@ class GitHub:
                 elif found and (found['type'] != 'blob' or found['mode'] not in {'100644', '100755'}):
                     raise ConnectorError('Only regular text files may be changed; directories, symlinks and submodules are protected.')
             if change.content is None and not found:
-                raise ConnectorError('Cannot delete a file that does not exist in the approved base.')
+                raise ConnectorError('Cannot delete a file that does not exist in the checkout base.')
 
     async def publish(self, run, args):
         target = await self.selected_target(run, args.repository)
@@ -314,7 +314,7 @@ class GitHub:
             if repo['base_sha'] != args.base_sha:
                 comparison = await self.request('GET', prefix + '/compare/' + args.base_sha + '...' + repo['base_sha'], token=token, params={'per_page': 1})
                 if comparison.get('status') not in {'ahead', 'identical'}:
-                    raise ConnectorError('The approved base is not on the current default branch. Rebase and request fresh approval.')
+                    raise ConnectorError('The checkout base is not on the current default branch. Rebase and prepare a new publication with a new request_key.')
             base = await self.request('GET', prefix + '/git/commits/' + args.base_sha, token=token)
             await self.validate_tree_paths(token, base['tree']['sha'], args.files, target)
             tree = [{'path': f.path, 'mode': '100755' if f.executable else '100644', 'type': 'blob',

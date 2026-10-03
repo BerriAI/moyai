@@ -2,7 +2,6 @@ import asyncio
 import copy
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -12,7 +11,8 @@ from pydantic import ValidationError
 from app.connector_errors import ConnectorError
 from app.github import Change, Publish, PERMISSIONS
 from app.security import digest
-from test_workspace import workspace, cloud_capability, wait_for
+from test_workspace import workspace, cloud_capability
+from test_spend import sign_in
 
 BASE = 'a' * 40
 CURRENT = 'b' * 40
@@ -182,27 +182,79 @@ def test_revocation_during_publication_stops_further_mutations(workspace, monkey
     assert [c[1].rsplit('/', 1)[-1] for c in api.calls if c[0] == 'POST'] == ['trees']
 
 
-@pytest.mark.parametrize('decision', ['approve', 'deny'])
-def test_exact_approval_and_no_merge_review_tools(workspace, monkeypatch, decision):
+@pytest.mark.parametrize('user,role', [('alice', 'admin'), ('bob', 'member')])
+def test_direct_pr_creation_without_admin_approval_and_no_merge_review_tools(workspace, monkeypatch, user, role):
     app, client = workspace
     run_id, headers = connected(app)
+    owner = sign_in(app, client, user, user + '@berri.ai')
+    app.state.store.execute('UPDATE runs SET owner_id=?,active_user_id=? WHERE id=?', (owner, owner, run_id))
+    assert client.get('/api/session').json()['role'] == role
     api = GitHubAPI(app.state.connectors.github, monkeypatch)
+    def still_running(method, path):
+        assert app.state.store.run(run_id)['status'] == 'running'
+        assert not app.state.store.approvals(run_id)
+    api.on_call = still_running
     url = f'/broker/{run_id}/tools/call'
     for name in ['github_merge', 'github_approve', 'github_review', 'github_request', 'github_update_branch']:
         assert client.post(url, headers=headers, json={'name': name, 'arguments': {}}).status_code == 403
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.post, url, headers=headers, json={'name': 'github_create_pull_request', 'arguments': PAYLOAD})
-        approval = wait_for(lambda: app.state.store.approvals(run_id))[0]
-        assert not api.calls
-        assert approval['arguments'] == PAYLOAD
-        assert client.post(f"/api/approvals/{approval['id']}", json={'decision': decision}).status_code == 200
-        result = future.result(5).json()
-    assert bool(api.pr) == (decision == 'approve')
-    assert ('url' in result) == (decision == 'approve')
-    client.patch('/api/connections/github/policy', json={'enabled': True, 'read_only': True})
-    assert client.post(url, headers=headers, json={'name': 'github_create_pull_request', 'arguments': PAYLOAD}).status_code == 403
-    names = [t['name'] for t in client.get(f'/broker/{run_id}/tools', headers=headers).json()]
-    assert 'github_checkout' in names and 'github_create_pull_request' not in names
+    tool = next(t for t in client.get(f'/broker/{run_id}/tools', headers=headers).json() if t['name'] == 'github_create_pull_request')
+    assert tool['annotations']['readOnlyHint'] is False
+    connection = next(c for c in client.get('/api/connections').json() if c['id'] == 'github')
+    policy = next(t for t in connection['tools'] if t['name'] == tool['name'])
+    assert policy['write'] is True and policy['requires_approval'] is False
+    response = client.post(url, headers=headers, json={'name': tool['name'], 'arguments': PAYLOAD})
+    assert response.status_code == 200
+    assert response.json()['url'] == 'https://github.com/BerriAI/litellm/pull/100'
+    assert response.json()['draft'] is False
+    assert not app.state.store.approvals(run_id)
+    assert not any(e['kind'] == 'approval' for e in app.state.store.events(run_id))
+    assert app.state.store.run(run_id)['status'] == 'running'
+    if role == 'member':
+        assert client.patch('/api/connections/github/policy', json={'enabled': True, 'read_only': False}).status_code == 403
+
+
+@pytest.mark.parametrize('restriction', ['read_only', 'disabled', 'disconnect', 'plugin', 'cancelled', 'revoked'])
+def test_direct_pr_still_requires_connection_policy_and_live_capability(workspace, monkeypatch, restriction):
+    app, client = workspace
+    run_id, headers = connected(app)
+    api = GitHubAPI(app.state.connectors.github, monkeypatch)
+    if restriction in {'read_only', 'disabled'}:
+        response = client.patch('/api/connections/github/policy', json={'enabled': restriction != 'disabled', 'read_only': restriction == 'read_only'})
+        assert response.status_code == 200
+    elif restriction == 'disconnect':
+        client.delete('/api/connections/github')
+    elif restriction == 'plugin':
+        app.state.store.execute("UPDATE runs SET plugins='[]' WHERE id=?", (run_id,))
+    elif restriction == 'cancelled':
+        app.state.store.update_run(run_id, status='cancelled')
+    else:
+        app.state.store.update_run(run_id, token_hash=digest('rotated'))
+    response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
+                           json={'name': 'github_create_pull_request', 'arguments': PAYLOAD})
+    assert response.status_code == (401 if restriction in {'cancelled', 'revoked'} else 403)
+    assert not api.calls and not app.state.store.approvals(run_id)
+    if restriction == 'read_only':
+        names = [t['name'] for t in client.get(f'/broker/{run_id}/tools', headers=headers).json()]
+        assert 'github_checkout' in names and 'github_create_pull_request' not in names
+
+
+def test_direct_pr_lost_response_is_uncertain_and_explicit_retry_reuses_pr(workspace, monkeypatch):
+    app, client = workspace
+    run_id, headers = connected(app)
+    api = GitHubAPI(app.state.connectors.github, monkeypatch)
+    api.lose = 'pr'
+    url = f'/broker/{run_id}/tools/call'
+    body = {'name': 'github_create_pull_request', 'arguments': PAYLOAD}
+    result = client.post(url, headers=headers, json=body).json()
+    assert result['outcome_uncertain'] is True and 'Lost response' in result['error']
+    assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/pulls')]) == 1
+    # A follow-up retry recovers the published PR instead of opening another one.
+    app.state.store.execute('UPDATE runs SET active_message_id=2 WHERE id=?', (run_id,))
+    retry = client.post(url, headers=headers, json=body).json()
+    assert retry['url'] == api.pr['html_url'] and retry['draft'] is False
+    assert not app.state.store.approvals(run_id)
+    assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/pulls')]) == 1
+    assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/git/refs')]) == 1
 
 
 def test_connection_secrets_stay_on_server_and_raw_tokens_refused(workspace):
@@ -216,15 +268,15 @@ def test_connection_secrets_stay_on_server_and_raw_tokens_refused(workspace):
     assert client.post('/api/connections/github', json={'token': 'personal-secret'}).status_code == 400
 
 
-def test_reconnect_after_approval_before_write_lock_cannot_substitute_installation(workspace, monkeypatch):
+def test_reconnect_after_admission_before_write_lock_cannot_substitute_installation(workspace, monkeypatch):
     app, _ = workspace
     run_id, _ = connected(app)
     github = app.state.connectors.github
     api = GitHubAPI(github, monkeypatch)
-    approved_run = {**app.state.store.run(run_id), 'github_connection_version': github.connection_version()}
+    admitted_run = {**app.state.store.run(run_id), 'github_connection_version': github.connection_version()}
     app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 20, 'repository': 'BerriAI/litellm'}, 'Reconnected')
     with pytest.raises(ConnectorError, match='changed'):
-        asyncio.run(github.publish(approved_run, Publish.model_validate(PAYLOAD)))
+        asyncio.run(github.publish(admitted_run, Publish.model_validate(PAYLOAD)))
     assert not api.calls
 
 
@@ -326,26 +378,21 @@ def connect_multiple(app):
         'repositories': ['BerriAI/litellm', 'BerriAI/moyai-devin']}, 'Both repositories')
 
 
-@pytest.mark.parametrize('decision', ['approve', 'deny'])
-def test_self_repository_pr_requires_exact_approval(workspace, monkeypatch, decision):
+def test_self_repository_pr_is_created_directly_without_approval(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = connected(app)
     connect_multiple(app)
     github = app.state.connectors.github
     api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai-devin')
     payload = {**PAYLOAD, 'repository': 'BerriAI/moyai-devin'}
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.post, f'/broker/{run_id}/tools/call', headers=headers,
-                             json={'name': 'github_create_pull_request', 'arguments': payload})
-        approval = wait_for(lambda: app.state.store.approvals(run_id))[0]
-        assert approval['arguments'] == payload and not api.calls
-        client.post(f"/api/approvals/{approval['id']}", json={'decision': decision})
-        result = future.result(5).json()
-    assert bool(api.pr) == (decision == 'approve')
-    if decision == 'approve':
-        assert result['repository'] == 'BerriAI/moyai-devin' and not result['draft']
-        assert all(path.startswith('/repos/BerriAI/moyai-devin') for _, path, _ in api.calls)
-        assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
+    response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
+                           json={'name': 'github_create_pull_request', 'arguments': payload})
+    assert response.status_code == 200
+    result = response.json()
+    assert result['repository'] == 'BerriAI/moyai-devin' and not result['draft']
+    assert not app.state.store.approvals(run_id)
+    assert all(path.startswith('/repos/BerriAI/moyai-devin') for _, path, _ in api.calls)
+    assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
 
 
 def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypatch):

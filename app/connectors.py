@@ -94,7 +94,7 @@ class Connectors:
                            "label": row.get("label", ""), "updated_at": row.get("updated_at"),
                            "identity": identity if row else "Not connected", **self.policy(provider),
                            **({'repositories': self.github.targets(), 'app_registered': bool(self.github.app_config())} if provider == 'github' else {}),
-                           "tools": [{"name": name, "write": spec[1], "description": spec[3]}
+                           "tools": [{"name": name, "write": spec[1], "requires_approval": self.requires_approval(name), "description": spec[3]}
                                      for name, spec in TOOLS.items() if spec[0] == provider]})
         return result
 
@@ -108,6 +108,11 @@ class Connectors:
         policy = self.policy(provider)
         return policy["enabled"] and (not write or not policy["read_only"]) and bool(
             self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
+
+    def requires_approval(self, name):
+        # PR creation remains a write for read-only policies and uncertain results.
+        # Only this narrow tool can publish directly; other writes still wait.
+        return TOOLS[name][1] and name != 'github_create_pull_request'
 
     def audit(self, provider, action):
         self.store.execute("INSERT INTO connection_audit(provider,action,actor,created_at) VALUES(?,?,?,?)",

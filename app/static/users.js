@@ -19,7 +19,7 @@ function userTable(users, query, filter) {
 
 function applyUserSession(session) {
   state.role = session.role || 'member'; state.identity = session.identity; state.csrf = session.csrf;
-  for (const id of ['#spend-nav', '#users-nav', '#environments-nav']) $(id).hidden = !session.authenticated || state.role !== 'admin';
+  state.authenticated = session.authenticated; state.userId = session.user_id;
   if (session.identity) $('.rail-foot small').title = state.role === 'admin' ? 'Organization admin' : 'Internal user';
 }
 
