@@ -446,6 +446,12 @@ class Store:
 
     def event(self, run_id: str, kind: str, message: str, data=None):
         data = dict(data) if isinstance(data, dict) else {}
+        # Only the server can admit commentary to the public update budget.
+        data.pop('public_update', None)
+        data.pop('public_reply_to', None)
+        if kind == 'message' and data.get('phase') != 'processing':
+            from .public_updates import record_update
+            return record_update(self, run_id, message, data, now())
         if kind != 'chat':
             # A queued user's creation time can precede the current response.
             # Bind work to the server's claimed turn, never a sandbox-supplied ID.

@@ -11,6 +11,7 @@ from uuid import uuid4
 from agentchat.models import Message, Sender
 
 from .db import now
+from .public_updates import ACTIVE_TURN_SQL
 from .security import digest
 from .slack_activity import SlackActivity, threaded
 
@@ -100,6 +101,7 @@ class SlackChat:
                 allowed = enabled and binding['team_id'] == team
                 # Preserve chronology when the previous answer has been saved
                 # but the background collector has not seen it yet.
+                self.collect_progress_in(conn, binding, allowed)
                 self.collect_answers_in(conn, binding, allowed)
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
@@ -218,6 +220,7 @@ class SlackChat:
                 # Replies completed while asleep must not be backfilled even
                 # when wake arrives before the periodic collector runs.
                 conn.execute('UPDATE slack_threads SET last_message_id=(SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?) WHERE run_id=?', (run_id, run_id))
+                self.collect_progress_in(conn, binding, False)
             message_id, submit = None, False
             if command:
                 if command == 'model' and not model_error:
@@ -298,6 +301,32 @@ class SlackChat:
         found = {match[1] for text in texts if isinstance(text, str) for match in USER_MENTION.finditer(text)}
         return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
 
+    def collect_progress_in(self, conn, binding, allowed):
+        run_id = binding['run_id']
+        # Retire stale updates before collecting the final answer. Never send
+        # "I'm starting" after the work finished or a new turn took over.
+        conn.execute(f"""UPDATE slack_outbox SET status='skipped'
+            WHERE run_id=? AND kind='progress' AND status='pending' AND NOT EXISTS (
+                SELECT 1 FROM runs r JOIN messages m ON m.id=r.active_message_id
+                WHERE r.id=slack_outbox.run_id AND {ACTIVE_TURN_SQL}
+                AND m.id=json_extract(slack_outbox.metadata,'$.turn_id'))""", (run_id,))
+        events = conn.execute(f"""SELECT e.* FROM events e JOIN runs r ON r.id=e.run_id
+            JOIN messages m ON m.id=r.active_message_id
+            WHERE e.run_id=? AND e.kind='message' AND json_extract(e.data,'$.public_update')=1
+            AND json_extract(e.data,'$.turn_id')=m.id AND {ACTIVE_TURN_SQL}
+            ORDER BY e.id""", (run_id,)).fetchall()
+        for event in events:
+            key = f"progress:{run_id}:{event['id']}"
+            data = json.loads(event['data'])
+            # A progress update is always one Slack post; final answers retain
+            # their complete, chunked delivery path.
+            value = slack_text(self.scrub(event['message']))
+            if len(value) > 2400:
+                value = value[:2400] + '…'
+            self.queue(conn, run_id, key, 'progress', value + '\n\n' + self.link(run_id), {'turn_id': data['turn_id']})
+            if not allowed or binding['paused']:
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
+
     def collect_answers_in(self, conn, binding, allowed):
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
@@ -327,6 +356,7 @@ class SlackChat:
                 allowed = enabled and binding['team_id'] == team
                 if not allowed:
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
+                self.collect_progress_in(conn, binding, allowed)
                 self.collect_answers_in(conn, binding, allowed)
                 if not allowed or binding['paused']:
                     continue
@@ -343,6 +373,11 @@ class SlackChat:
 
     async def deliver_one(self):
         for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending' ORDER BY o.id LIMIT 100"):
+            if row['kind'] == 'progress' and not self.store.rows(
+                    f"SELECT 1 FROM runs r JOIN messages m ON m.id=r.active_message_id WHERE r.id=? AND m.id=? AND {ACTIVE_TURN_SQL}",
+                    (row['run_id'], json.loads(row['metadata']).get('turn_id'))):
+                self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=? AND status='pending'", (row['id'],))
+                continue
             if self.last_post.get(row['channel'], 0) > time.monotonic() - 1.1:
                 continue
             if (not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']
