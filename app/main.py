@@ -39,6 +39,7 @@ from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
+from .feedback import Feedback
 from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
 from .automations import Automations
@@ -150,6 +151,7 @@ def create_app(settings: Settings | None = None):
     manager.credentials = credentials
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
+    feedback = Feedback(store, security, checkpoints)
     model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
@@ -203,6 +205,9 @@ def create_app(settings: Settings | None = None):
     app.include_router(skills.routes())
     app.include_router(memory.routes())
     app.state.memory = memory
+    app.include_router(feedback.routes())
+    app.state.feedback = feedback
+    slack.feedback = feedback
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
@@ -415,11 +420,15 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Task not found")
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
+        viewer = store.identity(security.session_info(request))
+        feedback_summary = feedback.for_run(run_id, viewer)
+        messages = [{**m, 'feedback': feedback_summary.get(m['id'])} if m['role'] == 'assistant' else m
+                    for m in store.messages(run_id)]
+        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None,
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
-                "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
+                "credential_requests": credentials.pending(run,viewer,security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "has_captures": bool(captures.listing(settings, run_id)), "slack_source": store.slack_source(run_id)}
 

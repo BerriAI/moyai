@@ -170,6 +170,8 @@ class Store:
                 conn.execute("UPDATE messages SET started_at=created_at WHERE status!='queued'")
             if 'steering_parent_id' not in columns:
                 conn.execute('ALTER TABLE messages ADD COLUMN steering_parent_id INTEGER')
+            if 'reply_to' not in columns:
+                conn.execute('ALTER TABLE messages ADD COLUMN reply_to INTEGER')
             if 'steer_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
                 conn.execute('ALTER TABLE runs ADD COLUMN steer_message_id INTEGER')
             if default_model:
@@ -357,7 +359,7 @@ class Store:
                 conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
                 conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
                 if status != 'steered':
-                    conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id) SELECT ?,'assistant',?,?,?,model,user_id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
+                    conn.execute("INSERT INTO messages(run_id,role,content,status,created_at,model,user_id,reply_to) SELECT ?,'assistant',?,?,?,model,user_id,id FROM messages WHERE id=?", (run_id, content, status, now(), message_id))
                 if self.tracing:
                     # Commit the answer and its pending span together. A crash
                     # after saving the answer must not lose its root trace.

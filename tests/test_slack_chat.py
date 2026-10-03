@@ -371,7 +371,7 @@ def test_slack_oauth_requests_bot_dm_and_thread_scopes(slack_app):
     app, _, _, _ = slack_app
     app.state.settings.slack_client_id = 'test-client'
     scope = parse_qs(urlparse(app.state.connectors.authorization_url('slack','state')).query)['scope'][0]
-    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history','reactions:write','assistant:write','users:read','users:read.email'}
+    assert set(scope.split(',')) == {'app_mentions:read','chat:write','channels:history','groups:history','im:history','reactions:read','reactions:write','assistant:write','users:read','users:read.email'}
 
 
 def test_acknowledgment_is_native_status_without_periodic_chatter(slack_app):

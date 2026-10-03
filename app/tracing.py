@@ -167,6 +167,31 @@ class AgentTracing:
         self.emit(run, run.get('active_message_id'), 'chat ' + attrs['gen_ai.request.model'],
                   request_id, start, time.time_ns(), attrs, failed=status != 'completed')
 
+    @best_effort
+    def feedback(self, answer, turn_id, user_id, rating, comment, source, revision, connection=None):
+        """Attach a human rating to the answer's existing trace as a child span."""
+        def one(sql, values):
+            if connection is not None:
+                row = connection.execute(sql, values).fetchone()
+                return dict(row) if row else None
+            rows = self.store.rows(sql, values)
+            return rows[0] if rows else None
+        run = one('SELECT * FROM runs WHERE id=?', (answer['run_id'],))
+        # Only rate turns that were traced; never invent a trace for older answers.
+        if not run or not one('SELECT 1 FROM trace_contexts WHERE run_id=? AND message_id=?', (run['id'], turn_id)):
+            return
+        verdict = {'up': 'helpful', 'down': 'not helpful', None: 'cleared'}[rating]
+        summary = f'Human feedback: {verdict}' + (f'\nComment: {comment}' if comment else '')
+        stamp = time.time_ns()
+        self.emit(run, turn_id, 'human_feedback', f'feedback:{answer["id"]}:{user_id}:{revision}', stamp, stamp,
+                  {'gen_ai.operation.name': 'feedback', 'openinference.span.kind': 'EVALUATOR',
+                   'input.value': self.content(answer['content']), 'output.value': self.content(summary),
+                   'feedback.rating': rating or 'cleared', 'feedback.score': {'up': 1, 'down': 0}.get(rating, -1),
+                   'feedback.comment': self.content(comment), 'feedback.source': source,
+                   'feedback.user_id': user_id, 'feedback.revision': revision,
+                   'moyai.message_id': str(answer['id']), 'moyai.status': 'completed'},
+                  connection=connection)
+
     def start(self):
         if isinstance(self.processor, TraceOutbox):
             self.processor.start()
