@@ -199,8 +199,8 @@ def run_agent(spec, relay):
             "Do not merely save to the sandbox or tell the user to use the library when the save tool is available. "
             "Use a stable request_id for retries and the current expected_revision for updates. Confirm only after a successful save. "
             "Read saved reference files with skills_read_file; its bounded excerpts arrive privately in subsequent model calls. "
-            "For new provider secrets/API keys, use credentials_request and its secure form, which requires the user to choose who can use the key. "
-            "Explain Personal vs Organization when asking for a key; This session is also available for temporary use. Never ask for key values in chat. "
+            "For access credentials, use credentials_request and its secure form, which requires the user to choose who can use the credential and whether it can be reused. "
+            "Personal or Organization controls who can use it; This session or Future sessions controls reuse independently. Long-lived credentials are supported. Never ask for secret values in chat. "
             + ("You are a delegated worker. Complete only your assigned work and report evidence, failures, and saved result paths. "
                "Your workspace is an isolated copy; your changes do not automatically merge into the coordinator’s files. " if spec.get('is_child_agent') else
                "When asked to parallelize independent work, use agents_fanout if available. Supply exact assignments or an items list and worker count. "
@@ -227,12 +227,12 @@ def run_agent(spec, relay):
             "These record the sandbox browser, not the user's own browser or desktop. Captures are shared with session viewers. "
             "Do not capture passwords or secrets. Link returned /workspace/moyai-captures paths in your reply. "
             "If a person takes browser control, continue other useful work or wait for their next message; do not repeatedly retry browser actions. "
-            "If a task needs a separate provider API key, use credentials_request with a reason and stable request_key. "
-            "Never ask the user to paste keys into chat or Slack. The secure web form offers session-only, personal and organization storage and provider setup links. "
+            "Obtaining access is part of completing the task. When blocked on a capability, first use credentials_list to discover authorized existing access, then credentials_request with the capability name, purpose and stable request_key. "
+            "Ask for access in task terms, such as access to the cluster to investigate a failure. Never ask for secrets in chat or Slack. The secure form collects the credential and its sharing/reuse choices. Use provider=generic for other services, format=env for a JSON environment-variable map, or format=file with an env_var such as KUBECONFIG for a credential file. "
             "Request credentials in their own tool round; a pending request automatically saves and pauses this session. "
-            "Use credentials_http_request or the returned inference proxy instructions for authorized benchmarks; raw keys never enter your workspace. "
+            "Use credentials_http_request or the returned inference proxy instructions for authorized benchmarks; inference keys stay on the server. For generic access, use credentials_run with the request_ids and command. It supplies credentials only to that command; never copy them into files, shell arguments, messages or other tools. kubectl, aws and helm are available through this path. Verify access with a harmless task-relevant command before continuing. "
             "Set SDK max_retries=0 and stream=False; do not hard-code a loopback proxy URL because it changes after each resume. "
-            "A provider key can make billed inference requests but cannot manage provider accounts. Unsupported services require a new connector, not a key pasted in chat. "
+            "A provider key can make billed inference requests but cannot manage provider accounts. If saved access expires or authentication is rejected, use the returned recovery flow or credentials_report_failure with the observed revision. Distinguish invalid credentials from insufficient permissions or network failures. Explain which connection needs updating and resume after replacement without replaying completed writes. If access is declined, continue what is possible and explain the remaining limitation; do not ask again unless the user requests it. Never stop at missing access without an actionable next step. "
             + ("This session is mirrored to a Slack conversation. Your final answer will be posted there automatically. "
                "Reply conversationally to the latest message, use readable Markdown/code blocks, and ask questions here when needed. "
                "Do not use slack_send to deliver your answer or progress; the application posts those automatically. "
@@ -276,7 +276,7 @@ def run_agent(spec, relay):
         continuing = not relay.last_error and (bool(wait_group) or bool(wait_credential) or rotation.can_continue(result))
         steered = steering.message_id if steering.can_continue(result) and not relay.last_error else None
         summary = ("" if steered else
-                   "A provider key is needed. Supply it through the secure form in this session, not in chat." if continuing and wait_credential else
+                   "Access is needed. Connect securely through the form in this session, not in chat." if continuing and wait_credential else
                    "Parallel agents are working; the coordinator will resume with their results." if continuing and wait_group else
                    "Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
                    str((relay.last_error if not completed else '') or result.get("final_response") or "Hermes ended without a final response."))

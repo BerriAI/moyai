@@ -509,7 +509,7 @@ class DurableRunner(RunManager):
                 state.pop('save_attempts',None)
                 self.running_status(run_id,'waiting_credential','')
                 self.store.update_run(run_id,pending_result='',summary='',sandbox_id='')
-                self.store.event(run_id,'credential','Workspace saved. Waiting for a provider key; sandbox released.',
+                self.store.event(run_id,'credential','Workspace saved. Waiting for access; sandbox released.',
                                  {'request_id':state['wait_credential']})
                 self.save(run_id,state)
             elif continuing and result.get('wait_group') and self.coordinator:

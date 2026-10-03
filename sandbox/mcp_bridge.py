@@ -1,7 +1,8 @@
 """Small legacy MCP stdio server: run-scoped app tools plus an isolated Chromium browser.
 
 Uses newline-delimited JSON-RPC and never writes non-protocol output to stdout.
-Provider credentials never enter this process.
+Inference provider keys stay server-side. Approved generic access is scoped to
+one subprocess by credential_tools and never returned as raw tool output.
 """
 import json
 import os
@@ -10,10 +11,11 @@ import urllib.request
 from urllib.error import HTTPError
 
 try:
-    from . import github_tools, computer
+    from . import github_tools, computer, credential_tools
 except ImportError:
     import github_tools
     import computer
+    import credential_tools
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -72,7 +74,12 @@ def serve():
             elif method == "tools/call":
                 name, args = params["name"], params.get("arguments", {})
                 try:
-                    if name in {'github_checkout', 'github_create_pull_request'}:
+                    if name == 'credentials_run':
+                        available = broker('/tools')
+                        if name not in {tool['name'] for tool in available}:
+                            raise github_tools.GitHubToolError('Credential commands are not enabled for this session.')
+                        data = credential_tools.run(args, broker)
+                    elif name in {'github_checkout', 'github_create_pull_request'}:
                         available = broker('/tools')  # Recheck revocation/read-only changes.
                         if name not in {tool['name'] for tool in available}:
                             raise github_tools.GitHubToolError('This GitHub operation is not enabled for the session.')
@@ -84,7 +91,7 @@ def serve():
                     result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
                 except HTTPError as exc:
                     message = f'Tool failed (HTTP {exc.code}). The action was not confirmed.'
-                    if name in {'skills_load', 'skills_save', 'skills_read_file'}:
+                    if name in {'skills_load', 'skills_save', 'skills_read_file'} or name.startswith('credentials_'):
                         # The skill API supplies sanitized permission/conflict
                         # messages. Preserve them so the agent can correct its
                         # arguments instead of repeating an unexplained failure.

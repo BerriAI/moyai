@@ -1,4 +1,4 @@
-"""User-scoped provider keys. Raw values never leave the control plane."""
+"""Encrypted task credentials, their authorization, and durable access requests."""
 import asyncio
 import hmac
 import json
@@ -14,8 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from .db import now
 
 
-# Curated origins AND routes: a model cannot send a key to a chosen URL, manage
-# provider accounts, or follow a redirect to another host.
+# Inference keys retain fixed origins/routes and never enter the sandbox.
 PROVIDERS = {
     'fireworks': {'name': 'Fireworks', 'base': 'https://api.fireworks.ai/inference/v1',
                   'setup': 'https://app.fireworks.ai/settings/users/api-keys'},
@@ -27,20 +26,93 @@ PROVIDERS = {
                  'setup': 'https://api.together.ai/settings/api-keys'},
     'groq': {'name': 'Groq', 'base': 'https://api.groq.com/openai/v1',
              'setup': 'https://console.groq.com/keys'},
+    'generic': {'name': 'Other service', 'setup': ''},
 }
-Provider = Literal['fireworks', 'openai', 'anthropic', 'together', 'groq']
+Provider = Literal['fireworks', 'openai', 'anthropic', 'together', 'groq', 'generic']
 Scope = Literal['session', 'personal', 'organization']
+Lifetime = Literal['session', 'persistent']
+Format = Literal['env', 'file']
 ACTIVE = {'running', 'awaiting_approval', 'saving', 'waiting_credential'}
+ENV_NAME = re.compile(r'^[A-Z_][A-Z0-9_]{0,127}$')
+RESERVED_ENV = {'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'ENV', 'BASH_ENV', 'IFS',
+                'PWD', 'OLDPWD', 'TMPDIR', 'NODE_OPTIONS', 'WORKSPACE_RUN_TOKEN',
+                'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'MOYAI_CREDENTIAL_PROXY_URL'}
+
+
+def environment_name(value):
+    if (not ENV_NAME.fullmatch(value) or value in RESERVED_ENV
+            or value.startswith(('LD_', 'DYLD_', 'PYTHON', 'HERMES_', 'WORKSPACE_', 'MOYAI_'))):
+        raise ValueError('Choose a credential environment variable, not a runtime setting.')
+    return value
+
+
+def expiry(value):
+    if not value:
+        return ''
+    try:
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError()
+        return parsed.astimezone(timezone.utc).isoformat()
+    except ValueError:
+        raise ValueError('Expiry must include a timezone.') from None
 
 
 class Arguments(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
 
-class CredentialRequest(Arguments):
+class Capability(Arguments):
     provider: Provider
+    name: str = Field(default='', max_length=80)
+    format: Format = 'env'
+    env_var: str = Field(default='', max_length=128)
+
+    @model_validator(mode='after')
+    def capability(self):
+        self.name = self.name.strip().lower()
+        if self.provider == 'generic':
+            if not self.name or not re.fullmatch(r'[a-z0-9][a-z0-9 _./:-]{0,79}', self.name):
+                raise ValueError('Provide a stable capability name.')
+            if self.format == 'file':
+                environment_name(self.env_var)
+            elif self.env_var:
+                raise ValueError('Environment credentials carry variable names in their JSON value.')
+        elif self.name or self.format != 'env' or self.env_var:
+            raise ValueError('Provider keys use the provider inference connection.')
+        return self
+
+
+class CredentialRequest(Capability):
     reason: str = Field(min_length=3, max_length=1000)
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{1,80}$')
+
+
+class ListCredentials(Arguments):
+    provider: Provider | None = None
+    name: str = Field(default='', max_length=80)
+
+
+class Materialize(Arguments):
+    request_ids: list[str] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode='after')
+    def handles(self):
+        if (len(set(self.request_ids)) != len(self.request_ids)
+                or any(not re.fullmatch(r'[0-9a-f]{32}', item) for item in self.request_ids)):
+            raise ValueError('Use distinct credential request IDs.')
+        return self
+
+
+class RunCredential(Materialize):
+    command: str = Field(min_length=1, max_length=16000)
+    timeout: int = Field(default=120, ge=1, le=600)
+
+
+class ReportFailure(Arguments):
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    revision: int = Field(ge=1)
+    failure: Literal['expired', 'invalid', 'permission', 'unknown']
 
 
 class Invoke(Arguments):
@@ -50,33 +122,78 @@ class Invoke(Arguments):
     body: dict = Field(default_factory=dict)
 
 
-class SaveSecret(Arguments):
-    provider: Provider
+class SaveSecret(Capability):
     label: str = Field(min_length=1, max_length=80)
     scope: Scope
+    lifetime: Lifetime | None = None
+    root_id: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+    expires_at: str = Field(default='', max_length=80)
     value: SecretStr
     client_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
+
+    @model_validator(mode='after')
+    def choices(self):
+        if self.provider == 'generic' and self.scope == 'session':
+            raise ValueError('Choose sharing and session use separately for generic access.')
+        if self.scope == 'session':
+            if self.lifetime not in (None, 'session'):
+                raise ValueError('Session scope requires session use.')
+            self.scope, self.lifetime = 'personal', 'session'
+        if self.lifetime is None:
+            if self.provider == 'generic':
+                raise ValueError('Choose this session or future sessions.')
+            self.lifetime = 'persistent'  # Existing inference-key clients.
+        self.expires_at = expiry(self.expires_at)
+        if not self.label.strip():
+            raise ValueError('Provide a credential name.')
+        return self
 
 
 class Resolve(Arguments):
     decision: Literal['provide', 'decline'] = 'provide'
+    generation: int | None = Field(default=None, ge=0)
     secret_id: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
     scope: Scope | None = None
+    lifetime: Lifetime | None = None
     label: str = Field(default='', max_length=80)
+    expires_at: str = Field(default='', max_length=80)
     value: SecretStr = SecretStr('')
 
     @model_validator(mode='after')
     def one_source(self):
         if self.decision == 'provide' and bool(self.secret_id) == bool(self.value.get_secret_value()):
-            raise ValueError('Choose a saved key or supply a new key.')
+            raise ValueError('Choose saved access or supply new credentials.')
         if self.decision == 'provide' and not self.secret_id and self.scope is None:
-            raise ValueError('Choose who can use this new key before saving it.')
+            raise ValueError('Choose who can use these credentials before saving them.')
+        return self
+
+
+class UpdateSecret(Arguments):
+    revision: int = Field(ge=1)
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    scope: Literal['personal', 'organization'] | None = None
+    lifetime: Lifetime | None = None
+    root_id: str | None = Field(default=None, pattern=r'^([0-9a-f]{32})?$')
+    expires_at: str | None = Field(default=None, max_length=80)
+    value: SecretStr | None = None
+
+    @model_validator(mode='after')
+    def updates(self):
+        if any(getattr(self, key) is None for key in self.model_fields_set):
+            raise ValueError('Omit fields that should stay unchanged.')
+        if self.label is not None and not self.label.strip():
+            raise ValueError('Provide a credential name.')
+        if self.expires_at is not None:
+            self.expires_at = expiry(self.expires_at)
         return self
 
 
 TOOLS = {
-    'credentials_request': (CredentialRequest, 'Request a provider API key when a benchmark needs one. Never ask for keys in chat. Supply a clear reason and stable request_key. Existing authorized keys may be reused. Otherwise this tool checkpoints and pauses the session for a secure web form; do not poll or launch other work in this tool round. When adding a new key, the secure form asks the user to choose Personal or Organization (admin-only); This session is also available. Never pick a default on their behalf. Personal keys stay owned by the user; organization keys are shared. Keys never enter the sandbox.'),
-    'credentials_http_request': (Invoke, 'Use an authorized credential request for a non-streaming inference or model-list API call. The server supplies authentication to the fixed provider origin. Only approved inference paths are allowed. Responses contain no key. For parallel Python benchmarks, use the proxy instructions returned by credentials_request. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
+    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized metadata only, including reuse scope, expiry and connection status; never secret values.'),
+    'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure JSON environment-variable map, format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Never ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
+    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
+    'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication opens a secure replacement request and pauses the session. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
+    'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
 }
 
 
@@ -107,6 +224,21 @@ class Credentials:
                     created_at TEXT NOT NULL
                 );
             ''')
+            for table, fields in {
+                'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                    'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
+                    'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
+                    'revision': 'INTEGER NOT NULL DEFAULT 1'},
+                'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                    'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
+                    'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
+                    'secret_revision': 'INTEGER NOT NULL DEFAULT 1'},
+            }.items():
+                columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+                for field, declaration in fields.items():
+                    if field not in columns:
+                        conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
+            conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")
 
     def root(self, run):
         return run['parent_run_id'] or run['id']
@@ -119,9 +251,9 @@ class Credentials:
 
     def same_requester(self, owner_id, actor_id):
         if owner_id == actor_id:
-            return True
-        # Accounting links are not authentication. Only a recent, eligible
-        # Slack profile from users.info may match an independently verified SSO.
+            return bool(owner_id)
+        # Accounting links are not authentication. Require a fresh, eligible
+        # Slack profile matching an independently verified Google identity.
         rows = self.store.rows('SELECT * FROM users WHERE id IN (?,?)', (owner_id, actor_id))
         owner = next((u for u in rows if u['id'] == owner_id and u['kind'] == 'google'), None)
         actor = next((u for u in rows if u['id'] == actor_id and u['kind'] == 'slack'), None)
@@ -129,7 +261,7 @@ class Credentials:
             return False
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(actor['profile_checked_at'])).total_seconds()
-        except ValueError:
+        except (ValueError, TypeError):
             return False
         return 0 <= age < 3600 and owner['email'] == actor['email']
 
@@ -137,100 +269,185 @@ class Credentials:
         conn.execute('INSERT INTO credential_audit(actor_id,secret_id,action,run_id,created_at) VALUES(?,?,?,?,?)',
                      (actor, secret, action, run_id, now()))
 
+    def status(self, secret):
+        if secret['revoked_at']:
+            return 'revoked'
+        if secret['invalid_reason']:
+            return secret['invalid_reason']
+        if secret['expires_at'] and secret['expires_at'] <= now():
+            return 'expired'
+        return 'active'
+
     def metadata(self, row, user_id, admin):
-        return {**{k: row[k] for k in ('id','provider','label','scope','created_at')},
-                'can_manage': admin if row['scope']=='organization' else row['owner_id']==user_id}
+        fields = ('id', 'provider', 'label', 'scope', 'created_at', 'name', 'format', 'env_var',
+                  'lifetime', 'root_id', 'expires_at', 'invalid_reason', 'revision')
+        return {**{k: row[k] for k in fields}, 'status': self.status(row),
+                'can_manage': admin if row['scope'] == 'organization' else row['owner_id'] == user_id}
+
+    def permitted(self, secret, run, actor_id):
+        if not actor_id or secret['revoked_at']:
+            return False
+        # Lifetime bounds every source of reachability, including shared access.
+        if secret['lifetime'] == 'session' and secret['root_id'] != self.root(run):
+            return False
+        return secret['scope'] == 'organization' or self.same_requester(secret['owner_id'], actor_id)
 
     def list_secrets(self, user_id, admin=False, root_id=''):
-        rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' AND (scope='organization' OR owner_id=?) ORDER BY created_at DESC", (user_id,))
-        return [self.metadata(r, user_id, admin) for r in rows
-                if r['scope'] != 'session' or not root_id or r['root_id'] == root_id]
+        rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC")
+        return [self.metadata(row, user_id, admin) for row in rows
+                if ((row['scope'] == 'organization' or self.same_requester(row['owner_id'], user_id))
+                    and (not root_id or row['lifetime'] != 'session' or row['root_id'] == root_id))]
+
+    def inventory(self, run, args):
+        rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC")
+        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in rows
+                if self.permitted(row, run, run['active_user_id'])
+                and (not args.provider or row['provider'] == args.provider)
+                and (not args.name or row['name'] == args.name.strip().lower())]}
+
+    def validated_value(self, body):
+        value = body.value.get_secret_value()
+        if body.provider != 'generic':
+            value = value.strip()
+            if not 8 <= len(value) <= 4096 or not re.fullmatch(r'[A-Za-z0-9_./:=+~-]+', value):
+                raise HTTPException(422, 'Enter a valid API key without spaces or line breaks.')
+        else:
+            try:
+                encoded = value.encode()
+            except UnicodeError:
+                raise HTTPException(422, 'Credentials must be valid UTF-8 text.') from None
+            if not value or len(encoded) > 128 * 1024 or '\0' in value:
+                raise HTTPException(422, 'Provide credentials up to 128 KiB without null characters.')
+            if body.format == 'env':
+                try:
+                    pairs = json.loads(value)
+                    if not isinstance(pairs, dict) or not 1 <= len(pairs) <= 32:
+                        raise ValueError()
+                    for key, item in pairs.items():
+                        environment_name(key)
+                        if not isinstance(item, str) or not item or len(item.encode()) > 32768 or '\0' in item:
+                            raise ValueError()
+                except (ValueError, TypeError, UnicodeError):
+                    raise HTTPException(422, 'Use a JSON object of credential environment names and nonempty string values, without runtime settings.') from None
+        return value
 
     def insert_secret(self, conn, body, user_id, admin, root_id=''):
         if body.scope == 'organization' and not admin:
-            raise HTTPException(403, 'Only an administrator can save organization keys.')
+            raise HTTPException(403, 'Only an administrator can save organization credentials.')
         if body.scope != 'organization' and not user_id.startswith('google:') and not self.security.local_preview():
-            raise HTTPException(403, 'Use Google sign-in to save a personal or session key.')
-        if body.scope == 'session' and not root_id:
-            raise HTTPException(422, 'Session keys must be provided through a session request.')
-        value = body.value.get_secret_value().strip()
-        if not 8 <= len(value) <= 4096 or not re.fullmatch(r'[A-Za-z0-9_./:=+~-]+', value):
-            raise HTTPException(422, 'Enter a valid API key without spaces or line breaks.')
+            raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
+        root_id = root_id or body.root_id if body.lifetime == 'session' else ''
+        if body.lifetime == 'session' and not root_id:
+            raise HTTPException(422, 'Session credentials must be associated with a session.')
+        value = self.validated_value(body)
+        fields = {key: getattr(body, key) for key in ('provider', 'scope', 'lifetime', 'name', 'format', 'env_var', 'expires_at')}
+        fields.update(label=body.label.strip(), root_id=root_id)
         existing = conn.execute('SELECT * FROM provider_secrets WHERE owner_id=? AND client_id=?', (user_id, body.client_id)).fetchone()
         if existing:
-            if (existing['revoked_at'] or any(existing[k] != v for k,v in {'provider':body.provider,'scope':body.scope,'label':body.label.strip(),'root_id':root_id}.items())
-                    or not hmac.compare_digest(self.security.decrypt(existing['encrypted']),value)):
-                raise HTTPException(409, 'This save was already used for a different key. Refresh the form.')
+            if (existing['revoked_at'] or any(existing[k] != v for k, v in fields.items())
+                    or not hmac.compare_digest(self.security.decrypt(existing['encrypted']).encode(), value.encode())):
+                raise HTTPException(409, 'This save was already used for different credentials. Refresh the form.')
             return existing['id']
         secret_id = uuid4().hex
-        conn.execute('INSERT INTO provider_secrets(id,provider,label,scope,owner_id,root_id,encrypted,created_at,client_id) VALUES(?,?,?,?,?,?,?,?,?)',
-                     (secret_id, body.provider, body.label.strip(), body.scope, user_id, root_id,
-                      self.security.encrypt(value), now(), body.client_id))
-        self.audit_in(conn, user_id, secret_id, 'saved ' + body.scope, root_id)
+        fields.update(id=secret_id, owner_id=user_id, encrypted=self.security.encrypt(value), created_at=now(), client_id=body.client_id)
+        columns = ','.join(fields)
+        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join(":" + key for key in fields)})', fields)
+        self.audit_in(conn, user_id, secret_id, 'saved ' + body.scope + ' ' + body.lifetime, root_id)
         return secret_id
-
-    def permitted(self, secret, run, actor_id):
-        if secret['revoked_at']:
-            return False
-        if secret['scope'] == 'organization':
-            return True
-        return (self.same_requester(secret['owner_id'], actor_id)
-                and (secret['scope'] != 'session' or secret['root_id'] == self.root(run)))
 
     def tools(self, run):
         if not self.settings.temporal_enabled or not run['chat_enabled']:
             return []
-        return [{'name':name, 'description':description, 'inputSchema':schema.model_json_schema()}
-                for name,(schema,description) in TOOLS.items()]
+        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema()}
+                for name, (schema, description) in TOOLS.items()]
+
+    def pending_result(self, row):
+        return {'status': 'pending', 'request_id': row['id'], 'moyai_wait_credential': row['id'],
+                'failure': row['failure'], 'generation': row['generation'],
+                'message': 'Access is needed. Pause for the secure form; never ask for credentials in chat.',
+                'session_url': self.settings.public_url.rstrip('/') + '/#run=' + row['run_id']}
 
     def ready(self, request):
+        if request['status'] == 'pending':
+            return self.pending_result(request)
         if request['status'] == 'declined':
-            return {'status':'declined', 'request_id':request['id'], 'provider':request['provider'],
-                    'instructions':'The user declined this key request. Continue without it, explain any limitation, and do not request it again unless the user asks.'}
-        suffix = '' if request['provider']=='anthropic' else '/v1'
-        return {'status':request['status'], 'request_id':request['id'], 'provider':request['provider'],
-                'instructions': 'Use credentials_http_request with this request_id. For Python SDKs, base_url=os.environ["MOYAI_CREDENTIAL_PROXY_URL"] + "/' + request['id'] + suffix + '", api_key=os.environ["WORKSPACE_RUN_TOKEN"]. Set max_retries=0 and stream=False. The endpoint is rebuilt each turn; do not hard-code it. No raw provider key is available. Provider charges are separate from Moyai gateway spend.'}
+            return {'status': 'declined', 'request_id': request['id'], 'provider': request['provider'],
+                    'instructions': 'The user declined this access request. Continue without it, explain any limitation, and do not request it again unless the user asks.'}
+        result = {'status': request['status'], 'request_id': request['id'], 'provider': request['provider']}
+        if request['provider'] == 'generic':
+            return {**result, 'name': request['name'], 'format': request['format'], 'env_var': request['env_var'],
+                    'instructions': 'Use credentials_run with this request_id to verify access and continue the task. Credential values are supplied only to that command. Report confirmed authentication failures with the returned revision; never replay potentially completed writes automatically.'}
+        suffix = '' if request['provider'] == 'anthropic' else '/v1'
+        return {**result, 'instructions': 'Use credentials_http_request with this request_id. For Python SDKs, base_url=os.environ["MOYAI_CREDENTIAL_PROXY_URL"] + "/' + request['id'] + suffix + '", api_key=os.environ["WORKSPACE_RUN_TOKEN"]. Set max_retries=0 and stream=False. The endpoint is rebuilt each turn; do not hard-code it. No raw provider key is available. Provider charges are separate from Moyai gateway spend.'}
+
+    def reopen_in(self, conn, row, failure, run=None):
+        if row['status'] != 'provided':
+            return dict(row)
+        if run and row['message_id'] != run['active_message_id']:
+            current = conn.execute('SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND request_key=?',
+                                   (run['id'], run['active_message_id'], row['request_key'])).fetchone()
+            if current:
+                if self.matching(current, row):
+                    current_secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (current['secret_id'],)).fetchone()
+                    if (current['status'] != 'provided' or (current_secret and self.permitted(current_secret, run, run['active_user_id'])
+                            and self.status(current_secret) == 'active')):
+                        return dict(current)  # A newer grant/decline wins over this older failure.
+                    return self.reopen_in(conn, current, failure, run)
+                # The same caller key was used for a different capability in this
+                # turn. Preserve that request and move this handle under a new key.
+                conn.execute('UPDATE credential_requests SET request_key=? WHERE id=?',
+                             (row['request_key'][:60] + '-renew-' + uuid4().hex[:8], row['id']))
+            conn.execute('UPDATE credential_requests SET message_id=?,actor_id=? WHERE id=?',
+                         (run['active_message_id'], run['active_user_id'], row['id']))
+        conn.execute("UPDATE credential_requests SET status='pending',secret_id='',resolved_at='',generation=generation+1,revision=revision+1,failure=? WHERE id=?",
+                     (failure, row['id']))
+        self.audit_in(conn, row['actor_id'], row['secret_id'], 'requested again: ' + failure, row['run_id'])
+        return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
+
+    def binding_in(self, conn, row, secret):
+        # The handle version changes for both in-place rotation and a different
+        # attached secret, whose own version may start again at one.
+        if row['secret_revision'] != secret['revision']:
+            conn.execute('UPDATE credential_requests SET revision=revision+1,secret_revision=? WHERE id=?',
+                         (secret['revision'], row['id']))
+            row = dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
+        return row
+
+    def matching(self, secret, capability):
+        return all(secret[key] == capability[key] for key in ('provider', 'name', 'format', 'env_var'))
 
     def request(self, run, args):
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             prior = conn.execute('SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND request_key=?',
                                  (run['id'], run['active_message_id'], args.request_key)).fetchone()
-            if prior and (prior['provider'] != args.provider or prior['reason'] != args.reason):
+            if prior and any(prior[key] != getattr(args, key) for key in ('provider', 'reason', 'name', 'format', 'env_var')):
                 raise ValueError('Use the original arguments when retrying this credential request.')
             if not prior:
                 prior = conn.execute("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'",
-                                     (run['id'],run['active_message_id'])).fetchone()
+                                     (run['id'], run['active_message_id'])).fetchone()
             if prior:
                 row = dict(prior)
                 if row['status'] == 'provided':
-                    secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?',(row['secret_id'],)).fetchone()
-                    if not secret or not self.permitted(secret,run,run['active_user_id']):
-                        row.update(status='pending',secret_id='',resolved_at='')
-                        conn.execute("UPDATE credential_requests SET status='pending',secret_id='',resolved_at='' WHERE id=?",(row['id'],))
-                        self.audit_in(conn,run['active_user_id'],'','requested again',run['id'])
+                    secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (row['secret_id'],)).fetchone()
+                    if not secret or not self.permitted(secret, run, run['active_user_id']) or self.status(secret) != 'active':
+                        row = self.reopen_in(conn, row, self.status(secret) if secret else 'unavailable')
             else:
                 actor = run['active_user_id']
                 if not actor or not run['active_message_id']:
-                    raise ValueError('Start an authenticated chat session before requesting a key.')
-                # Reuse a single unambiguous personal/session key before an org
-                # default. Ambiguous choices always go through the secure form.
-                candidates = [dict(s) for s in conn.execute("SELECT * FROM provider_secrets WHERE provider=? AND revoked_at=''", (args.provider,))
-                              if self.permitted(s, run, actor)]
-                private = [s for s in candidates if s['scope'] != 'organization']
-                choices = private or [s for s in candidates if s['scope'] == 'organization']
+                    raise ValueError('Start an authenticated chat session before requesting access.')
+                candidates = [dict(secret) for secret in conn.execute("SELECT * FROM provider_secrets WHERE provider=? AND revoked_at=''", (args.provider,))
+                              if self.matching(secret, args.model_dump()) and self.permitted(secret, run, actor) and self.status(secret) == 'active']
+                private = [secret for secret in candidates if secret['scope'] != 'organization']
+                choices = private or candidates
                 secret = choices[0] if len(choices) == 1 else None
-                row = {'id':uuid4().hex, 'run_id':run['id'], 'message_id':run['active_message_id'], 'actor_id':actor,
-                       'provider':args.provider,'reason':args.reason,'request_key':args.request_key,
-                       'status':'provided' if secret else 'pending','secret_id':secret['id'] if secret else '',
-                       'created_at':now(),'resolved_at':now() if secret else ''}
-                conn.execute('INSERT INTO credential_requests VALUES(:id,:run_id,:message_id,:actor_id,:provider,:reason,:request_key,:status,:secret_id,:created_at,:resolved_at)',row)
+                row = {'id': uuid4().hex, 'run_id': run['id'], 'message_id': run['active_message_id'], 'actor_id': actor,
+                       **args.model_dump(), 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
+                       'created_at': now(), 'resolved_at': now() if secret else '', 'generation': 0, 'failure': '',
+                       'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
+                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
                 self.audit_in(conn, actor, row['secret_id'], 'reused' if secret else 'requested', run['id'])
-        self.store.event(run['id'], 'credential', 'Provider key ready' if row['status'] == 'provided' else 'Provider key requested', {'request_id':row['id']})
-        if row['status'] == 'pending':
-            return {'status':'pending','request_id':row['id'],'moyai_wait_credential':row['id'],
-                    'message':'Pause for the secure web form. Never ask the user to paste a key in chat.',
-                    'session_url':self.settings.public_url.rstrip('/') + '/#run=' + run['id']}
+        self.store.event(run['id'], 'credential', 'Access ready' if row['status'] == 'provided' else 'Access requested', {'request_id': row['id']})
         return self.ready(row)
 
     def resolution(self, run_id, request_id):
@@ -243,134 +460,263 @@ class Credentials:
     def pending(self, run, user_id, admin):
         if run['status'] not in ACTIVE:
             return []
-        rows = self.store.rows("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'", (run['id'],run['active_message_id']))
-        return [{**{k:r[k] for k in ('id','provider','reason','status')},
-                 'can_personal':self.same_requester(user_id,r['actor_id']), 'can_organization':admin,
-                 'setup_url':PROVIDERS[r['provider']]['setup'], 'provider_name':PROVIDERS[r['provider']]['name']}
-                for r in rows]
+        rows = self.store.rows("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'", (run['id'], run['active_message_id']))
+        return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure')},
+                 'root_id': self.root(run), 'can_personal': self.same_requester(user_id, row['actor_id']), 'can_organization': admin,
+                 'setup_url': PROVIDERS[row['provider']]['setup'], 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
+                for row in rows]
 
     def resolve(self, request_id, body, user_id, admin):
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            row = conn.execute('SELECT * FROM credential_requests WHERE id=?',(request_id,)).fetchone()
+            row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
             if not row:
-                raise HTTPException(404,'Credential request not found.')
+                raise HTTPException(404, 'Credential request not found.')
             run = self.store.run(row['run_id'])
-            own = self.same_requester(user_id,row['actor_id'])
+            own = self.same_requester(user_id, row['actor_id'])
             if not own and not admin:
-                raise HTTPException(403,'Only the requester or an administrator can resolve this request.')
+                raise HTTPException(403, 'Only the requester or an administrator can resolve this request.')
+            if (body.generation is not None and body.generation != row['generation']) or (body.generation is None and row['generation']):
+                raise HTTPException(409, 'This access request changed. Reopen the form before continuing.')
             if row['status'] != 'pending':
-                return row['run_id']  # A lost acknowledgement never saves twice.
+                return row['run_id']  # Lost acknowledgements never save twice.
             if run['status'] not in ACTIVE or run['active_message_id'] != row['message_id']:
-                raise HTTPException(409,'This session is no longer waiting for that key.')
+                raise HTTPException(409, 'This session is no longer waiting for that access.')
             secret_id = ''
             if body.decision == 'provide':
                 if body.secret_id:
-                    secret = conn.execute("SELECT * FROM provider_secrets WHERE id=? AND revoked_at=''",(body.secret_id,)).fetchone()
-                    if (not secret or secret['provider'] != row['provider'] or
-                        (secret['scope'] != 'organization' and (secret['owner_id'] != user_id or not own)) or
-                        not self.permitted(secret,run,row['actor_id'])):
-                        raise HTTPException(403,'That key is not available to this requester and session.')
+                    secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (body.secret_id,)).fetchone()
+                    if (not secret or not self.matching(secret, row) or self.status(secret) != 'active'
+                            or (secret['scope'] != 'organization' and (secret['owner_id'] != user_id or not own))
+                            or not self.permitted(secret, run, row['actor_id'])):
+                        raise HTTPException(403, 'Those credentials are not available to this requester and session.')
                     secret_id = secret['id']
                 else:
                     if body.scope != 'organization' and not own:
-                        raise HTTPException(403,'Personal keys can only be supplied for your own requests.')
-                    data = SaveSecret(provider=row['provider'],scope=body.scope,label=body.label.strip() or PROVIDERS[row['provider']]['name'] + ' key',
-                                      value=body.value,client_id='request-' + row['id'])
-                    secret_id = self.insert_secret(conn,data,user_id,admin,self.root(run) if body.scope == 'session' else '')
+                        raise HTTPException(403, 'Personal credentials can only be supplied for your own requests.')
+                    try:
+                        data = SaveSecret(**{key: row[key] for key in ('provider', 'name', 'format', 'env_var')},
+                            scope=body.scope, lifetime=body.lifetime, expires_at=body.expires_at,
+                            label=body.label.strip() or row['name'] or PROVIDERS[row['provider']]['name'] + ' key',
+                            value=body.value, client_id='request-' + row['id'] + '-' + str(row['generation']))
+                    except ValueError:
+                        raise HTTPException(422, 'Choose sharing and reuse, and check the credential format and expiry.') from None
+                    secret_id = self.insert_secret(conn, data, user_id, admin, self.root(run))
             status = 'provided' if secret_id else 'declined'
-            conn.execute('UPDATE credential_requests SET status=?,secret_id=?,resolved_at=? WHERE id=?',(status,secret_id,now(),request_id))
-            self.audit_in(conn,user_id,secret_id,status,row['run_id'])
-        self.store.event(row['run_id'],'credential','Provider key supplied' if secret_id else 'Provider key request declined',{'request_id':request_id})
+            secret_revision = conn.execute('SELECT revision FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()[0] if secret_id else 1
+            conn.execute('UPDATE credential_requests SET status=?,secret_id=?,secret_revision=?,resolved_at=? WHERE id=?',
+                         (status, secret_id, secret_revision, now(), request_id))
+            self.audit_in(conn, user_id, secret_id, status, row['run_id'])
+        self.store.event(row['run_id'], 'credential', 'Access supplied' if secret_id else 'Access request declined', {'request_id': request_id})
         return row['run_id']
 
+    def authorized_request(self, conn, run, request_id):
+        row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
+        if not row or row['run_id'] != run['id']:
+            raise HTTPException(403, 'This credential request is not available in this session.')
+        secret = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (row['secret_id'],)).fetchone()
+        # Handles from earlier turns may only be used under current permission.
+        same_actor = (self.same_requester(row['actor_id'], run['active_user_id'])
+                      or self.same_requester(run['active_user_id'], row['actor_id']))
+        if not same_actor and (not secret or secret['scope'] != 'organization'):
+            raise HTTPException(403, 'Request access for the current requester.')
+        return dict(row), dict(secret) if secret else None
+
+    def materialize(self, run, args):
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            accepted = []
+            for request_id in args.request_ids:
+                row, secret = self.authorized_request(conn, run, request_id)
+                if row['provider'] != 'generic':
+                    raise HTTPException(422, 'Use the inference proxy for provider keys.')
+                if row['status'] != 'provided':
+                    return self.ready(row)
+                if not secret or not self.permitted(secret, run, run['active_user_id']):
+                    return self.ready(self.reopen_in(conn, row, 'unavailable', run))
+                if self.status(secret) != 'active':
+                    return self.ready(self.reopen_in(conn, row, self.status(secret), run))
+                accepted.append((self.binding_in(conn, row, secret), secret))
+            # No plaintext is produced until every selected handle is authorized.
+            return {'status': 'ready', 'bindings': [{'request_id': row['id'], 'revision': row['revision'],
+                    'format': secret['format'], 'env_var': secret['env_var'],
+                    'value': self.security.decrypt(secret['encrypted'])} for row, secret in accepted]}
+
+    def report_failure(self, run, args):
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row, secret = self.authorized_request(conn, run, args.request_id)
+            if (row['status'] != 'provided' or not secret or row['revision'] != args.revision
+                    or row['secret_revision'] != secret['revision']):
+                return {'status': 'stale', 'message': 'Access changed since this command. Check the current connection before continuing.'}
+            if not self.permitted(secret, run, run['active_user_id']):
+                raise HTTPException(403, 'This access is unavailable to the current requester.')
+            if args.failure == 'unknown':
+                return {'status': 'unknown', 'request_id': row['id'], 'revision': row['revision'],
+                        'message': 'The failure does not establish that credentials are invalid. Inspect the command and service; do not automatically replay writes.'}
+            if args.failure != 'permission':
+                conn.execute('UPDATE provider_secrets SET invalid_reason=? WHERE id=? AND revision=?',
+                             (args.failure, secret['id'], secret['revision']))
+            result = self.ready(self.reopen_in(conn, row, args.failure, run))
+            self.audit_in(conn, run['active_user_id'], secret['id'], 'authentication ' + args.failure, run['id'])
+        self.store.event(run['id'], 'credential', 'Additional permission needed' if args.failure == 'permission' else 'Saved access needs replacement', {'request_id': args.request_id})
+        return result
+
+    async def call(self, run, name, arguments):
+        args = TOOLS[name][0].model_validate(arguments)
+        if name == 'credentials_list':
+            return self.inventory(run, args)
+        if name == 'credentials_request':
+            return self.request(run, args)
+        if name == 'credentials_report_failure':
+            return self.report_failure(run, args)
+        if name == 'credentials_run':
+            return {'error': 'Run credential commands through the sandbox credential tool.'}
+        status, result = await self.invoke(run, args)
+        return {'status_code': status, 'response': result,
+                **({'moyai_wait_credential': result['moyai_wait_credential']} if result.get('moyai_wait_credential') else {})}
+
     async def invoke(self, run, args):
-        request = self.row(args.request_id)
-        # A handle from an earlier turn is usable only by that same actor (or
-        # with an org key). Children request their own scoped handle.
-        secret_rows = self.store.rows('SELECT * FROM provider_secrets WHERE id=?',(request['secret_id'],))
-        secret = secret_rows[0] if secret_rows else None
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            request, secret = self.authorized_request(conn, run, args.request_id)
+            if secret:
+                request = self.binding_in(conn, request, secret)
         if (request['run_id'] != run['id'] or request['status'] != 'provided' or not secret
-                or not self.permitted(secret,run,run['active_user_id'])):
-            raise HTTPException(403,'This provider key is unavailable. Request it again through the secure form.')
+                or not self.permitted(secret, run, run['active_user_id'])):
+            raise HTTPException(403, 'This provider key is unavailable. Request it again through the secure form.')
+        if secret['provider'] == 'generic':
+            raise HTTPException(422, 'Use credentials_run for this connection.')
+        if self.status(secret) != 'active':
+            result = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='expired' if self.status(secret) == 'expired' else 'invalid'))
+            return 401, {'error': {'message': 'Saved authentication is unavailable. Use the secure replacement form.', 'type': 'credential_expired'}, **result}
         provider = PROVIDERS[secret['provider']]
-        paths = {'GET':{'/models'},'POST':{'/messages'} if secret['provider']=='anthropic' else {'/chat/completions','/completions','/embeddings'}}
+        paths = {'GET': {'/models'}, 'POST': {'/messages'} if secret['provider'] == 'anthropic' else {'/chat/completions', '/completions', '/embeddings'}}
         if args.path not in paths[args.method] or (args.method == 'GET' and args.body):
-            raise HTTPException(422,'Only supported inference and model-list routes are allowed.')
+            raise HTTPException(422, 'Only supported inference and model-list routes are allowed.')
         if args.body.get('stream') or args.body.get('background'):
-            raise HTTPException(422,'Use non-streaming, foreground requests through the credential proxy.')
+            raise HTTPException(422, 'Use non-streaming, foreground requests through the credential proxy.')
         if self.slots.locked():
-            raise HTTPException(429,'Provider request capacity is busy. No provider call was made.')
+            raise HTTPException(429, 'Provider request capacity is busy. No provider call was made.')
         async with self.slots:
             value = self.security.decrypt(secret['encrypted'])
-            headers = {'x-api-key':value,'anthropic-version':'2023-06-01'} if secret['provider']=='anthropic' else {'Authorization':'Bearer '+value}
+            headers = {'x-api-key': value, 'anthropic-version': '2023-06-01'} if secret['provider'] == 'anthropic' else {'Authorization': 'Bearer ' + value}
             try:
-                async with httpx.AsyncClient(timeout=httpx.Timeout(300,connect=30),follow_redirects=False) as client:
-                    async with client.stream(args.method,provider['base']+args.path,headers=headers,
-                                             json=args.body if args.method=='POST' else None) as response:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30), follow_redirects=False) as client:
+                    async with client.stream(args.method, provider['base'] + args.path, headers=headers,
+                                             json=args.body if args.method == 'POST' else None) as response:
                         raw = bytearray()
                         async for chunk in response.aiter_bytes():
                             raw.extend(chunk)
-                            if len(raw)>8*1024*1024:
-                                raise HTTPException(502,'Provider response exceeded the size limit.')
+                            if len(raw) > 8 * 1024 * 1024:
+                                raise HTTPException(502, 'Provider response exceeded the size limit.')
                         status = response.status_code
             except httpx.HTTPError:
-                raise HTTPException(502,'Provider request could not be confirmed. Do not retry a billed request automatically.') from None
+                raise HTTPException(502, 'Provider request could not be confirmed. Do not retry a billed request automatically.') from None
             if not 200 <= status < 300:
-                # Provider errors sometimes echo authentication; never forward them.
-                return status if 400<=status<600 else 502, {'error':{'message':f'{provider["name"]} rejected the request ({status}). Check the key, quota, model and request.','type':'provider_error'}}
+                recovery = {}
+                if status in (401, 403):
+                    recovery = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='invalid' if status == 401 else 'permission'))
+                return status if 400 <= status < 600 else 502, {'error': {'message': f'{provider["name"]} rejected the request ({status}). ' + ('Update authentication through the secure form.' if status == 401 else 'Check permissions, quota, model and request.'), 'type': 'invalid_credentials' if status == 401 else 'permission' if status == 403 else 'provider_error'}, **recovery}
             try:
-                # Decode JSON escapes before scrubbing both values and object
-                # keys. Provider responses may echo a token as unicode escapes.
                 decoded = json.loads(bytes(raw))
-                result = json.loads(json.dumps(decoded).replace(value,'[credential redacted]'))
-            except (ValueError,UnicodeDecodeError):
-                raise HTTPException(502,'Provider returned an invalid JSON response.') from None
+                result = json.loads(json.dumps(decoded).replace(value, '[credential redacted]'))
+            except (ValueError, UnicodeDecodeError):
+                raise HTTPException(502, 'Provider returned an invalid JSON response.') from None
             return status, result
+
+    def update_secret(self, secret_id, body, user_id, admin):
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM provider_secrets WHERE id=? AND revoked_at=\'\'', (secret_id,)).fetchone()
+            if not row or (row['scope'] == 'organization' and not admin) or (row['scope'] != 'organization' and row['owner_id'] != user_id):
+                raise HTTPException(404, 'Credentials not found.')
+            if row['revision'] != body.revision:
+                raise HTTPException(409, 'These credentials changed. Refresh before saving.')
+            values = dict(row)
+            for key in body.model_fields_set - {'revision', 'value'}:
+                values[key] = getattr(body, key)
+            if values['scope'] == 'organization' and not admin:
+                raise HTTPException(403, 'Only an administrator can manage organization credentials.')
+            if values['scope'] == 'personal' and row['scope'] == 'organization':
+                # An administrator can make a shared credential personal only to themselves.
+                values['owner_id'] = user_id
+                values['client_id'] = 'ownership-' + secret_id
+                if not user_id.startswith('google:') and not self.security.local_preview():
+                    raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
+            if values['lifetime'] == 'session':
+                root = self.store.run(values['root_id']) if values['root_id'] else None
+                if not root or self.root(root) != values['root_id']:
+                    raise HTTPException(422, 'Choose an existing root session for session-only use.')
+                if values['scope'] == 'personal' and not self.same_requester(values['owner_id'], root['active_user_id']):
+                    raise HTTPException(403, 'Choose your own session for personal credentials.')
+            else:
+                values['root_id'] = ''
+            if body.value is not None:
+                candidate = SaveSecret(**{key: values[key] for key in ('provider', 'name', 'format', 'env_var', 'scope', 'lifetime', 'root_id', 'expires_at', 'client_id', 'label')}, value=body.value)
+                values['encrypted'] = self.security.encrypt(self.validated_value(candidate))
+                values['invalid_reason'] = ''
+            values['label'] = values['label'].strip()
+            fields = ('label', 'scope', 'lifetime', 'root_id', 'expires_at', 'owner_id', 'client_id', 'encrypted', 'invalid_reason')
+            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=:' + key for key in fields) + ',revision=revision+1 WHERE id=:id', values)
+            self.audit_in(conn, user_id, secret_id, 'updated', values['root_id'])
+            saved = dict(conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone())
+        return self.metadata(saved, user_id, admin)
 
     def routes(self):
         router = APIRouter()
 
         def actor(request, mutation=False):
-            self.security.require(request,mutation=mutation)
-            return self.store.identity(self.security.session_info(request)), self.security.role(request)=='admin'
+            self.security.require(request, mutation=mutation)
+            return self.store.identity(self.security.session_info(request)), self.security.role(request) == 'admin'
 
         @router.get('/api/credentials')
-        async def list_keys(request: Request, run_id: str=''):
-            user,admin = actor(request)
-            run = self.store.run(run_id) if re.fullmatch(r'[0-9a-f]{32}',run_id) else None
-            return {'providers':[{'id':k,'name':v['name'],'setup_url':v['setup']} for k,v in PROVIDERS.items()],
-                    'secrets':self.list_secrets(user,admin,self.root(run) if run else '')}
+        async def list_keys(request: Request, run_id: str = ''):
+            user, admin = actor(request)
+            run = self.store.run(run_id) if re.fullmatch(r'[0-9a-f]{32}', run_id) else None
+            root_id = self.root(run) if run else ''
+            return {'providers': [{'id': key, 'name': value['name'], 'setup_url': value['setup']} for key, value in PROVIDERS.items()],
+                    'root_id': root_id, 'secrets': self.list_secrets(user, admin, root_id)}
 
-        @router.post('/api/credentials/secrets',status_code=201)
+        @router.post('/api/credentials/secrets', status_code=201)
         async def save_key(body: SaveSecret, request: Request):
-            user,admin = actor(request,True)
+            user, admin = actor(request, True)
+            if body.lifetime == 'session':
+                root = self.store.run(body.root_id) if body.root_id else None
+                if not root or self.root(root) != body.root_id:
+                    raise HTTPException(422, 'Provide session credentials through a session request.')
+                if body.scope == 'personal' and not self.same_requester(user, root['active_user_id']):
+                    raise HTTPException(403, 'Choose your own session for personal credentials.')
             with self.store.connect() as conn:
                 conn.execute('BEGIN IMMEDIATE')
-                identity = self.insert_secret(conn,body,user,admin)
-            return {'id':identity,'saved':True}
+                identity = self.insert_secret(conn, body, user, admin)
+            return {'id': identity, 'saved': True}
+
+        @router.patch('/api/credentials/secrets/{secret_id}')
+        async def update_key(secret_id: str, body: UpdateSecret, request: Request):
+            user, admin = actor(request, True)
+            return self.update_secret(secret_id, body, user, admin)
 
         @router.delete('/api/credentials/secrets/{secret_id}')
         async def revoke_key(secret_id: str, request: Request):
-            user,admin = actor(request,True)
+            user, admin = actor(request, True)
             with self.store.connect() as conn:
                 conn.execute('BEGIN IMMEDIATE')
-                row = conn.execute('SELECT * FROM provider_secrets WHERE id=?',(secret_id,)).fetchone()
-                if not row or not (row['owner_id']==user or (row['scope']=='organization' and admin)):
-                    raise HTTPException(404,'Key not found.')
-                if row['scope']=='organization' and not admin:
-                    raise HTTPException(403,'Only an administrator can revoke organization keys.')
-                conn.execute("UPDATE provider_secrets SET encrypted='',revoked_at=? WHERE id=?",(now(),secret_id))
-                self.audit_in(conn,user,secret_id,'revoked')
-            return {'revoked':True}
+                row = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()
+                if not row or not (row['owner_id'] == user or (row['scope'] == 'organization' and admin)):
+                    raise HTTPException(404, 'Credentials not found.')
+                if row['scope'] == 'organization' and not admin:
+                    raise HTTPException(403, 'Only an administrator can revoke organization credentials.')
+                conn.execute("UPDATE provider_secrets SET encrypted='',revoked_at=?,revision=revision+1 WHERE id=?", (now(), secret_id))
+                self.audit_in(conn, user, secret_id, 'revoked')
+            return {'revoked': True}
 
         @router.post('/api/credentials/requests/{request_id}')
         async def resolve_request(request_id: str, body: Resolve, request: Request):
-            user,admin = actor(request,True)
-            run_id = self.resolve(request_id,body,user,admin)
-            # Wake is durable before acknowledgement, even if Temporal is down.
+            user, admin = actor(request, True)
+            run_id = self.resolve(request_id, body, user, admin)
             self.manager.submit(self.store.run(run_id))
             await self.checkpoints.flush()
-            return {'saved':True}
+            return {'saved': True}
 
         return router

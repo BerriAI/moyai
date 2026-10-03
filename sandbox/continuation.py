@@ -21,11 +21,11 @@ def resumed_context(spec):
                  'Report failed or incomplete cases explicitly.\n' + json.dumps(compact))
     if spec.get('credential_resolution'):
         resolution = spec['credential_resolution']
-        instruction = ('PROVIDER KEY REQUEST IS STILL PENDING. Incorporate the user message in the same task; '
-                       'do not claim the key was supplied or create a duplicate request. '
+        instruction = ('ACCESS REQUEST IS STILL PENDING. Incorporate the user message in the same task; '
+                       'do not claim access was supplied or create a duplicate request. '
                        if resolution['status'] == 'pending' else
-                       'PROVIDER KEY REQUEST RESOLVED. Continue the original work if provided. If declined, explain '
-                       'what can be done without the key; do not request it again unless the user asks. ')
+                       'ACCESS REQUEST RESOLVED. Continue the original work if provided. If declined, explain '
+                       'what can be done without this access; do not request it again unless the user asks. ')
         text += '\n\n' + instruction + '\n' + json.dumps(resolution)
     return text
 

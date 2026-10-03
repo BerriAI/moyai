@@ -53,7 +53,7 @@ class BrokerRelay:
                     authorized = authorized or hmac.compare_digest(self.headers.get('x-api-key',''),token)
                 if not authorized:
                     return self.error(401, 'Invalid cloud session capability.')
-                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/tools/call'}}
+                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/tools/call', '/credentials/materialize'}}
                 if not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:
@@ -69,10 +69,10 @@ class BrokerRelay:
                         except (ValueError,UnicodeDecodeError):
                             return self.error(422,'Invalid provider request JSON.')
                         route,method = '/credentials/invoke','POST'
-                    control_call = False
+                    control_call = self.path == '/credentials/materialize'
                     if self.path == '/tools/call':
                         try:
-                            control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry', 'credentials_request'}
+                            control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
                         except (ValueError, AttributeError):
                             pass
                     if self.command == 'GET' and self.path in {'/tools', '/v1/models'}:
@@ -156,6 +156,9 @@ class BrokerRelay:
                     if not message:
                         try:
                             value = json.loads(exc.read(8192))
+                            credential = value.get('moyai_wait_credential') if credential_route else None
+                            if isinstance(credential, str) and re.fullmatch(r'[0-9a-f]{32}', credential):
+                                relay.wait_credential = credential
                             message = value.get('detail') or value.get('error', {}).get('message')
                         except (ValueError, AttributeError):
                             pass

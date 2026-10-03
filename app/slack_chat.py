@@ -318,7 +318,7 @@ class SlackChat:
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential_requests'").fetchone():
                     for key in conn.execute("SELECT q.id,q.run_id FROM credential_requests q JOIN runs r ON r.id=q.run_id WHERE (r.id=? OR r.parent_run_id=?) AND q.status='pending' AND q.message_id=r.active_message_id AND r.status IN ('running','saving','waiting_credential')",(run_id,run_id)).fetchall():
                         self.queue(conn,run_id,'credential:'+key['id'],'approval',
-                                   'A provider API key is needed to continue. Provide a key or open the provider setup link through the secure form. Do not paste keys in Slack.\n' + self.link(key['run_id']))
+                                   'Access is needed to continue. Connect through the secure form, or choose to continue without access. Do not paste credentials in Slack.\n' + self.link(key['run_id']))
                 if binding['status'] == 'interrupted':
                     self.queue(conn, run_id, f"interrupted:{run_id}:{binding['updated_at']}", 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 

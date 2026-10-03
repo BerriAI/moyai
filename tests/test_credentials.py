@@ -303,3 +303,204 @@ def test_credential_tools_require_durable_identity_and_do_not_return_values(work
     assert 'Invalid' in bad.text and KEY not in bad.text
     app.state.store.update_run(run['id'],token_hash='')
     assert client.post(endpoint+'/tools/call',json=body,headers=headers).status_code==401
+
+
+def access_request(vault,run,*,format='env',key='cluster'):
+    return vault.request(run,CredentialRequest(provider='generic',name='production cluster',format=format,
+        env_var='KUBECONFIG' if format=='file' else '',reason='Investigate the outage',request_key=key))
+
+
+def generic_value(format):
+    return 'apiVersion: v1\nusers:\n- token: private-test-token\n' if format=='file' else json.dumps({'AWS_ACCESS_KEY_ID':'synthetic-access','AWS_SECRET_ACCESS_KEY':'synthetic-secret'})
+
+
+@pytest.mark.parametrize('scope',['personal','organization'])
+@pytest.mark.parametrize('lifetime',['session','persistent'])
+@pytest.mark.parametrize('format',['env','file'])
+def test_generic_sharing_and_lifetime_apply_to_inventory_reuse_and_materialization(workspace,monkeypatch,scope,lifetime,format):
+    from app.credentials import ListCredentials, Materialize
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    run=active(app)
+    request=access_request(vault,run,format=format)
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    value=generic_value(format)
+    response=client.post('/api/credentials/requests/'+request['request_id'],json={
+        'scope':scope,'lifetime':lifetime,'value':value,'generation':0})
+    assert response.status_code==200
+    row=vault.row(request['request_id'])
+    secret=app.state.store.rows('SELECT * FROM provider_secrets')[0]
+    assert secret['scope']==scope and secret['lifetime']==lifetime
+    assert secret['root_id']==(run['id'] if lifetime=='session' else '')
+    assert value not in str(secret)
+    result=vault.materialize(run,Materialize(request_ids=[row['id']]))
+    assert result['bindings'][0]['value']==value and result['bindings'][0]['revision']==1
+    assert value not in json.dumps(vault.inventory(run,ListCredentials()))
+    for actor,same_root,allowed in [('google:alice',False,lifetime=='persistent'),
+                                   ('google:bob',True,scope=='organization'),
+                                   ('google:bob',False,scope=='organization' and lifetime=='persistent')]:
+        other=active(app,actor)
+        if same_root:
+            app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?',(run['id'],other['id']))
+            other=app.state.store.run(other['id'])
+        listing=vault.inventory(other,ListCredentials())['credentials']
+        assert bool(listing)==allowed
+        assert (access_request(vault,other,format=format)['status']=='provided')==allowed
+        # A credential request is run-bound even when its secret is shared.
+        with pytest.raises(HTTPException):
+            vault.materialize(other,Materialize(request_ids=[row['id']]))
+
+
+def test_generic_input_is_explicit_and_runtime_names_and_secret_errors_are_safe(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    body={'provider':'generic','name':'cloud','label':'Cloud','scope':'personal','lifetime':'persistent',
+          'format':'env','value':generic_value('env'),'client_id':'generic-input'}
+    invalid=[{key:value for key,value in body.items() if key!='lifetime'},
+             {**body,'value':json.dumps({'WORKSPACE_RUN_TOKEN':'private-secret'})},
+             {**body,'value':json.dumps({'LD_PRELOAD':'private-secret'})},
+             {**body,'value':json.dumps({'AWS_SECRET_ACCESS_KEY':{'nested':'private-secret'}})},
+             {**body,'value':'private-secret'},
+             {**body,'format':'file','env_var':'HOME','value':'private-secret'},
+             {**body,'format':'file','env_var':'KUBECONFIG','value':'private-secret\0'}]
+    for data in invalid:
+        response=client.post('/api/credentials/secrets',json=data)
+        assert response.status_code==422 and 'private-secret' not in response.text
+    request=access_request(app.state.credentials,active(app))
+    for choices in [{'scope':'personal'}, {'scope':'session','lifetime':'session'},
+                    {'scope':'session','lifetime':'persistent'},
+                    {'scope':'personal','lifetime':'persistent','expires_at':'not-a-date'}]:
+        response=client.post('/api/credentials/requests/'+request['request_id'],json={**choices,'value':generic_value('env')})
+        assert response.status_code==422 and 'synthetic-secret' not in response.text
+        assert app.state.credentials.row(request['request_id'])['status']=='pending'
+    assert not app.state.store.rows('SELECT * FROM provider_secrets')
+
+
+def test_rotation_and_renewal_reject_stale_failure_and_stale_forms(workspace,monkeypatch):
+    from app.credentials import Materialize, ReportFailure
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    run=active(app)
+    request=access_request(vault,run)
+    endpoint='/api/credentials/requests/'+request['request_id']
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    body={'scope':'personal','lifetime':'persistent','value':generic_value('env'),'generation':0}
+    assert client.post(endpoint,json=body).status_code==200
+    args=Materialize(request_ids=[request['request_id']])
+    first=vault.materialize(run,args)['bindings'][0]
+    secret_id=vault.row(request['request_id'])['secret_id']
+    edit='/api/credentials/secrets/'+secret_id
+    assert client.patch(edit,json={'revision':1,'value':json.dumps({'AWS_SECRET_ACCESS_KEY':'replacement-one'})}).status_code==200
+    report=lambda revision,failure:vault.report_failure(run,ReportFailure(request_id=request['request_id'],revision=revision,failure=failure))
+    assert report(first['revision'],'expired')['status']=='stale'
+    second=vault.materialize(run,args)['bindings'][0]
+    assert second['revision']>first['revision']
+    pending=report(second['revision'],'invalid')
+    assert pending['moyai_wait_credential']==request['request_id'] and pending['generation']==1
+    assert client.post(endpoint,json=body).status_code==409
+    replacement={**body,'generation':1,'value':json.dumps({'AWS_SECRET_ACCESS_KEY':'replacement-two'})}
+    assert client.post(endpoint,json=replacement).status_code==200
+    assert client.post(endpoint,json=replacement).status_code==200
+    third=vault.materialize(run,args)['bindings'][0]
+    assert third['revision']>second['revision']
+    assert report(second['revision'],'invalid')['status']=='stale'
+    assert vault.materialize(run,args)['status']=='ready'
+    assert len(app.state.store.rows('SELECT * FROM provider_secrets'))==2
+    assert client.patch(edit,json={'revision':1,'label':'stale overwrite'}).status_code==409
+
+
+def test_expiry_of_previous_turn_handle_reopens_current_turn_and_preserves_progress(workspace,monkeypatch):
+    from app.credentials import Materialize
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    run=active(app)
+    request=access_request(vault,run,format='file')
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    endpoint='/api/credentials/requests/'+request['request_id']
+    assert client.post(endpoint,json={'scope':'organization','lifetime':'persistent','value':generic_value('file')}).status_code==200
+    secret=vault.row(request['request_id'])['secret_id']
+    assert client.patch('/api/credentials/secrets/'+secret,json={'revision':1,'expires_at':'2000-01-01T00:00:00Z'}).status_code==200
+    app.state.store.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,user_id) VALUES(?,'user','Continue outage investigation','running','next',?,'google:alice')",(run['id'],now()))
+    message=app.state.store.rows('SELECT MAX(id) AS id FROM messages WHERE run_id=?',(run['id'],))[0]['id']
+    app.state.store.execute('UPDATE runs SET active_message_id=? WHERE id=?',(message,run['id']))
+    run=app.state.store.run(run['id'])
+    pending=vault.materialize(run,Materialize(request_ids=[request['request_id']]))
+    assert pending['status']=='pending' and pending['failure']=='expired'
+    assert vault.row(request['request_id'])['message_id']==message
+    assert vault.resolution(run['id'],request['request_id'])['status']=='pending'
+    assert len(vault.pending(run,'google:alice',True))==1
+    assert client.get('/api/credentials').json()['secrets'][0]['status']=='expired'
+
+
+def test_metadata_edits_keep_values_and_enforce_personal_org_and_session_bounds(workspace,monkeypatch):
+    from app.credentials import Materialize
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    run=active(app)
+    request=access_request(vault,run)
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    assert client.post('/api/credentials/requests/'+request['request_id'],json={
+        'scope':'personal','lifetime':'persistent','value':generic_value('env')}).status_code==200
+    identity=vault.row(request['request_id'])['secret_id']
+    endpoint='/api/credentials/secrets/'+identity
+    assert client.patch(endpoint,json={'revision':1,'lifetime':'session'}).status_code==422
+    saved=client.patch(endpoint,json={'revision':1,'scope':'organization','lifetime':'session','root_id':run['id']})
+    assert saved.status_code==200 and saved.json()['revision']==2
+    assert 'value' not in saved.text and 'encrypted' not in saved.text
+    assert vault.materialize(run,Materialize(request_ids=[request['request_id']]))['bindings'][0]['value']==generic_value('env')
+    sign_in(app,client,'bob','bob@berri.ai')
+    assert client.patch(endpoint,json={'revision':2,'label':'Not authorized'}).status_code==404
+    sign_in(app,client)
+    assert client.patch(endpoint,json={'revision':2,'lifetime':'persistent'}).json()['root_id']==''
+    assert client.patch(endpoint,json={'revision':3,'value':''}).status_code==422
+    assert client.patch(endpoint,json={'revision':3,'expires_at':None}).status_code==422
+    for invalid in [{'scope':'session','value':generic_value('env')},
+                    {'expires_at':'not-a-date','value':generic_value('env')}]:
+        rejected=client.patch(endpoint,json={'revision':3,**invalid})
+        assert rejected.status_code==422 and 'synthetic-secret' not in rejected.text
+
+
+def test_legacy_session_scope_migrates_once_and_remains_root_bound(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    identity=save(client).json()['id']
+    run=active(app)
+    app.state.store.execute("UPDATE provider_secrets SET scope='session',root_id=? WHERE id=?",(run['id'],identity))
+    with app.state.store.connect() as conn:
+        for field in ('name','format','env_var','lifetime','expires_at','invalid_reason','revision'):
+            conn.execute('ALTER TABLE provider_secrets DROP COLUMN '+field)
+        for field in ('name','format','env_var','generation','failure','revision','secret_revision'):
+            conn.execute('ALTER TABLE credential_requests DROP COLUMN '+field)
+    for attempt in range(2):
+        vault=Credentials(app.state.store,app.state.security,app.state.settings,app.state.manager,SimpleNamespace(flush=None))
+        secret=app.state.store.rows('SELECT * FROM provider_secrets WHERE id=?',(identity,))[0]
+        assert secret['scope']=='personal' and secret['lifetime']=='session'
+        assert vault.permitted(secret,run,'google:alice')
+        assert not vault.permitted(secret,active(app),'google:alice')
+
+
+def test_permission_recovery_pauses_only_this_request_and_keeps_shared_credentials_usable(workspace,monkeypatch):
+    from app.credentials import Materialize, ReportFailure
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    run=active(app)
+    request=access_request(vault,run)
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    endpoint='/api/credentials/requests/'+request['request_id']
+    assert client.post(endpoint,json={'scope':'organization','lifetime':'persistent','value':generic_value('env')}).status_code==200
+    first=vault.materialize(run,Materialize(request_ids=[request['request_id']]))['bindings'][0]
+    saved=vault.row(request['request_id'])['secret_id']
+    other=active(app,'google:bob')
+    other_request=access_request(vault,other)
+    failed=vault.report_failure(run,ReportFailure(request_id=request['request_id'],revision=first['revision'],failure='permission'))
+    assert failed['status']=='pending' and failed['failure']=='permission'
+    assert app.state.store.rows('SELECT invalid_reason FROM provider_secrets')[0]['invalid_reason']==''
+    assert vault.materialize(other,Materialize(request_ids=[other_request['request_id']]))['status']=='ready'
+    # The service administrator can grant permissions without replacing its key.
+    assert client.post(endpoint,json={'secret_id':saved,'generation':1}).status_code==200
+    assert vault.materialize(run,Materialize(request_ids=[request['request_id']]))['status']=='ready'

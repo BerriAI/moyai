@@ -33,7 +33,7 @@ from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
-from .credentials import Credentials, CredentialRequest, Invoke, TOOLS as CREDENTIAL_TOOLS
+from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
 from .environments import Environments
 from .tracing import AgentTracing
@@ -258,7 +258,7 @@ def create_app(settings: Settings | None = None):
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request, exc):
         if request.url.path.startswith('/api/credentials'):
-            return JSONResponse({'detail':'Invalid credential form. Choose who can use a new key and check the provider and required fields.'},status_code=422)
+            return JSONResponse({'detail':'Invalid credential form. Choose who can use it and when it can be reused, then check the required fields.'},status_code=422)
         if request.url.path.startswith('/api/skills'):
             return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
         return await request_validation_exception_handler(request,exc)
@@ -665,12 +665,9 @@ def create_app(settings: Settings | None = None):
             if not credentials.tools(run):
                 raise HTTPException(403,'Credential requests require a durable chat session.')
             try:
-                if body.name == 'credentials_request':
-                    result = credentials.request(run,CredentialRequest.model_validate(body.arguments))
-                    await checkpoints.flush()
-                    return result
-                status,result = await credentials.invoke(run,Invoke.model_validate(body.arguments))
-                return {'status_code':status,'response':result}
+                result = await credentials.call(run, body.name, body.arguments)
+                await checkpoints.flush()
+                return result
             except ValidationError:
                 return {'error':'Invalid credential tool arguments.'}
             except ValueError as exc:
@@ -747,6 +744,21 @@ def create_app(settings: Settings | None = None):
                 store.execute("UPDATE approvals SET status='uncertain',result=? WHERE id=?", (message, approval_id))
             store.event(run_id, "error", f"{body.name}: {message}")
             return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
+
+    @app.post('/broker/{run_id}/credentials/materialize')
+    async def credential_materialize(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        if not credentials.tools(run):
+            raise HTTPException(403, 'Credential access requires a durable chat session.')
+        try:
+            args = Materialize.model_validate(await broker_body(request, '/credentials/materialize'))
+            result = credentials.materialize(run, args)
+        except (ValueError, ValidationError):
+            raise HTTPException(422, 'Invalid credential access request.') from None
+        await checkpoints.flush()
+        # This route is consumed only by the sandbox executor, never returned
+        # as an agent tool result or saved in runner/Temporal state.
+        return JSONResponse(result, headers={'Cache-Control': 'no-store'})
 
     @app.post('/broker/{run_id}/credentials/invoke')
     async def credential_invoke(run_id: str, request: Request):

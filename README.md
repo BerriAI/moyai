@@ -643,55 +643,80 @@ GitHub's `pull_requests:write` permission includes review/merge capabilities, so
 
 A publication journal uses the session plus `request_key` to recover an uncertain branch/PR response across chat turns. Explicit retries with unchanged files and fields find the existing PR; conflicting payloads, changed installations and externally changed branches stop instead of overwriting. Retrying PR creation does not require approval; read-only and disabled connections still block publication. Pausing/disconnecting GitHub or stopping the session revokes further calls; an already-sent GitHub action cannot be recalled.
 
-## Secure provider key requests
+## Secure access requests
 
-Durable sessions can call `credentials_request` when a benchmark needs a separate
-provider key. The session displays a secure form and a provider setup link, saves
-its conversation/files, releases its Modal sandbox and waits for a Temporal wake.
-Providing or declining the key resumes the same user message from its checkpoint.
-Slack-linked sessions send a web-form link; keys must never be pasted into Slack
-or chat. Subagent requests appear in the child's chat and also notify the linked
-parent Slack thread.
+Obtaining access is part of completing a task. Durable sessions first use
+`credentials_list` to discover authorized saved access, then `credentials_request`
+to reuse a matching connection or open a secure form. Pending requests checkpoint
+the conversation/files, release the Modal sandbox and wait for a Temporal wake.
+Providing or declining access resumes the same message. Slack and subagent
+requests link to the same secure web flow; never paste credentials into chat.
 
-The Secrets page asks who can use each new key before saving it. No scope is
-preselected; the server rejects a new key without an explicit choice. The
-secure form shown when an agent requests a key uses the same choice. Reusing an
-already saved key keeps its existing scope. Available scopes:
+The form requires two independent choices:
 
-- **This session:** available to the requester in this session and its subagents.
-- **Personal:** reusable for that signed-in user's requests.
-- **Organization:** reusable by teammates; only current admins can add or revoke.
+| Choice | Options |
+| --- | --- |
+| Who can use it | Personal (your requests) or Organization (everyone in this organization) |
+| When Moyai can use it | This session and its subagents, or across future sessions |
 
-A single authorized saved key for a provider is reused automatically. Multiple
-matches require choosing a key in the form. Saved values cannot be read back in
-the UI or API. Revocation blocks future proxy calls but does not cancel in-flight
-provider calls or revoke the upstream provider key. Use revoke/add to replace a
-key. Session keys remain until revoked. Results retain the session's existing
-sharing; personal key scope does not turn shared conversations into private chats.
+Long-lived credentials are supported. Session use is bounded to the root chat,
+including for organization credentials; it does not alter provider expiry.
+Organization access remains managed by admins. Saved credentials remain encrypted
+until revoked. The Secrets page exposes metadata, optional known expiry and
+status, and supports editing, replacement and revocation without revealing the
+saved value. Replacing a value preserves its identity; revision checks reject
+stale edits. Existing session keys migrate to personal/session access, and
+existing personal/organization keys retain future-session use.
 
-Personal access is checked on every provider call against the active message's
-server-owned user identity, including follow-ups by a different teammate. Slack
-requests can match SSO only using a recent eligible Slack profile email; manual
-spend attribution links alone never grant credential access. Google sign-in is
-required for personal/session keys outside local previews.
+Generic service access uses `provider=generic` with a stable capability `name`.
+Choose `format=env` for a JSON object of environment variable names to string
+values, or `format=file` and an `env_var` such as `KUBECONFIG` for multiline UTF-8
+file contents. This supports token sets, kubeconfigs, service-account JSON and PEM
+files. Values are limited to 128 KiB; runtime-control environment names and null
+characters are rejected. A single unambiguous matching connection is reused;
+multiple matches require a user choice. `credentials_list` returns metadata only.
 
-Initial providers: Fireworks, OpenAI, Anthropic, Together AI and Groq. Their fixed
-HTTPS origins and inference/model-list routes are allowlisted in
-`app/credentials.py`. The server injects provider authentication and rejects
-redirects, arbitrary hosts, account-management routes and streaming/background
-requests. `credentials_http_request` handles individual calls. Parallel benchmark
-scripts can use the OpenAI/Anthropic SDK through a per-turn loopback proxy using
-the environment instructions returned by the request tool; set `max_retries=0`
-and `stream=False`. Keys are never returned to the agent, placed in sandbox
-environment variables, saved in artifacts, or stored in Temporal history.
-Provider error bodies are not forwarded. The proxy shares the web process's
-model-request concurrency limit and bounds response size.
+`credentials_run` uses one or more approved request handles to run a command in
+the sandbox. The internal broker rechecks the current requester, session, expiry
+and revocation before releasing values to that executor. Environment values are
+scoped to the subprocess; file values use Linux anonymous memory files with mode
+0600, referenced through inherited descriptors. The executor closes descriptors,
+stops the process group and redacts known values from bounded output before
+returning it to the agent. It does not write credential values to the launch spec,
+Temporal state or a credential file in the snapshotted filesystem. Approved
+commands can themselves copy data or create service caches; this is not a
+boundary against malicious sandbox code. Revocation prevents subsequent loads,
+not an already-running command or use at the upstream service.
 
-These separate-provider charges are **not** added to the Moyai gateway-key spend
-total: they are billed to the key supplied by the user. This flow does not create
-provider accounts or keys automatically; the setup link lets the user create one
-in their provider account and return to Moyai. Arbitrary secrets/raw environment
-variable injection and custom provider origins are not supported.
+New images include `aws`, `kubectl` and `helm`. Restored older images install a
+missing supported CLI when a credential command references it. Installation
+errors are separate from authentication failures. Generic access is a deliberate
+policy expansion: approved credentials can now reach sandbox commands, with the
+permissions the user supplied. Existing connected-app approval rules still apply.
+
+Known expiry and recognizable invalid-authentication errors reopen the secure
+request. Permission failures request additional access without invalidating the
+shared credential for other tasks. Delayed errors from an earlier credential
+revision cannot invalidate its replacement. Commands with multiple credentials
+return their observed revisions so the agent can identify the failed connection;
+ambiguous failures do not invalidate every credential. Completed or uncertain
+writes are never automatically replayed. The agent verifies updated access and
+continues from the saved task.
+
+Fireworks, OpenAI, Anthropic, Together AI and Groq inference keys keep their
+existing server-side proxy. Its fixed HTTPS origins/routes, redirect rejection,
+non-streaming requests, response bounds and concurrency limit remain in place.
+Use `credentials_http_request` or the returned SDK proxy instructions with
+`max_retries=0` and `stream=False`. Those inference keys stay out of the sandbox,
+and their provider charges remain separate from Moyai gateway spend.
+
+Access is checked against the active message's server-owned identity, including
+follow-ups by another teammate. Slack personal access requires a recent eligible
+profile matching verified SSO; spend attribution links grant no access. Personal
+credentials require Google sign-in outside local previews. This remains a
+single-organization workspace, and personal credential ownership does not make
+shared conversations or their results private.
+
 ### Personal and organization skills
 
 The **Skills** library stores reusable Markdown instructions. Add a name, a

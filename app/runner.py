@@ -267,6 +267,7 @@ class RunManager:
                               "cd /opt/hermes && python -m pm.build_env --source /opt/hermes --out /opt/hermes-env --no-install-project --extra mcp",
                               "cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; from cryptography.fernet import Fernet'")
                 .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
+                .run_commands("python /opt/workspace-runner/install_access_tools.py")
                 .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
 
     def is_active(self, run_id):

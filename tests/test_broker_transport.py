@@ -122,6 +122,7 @@ def test_loopback_relay_seals_model_and_mcp_requests_and_returns_sse():
 
 def test_credential_relay_pauses_and_exposes_only_scoped_sdk_paths():
     calls=[]
+    expired=[False]
     request_id='a'*32
     class Edge(BaseHTTPRequestHandler):
         def log_message(self,*args): pass
@@ -129,8 +130,8 @@ def test_credential_relay_pauses_and_exposes_only_scoped_sdk_paths():
             path=self.path.removeprefix('/broker/run')
             body=json.loads(unseal('runtime-token',path,self.rfile.read(int(self.headers['Content-Length']))))
             calls.append((path,body))
-            result={'moyai_wait_credential':request_id} if path=='/tools/call' else {'data':[]}
-            self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
+            result={'moyai_wait_credential':request_id} if path in {'/tools/call','/credentials/materialize'} or expired[0] else {'data':[]}
+            self.send_response(401 if expired[0] else 200);self.send_header('Content-Type','application/json');self.end_headers()
             self.wfile.write(json.dumps(result).encode())
     server=ThreadingHTTPServer(('127.0.0.1',0),Edge)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -150,6 +151,18 @@ def test_credential_relay_pauses_and_exposes_only_scoped_sdk_paths():
         assert calls[1]==('/credentials/invoke',{'request_id':request_id,'method':'GET','path':'/models','body':{}})
         assert calls[2][1]['path']=='/messages' and calls[3][1]['path']=='/chat/completions'
         assert len(calls)==4
+        with httpx.Client(base_url=relay.url,timeout=5) as client:
+            for name in ['credentials_report_failure','credentials_http_request']:
+                relay.wait_credential=''
+                client.post('/tools/call',json={'name':name,'arguments':{}},headers=headers)
+                assert relay.wait_credential==request_id
+            relay.wait_credential=''
+            client.post('/credentials/materialize',json={'request_ids':[request_id]},headers=headers)
+            assert relay.wait_credential==request_id
+            expired[0]=True
+            relay.wait_credential=''
+            assert client.get(base+'/models',headers=headers).status_code==401
+            assert relay.wait_credential==request_id
     finally:
         relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
 

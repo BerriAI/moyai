@@ -5,7 +5,7 @@ const settingsGroups = [
   ]},
   {id:'integrations', title:'Integrations', items:[
     {view:'connections', title:'Connections', description:'Connect GitHub, Slack, Linear, and Notion.'},
-    {view:'secrets', title:'Secrets', description:'Manage personal and shared API keys.'},
+    {view:'secrets', title:'Secrets', description:'Manage personal and shared service access.'},
   ]},
   {id:'workspace', title:'Workspace', items:[
     {view:'runtime', title:'Runtime', description:'Check cloud setup and session limits.'},
