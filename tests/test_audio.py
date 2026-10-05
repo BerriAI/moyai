@@ -27,6 +27,39 @@ def gateway(monkeypatch, handler):
     monkeypatch.setattr('app.audio.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(handler), **kw))
 
 
+def slack_download(monkeypatch, handler):
+    """Mock only the SDK's HTTP transport, preserving its download validation."""
+    class Stream:
+        def __init__(self, response):
+            self.response, self.status, self.content = response, response.status_code, self
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def iter_chunked(self, size):
+            for chunk in self.response.iter_bytes(size):
+                yield chunk
+
+    class Session:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        def get(self, url, *, headers, allow_redirects):
+            assert allow_redirects is False
+            return Stream(handler(httpx.Request('GET', url, headers=headers)))
+
+    monkeypatch.setattr('agentchat.channels.slack_files.aiohttp.ClientSession', Session)
+
+
 def configured(app):
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     app.state.settings.litellm_api_key = 'private-gateway-key'
@@ -169,7 +202,7 @@ def test_slack_never_sends_bot_token_to_untrusted_file_urls(slack_app, monkeypat
     app, *_ = slack_app
     grant_files(app)
     async def info(*args, **kwargs):
-        return {'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':url}}
+        return {'ok':True, 'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':url}}
     monkeypatch.setattr(app.state.connectors, 'request', info)
     with pytest.raises(ValueError, match='unsupported file location'):
         asyncio.run(app.state.slack.files.read('F12345678','T12345678'))
@@ -180,7 +213,7 @@ def test_slack_download_and_transcription_use_separate_credentials(slack_app, mo
     grant_files(app)
     async def info(*args, **kwargs):
         assert kwargs['headers']['Authorization'] == 'Bearer bot-token'
-        return {'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':'https://files.slack.com/files-pri/voice'}}
+        return {'ok':True, 'file':{'id':'F12345678','name':'voice.wav','size':len(wav()),'url_private':'https://files.slack.com/files-pri/voice'}}
     def response(request):
         if request.method == 'GET':
             assert request.headers['Authorization'] == 'Bearer bot-token'
@@ -189,6 +222,7 @@ def test_slack_download_and_transcription_use_separate_credentials(slack_app, mo
         return httpx.Response(200, json={'text':'Read this voice message.'})
     monkeypatch.setattr(app.state.connectors, 'request', info)
     gateway(monkeypatch, response)
+    slack_download(monkeypatch, response)
     name, raw, inspected = asyncio.run(app.state.slack.files.read('F12345678','T12345678'))
     assert inspected[2] == 'Read this voice message.' and raw == wav()
 

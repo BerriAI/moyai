@@ -3,25 +3,17 @@ import asyncio
 import hashlib
 import json
 from pathlib import PurePath
-import re
-from urllib.parse import urlsplit
 
-import httpx
+from agentchat import Attachment
+from agentchat.channels.slack_files import download_slack_file, slack_attachments
 
 from .audio import AUDIO_TYPES, AudioTranscriber, audio_type
 from .attachments import MAX_FILE, MAX_FILES, MAX_MESSAGE, filename, inspect_file
 
 
 def file_ids(files):
-    """Keep only bounded identifiers from signed events, never supplied URLs."""
-    if not isinstance(files, list):
-        return []
-    selected = []
-    for file in files[:MAX_FILES]:
-        if not isinstance(file, dict) or not re.fullmatch(r'F[A-Z0-9]{7,30}', str(file.get('id', ''))):
-            continue
-        selected.append(file['id'])
-    return list(dict.fromkeys(selected))
+    """Persist SDK-normalized references; downloads happen on the claimed turn."""
+    return [item.id for item in slack_attachments(files, limit=MAX_FILES)]
 
 
 class SlackFiles:
@@ -43,36 +35,19 @@ class SlackFiles:
         self.check_access(team)
         token = await connectors.slack_bot_token()
         headers = {'Authorization': 'Bearer ' + token}
-        info = await connectors.request('GET', 'https://slack.com/api/files.info', headers=headers, params={'file': file_id})
-        file = info.get('file', {})
-        if not isinstance(file, dict) or file.get('id') != file_id or file.get('is_external'):
-            raise ValueError('This Slack file is unavailable. Upload the attachment again.')
-        name = filename(file.get('name') or 'attachment.' + str(file.get('filetype', 'bin')))
+
+        async def request(api, payload):
+            return await connectors.request('GET', 'https://slack.com/api/' + api, headers=headers, params=payload)
+
+        async def guard():
+            self.check_access(team)
+
+        file = await download_slack_file(Attachment(id=file_id), bot_token=token, request=request,
+                                         max_bytes=MAX_FILE, before_download=guard)
+        name, raw = filename(file.name), file.content
         extension = PurePath(name).suffix.lower().lstrip('.')
-        if extension not in AUDIO_TYPES and str(file.get('mimetype', '')).startswith('audio/'):
+        if extension not in AUDIO_TYPES and (file.media_type or '').startswith('audio/'):
             raise ValueError('Unsupported audio format. Send MP3, WAV, M4A, WebM, OGG or FLAC.')
-        if not isinstance(file.get('size'), int) or not 0 < file['size'] <= MAX_FILE:
-            raise ValueError('Each attachment must be 10 MB or smaller.')
-        url = file.get('url_private_download') or file.get('url_private', '')
-        parsed = urlsplit(url)
-        # Do not send a bot token to event-provided URLs or redirected hosts.
-        if (parsed.scheme != 'https' or parsed.hostname != 'files.slack.com' or parsed.port not in (None, 443)
-                or parsed.username or parsed.password or not parsed.path.startswith('/files-pri/')):
-            raise ValueError('Slack returned an unsupported file location. Upload the attachment again.')
-        self.check_access(team)
-        async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-            async with client.stream('GET', url, headers=headers) as response:
-                response.raise_for_status()
-                chunks, size = [], 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > MAX_FILE:
-                        raise ValueError('Each attachment must be 10 MB or smaller.')
-                    chunks.append(chunk)
-        raw = b''.join(chunks)
-        self.check_access(team)
-        if not raw:
-            raise ValueError('This Slack file was empty. Upload the attachment again.')
         if extension in AUDIO_TYPES:
             media_type = audio_type(name, raw)
             transcript = await self.transcriber.transcribe(raw, name, media_type)
@@ -80,7 +55,7 @@ class SlackFiles:
             return name, raw, (media_type, b'', transcript)
         inspected = await asyncio.to_thread(inspect_file, raw)
         self.check_access(team)
-        if str(file.get('mimetype', '')).startswith('image/') and not inspected[1]:
+        if (file.media_type or '').startswith('image/') and not inspected[1]:
             raise ValueError('This image could not be opened. Try exporting it as PNG or JPEG.')
         return name, raw, inspected
 

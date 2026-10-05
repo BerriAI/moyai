@@ -1117,11 +1117,14 @@ native delivery described above.
 
 Incoming Slack files use this same attachment pipeline. Signed mentions, direct
 messages and replies in a bound thread retain up to five file IDs, including
-image-only messages. Once that turn starts, the worker retrieves file metadata
-and downloads from Slack's private file host using the bot's `files:read` access.
+image-only messages. AgentChat normalizes the attachment references. Once that
+turn starts, Moyai uses AgentChat's incoming-file helper to retrieve metadata and
+download from Slack's private file host using the bot's `files:read` access.
 PNG, JPEG, WebP and GIF inputs get the same validated previews, sandbox originals
 and model image inputs as web uploads; audio still gets transcribed. No private
-Slack URL or bot credential is passed to the model.
+Slack URL or bot credential is passed to the model. AgentChat owns file transport
+and download limits; Moyai owns access checks, durable queues, content inspection,
+previews, transcription and model inputs.
 
 For an initial request, the bounded conversation read can recover files missing
 from an `app_mention` event and include files from the explicitly invoked thread.

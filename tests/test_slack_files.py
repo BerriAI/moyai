@@ -11,7 +11,7 @@ from app.message_queue import MessageQueue
 from app.security import digest
 from sandbox.agent import conversation_prompt
 from test_attachments import png
-from test_audio import grant_files, wav
+from test_audio import gateway, grant_files, slack_download
 from test_slack import event, signed, slack_app
 from test_spend import sign_in
 
@@ -44,9 +44,9 @@ def provider(app, monkeypatch, *, raw=None, metadata=None, history=None, status=
         model_inputs.append(json.loads(request.content))
         return httpx.Response(200, json={'choices': [{'message': {'content': 'Image received.'}}]})
 
-    actual = httpx.AsyncClient
     monkeypatch.setattr(app.state.connectors, 'request', request)
-    monkeypatch.setattr('app.slack_files.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(transport), **kw))
+    gateway(monkeypatch, transport)
+    slack_download(monkeypatch, transport)
     return calls, model_inputs
 
 
@@ -168,7 +168,7 @@ def test_slack_image_actual_download_limit_and_connection_changes(slack_app, mon
     app, *_ = slack_app
     provider(app, monkeypatch, raw=b'x' * 32, metadata={'size': 1})
     monkeypatch.setattr('app.slack_files.MAX_FILE', 16)
-    with pytest.raises(ValueError, match='10 MB'):
+    with pytest.raises(ValueError, match='download limit'):
         asyncio.run(app.state.slack.files.read(FILE['id'], 'T12345678'))
     with pytest.raises(ValueError, match='access changed'):
         asyncio.run(app.state.slack.files.read(FILE['id'], 'T87654321'))

@@ -9,7 +9,7 @@ resolution-markers = [
 [[package]]
 name = "agentchat"
 version = "0.1.0a1"
-source = { git = "https://github.com/BerriAI/agentchat.git?rev=3cbc895faa77f8f59e47736b68036777157a91c4#3cbc895faa77f8f59e47736b68036777157a91c4" }
+source = { git = "https://github.com/BerriAI/agentchat.git?rev=8876e361c4071b4906916452ff3e6c35b1a9c78b#8876e361c4071b4906916452ff3e6c35b1a9c78b" }
 dependencies = [
     { name = "aiohttp" },
     { name = "slack-sdk" },
@@ -560,7 +560,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=3cbc895faa77f8f59e47736b68036777157a91c4" },
+    { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=8876e361c4071b4906916452ff3e6c35b1a9c78b" },
     { name = "cryptography", specifier = ">=44" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },

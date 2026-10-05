@@ -13,7 +13,7 @@ from weakref import WeakValueDictionary
 
 from agentchat import AgentChat
 from agentchat.channels.slack_mirror import mirror_payload
-from agentchat.models import Message, RichReply, Sender, UploadedFile, UploadFile
+from agentchat.models import Attachment, Message, RichReply, Sender, UploadedFile, UploadFile
 from agentchat.channels.slack_media import rich_payload, upload_slack_files
 from fastapi import HTTPException
 
@@ -90,9 +90,10 @@ class SlackWebhookChannel:
         conversation = f'slack:{team}:{channel}' + ('' if direct_message and root == ts else ':' + root)
         message = Message(id=f'slack:{team}:{event_id}', conversation_id=conversation, channel=self.name,
                           sender=Sender(id=user), text=prompt, role='user',
+                          attachments=tuple(Attachment(id=file_id) for file_id in file_ids),
                           metadata=MappingProxyType({'team': team, 'event_id': event_id, 'channel': channel,
                               'ts': ts, 'root': root, 'mentioned': mentioned, 'direct_message': direct_message,
-                              'missing_cloud': tuple(missing_cloud), 'file_ids': tuple(file_ids)}))
+                              'missing_cloud': tuple(missing_cloud)}))
         await self._receiver(self, message)
 
     def source_for_run(self, run_id, delivery=None):
@@ -258,6 +259,7 @@ def connect_agentchat(owner):
     @app.on_message
     async def respond(context):
         data = dict(context.message.metadata)
+        data['file_ids'] = tuple(attachment.id for attachment in context.message.attachments)
         await owner.accept_message(user=context.sender.id, prompt=context.message.text, **data)
         # Responses are posted later via AgentChat by the durable outbox worker.
         return None
