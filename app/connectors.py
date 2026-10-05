@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+from typing import Annotated
 from urllib.parse import urlencode
 
 import httpx
@@ -20,8 +21,11 @@ class Search(Args):
     query: str = Field(min_length=1, max_length=500)
 
 
+LinearIssueId = Annotated[str, Field(pattern=r"^(?:[A-Za-z][A-Za-z0-9]*-\d+|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")]
+
+
 class LinearIssue(Args):
-    issue_id: str = Field(pattern=r"^(?:[A-Za-z][A-Za-z0-9]*-\d+|[0-9a-fA-F-]{36})$")
+    issue_id: LinearIssueId
 
 
 class LinearComment(LinearIssue):
@@ -32,6 +36,11 @@ class LinearCreateIssue(Args):
     team_id: str = Field(pattern=r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
     title: str = Field(min_length=1, max_length=250)
     description: str = Field(min_length=1, max_length=20000)
+    parent_id: LinearIssueId | None = Field(default=None, description="Optional parent issue identifier (e.g. LIT-9222) or UUID for a new sub-issue.")
+
+
+class LinearUpdateIssue(LinearIssue):
+    parent_id: LinearIssueId | None = Field(description="Required: parent issue identifier (e.g. LIT-9222) or UUID. Explicit null removes the parent.")
 
 
 class SlackThread(Args):
@@ -57,9 +66,10 @@ TOOLS = {
     "linear_my_issues": ("linear", False, Args, "Read up to 50 open Linear tickets assigned to the authenticated person running this session, using their verified work email. Never uses the shared connection owner as the assignee."),
     "linear_teams": ("linear", False, Args, "List up to 50 accessible Linear teams and their IDs. Use before creating an issue; ask if the right team is ambiguous."),
     "linear_search": ("linear", False, Search, "Search Linear issue titles by text. Returns at most 20 issues."),
-    "linear_issue": ("linear", False, LinearIssue, "Read a Linear issue's description, status, and recent comments."),
+    "linear_issue": ("linear", False, LinearIssue, "Read a Linear issue's description, status, parent, and recent comments. Use to verify reparenting."),
     "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue. Requires workspace approval."),
-    "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
+    "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
+    "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. Requires workspace approval and a credential with issue-update permission. Verify with linear_issue before retrying an uncertain update."),
     "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
     "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation."),
     "slack_send": ("slack", True, SlackSend, "Send a Slack message. Requires workspace approval."),
@@ -232,6 +242,14 @@ class Connectors:
                                     json={'query': query, 'variables': {'email': rows[0]['email']}})
         return result['data']
 
+    async def linear_issue_uuid(self, issue_id):
+        # Resolve identifiers and UUIDs alike before using relationship inputs.
+        data = await self.call("linear_issue", {"issue_id": issue_id})
+        issue = data.get("issue") or {}
+        if not issue.get("id"):
+            raise ConnectorError("Linear issue not found or not accessible.")
+        return issue["id"]
+
     async def call(self, name, arguments):
         if name == 'linear_my_issues':
             raise ConnectorError('My Linear tickets requires an authenticated session owner.')
@@ -245,13 +263,22 @@ class Connectors:
                 query = "{teams(first:50){nodes{id name key} pageInfo{hasNextPage endCursor}}}"
                 variables = {}
             elif name == "linear_create_issue":
-                query = "mutation($input:IssueCreateInput!){issueCreate(input:$input){success issue{id identifier title description url}}}"
+                query = "mutation($input:IssueCreateInput!){issueCreate(input:$input){success issue{id identifier title description url parent{id identifier title url}}}}"
                 variables = {"input": {"teamId": args["team_id"], "title": args["title"], "description": args["description"]}}
+                if args["parent_id"] is not None:
+                    variables["input"]["parentId"] = await self.linear_issue_uuid(args["parent_id"])
+            elif name == "linear_update_issue":
+                issue_id = await self.linear_issue_uuid(args["issue_id"])
+                parent_id = await self.linear_issue_uuid(args["parent_id"]) if args["parent_id"] is not None else None
+                if issue_id == parent_id:
+                    raise ConnectorError("A Linear issue cannot be its own parent.")
+                query = "mutation($id:String!,$input:IssueUpdateInput!){issueUpdate(id:$id,input:$input){success issue{id identifier title url parent{id identifier title url}}}}"
+                variables = {"id": issue_id, "input": {"parentId": parent_id}}
             elif name == "linear_search":
                 query = "query($q:String!){issues(filter:{title:{containsIgnoreCase:$q}},first:20){nodes{id identifier title url state{name}} pageInfo{hasNextPage endCursor}}}"
                 variables = {"q": args["query"]}
             elif name == "linear_issue":
-                query = "query($id:String!){issue(id:$id){id identifier title description url state{name} comments(last:10){nodes{id body}}}}"
+                query = "query($id:String!){issue(id:$id){id identifier title description url state{name} parent{id identifier title url} comments(last:10){nodes{id body}}}}"
                 variables = {"id": args["issue_id"]}
             else:
                 # commentCreate expects the issue UUID; issue(id:) resolves LIT-123 too.
@@ -261,12 +288,23 @@ class Connectors:
                     raise ConnectorError("Linear issue not found.")
                 query = "mutation($input:CommentCreateInput!){commentCreate(input:$input){success comment{id body url}}}"
                 variables = {"input": {"issueId": issue_id, "body": args["body"]}}
+            # Relationship resolution can await multiple reads. Recheck the write
+            # policy in case the connection changed while those were in flight.
+            if not self.allowed(name):
+                raise ConnectorError("This operation is disabled by your organization's connection policy.")
             result = await self.request("POST", "https://api.linear.app/graphql", headers=headers, json={"query": query, "variables": variables})
             data = result["data"]
             if name == "linear_comment" and not data.get("commentCreate", {}).get("success"):
                 raise ConnectorError("Linear did not confirm the comment was created.")
             if name == "linear_create_issue" and not data.get("issueCreate", {}).get("success"):
                 raise ConnectorError("Linear did not confirm the issue was created. Verify it before retrying; the credential needs Create issues permission.")
+            if name == "linear_update_issue":
+                update = data.get("issueUpdate") or {}
+                updated_issue = update.get("issue") or {}
+                actual_parent = (updated_issue.get("parent") or {}).get("id")
+                if (not update.get("success") or updated_issue.get("id") != issue_id
+                        or "parent" not in updated_issue or actual_parent != parent_id):
+                    raise ConnectorError("Linear did not confirm the parent update. Read the issue to verify its parent before retrying.")
             return data
         if provider == "slack":
             endpoint, method, payload = {

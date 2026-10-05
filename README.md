@@ -269,7 +269,7 @@ Open **Organization** and either enter the appropriate token or use the OAuth bu
 
 | App | Required setup | Tools exposed |
 | --- | --- | --- |
-| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | List accessible teams (50 results), search issue titles (20 results), read an issue, create an issue or add a comment after approval. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
+| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | List accessible teams (50 results), search issue titles (20 results), read an issue and its parent, create an issue (optionally under a parent) directly, update an existing issue's parent or add a comment after approval. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
 | Slack | User token with `search:read`, relevant channel/DM history scopes, and `chat:write`; or a Slack OAuth app with those **user** scopes and callback `PUBLIC_URL/oauth/slack/callback`. Bot tokens cannot search messages. | Search messages (20 results), read a thread (50 messages), send a message after approval. |
 | Notion | Integration token with content access and the target pages shared to it; or public integration OAuth client with callback `PUBLIC_URL/oauth/notion/callback`. | Search page titles (20 results), read up to 100 top-level blocks, append a paragraph after approval. |
 
@@ -798,9 +798,38 @@ by atomic replacement; retained hard links initially share storage, with later
 changed versions consuming additional disk space. Runtime and spend views show
 the workers’ current state and all attributed follow-up costs.
 
-## Linear ticket creation
+## Linear tickets and sub-issues
 
 When the user requests a ticket, `linear_create_issue` creates it directly, with no administrator approval step for either members or admins. Use `linear_teams` to resolve the intended team. The session must enable Linear, the shared connection must permit writes, and the connected credential must have Create issues permission. Disabled/read-only connections, missing credentials and revoked session capabilities still block creation. If the provider does not confirm the write, verify the destination before retrying. Linear comments and other connected-app writes keep their existing approval requirements.
+
+For a **new** sub-issue, include `parent_id` in `linear_create_issue`. Omit it (or
+use `null`) for a standalone issue. The original three required arguments remain
+unchanged. A missing or inaccessible parent stops creation.
+
+For an **existing** ticket, use `linear_update_issue` with `issue_id` and
+`parent_id`, for example `{"issue_id":"LIT-1234","parent_id":"LIT-9222"}`.
+Both accept a Linear identifier or UUID. This sends `issueUpdate` with only
+`parentId`; it preserves the existing issue instead of creating a replacement or
+substituting cross-links. To remove a parent, explicitly pass `"parent_id":null`.
+Omitting `parent_id` is rejected. Parent updates require administrator approval
+of the exact arguments, following the policy for other existing-issue writes.
+
+Read the ticket with `linear_issue` to verify its returned `parent` (ID,
+identifier, title and URL). An update is confirmed only when Linear returns
+success, the same issue ID, and the requested parent. Unconfirmed writes are
+marked uncertain and are never retried automatically. Reparenting several
+existing tickets requires one update per ticket; no new tickets are needed.
+
+Run `uv run python scripts/linear_parenting_demo.py` for a local demonstration
+of five existing issues being moved under one parent. It exercises the broker,
+administrator approval, connector HTTP handling and parent readback against a
+simulated Linear API, with no live provider calls. The script's `--pause 1.5`
+option spaces out the output for a terminal recording.
+
+After deployment, these tools are advertised by the workspace broker and its
+MCP bridge; a running agent may need to refresh its tool discovery or resume in
+a new turn to see the updated schema. The connector uses Linear's
+[issue update API](https://linear.app/developers/graphql#creating--editing-issues).
 
 ## Shared organization GitHub
 
