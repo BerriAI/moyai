@@ -91,6 +91,10 @@ async def temporal_costs(settings, start, end, state, save_state):
             state['report_id'] = response.json()['billingReportId']
             save_state(state)
         response = await client.get(base + '/' + quote(state['report_id'], safe=''), headers=headers)
+        # A successful CreateBillingReport can precede visibility in GetBillingReport.
+        # Keep the saved ID and let the worker poll within its existing timeout.
+        if response.status_code == 404:
+            return None
         response.raise_for_status()
         report = response.json()['billingReport']
         if report['state'] == 'BILLING_REPORT_STATE_IN_PROGRESS':

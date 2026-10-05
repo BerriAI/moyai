@@ -165,3 +165,62 @@ async def test_temporal_download_rejects_internal_urls(workspace,monkeypatch):
     monkeypatch.setattr(billing_sources.httpx,'AsyncClient',lambda **kw: real(transport=httpx.MockTransport(service),**kw))
     with pytest.raises(BillingUnavailable,match='unsupported report download host'):
         await billing_sources.temporal_costs(app.state.settings,date(2026,9,1),date(2026,9,2),{'report_id':'existing'},lambda x:None)
+
+
+async def test_temporal_new_report_not_found_is_pending_then_resumes(workspace,monkeypatch):
+    app, client = workspace
+    costs = infra(app)
+    client.portal.call(costs.close)
+    app.state.settings.temporal_billing_api_key = 'private-key'
+    app.state.settings.temporal_namespace = 'moyai.account'
+    costs.enqueue(date(2026,9,1),date(2026,9,2))
+    real, calls, visible = httpx.AsyncClient, [], False
+
+    def service(request):
+        calls.append(request)
+        if request.method == 'POST':
+            return httpx.Response(200,json={'billingReportId':'eventually-visible'})
+        if request.url.host == 'reports.s3.amazonaws.com':
+            assert 'authorization' not in request.headers
+            return httpx.Response(200,text=CSV)
+        assert request.url.path.endswith('/eventually-visible')
+        if not visible:
+            return httpx.Response(404,json={'code':5,'message':'billing report not found'})
+        return httpx.Response(200,json={'billingReport':{
+            'state':'BILLING_REPORT_STATE_GENERATED',
+            'downloadInfo':[{'fileFormat':'FILE_FORMAT_CSV','url':'https://reports.s3.amazonaws.com/report'}],
+        }})
+
+    monkeypatch.setattr(billing_sources.httpx,'AsyncClient',lambda **kw: real(transport=httpx.MockTransport(service),**kw))
+    await costs.process(app.state.store.rows('SELECT * FROM infrastructure_sync_jobs')[0])
+    pending = app.state.store.rows('SELECT * FROM infrastructure_sync_jobs')[0]
+    assert pending['status'] == 'pending'
+    assert json.loads(pending['state'])['report_id'] == 'eventually-visible'
+    assert not app.state.store.rows('SELECT * FROM infrastructure_daily_costs')
+    visible = True
+    await costs.process(pending)
+    assert app.state.store.rows('SELECT * FROM infrastructure_sync_jobs')[0]['status'] == 'complete'
+    assert costs.report(date(2026,9,1),date(2026,9,2))['spend'] == '1.20456'
+    assert len([r for r in calls if r.method == 'POST']) == 1
+
+
+@pytest.mark.parametrize('status,expired,expected',[(404,True,'Billing report timed out'),(403,False,'Billing sync failed')])
+async def test_temporal_polling_remains_bounded_and_permission_errors_fail(workspace,monkeypatch,status,expired,expected):
+    app, client = workspace
+    costs = infra(app)
+    client.portal.call(costs.close)
+    app.state.settings.temporal_billing_api_key = 'private-key'
+    app.state.settings.temporal_namespace = 'moyai.account'
+    costs.enqueue(date(2026,9,1),date(2026,9,2))
+    job = app.state.store.rows('SELECT * FROM infrastructure_sync_jobs')[0]
+    job['state'] = json.dumps({'report_id':'existing'})
+    if expired:
+        job['updated_at'] = '2000-01-01T00:00:00+00:00'
+    real = httpx.AsyncClient
+    monkeypatch.setattr(billing_sources.httpx,'AsyncClient',lambda **kw: real(
+        transport=httpx.MockTransport(lambda request:httpx.Response(status,json={'message':'private-secret'})),**kw))
+    await costs.process(job)
+    failed = app.state.store.rows('SELECT * FROM infrastructure_sync_jobs')[0]
+    assert failed['status'] == 'error'
+    assert expected in failed['error']
+    assert 'private-secret' not in failed['error']
