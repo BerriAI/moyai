@@ -371,8 +371,8 @@ class AgentCoordinator:
         run = self.store.run(run_id)
         groups = [self.results(run_id, r['id'], latest=True) for r in self.store.rows('SELECT id FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,))]
         ids = [run_id] + [c['id'] for g in groups for c in g['children']]
-        requests = self.store.rows('SELECT run_id,cost,status FROM model_requests WHERE key_hash=? AND run_id IN (' + ','.join('?' for _ in ids) + ')',
-                                   (digest(self.settings.litellm_api_key), *ids)) if include_costs else []
+        requests = self.store.rows('SELECT run_id,cost,status FROM model_requests WHERE run_id IN (' + ','.join('?' for _ in ids) + ')',
+                                   tuple(ids)) if include_costs else []
         costs = {}
         for row in requests:
             bucket = costs.setdefault(row['run_id'], {'spend': Decimal(0), 'requests': 0, 'missing_costs': 0})

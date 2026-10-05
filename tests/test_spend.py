@@ -191,7 +191,7 @@ def test_second_slack_sender_keeps_own_attribution(slack_app):
     assert app.state.store.run(run_id)['owner_id'] == first['user_id']
 
 
-def test_key_rotation_keeps_previous_key_costs_out_of_current_report(workspace):
+def test_key_rotation_preserves_organization_cost_history(workspace):
     app, _ = workspace
     app.state.settings.litellm_api_key = 'first-key'
     run = active(app)
@@ -199,7 +199,7 @@ def test_key_rotation_keeps_previous_key_costs_out_of_current_report(workspace):
     app.state.store.execute("UPDATE model_requests SET cost='2.5' WHERE id=?", (rid,))
     assert app.state.spend.report()['total']['spend'] == '2.5'
     app.state.settings.litellm_api_key = 'replacement-key'
-    assert app.state.spend.report()['total']['spend'] == '0'
+    assert app.state.spend.report()['total']['spend'] == '2.5'
     assert app.state.store.rows('SELECT id FROM model_requests')
 
 

@@ -142,6 +142,7 @@ def create_app(settings: Settings | None = None):
     environments = Environments(store, settings, security, manager, connectors, checkpoints)
     manager.environments = environments
     spend = Spend(store, settings, security, checkpoints)
+    infrastructure = spend.infrastructure
     coordinator = AgentCoordinator(store, settings, manager)
     tracing = AgentTracing(store, settings)
     store.tracing = tracing
@@ -176,9 +177,11 @@ def create_app(settings: Settings | None = None):
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         tracing.start()
+        infrastructure.start()
         try:
             yield
         finally:
+            await infrastructure.close()
             await automations.close()
             await environments.close()
             await identities.close()
@@ -197,6 +200,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(user_roles.routes(security))
     app.state.user_roles = user_roles
     app.include_router(spend.routes())
+    app.include_router(infrastructure.routes())
     app.include_router(identities.routes())
     app.include_router(credentials.routes())
     app.state.credentials = credentials

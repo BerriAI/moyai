@@ -51,6 +51,13 @@ class Settings(BaseSettings):
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
     modal_vm_runtime: bool = False
+    # Billing reports require Modal Team/Enterprise access. Additional objects
+    # (e.g. dedicated Volumes) must belong only to Moyai.
+    modal_billing_enabled: bool = False
+    modal_billing_object_ids: str = ''
+    # Separate billing permission; never reuse the namespace worker key implicitly.
+    temporal_billing_api_key: str = ''
+
     auto_prepare_repositories: bool = True
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
     max_concurrent_runs: int = Field(default=100, ge=1, le=100)
@@ -90,6 +97,14 @@ class Settings(BaseSettings):
     github_repository: str = Field(default="BerriAI/litellm", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
     # Explicit allowlist; empty preserves the original single-repository setting.
     github_repositories: str = ""
+
+    @field_validator('modal_billing_object_ids')
+    @classmethod
+    def billing_objects(cls, value):
+        items = sorted(set(x.strip() for x in value.split(',') if x.strip()))
+        if len(items) > 100 or any(not re.fullmatch(r'[A-Za-z0-9-]{1,100}', item) for item in items):
+            raise ValueError('Use at most 100 comma-separated Modal object IDs.')
+        return ','.join(items)
 
     @field_validator('litellm_trace_endpoint', 'raindrop_trace_endpoint')
     @classmethod

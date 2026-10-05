@@ -124,6 +124,8 @@ def completion_events(value):
 class Spend:
     def __init__(self, store, settings, security, checkpoints):
         self.store, self.settings, self.security, self.checkpoints = store, settings, security, checkpoints
+        from .infrastructure_costs import InfrastructureCosts
+        self.infrastructure = InfrastructureCosts(store, settings, security, checkpoints)
         with store.connect() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS model_requests (
@@ -136,6 +138,8 @@ class Spend:
                 CREATE INDEX IF NOT EXISTS idx_model_requests_gateway ON model_requests(key_hash,gateway_id);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_time ON model_requests(key_hash,created_at);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_run ON model_requests(key_hash,run_id);
+                CREATE INDEX IF NOT EXISTS idx_model_requests_org_time ON model_requests(created_at);
+                CREATE INDEX IF NOT EXISTS idx_model_requests_org_run ON model_requests(run_id);
             ''')
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
             if 'cost_source' not in columns:
@@ -176,8 +180,8 @@ class Spend:
             OR EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
             OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
             OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id)''')}
-        requests = {r['id']: r for r in self.store.rows('SELECT * FROM model_requests WHERE key_hash=?', (self.key_hash,))}
-        rows = [row for row in requests.values() if lower <= row['created_at'] < upper]
+        rows = self.store.rows('SELECT * FROM model_requests WHERE created_at>=? AND created_at<?', (lower, upper))
+        tracked_since = self.store.rows('SELECT MIN(created_at) AS value FROM model_requests')[0]['value']
         def empty():
             return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'sessions': set()}
         groups = {user['id']: empty() for user in users.values() if user['kind'] == 'google'}
@@ -206,13 +210,23 @@ class Spend:
         def identity(user_id):
             return users.get(user_id, {'id': 'unattributed', 'name': 'Unattributed / earlier usage', 'email': '', 'kind': 'unattributed'})
         titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows('SELECT id,prompt FROM runs')}
-        return {'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
+        result = {'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
                 'priced_requests': sum(row['cost'] is not None for row in rows),
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
                 'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_source','prompt_tokens','completion_tokens','total_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
-                'identities': list(users.values()), 'tracked_since': min((r['created_at'] for r in requests.values()), default=None)}
+                'identities': list(users.values()), 'tracked_since': tracked_since}
+
+        infrastructure = self.infrastructure.report(start, end)
+        result['infrastructure'] = infrastructure
+        result['cost_summary'] = {
+            'llm': str(total['spend']), 'infrastructure': infrastructure['spend'],
+            'total': str(total['spend'] + Decimal(infrastructure['spend'])),
+            'estimated': infrastructure['estimated'],
+            'incomplete': infrastructure['incomplete'] or bool(total['pending_costs'] or total['missing_costs']),
+        }
+        return result
 
     def routes(self):
         router = APIRouter()

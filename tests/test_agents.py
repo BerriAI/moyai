@@ -216,6 +216,7 @@ async def test_child_cost_rollup_does_not_duplicate_global_spend(durable):
         request = spend.begin(manager.store.run(run_id), 'test-model')
         manager.store.execute("UPDATE model_requests SET cost=?,status='completed' WHERE id=?", (str(Decimal('0.1') * (i+1)), request))
     assert spend.report()['total']['spend'] == '0.6'
+    manager.settings.litellm_api_key = 'rotated-key'
     view = coordinator.view(root)
     assert view['spend'] == '0.6'
     assert {c['cost']['spend'] for c in view['groups'][0]['children']} == {'0.2', '0.3'}
