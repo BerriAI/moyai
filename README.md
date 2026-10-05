@@ -873,7 +873,7 @@ commands can themselves copy data or create service caches; this is not a
 boundary against malicious sandbox code. Revocation prevents subsequent loads,
 not an already-running command or use at the upstream service.
 
-New images include `aws`, `kubectl` and `helm`. Restored older images install a
+New images include `aws`, `kubectl`, `helm` and 1Password CLI `op` 2.30.0. Restored older images install a
 missing supported CLI when a credential command references it. Installation
 errors are separate from authentication failures. Generic access is a deliberate
 policy expansion: approved credentials can now reach sandbox commands, with the
@@ -901,6 +901,58 @@ profile matching verified SSO; spend attribution links grant no access. Personal
 credentials require Google sign-in outside local previews. This remains a
 single-organization workspace, and personal credential ownership does not make
 shared conversations or their results private.
+
+### 1Password Shared vault
+
+Use **Settings → Secrets → Connect 1Password** to save a service-account token.
+The form has one masked token field; it stores `OP_SERVICE_ACCOUNT_TOKEN` under
+the generic capability `1password-shared`. Choose **Organization** and **Across
+future sessions** for team access, and record the token's actual expiry if known.
+An existing matching connection opens for editing instead of creating another.
+Only an administrator can save organization access. The value remains encrypted
+in Moyai's existing credential store and is never returned by the Secrets API.
+
+Create a dedicated Moyai service account in `berriai.1password.com` with
+`Shared:read_items,write_items` only. Vault creation is unnecessary. Saving a
+token does **not** restrict its upstream permissions: the account's 1Password
+grants are the access boundary. Do not reuse another agent's token by copying it
+through chat. See the official [service-account setup guide](https://developer.1password.com/docs/service-accounts/get-started/).
+
+This uses the plain CLI, with no 1Password MCP or connector. New Modal images
+install the pinned official Linux archive after verifying its SHA-256 checksum.
+An older restored sandbox installs a missing `op` when a credential command
+references it. Changing this code alone does not update the deployed service;
+deploy it following the active-session precautions above.
+
+The agent checks saved Shared access before asking for a provider key. It uses
+`credentials_request` with `provider=generic`, `name=1password-shared`, and
+`format=env`, then runs `op` through `credentials_run` using the returned handle.
+The existing broker rechecks scope, expiry, and revocation on every load. The
+token reaches only the command subprocess, rather than every agent shell.
+It is not part of the sandbox launch spec or prepared environment image.
+
+First verify `op --version`, `op whoami`, and `op vault list`, then list item
+metadata with `op item list --vault Shared`. Authentication is automatic from
+the service-account token. For provider calls, use nonsecret references and
+`op run`, retaining its default output masking, for example inside
+`credentials_run`:
+
+```sh
+PROVIDER_API_KEY='op://Shared/<item>/credential' op run -- python provider_check.py
+```
+
+The program reads `PROVIDER_API_KEY` from its environment and reports only a
+nonsecret success/failure result. Do not print values or disable output masking.
+`credentials_run` redacts the injected service-account token; it cannot know
+all newly fetched vault values. If direct `op read` is necessary, capture its
+stdout in memory and pass it directly to the intended process in the same command.
+
+For authorized writes, search for an existing item first and edit it; resolve
+ambiguous matches before writing. Send secret JSON templates to `op item
+create/edit` through stdin, capture their output in memory, and report only item
+IDs/titles. Keep values out of command arguments, files, recordings and logs.
+Renew expired tokens in 1Password and replace the saved value using **Edit**;
+this preserves Moyai's credential identity and existing recovery flow.
 
 ### Personal and organization skills
 
