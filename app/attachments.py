@@ -95,6 +95,8 @@ def attachment_context(items):
 class Attachments:
     def __init__(self, store):
         self.store = store
+        # Keep the legacy slack_audio_inputs name so pending audio survives the
+        # upgrade; the durable queue now accepts all Slack file attachments.
         with store.connect() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS attachments (

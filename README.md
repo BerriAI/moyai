@@ -1115,6 +1115,22 @@ link. These user-uploaded files are not copied to Slack and require no additiona
 Slack scopes. Agent demo captures referenced in completed answers use the separate
 native delivery described above.
 
+Incoming Slack files use this same attachment pipeline. Signed mentions, direct
+messages and replies in a bound thread retain up to five file IDs, including
+image-only messages. Once that turn starts, the worker retrieves file metadata
+and downloads from Slack's private file host using the bot's `files:read` access.
+PNG, JPEG, WebP and GIF inputs get the same validated previews, sandbox originals
+and model image inputs as web uploads; audio still gets transcribed. No private
+Slack URL or bot credential is passed to the model.
+
+For an initial request, the bounded conversation read can recover files missing
+from an `app_mention` event and include files from the explicitly invoked thread.
+Nearby channel messages' files and future replies are excluded. Direct-message
+history is not imported. Files queued during a response wait for their own turn;
+failures explicitly tell the agent that content is missing. Existing installations
+without `files:read` must reconnect Slack. The durable intake table keeps its
+legacy `slack_audio_inputs` name to preserve pending recordings across upgrades.
+
 ## Prepared project environments
 
 Each repository added to Moyai's shared GitHub connection appears automatically

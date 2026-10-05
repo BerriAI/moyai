@@ -13,7 +13,7 @@ from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
-from .slack_audio import SlackAudio, audio_files
+from .slack_files import SlackFiles, file_ids as slack_file_ids
 
 
 class SlackSessions:
@@ -23,7 +23,7 @@ class SlackSessions:
         self.jobs = set()
         self.identities = None
         self.automation_events = None
-        self.audio = SlackAudio(self)
+        self.files = SlackFiles(self)
         self.chat = SlackChat(self)
         self.agentchat, self.channel = connect_agentchat(self)
 
@@ -107,11 +107,11 @@ class SlackSessions:
         if addressed and mention not in addressed[1]:
             return {'ok': True}
         prompt = text.replace(mention, "").strip()
-        file_ids = audio_files(event.get('files'))
+        file_ids = slack_file_ids(event.get('files'))
         if not prompt and not file_ids:
             return {"ok": True}
-        if file_ids:
-            prompt = (prompt + '\n\n' if prompt else '') + 'Please respond to the attached audio message.'
+        if file_ids and not prompt:
+            prompt = 'Please respond to the attached files.'
         if len(prompt) > 16000:
             raise HTTPException(400, "Slack task is too long.")
         direct_message = event.get('type') == 'message' and event.get('channel_type') == 'im' and channel.startswith('D')
@@ -154,12 +154,16 @@ class SlackSessions:
             self.submit_reply(run['id'])
 
     async def prepare(self, run_id):
+        await self.prepare_source(run_id)
+        self.files.include_context(run_id)
+        await self.files.prepare(run_id)
+
+    async def prepare_source(self, run_id):
         """Runs in the session job, never on Slack's acknowledgement path.
 
         Reads can safely be retried after an interruption, but source messages
         are frozen at the mention timestamp and agent work is never replayed.
         """
-        await self.audio.prepare(run_id)
         source = self.store.slack_source(run_id)
         if not source or source["context_status"] not in {"pending", "fetching"}:
             return
@@ -239,7 +243,8 @@ class SlackSessions:
                 clipped = len(text) > 3000
                 messages[ts] = {"ts": ts, "user": item.get("user") or item.get("bot_id") or "unknown",
                                 "text": text[:3000], "text_truncated": clipped,
-                                "has_attachments": bool(item.get("files") or item.get("attachments"))}
+                                "has_attachments": bool(item.get("files") or item.get("attachments")),
+                                "file_ids": slack_file_ids(item.get('files'))}
             cursor = data.get("response_metadata", {}).get("next_cursor", "")
             truncated = bool(data.get("has_more") or cursor)
             if not cursor:
@@ -266,7 +271,7 @@ class SlackSessions:
         if threaded and not root:
             warnings.append("The thread's root message was not returned.")
         if any(m["has_attachments"] for m in selected):
-            warnings.append("Attached files and rich attachments were not read.")
+            warnings.append("Attached files are available only when listed under USER ATTACHMENTS; other files and rich attachments were not read.")
         return {"messages": selected, "truncated": truncated, "warning": " ".join(warnings)}
 
     def submit_reply(self, run_id):
