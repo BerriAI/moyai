@@ -101,8 +101,8 @@
 @media(max-width:650px){.skills-page{padding:20px 16px}.skill-card{flex-direction:column;gap:12px}.skill-form-row{grid-template-columns:1fr;gap:0}.skill-editor,.skill-picker{padding:22px}.skills-filters{flex-wrap:wrap}.skill-card-actions{flex-wrap:wrap}.skill-picker-button{padding:8px}.reply-composer .composer-toolbar{gap:4px}}
 /* Inline skill completion stays attached to the current composer. */
 /* Files stay in the composer until their message has been acknowledged. */
-.attach-button{width:34px;height:34px;display:grid;place-items:center;flex-shrink:0;padding:6px!important;color:#77717f}
-.attach-button:hover{background:#f2eef7;color:#654a8d;border-radius:8px}
+.attach-button,.record-button.is-idle{width:34px;height:34px;display:grid;place-items:center;flex-shrink:0;padding:6px!important;color:#77717f}
+.attach-button:hover,.record-button.is-idle:hover{background:#f2eef7;color:#654a8d;border-radius:8px}
 .attachment-tray{display:flex;gap:12px;overflow-x:auto;padding:18px 20px 3px;align-items:flex-start}
 .attachment-tray[hidden]{display:none}.draft-attachment{position:relative;flex:0 0 205px;max-width:205px;border:1px solid #e4e0e9;border-radius:12px;background:#fbfafc}
 .attachment-open{border:0!important;background:transparent!important;padding:12px!important;display:flex;align-items:center;gap:10px;width:100%;text-align:left;border-radius:12px}
