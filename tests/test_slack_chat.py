@@ -32,6 +32,64 @@ def finish(app, run_id, answer):
     app.state.slack.chat.collect()
 
 
+def test_web_reply_attribution_uses_current_sender_profile_without_rewriting_history(slack_app):
+    from test_spend import sign_in
+
+    app, client, run_id = start(slack_app)
+    finish(app, run_id, 'Ready.')
+    prompt = 'can you make a pr ?\nKeep the literal ID U12345678 in this example.'
+    send(client, 1, prompt)
+    sign_in(app, client)
+
+    def reply():
+        response = client.get(f'/api/runs/{run_id}')
+        assert response.status_code == 200
+        return response.json()['messages'][-1]
+
+    original = f'Slack reply from U12345678:\n{prompt}'
+    assert reply()['display_content'] == f'Slack reply from Slack teammate:\n{prompt}'
+    actor = 'slack:T12345678:U12345678'
+    app.state.store.execute('UPDATE users SET name=?,email=? WHERE id=?', ('Ryan', 'ryan@berri.ai', actor))
+    assert reply()['display_content'] == f'Slack reply from Ryan:\n{prompt}'
+    assert reply()['content'] == original
+    assert reply()['user_id'] == actor
+    claimed = app.state.store.claim_message(run_id)
+    assert claimed['content'] == original
+    app.state.store.finish_message(run_id, claimed['id'], original)
+    # Assistant text quoting a Slack label must not be rewritten.
+    assert 'display_content' not in reply()
+    # A profile refresh also fixes old, completed history on the next read.
+    app.state.store.execute('UPDATE users SET name=? WHERE id=?', ('Ryan Updated', actor))
+    history = client.get(f'/api/runs/{run_id}').json()['messages']
+    assert history[-2]['display_content'] == f'Slack reply from Ryan Updated:\n{prompt}'
+    assert app.state.store.rows('SELECT content FROM messages WHERE id=?', (claimed['id'],))[0]['content'] == original
+
+
+def test_web_reply_attribution_does_not_rename_initial_or_web_text(slack_app):
+    from test_spend import sign_in
+
+    app, client, _, _ = slack_app
+    literal = 'Slack reply from U12345678:\nQuoted example'
+    client.post('/hooks/slack/events', **signed(event(text='<@U99999999> ' + literal)))
+    run_id = app.state.store.rows('SELECT id FROM runs')[0]['id']
+    first = app.state.store.messages(run_id)[0]
+    assert first['content'] == literal and 'display_content' not in first
+    user = sign_in(app, client)
+    app.state.store.enqueue_message(run_id, literal, 'web-example', user_id=user)
+    assert 'display_content' not in app.state.store.messages(run_id)[-1]
+
+
+def test_web_reply_attribution_uses_reply_sender_and_email_fallback(slack_app):
+    app, client, run_id = start(slack_app)
+    finish(app, run_id, 'Ready.')
+    app.state.store.execute("UPDATE users SET name='Original sender' WHERE kind='slack'")
+    send(client, 1, 'Another teammate replies.', user='U87654321')
+    app.state.store.execute("UPDATE users SET email='ryan@berri.ai' WHERE id='slack:T12345678:U87654321'")
+    reply = app.state.store.messages(run_id)[-1]
+    assert reply['display_content'] == 'Slack reply from ryan@berri.ai:\nAnother teammate replies.'
+    assert reply['content'] == 'Slack reply from U87654321:\nAnother teammate replies.'
+
+
 def publication(app, run_id, number=100, title='Show the completed demo'):
     result = {'number': number, 'url': f'https://github.com/BerriAI/moyai-devin/pull/{number}',
               'repository': 'BerriAI/moyai-devin', 'title': title, 'draft': False}

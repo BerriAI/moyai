@@ -22,6 +22,19 @@ function controller(){
   return {ctrl,requests,toasts,drafts,used,element,options,get writes(){return writes;},setRun(next){run=next;ctrl.render(next);}};
 }
 
+test('Slack reply cards show escaped names while queue edits preserve canonical input',async()=>{
+  const b=controller();
+  const input={...message,content:'Slack reply from U12345678:\nMake a PR',
+    display_content:'Slack reply from Ryan <script>alert(1)</script>:\nMake a PR'};
+  b.setRun({status:'running',messages:[active,input]});
+  assert.match(b.element.html,/Slack reply from Ryan &lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+  assert.doesNotMatch(b.element.html,/U12345678|<script>/);
+  await b.ctrl.act(2,'edit');
+  assert.equal(b.drafts.get(2).content,input.content);
+  await b.ctrl.act(2,'save');
+  assert.equal(b.requests[0].body.content,input.content);
+});
+
 test('a new request is immediately in the transcript without changing its durable state',()=>{
   const input={...message,attachments:[{id:'file',name:'skill.md'}]},run={status:'queued',messages:[input]};
   const before=structuredClone(run),view=queue.presentation(run);

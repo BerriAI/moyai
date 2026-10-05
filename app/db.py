@@ -291,7 +291,30 @@ class Store:
         return {**context, **row}
 
     def messages(self, run_id):
-        messages = self.rows("SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,m.user_id,m.revision,m.queue_locked,m.steering_parent_id,COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name FROM messages m LEFT JOIN users u ON u.id=m.user_id LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE m.run_id=? AND m.status!='deleted' ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,COALESCE(NULLIF(m.started_at,''),m.created_at),m.id", (run_id,))
+        messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
+            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,
+            COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
+            u.name AS sender_name,u.email AS sender_email,
+            (SELECT r.user_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
+                AND m.user_id='slack:'||r.team_id||':'||r.user_id
+                AND NOT EXISTS(SELECT 1 FROM slack_events e WHERE e.event_id=r.event_id)
+                LIMIT 1) AS slack_reply_user
+            FROM messages m LEFT JOIN users u ON u.id=m.user_id
+            LEFT JOIN users linked ON linked.id=u.linked_user_id
+            WHERE m.run_id=? AND m.status!='deleted'
+            ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,
+                COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,))
+        for message in messages:
+            slack_user = message.pop('slack_reply_user')
+            name, email = message.pop('sender_name'), message.pop('sender_email')
+            prefix = f'Slack reply from {slack_user}:\n'
+            # Resolve only our generated attribution, including saved history.
+            # Keep canonical content intact for agents, retries and queue edits.
+            if message['role'] == 'user' and slack_user and message['content'].startswith(prefix):
+                name = (name or '').strip()
+                if name in {'', slack_user, 'Slack ' + slack_user, message['user_id']}:
+                    name = (email or '').strip() or 'Slack teammate'
+                message['display_content'] = f'Slack reply from {name}:\n' + message['content'][len(prefix):]
         # Inputs that never started (cancelled/failed while waiting) stay where
         # they were sent: before the first later-sent input that did run.
         ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]
