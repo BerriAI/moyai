@@ -360,3 +360,58 @@ test('session lookup errors are retryable and persistent reuse disables the root
   f.element('secret-value').value='synthetic-provider-key';await f.element('credential-form').onsubmit({preventDefault(){}});
   assert.equal(f.posts[0].body.lifetime,'persistent');assert.equal('root_id' in f.posts[0].body,false);
 });
+
+test('1Password shortcut saves a masked token with explicit organization and reuse choices',async()=>{
+  const f=fixture({kind:'key'});
+  await f.ctx.openOnePasswordDialog();
+  assert.equal(f.element('secret-provider').value,'generic');
+  assert.equal(f.element('secret-name').value,'1password-shared');
+  assert.equal(f.element('secret-generic-fields').hidden,true);
+  assert.equal(f.element('secret-input-0').type,'password');
+  assert.equal(f.elements.has('secret-value'),false);
+  assert.equal(f.element('secret-scope').value,'');
+  assert.equal(f.element('secret-lifetime').value,'');
+  f.element('secret-input-0').value='synthetic-op-token';
+  await f.element('credential-form').onsubmit({preventDefault(){}});
+  assert.equal(f.posts.length,0);
+  f.element('secret-scope').value='organization';f.element('secret-lifetime').value='persistent';
+  await f.element('credential-form').onsubmit({preventDefault(){}});
+  assert.equal(f.posts[0].path,'/api/credentials/secrets');
+  assert.equal(f.posts[0].body.name,'1password-shared');
+  assert.equal(f.posts[0].body.label,'1Password Shared');
+  assert.deepEqual(JSON.parse(f.posts[0].body.value),{OP_SERVICE_ACCOUNT_TOKEN:'synthetic-op-token'});
+  assert.equal(f.elements.has('secret-input-0'),false);
+});
+
+test('1Password shortcut edits an existing connection and preserves its token when blank',async()=>{
+  for(const replacement of ['', 'synthetic-new-token']){
+    const saved={id:'shared',provider:'generic',name:'1password-shared',format:'env',scope:'organization',lifetime:'persistent',label:'Shared',revision:4,can_manage:true};
+    const f=fixture({kind:'key',saved:[saved]});
+    await f.ctx.openOnePasswordDialog();
+    assert.equal(f.element('secret-input-0').required,false);
+    f.element('secret-input-0').value=replacement;
+    await f.element('credential-form').onsubmit({preventDefault(){}});
+    assert.equal(f.posts[0].method,'PATCH');
+    assert.equal(f.posts[0].path,'/api/credentials/secrets/shared');
+    assert.equal(f.posts[0].body.revision,4);
+    assert.equal('value' in f.posts[0].body,!!replacement);
+    if(replacement)assert.deepEqual(JSON.parse(f.posts[0].body.value),{OP_SERVICE_ACCOUNT_TOKEN:replacement});
+  }
+});
+
+test('1Password shortcut does not duplicate ambiguous or admin-managed access',async()=>{
+  const saved={id:'shared',provider:'generic',name:'1password-shared',format:'env',scope:'organization'};
+  const f=fixture({kind:'key',saved:[saved],admin:false});
+  await assert.rejects(()=>f.ctx.openOnePasswordDialog(),/managed by an administrator/);
+  assert.equal(f.posts.length,0);
+  const many=fixture({kind:'key',saved:[{...saved,can_manage:true},{...saved,id:'shared2',can_manage:true}]});
+  await assert.rejects(()=>many.ctx.openOnePasswordDialog(),/Multiple Shared connections/);
+});
+
+test('1Password pending requests get a masked token field without JSON entry',async()=>{
+  const f=fixture({kind:'key',admin:false});
+  await f.ctx.openCredentialDialog({id:'shared',provider:'generic',name:'1password-shared',format:'env',can_personal:true,reason:'Check the Shared vault'});
+  assert.equal(f.element('secret-input-0').type,'password');
+  assert.equal(f.element('secret-use-organization').disabled,true);
+  assert.equal(f.elements.has('secret-value'),false);
+});
