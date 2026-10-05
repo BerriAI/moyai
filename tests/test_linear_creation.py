@@ -2,7 +2,6 @@
 import pytest
 
 from app.connector_errors import ConnectorError
-from app.connectors import TOOLS
 from test_workspace import workspace, cloud_capability
 
 ARGS = {'team_id': '12345678-1234-1234-1234-123456789abc',
@@ -54,13 +53,6 @@ def test_failed_creation_is_uncertain_without_retries_or_approval(workspace, mon
     assert len(calls) == 1 and not app.state.store.approvals(run_id)
     assert app.state.store.run(run_id)['status'] == 'running'
     assert any(e['kind'] == 'error' for e in app.state.store.events(run_id))
-
-
-def test_other_connected_app_writes_keep_approval(workspace):
-    app, _ = workspace
-    direct = {'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request', 'linear_create_issue'}
-    for name, spec in TOOLS.items():
-        assert app.state.connectors.requires_approval(name) == (spec[1] and name not in direct)
 
 
 def test_invalid_ticket_still_fails_before_provider_call(workspace, monkeypatch):

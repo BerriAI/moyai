@@ -22,7 +22,7 @@ A separate deterministic runtime check also passed: the real Hermes conversation
 
 **Live migration verified September 29, 2026:** all 12 existing sessions, 14 messages, three organization connections, saved filesystem snapshot IDs, Slack source context, and 10 byte-identical result archives moved to Render. All three provider health checks passed. The existing continuity chat resumed on a new Modal sandbox and recovered “blue lantern” and file value `12`. A real [#bot-spam thread mention](https://berriaillm.slack.com/archives/C0B302ZJU05/p1790733863830609?thread_ts=1790733854.157109&cid=C0B302ZJU05) created [a Render session](https://moyai-devin.onrender.com/#run=b371989dcc8842fdad936f5784beec7f), automatically read two source messages, and answered the marker `river-stone-73`. No external writes were requested. Both sandboxes terminated. The old Modal web deployment is stopped; its Volume remains a frozen migration backup. Existing workspace passwords are unchanged. A second Render deployment, with bootstrap disabled, preserved all 13 current sessions, 18 messages, 11 archive checksums, saved snapshots, and organization connections. Unauthenticated APIs still returned 401, and no Modal sandbox remained running.
 
-`render.yaml` defines the company Render Python service in Oregon with 1 CPU / 2 GB memory and a 1 GB persistent disk ($25.25/month base plus usage). Render hosts the browser UI, encrypted app connections, Slack webhook, SQLite history, and approval broker. Agent machines, filesystem snapshots, and Chromium still run in Modal. Service automatic deploys and Blueprint automatic synchronization are disabled because deployments interrupt active chat turns; check for active sessions before deploying. Manually sync the Blueprint after reviewing configuration changes, then deploy the intended commit. Keep one web instance. Render's disk forces stop-before-start deployments, preserving the single-writer database requirement.
+`render.yaml` defines the company Render Python service in Oregon with 1 CPU / 2 GB memory and a 1 GB persistent disk ($25.25/month base plus usage). Render hosts the browser UI, encrypted app connections, Slack webhook, SQLite history, and tool broker. Agent machines, filesystem snapshots, and Chromium still run in Modal. Service automatic deploys and Blueprint automatic synchronization are disabled because deployments interrupt active chat turns; check for active sessions before deploying. Manually sync the Blueprint after reviewing configuration changes, then deploy the intended commit. Keep one web instance. Render's disk forces stop-before-start deployments, preserving the single-writer database requirement.
 
 The deployed Blueprint sets `RENDER_MIGRATION_STAGE=false` and leaves `BOOTSTRAP_MODAL_VOLUME` empty now that the import is complete. For a fresh migration, `render_start.py` defaults to staging mode unless explicitly configured. The health endpoint is available, but sessions and Slack events are refused until cutover. Configure the existing environment secrets privately in Render; preserve `ENCRYPTION_KEY`, both workspace passwords, and `SESSION_SECRET`. `PUBLIC_URL` comes from Render's own `RENDER_EXTERNAL_URL`; Modal proxy rewriting and Modal Volume checkpoint writes are disabled on Render.
 
@@ -163,11 +163,11 @@ Roles saved in the app take precedence over `GOOGLE_ADMIN_EMAILS`. That environm
 
 Keep `PASSWORD_LOGIN_ENABLED=true` for initial setup. After a real Google administrator login succeeds, set it to `false` and redeploy; this disables password login and invalidates existing password sessions. Preserve `SESSION_SECRET` and `ENCRYPTION_KEY` and existing data during the change. Domain, OAuth client, and administrator-policy changes are checked on subsequent requests. Google sessions last at most 12 hours; Google account suspension is checked on the next Google authentication, not through directory synchronization.
 
-The server verifies Google’s signature, issuer, audience, expiry, nonce, verified email, and hosted-domain claim. Login state is single-use, expires in ten minutes, is bound to the initiating browser, and uses PKCE. Return destinations are restricted to known local app routes. Google login requests only `openid email profile`; Google API access and refresh tokens are not stored. Passwords, authorization codes, and identity tokens must not appear in logs or screenshots. Connection policies apply to all sessions. Linear ticket creation, GitHub PR creation and session-owned PR updates/comments need no extra approval; other connected-app writes require an administrator.
+The server verifies Google’s signature, issuer, audience, expiry, nonce, verified email, and hosted-domain claim. Login state is single-use, expires in ten minutes, is bound to the initiating browser, and uses PKCE. Return destinations are restricted to known local app routes. Google login requests only `openid email profile`; Google API access and refresh tokens are not stored. Passwords, authorization codes, and identity tokens must not appear in logs or screenshots. Connection policies apply to all sessions. All enabled connected-app tools, including newly added tools, execute without per-use approval for members and admins. Read-only and paused connection settings, provider permissions and session scope still apply.
 
 ## Chat interface
 
-The browser opens into a conversation workspace with searchable sessions in the sidebar, a centered new-session composer, and a full-height chat with the composer fixed below the conversation. Enter sends; Shift + Enter adds a line. Unsent follow-up drafts remain with their session while switching chats. Activity opens the session's progress, Slack source context, and file download in a collapsible panel. Pending write approvals remain visible beside the composer.
+The browser opens into a conversation workspace with searchable sessions in the sidebar, a centered new-session composer, and a full-height chat with the composer fixed below the conversation. Enter sends; Shift + Enter adds a line. Unsent follow-up drafts remain with their session while switching chats. Activity opens the session's progress, Slack source context, and file download in a collapsible panel. Connected-app tools execute without an approval prompt. Historical approval records remain readable.
 
 The sidebar lists the 100 most recently updated parent sessions first, using the same last-updated time shown beneath each title. New messages and session state changes update this time; simply opening a session does not. Subagents stay nested under their parent in assignment order. The list refreshes every 15 seconds, and a selected older session remains accessible beyond the list limit.
 
@@ -189,7 +189,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 | Tool discovery | Hermes keeps terminal/file tools direct and exposes workspace MCP tools through `tool_search`, `tool_describe`, and `tool_call`. Full connector schemas load on demand; the upfront catalog listing has a 600 estimated-token budget. |
 | Organization controls | Shared connections, separate admin/member access, enabled/paused and read-only policies, health checks, and an audit history of connection changes. |
 | Slack sessions | Mention @Moyai Devin in a channel the bot has joined. Signed, deduplicated events start one saved session per thread. AgentChat routes mentions, thread follow-ups, and direct messages into saved conversations. Threads show native working status, then the answer; plain DMs retain eyes acknowledgment. |
-| External writes | Linear tickets and GitHub PRs are created directly; session-owned PR updates/comments also run directly. Other connected-app writes show exact arguments for one-time admin approval; denied/expired actions are not sent. Ambiguous write failures are recorded as uncertain and never retried automatically. |
+| External writes | All enabled connected-app tools run directly, including new tools, GitHub PR creation/maintenance, Linear ticket creation/updates/comments, Slack messages and Notion writes. Read-only/paused policies still block writes. Ambiguous write failures are reported as uncertain and never retried automatically. |
 | Agent browser | Isolated headless Chromium with open/read/click/fill tools over MCP; latest screenshot returned in the result archive. |
 | Results | Summary, tracked changes as a patch, eligible new files, and latest browser screenshot. Up to 2 MB per artifact file / 15 MB collected content / 20 MB archive download. Hidden files and symlinks are skipped. |
 | Saved workspace | Each response saves Hermes conversation history and a Modal filesystem snapshot. With Temporal, follow-ups reuse the sandbox for five idle minutes; later responses restore saved files and tool history. Warm sandboxes consume compute. Filesystem snapshots do not preserve running background processes or browser tabs. |
@@ -201,8 +201,8 @@ startup, but the model sees a compact catalog and the search bridge instead of
 every parameter schema. Browser, skills, credentials, and agent-coordination
 tools use the same path. Search finds capabilities; describe returns selected
 schemas; call invokes the existing tool. Repeated calls can reuse a schema
-already in the conversation. Server-side permissions, revocation checks, and
-write approvals still apply to every invocation.
+already in the conversation. Server-side permissions and revocation checks still apply to every invocation;
+enabled tools run without a per-use approval step.
 
 To verify this against the pinned Hermes runtime without model or provider
 requests, set `HERMES_TEST_SOURCE` to its checkout and `HERMES_TEST_PYTHON` to
@@ -255,7 +255,7 @@ The included Docker image runs the control plane on an always-on cloud VM or con
 docker compose up --build -d
 ```
 
-The compose port binds only to the cloud host's loopback interface. Place an HTTPS reverse proxy in front of port 8787, set `PUBLIC_URL` to its exact origin, and preserve the incoming Host header. Allow `/broker/` traffic from Modal with its run-scoped bearer tokens. Disable proxy buffering for event streams and allow requests lasting up to 16 minutes for human approvals. Set an appropriate body-size limit (5 MB) at the proxy.
+The compose port binds only to the cloud host's loopback interface. Place an HTTPS reverse proxy in front of port 8787, set `PUBLIC_URL` to its exact origin, and preserve the incoming Host header. Allow `/broker/` traffic from Modal with its run-scoped bearer tokens. Disable proxy buffering for event streams. Set an appropriate body-size limit (5 MB) at the proxy.
 
 Use one replica with a persistent local disk. Avoid serverless request hosts that stop background work after an HTTP response. The Docker image was built and its task creation and restart persistence were verified locally. This alternative has not been deployed to a separate VM.
 
@@ -263,15 +263,15 @@ Use one replica with a persistent local disk. Avoid serverless request hosts tha
 
 New browser sessions select all enabled connected apps by default; uncheck an app to exclude it from that session. No per-user provider sign-in is required.
 
-Connections are **shared by the LiteLLM organization** and retain the permissions of their authorizing identity. The deployed app uses verified BerriAI Google SSO; password sign-in is a configurable fallback. Members can start sessions, use enabled connections, create Linear tickets, and create GitHub PRs in authorized repositories without an administrator approval step. Only admins can manage connections, change access policies, view spend, link Slack identities, or approve other external writes. This is a single-organization trusted-team MVP with shared session visibility.
+Connections are **shared by the LiteLLM organization** and retain the permissions of their authorizing identity. The deployed app uses verified BerriAI Google SSO; password sign-in is a configurable fallback. Members can start sessions and use all enabled connected-app tools without an administrator approval step. Only admins can manage connections, change access policies, view spend or link Slack identities. This is a single-organization trusted-team MVP with shared session visibility.
 
 Open **Organization** and either enter the appropriate token or use the OAuth button after configuring the provider's client ID and secret. Tokens are checked with the provider before being saved. Disconnect removes the locally stored credential; revoke the integration at the provider as well if you want to terminate its authorization there.
 
 | App | Required setup | Tools exposed |
 | --- | --- | --- |
-| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | List accessible teams (50 results), search issue titles (20 results), read an issue and its parent, create an issue (optionally under a parent) directly, update an existing issue's parent or add a comment after approval. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
-| Slack | User token with `search:read`, relevant channel/DM history scopes, and `chat:write`; or a Slack OAuth app with those **user** scopes and callback `PUBLIC_URL/oauth/slack/callback`. Bot tokens cannot search messages. | Search messages (20 results), read a thread (50 messages), send a message after approval. |
-| Notion | Integration token with content access and the target pages shared to it; or public integration OAuth client with callback `PUBLIC_URL/oauth/notion/callback`. | Search page titles (20 results), read up to 100 top-level blocks, append a paragraph after approval. |
+| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | List accessible teams (50 results), search issue titles (20 results), read an issue and its parent, create an issue (optionally under a parent) directly, update an existing issue's parent or add a comment directly. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
+| Slack | User token with `search:read`, relevant channel/DM history scopes, and `chat:write`; or a Slack OAuth app with those **user** scopes and callback `PUBLIC_URL/oauth/slack/callback`. Bot tokens cannot search messages. | Search messages (20 results), read a thread (50 messages), send a message directly. |
+| Notion | Integration token with content access and the target pages shared to it; or public integration OAuth client with callback `PUBLIC_URL/oauth/notion/callback`. | Search page titles (20 results), read up to 100 top-level blocks, append a paragraph directly. |
 
 Set `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`, `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET`, and/or `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` to show native OAuth buttons. Provider administrators may need to approve the apps and scopes. Notion search is title search, not full-text search; nested page blocks and subsequent result pages are not automatically expanded in this MVP.
 
@@ -394,7 +394,7 @@ infrastructure + $18.75 of LLM costs = $63.50. Demo data lives separately in
 
 A production failure on LIT-6275 exposed an edge-firewall false positive: the first inference and Linear read succeeded, but the saved conversation containing the issue’s code/reproduction examples received Cloudflare HTML `403 Blocked` before reaching the Render app. Every follow-up restored that same context and failed again. An isolated copy of the actual snapshot reproduced this: plain JSON returned the expected capability `401`, while the saved conversation returned `403`.
 
-The sandbox now runs an authenticated loopback adapter for Hermes and MCP. Requests cross the public edge as Fernet envelopes bound to a fresh run capability and exact route, with a five-minute validity window. Render authenticates the active run **before** decrypting and keeps its model allowlist, sender accounting, input validation, size limits, tool policies, and exact-action approvals. No gateway credentials enter the sandbox, no extra gateway key is created, and no firewall setting is changed. Restored sessions receive the updated adapter files, preserving user files and history. The exact previously blocked conversation passed the edge after this transport change.
+The sandbox now runs an authenticated loopback adapter for Hermes and MCP. Requests cross the public edge as Fernet envelopes bound to a fresh run capability and exact route, with a five-minute validity window. Render authenticates the active run **before** decrypting and keeps its model allowlist, sender accounting, input validation, size limits and tool policies. No gateway credentials enter the sandbox, no extra gateway key is created, and no firewall setting is changed. Restored sessions receive the updated adapter files, preserving user files and history. The exact previously blocked conversation passed the edge after this transport change.
 
 Slack context is included once instead of being appended again on every follow-up. Failed assistant turns retain their failure status and appear as failures in Slack and the web UI. Connection failures give an actionable explanation instead of guessing about the user’s model API key. For issue follow-ups, the agent checks for an existing fix PR and uses the shared GitHub App to create a normal PR directly when enabled.
 
@@ -433,7 +433,7 @@ Invite the bot to a channel and mention **@Moyai Devin** followed by a task. Moy
 
 Direct-message **Moyai Devin** to start without a mention. Subsequent DMs reuse the same saved conversation and files; replies appear directly in the DM. A DM begins with the current request and saved session history, without importing older DMs through the shared search account. One-to-one DMs are supported; group DMs are ignored. Each DM is bound to its original Slack sender, and each turn keeps that sender’s spend attribution. **DM sessions are also visible to signed-in BerriAI teammates in the web app.** The first answer and Connections page explain this shared visibility. Separate threads in Slack’s Agent panel keep their own sessions and reply within the originating thread, while ordinary top-level DMs continue their existing session.
 
-Tasks use enabled organization connections. Everyone with access to the Slack thread can see both new inputs sent from its linked web session and the agent’s answers. Web inputs are posted by the bot with the authenticated sender’s name/email and a “via Moyai web” label; the bot never impersonates their Slack account. The web composer shows this sharing state. Linear ticket creation and GitHub PR creation, session-owned PR updates and comments need no administrator approval step. Other external app writes need an administrator to approve the exact action in the signed-in web app; saying “yes” in Slack cannot approve those writes.
+Tasks use enabled organization connections. Everyone with access to the Slack thread can see both new inputs sent from its linked web session and the agent’s answers. Web inputs are posted by the bot with the authenticated sender’s name/email and a “via Moyai web” label; the bot never impersonates their Slack account. The web composer shows this sharing state. All enabled connected-app tools run without a per-use approval step in Slack sessions, under the same connection policies as web sessions.
 
 Send `stop` to stop the response and cancel queued follow-ups; `sleep` also pauses listening and automatic answers in that thread. Use `wake` or a new direct mention to resume. `status` reports the session state. These commands must be the entire message. Pausing the organization Slack connection disables thread intake and pending replies.
 
@@ -466,7 +466,7 @@ flowchart LR
 
 The app uses native REST/GraphQL adapters for predictable OAuth and a small tool surface. A stdio MCP bridge exposes those tools to Hermes. A sandbox gets a random capability limited to its run and enabled apps; the capability is revoked on stop, completion, timeout, or restart. It does not receive provider or Modal account credentials. Agent code and browser sessions run on Modal, never on the control-plane host.
 
-Response states: `queued → provisioning → running ↔ awaiting_approval → saving → idle` (shown as **Ready**). A session keeps its ID across responses. Messages submitted during a response queue for the next turn; they do not interrupt an in-flight tool. Each response receives a fresh sandbox capability, including on a reused machine. Model requests remain attributed to the original user and message across renewals. After saving the latest artifact and conversation/filesystem snapshot, a completed top-level Temporal chat keeps its sandbox for five idle minutes. Follow-ups reuse it; messages already queued drain before the idle timer starts. After release, the next response restores that snapshot. Snapshot retention is indefinite; Modal storage charges may apply. Stopping ends the current response and cancels queued messages. A new message resumes the last completed checkpoint; unfinished changes may be lost. Legacy tasks created before chat support remain readable with **Run again** available to start a new chat.
+Response states: `queued → provisioning → running → saving → idle` (shown as **Ready**). A session keeps its ID across responses. Messages submitted during a response queue for the next turn; they do not interrupt an in-flight tool. Each response receives a fresh sandbox capability, including on a reused machine. Model requests remain attributed to the original user and message across renewals. After saving the latest artifact and conversation/filesystem snapshot, a completed top-level Temporal chat keeps its sandbox for five idle minutes. Follow-ups reuse it; messages already queued drain before the idle timer starts. After release, the next response restores that snapshot. Snapshot retention is indefinite; Modal storage charges may apply. Stopping ends the current response and cancels queued messages. A new message resumes the last completed checkpoint; unfinished changes may be lost. Legacy tasks created before chat support remain readable with **Run again** available to start a new chat.
 
 New requests and follow-ups to an idle session appear directly in the conversation as soon as the server accepts them, even before a worker claims them. Only messages waiting behind another input appear in the editable queue. The next dispatch candidate follows Send now priority, then arrival order; durable queue and Temporal execution states stay unchanged. Starting a new request does not reopen the previous response's finished activity.
 
@@ -508,7 +508,7 @@ node --check app/static/app.js
 uv run python -m compileall -q app sandbox
 ```
 
-The automated suite uses isolated temporary databases and mocked external services. It tests demo completion and SSE replay, cancellation, CSRF/host/session boundaries, repository URL validation, encrypted credentials, per-run tool scope, one-time approval and denial, uncertain writes, OAuth state binding/replay rejection, restart recovery, model-proxy restrictions, sandbox cleanup during provisioning and shutdown, admin/member restrictions, connection-policy revocation, Slack signature freshness and event deduplication, and bot/user token rotation.
+The automated suite uses isolated temporary databases and mocked external services. It tests demo completion and SSE replay, cancellation, CSRF/host/session boundaries, repository URL validation, encrypted credentials, per-run tool scope, direct tool execution without approval, uncertain writes, OAuth state binding/replay rejection, restart recovery, model-proxy restrictions, sandbox cleanup during provisioning and shutdown, admin/member restrictions, connection-policy revocation, Slack signature freshness and event deduplication, and bot/user token rotation.
 
 Manual browser QA covers creating a task, streaming and saved activity, stopping a task, connection dialogs, runtime readiness, and responsive layout. The optional browser WebMCP tools expose listing tasks and starting explicit demos; they do not enable unattended cloud runs.
 
@@ -516,7 +516,7 @@ The completed cloud checks are described at the top of this document. For future
 
 1. Submit a small task against a public test repository in Modal mode; confirm the image builds, Hermes invokes a terminal tool, and results stream back.
 2. Confirm the model gateway records the configured model/key and budget.
-3. Connect each provider and run one search/read. Test live writes only with an explicitly authorized disposable destination; approval, denial, and ambiguous-write handling are covered by the automated suite, but real provider writes remain unverified.
+3. Connect each provider and run one search/read. Test live writes only with an explicitly authorized disposable destination; direct execution, policy denial and ambiguous-write handling are covered by the automated suite, but real provider writes remain unverified.
 4. Open a public page with the agent browser and download its screenshot.
 5. Stop a real task during provisioning and while running; verify Modal shows no remaining sandbox after cleanup/timeout.
 
@@ -615,7 +615,7 @@ an explicit follow-up. Snapshots do not contain RAM, running processes, or brows
 tabs. A tool that cannot reach a safe boundary before Modal's hard limit can still
 be interrupted. In-flight HTTP model/tool requests to the Render broker can fail
 during a Render restart; Temporal does not transparently replay those requests.
-Existing write approvals, uncertain-write records, Slack outbox deduplication,
+Connection policies, uncertain-write handling, Slack outbox deduplication,
 and per-user inference accounting remain in force. Modal snapshots are retained
 indefinitely as before; periodic snapshots add storage usage and need an explicit
 retention policy before large-scale use. Losing the Render disk still loses the
@@ -718,7 +718,7 @@ requires a new key. Each child inherits the initiating message's user, selected
 model, repository and enabled app set, and receives an isolated snapshot of the
 parent's current files. Finish file writes before delegating. Child conversations
 start fresh; child changes are not automatically merged. Workers cannot launch
-further children. Child agents follow the same policy: direct Linear ticket creation and GitHub PR creation/maintenance in authorized repositories, administrator approval for other connected-app writes.
+further children. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
 
 After the delegation tool completes, the coordinator checkpoints between tool
 rounds, terminates its sandbox and waits durably. Its original user message stays
@@ -785,8 +785,8 @@ Authenticated web follow-ups can be sent directly to a child. They queue behind
 its current turn and are charged to the signed-in sender. While the parent is
 waiting, it waits for accepted follow-ups too, including messages arriving during
 capacity admission. A parent stop blocks new child messages until cleanup finishes.
-Workers still cannot create further agents, and all existing external-write
-approvals apply.
+Workers still cannot create further agents, and organization connection policies
+apply to their tool calls.
 
 At handoff, the parent receives saved answers and immutable archive versions.
 Later child chats can change their own workspace without silently changing those
@@ -800,7 +800,7 @@ the workers’ current state and all attributed follow-up costs.
 
 ## Linear tickets and sub-issues
 
-When the user requests a ticket, `linear_create_issue` creates it directly, with no administrator approval step for either members or admins. Use `linear_teams` to resolve the intended team. The session must enable Linear, the shared connection must permit writes, and the connected credential must have Create issues permission. Disabled/read-only connections, missing credentials and revoked session capabilities still block creation. If the provider does not confirm the write, verify the destination before retrying. Linear comments and other connected-app writes keep their existing approval requirements.
+When the user requests a ticket, `linear_create_issue` creates it directly, with no administrator approval step for either members or admins. Use `linear_teams` to resolve the intended team. The session must enable Linear, the shared connection must permit writes, and the connected credential must have Create issues permission. Disabled/read-only connections, missing credentials and revoked session capabilities still block creation. If the provider does not confirm the write, verify the destination before retrying. Linear comments, parent updates and other enabled connected-app writes also execute directly.
 
 For a **new** sub-issue, include `parent_id` in `linear_create_issue`. Omit it (or
 use `null`) for a standalone issue. The original three required arguments remain
@@ -811,8 +811,8 @@ For an **existing** ticket, use `linear_update_issue` with `issue_id` and
 Both accept a Linear identifier or UUID. This sends `issueUpdate` with only
 `parentId`; it preserves the existing issue instead of creating a replacement or
 substituting cross-links. To remove a parent, explicitly pass `"parent_id":null`.
-Omitting `parent_id` is rejected. Parent updates require administrator approval
-of the exact arguments, following the policy for other existing-issue writes.
+Omitting `parent_id` is rejected. Parent updates execute directly when the
+connection allows writes, without an administrator approval step.
 
 Read the ticket with `linear_issue` to verify its returned `parent` (ID,
 identifier, title and URL). An update is confirmed only when Linear returns
@@ -821,8 +821,8 @@ marked uncertain and are never retried automatically. Reparenting several
 existing tickets requires one update per ticket; no new tickets are needed.
 
 Run `uv run python scripts/linear_parenting_demo.py` for a local demonstration
-of five existing issues being moved under one parent. It exercises the broker,
-administrator approval, connector HTTP handling and parent readback against a
+of five existing issues being moved under one parent without approval clicks.
+It exercises the broker, connector HTTP handling and parent readback against a
 simulated Linear API, with no live provider calls. The script's `--pause 1.5`
 option spaces out the output for a terminal recording.
 
@@ -906,7 +906,7 @@ New images include `aws`, `kubectl`, `helm` and 1Password CLI `op` 2.30.0. Resto
 missing supported CLI when a credential command references it. Installation
 errors are separate from authentication failures. Generic access is a deliberate
 policy expansion: approved credentials can now reach sandbox commands, with the
-permissions the user supplied. Existing connected-app approval rules still apply.
+permissions the user supplied. Organization connection policies still apply.
 
 Known expiry and recognizable invalid-authentication errors reopen the secure
 request. Permission failures request additional access without invalidating the
@@ -1266,7 +1266,7 @@ of the original conversation and use a separate workspace, message queue, and
 billing attribution for the person who sends the message. They do not steer the
 main agent, share its live browser/files, or mirror into its Slack thread. They
 remain available in the add-tab menu and session list after closing the tab.
-Approvals and credential requests can be completed through **Open session**.
+Credential requests can be completed through **Open session**.
 
 ### Automations
 
@@ -1358,7 +1358,7 @@ and cannot be rearmed by routine sync. Dates are stored in UTC and displayed in
 local time. Custom schedules use numeric cron, not raw RRULE.
 
 A schedule workflow launches the existing durable session runner and waits for
-it to finish, including approval/input waits. Scheduled occurrences skip overlap
+it to finish, including input waits. Scheduled occurrences skip overlap
 and have a 15-minute catch-up window. Event deliveries persist before acknowledgement
 and queue while a previous run (including children) is active, the automation's
 hourly limit is full, or session capacity is unavailable. Queued events expire
@@ -1379,7 +1379,7 @@ verified Google email (`linear_my_issues`), reserves an issue identifier with
 `automation_claim_item`, implements/tests one ticket, and calls the GitHub PR
 publication tool under the organization’s connection policy. Claims survive failure: continue or review the original
 session instead of silently attempting another PR. Templates are instructions,
-not a guarantee that a model follows every step. Tool approval requirements and connection policies apply to automation runs just
+not a guarantee that a model follows every step. Connection policies apply to automation runs just
 as they do to interactive sessions. Automations do not gain extra connection
 permissions or the ability to approve or merge PRs. Shared-password users need a Google-linked identity for
 “my tickets.” Local previews can manually run simulations without Temporal or LLM
@@ -1393,7 +1393,7 @@ Optional `AUDIO_TRANSCRIPTION_PROMPT` supplies a short spelling glossary without
 
 Reconnect the Slack app once to grant its added `files:read` bot permission. Signed, authorized mentions, DMs and bound-thread replies retain the file IDs with the accepted message. The worker downloads only from Slack's private file host using the bot credential, transcribes outside the webhook acknowledgment, and attaches the original plus transcript to that sender's turn. Audio queued during a response takes a turn boundary before it is read. Transcript/download failures explicitly tell the agent what is missing and ask the sender to retry or use text. Prior messages' unrelated Slack attachments are not backfilled.
 
-Transcripts are automatic and may contain errors. They are stored alongside the original attachment and become part of the shared session when sent, with the same access and approval rules as other user input. Drafts remain private to their uploader. The server bounds download/response sizes, concurrency and timeouts; it does not follow file redirects or silently truncate transcripts.
+Transcripts are automatic and may contain errors. They are stored alongside the original attachment and become part of the shared session when sent, with the same access rules as other user input. Drafts remain private to their uploader. The server bounds download/response sizes, concurrency and timeouts; it does not follow file redirects or silently truncate transcripts.
 
 To verify locally, configure a working transcription endpoint and run `uv run uvicorn app.main:app --host 127.0.0.1 --port 8787`. Open the web composer, attach a short spoken request without typing text, preview its transcript, and send it. With the Slack permission installed, mention the bot with a voice clip and follow up with a second clip in that thread. Tests: `uv run pytest tests/test_audio.py tests/test_attachments.py tests/test_slack.py tests/test_slack_chat.py tests/test_message_queue.py` and `node --test tests/*.cjs`.
 

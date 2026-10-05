@@ -3,7 +3,6 @@
 Optional because Hermes is built separately inside Modal, not a web dependency.
 Set HERMES_TEST_SOURCE and HERMES_TEST_PYTHON to run this integration check.
 """
-from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -14,11 +13,11 @@ from threading import Thread
 import pytest
 
 from sandbox.agent import hermes_config
-from test_workspace import cloud_capability, wait_for, workspace  # noqa: F401
+from test_workspace import cloud_capability, workspace  # noqa: F401
 from test_spend import sign_in, active
 
 
-def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_path, monkeypatch):
+def test_native_tool_search_preserves_broker_scope_and_direct_writes(workspace, tmp_path, monkeypatch):
     source, python = os.environ.get('HERMES_TEST_SOURCE'), os.environ.get('HERMES_TEST_PYTHON')
     if not source or not python:
         pytest.skip('Set HERMES_TEST_SOURCE and HERMES_TEST_PYTHON for the pinned Hermes integration')
@@ -70,15 +69,7 @@ def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_
             if body['name'] == 'slack_search' and body['arguments']['query'] == 'revoked':
                 response = client.patch('/api/connections/slack/policy', json={'enabled': False, 'read_only': False})
                 assert response.status_code == 200
-            if body['name'] == 'linear_comment':
-                with ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(client.post, f'/broker/{run_id}/tools/call', headers=headers, json=body)
-                    approval = wait_for(lambda: app.state.store.approvals(run_id))[-1]
-                    response = client.post(f"/api/approvals/{approval['id']}", json={'decision': 'deny'})
-                    assert response.status_code == 200
-                    self.reply(future.result(timeout=5))
-            else:
-                self.reply(client.post(f'/broker/{run_id}/tools/call', headers=headers, json=body))
+            self.reply(client.post(f'/broker/{run_id}/tools/call', headers=headers, json=body))
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -113,6 +104,6 @@ def test_native_tool_search_preserves_broker_scope_and_approvals(workspace, tmp_
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
-    assert provider_calls == ['linear_search', 'github_repositories', 'slack_search']
-    assert broker_calls == ['memory_save', 'memory_search', *provider_calls, 'slack_search', 'linear_comment']
-    assert app.state.store.approvals(run_id)[0]['status'] == 'denied'
+    assert provider_calls == ['linear_search', 'github_repositories', 'slack_search', 'linear_comment']
+    assert broker_calls == ['memory_save', 'memory_search', *provider_calls[:3], 'slack_search', 'linear_comment']
+    assert not app.state.store.approvals(run_id)

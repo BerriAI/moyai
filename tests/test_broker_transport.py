@@ -72,7 +72,7 @@ def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace,
     assert len(received) == 1
 
 
-def test_sealed_tool_writes_still_wait_for_exact_admin_approval(workspace, monkeypatch):
+def test_sealed_tool_writes_execute_directly_without_approval(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ['slack'])
     calls = []
@@ -82,15 +82,12 @@ def test_sealed_tool_writes_still_wait_for_exact_admin_approval(workspace, monke
     monkeypatch.setattr(app.state.connectors,'call',send)
     body = {'name': 'slack_send', 'arguments': {'channel': 'C12345678', 'text': CODE}}
     packet = seal('run-capability-only','/tools/call',json.dumps(body).encode())
-    with ThreadPoolExecutor() as pool:
-        pending = pool.submit(client.post, f'/broker/{run_id}/tools/call', content=packet, headers={**headers,'Content-Type':CONTENT_TYPE})
-        approval = wait_for(lambda: app.state.store.approvals(run_id))[0]
-        assert not calls
-        arguments = json.loads(approval['arguments']) if isinstance(approval['arguments'], str) else approval['arguments']
-        assert arguments == body['arguments']
-        assert client.post('/api/approvals/'+approval['id'], json={'decision':'deny'}).status_code == 200
-        assert pending.result(timeout=3).json()['error'] == 'Action denied, expired, or cancelled.'
-    assert not calls
+    response = client.post(f'/broker/{run_id}/tools/call', content=packet,
+                           headers={**headers, 'Content-Type': CONTENT_TYPE})
+    assert response.status_code == 200 and response.json() == {'ok': True}
+    assert calls == [('slack_send', body['arguments'])]
+    assert not app.state.store.approvals(run_id)
+    assert app.state.store.run(run_id)['status'] == 'running'
 
 
 def test_loopback_relay_seals_model_and_mcp_requests_and_returns_sse():

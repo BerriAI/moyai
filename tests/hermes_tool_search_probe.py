@@ -84,9 +84,9 @@ def main():
         # reaches the real broker, after the tool's schema was discovered.
         revoked = dispatch('tool_call', {'calls': [{'name': targets[2], 'arguments': {'query': 'revoked'}}]})
         assert 'HTTP 403' in json.dumps(revoked)
-        denied_write = dispatch('tool_call', {'calls': [{'name': 'mcp__workspace__linear_comment',
-            'arguments': {'issue_id': 'LIT-123', 'body': 'fixture write; deny it'}}]})
-        assert 'denied' in json.dumps(denied_write).lower()
+        direct_write = dispatch('tool_call', {'calls': [{'name': 'mcp__workspace__linear_comment',
+            'arguments': {'issue_id': 'LIT-123', 'body': 'fixture write; execute directly'}}]})
+        assert 'fixture-ok' in json.dumps(direct_write)
         print('TOOL_SEARCH_PROOF ' + json.dumps({'before_schema_chars': len(before),
             'after_schema_chars': len(after), 'raw_tool_count': len(raw),
             'visible_tool_count': len(agent.tools), 'verified_services': ['linear', 'github', 'slack', 'personal_memory']}))

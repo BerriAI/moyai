@@ -294,7 +294,7 @@ class SlackSessions:
                 return
             token = await self.connectors.slack_bot_token()
             url = f"{self.settings.public_url.rstrip('/')}/#run={run_id}"
-            message = f"Created a cloud session for your request. <{url}|Open session>\nResults and approvals stay in the web app. Organization sign-in is required."
+            message = f"Created a cloud session for your request. <{url}|Open session>\nResults stay in the web app. Organization sign-in is required."
             await self.connectors.request("POST", "https://slack.com/api/chat.postMessage",
                                           headers={"Authorization": f"Bearer {token}"},
                                           json={"channel": row["channel"], "thread_ts": row["thread_ts"], "text": message,

@@ -67,15 +67,15 @@ TOOLS = {
     "linear_teams": ("linear", False, Args, "List up to 50 accessible Linear teams and their IDs. Use before creating an issue; ask if the right team is ambiguous."),
     "linear_search": ("linear", False, Search, "Search Linear issue titles by text. Returns at most 20 issues."),
     "linear_issue": ("linear", False, LinearIssue, "Read a Linear issue's description, status, parent, and recent comments. Use to verify reparenting."),
-    "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue. Requires workspace approval."),
+    "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue directly. No administrator approval step is required."),
     "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
-    "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. Requires workspace approval and a credential with issue-update permission. Verify with linear_issue before retrying an uncertain update."),
+    "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
     "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
     "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation."),
-    "slack_send": ("slack", True, SlackSend, "Send a Slack message. Requires workspace approval."),
+    "slack_send": ("slack", True, SlackSend, "Send a Slack message directly. No administrator approval step is required."),
     "notion_search": ("notion", False, Search, "Search Notion page titles visible to the connected integration (not full-text content)."),
     "notion_page": ("notion", False, NotionPage, "Read a Notion page's first 100 top-level blocks. Nested blocks are indicated, not expanded."),
-    "notion_append": ("notion", True, NotionAppend, "Append a paragraph to a Notion page. Requires workspace approval."),
+    "notion_append": ("notion", True, NotionAppend, "Append a paragraph to a Notion page directly. No administrator approval step is required."),
 }
 
 
@@ -104,7 +104,7 @@ class Connectors:
                            "label": row.get("label", ""), "updated_at": row.get("updated_at"),
                            "identity": identity if row else "Not connected", **self.policy(provider),
                            **({'repositories': self.github.targets(), 'app_registered': bool(self.github.app_config())} if provider == 'github' else {}),
-                           "tools": [{"name": name, "write": spec[1], "requires_approval": self.requires_approval(name), "description": spec[3]}
+                           "tools": [{"name": name, "write": spec[1], "requires_approval": False, "description": spec[3]}
                                      for name, spec in TOOLS.items() if spec[0] == provider]})
         return result
 
@@ -118,13 +118,6 @@ class Connectors:
         policy = self.policy(provider)
         return policy["enabled"] and (not write or not policy["read_only"]) and bool(
             self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
-
-    def requires_approval(self, name):
-        # Ticket creation and the narrow GitHub publishing tools run directly.
-        # They remain writes for read-only policies and uncertain outcomes.
-        return TOOLS[name][1] and name not in {
-            'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request',
-            'linear_create_issue'}
 
     def audit(self, provider, action):
         self.store.execute("INSERT INTO connection_audit(provider,action,actor,created_at) VALUES(?,?,?,?)",

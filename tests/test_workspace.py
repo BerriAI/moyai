@@ -1,7 +1,6 @@
 import asyncio
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -106,31 +105,35 @@ def test_tokens_are_validated_encrypted_and_never_returned(workspace, monkeypatc
     assert not app.state.store.rows("SELECT * FROM connections")
 
 
-@pytest.mark.parametrize("decision,expected_calls", [("approve", 1), ("deny", 0)])
+@pytest.mark.parametrize('role', ['admin', 'member'])
 @pytest.mark.parametrize('provider,name,arguments', [
-    ('slack', 'slack_send', {'channel': 'C12345678', 'text': 'An approved test message'}),
-    ('linear', 'linear_comment', {'issue_id': 'LIT-123', 'body': 'An approved test comment'}),
-    ('notion', 'notion_append', {'page_id': 'a' * 32, 'text': 'An approved test note'}),
+    ('slack', 'slack_send', {'channel': 'C12345678', 'text': 'A requested test message'}),
+    ('linear', 'linear_comment', {'issue_id': 'LIT-123', 'body': 'A requested test comment'}),
+    ('notion', 'notion_append', {'page_id': 'a' * 32, 'text': 'A requested test note'}),
 ])
-def test_writes_wait_for_exactly_one_decision(workspace, monkeypatch, decision, expected_calls, provider, name, arguments):
+def test_writes_execute_without_approval(workspace, monkeypatch, role, provider, name, arguments):
     app, client = workspace
     run_id, headers = cloud_capability(app, [provider])
+    if role == 'member':
+        app.state.settings.workspace_password = 'admin-password'
+        app.state.settings.workspace_member_password = 'member-password'
+        assert client.post('/api/login', json={'password': 'member-password'}).json()['role'] == 'member'
+        client.headers['X-CSRF-Token'] = client.get('/api/session').json()['csrf']
     calls = []
     async def call(name, arguments):
+        assert app.state.store.run(run_id)['status'] == 'running'
+        assert not app.state.store.approvals(run_id)
         calls.append((name, arguments))
-        return {"ok": True, "ts": "1234567890.123456"}
-    monkeypatch.setattr(app.state.connectors, "call", call)
-    body = {"name": name, "arguments": arguments}
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.post, f"/broker/{run_id}/tools/call", json=body, headers=headers)
-        approval = wait_for(lambda: app.state.store.approvals(run_id))[-1]
-        assert not calls and not future.done()
-        url = f"/api/approvals/{approval['id']}"
-        assert client.post(url, json={"decision": decision}).status_code == 200
-        assert client.post(url, json={"decision": decision}).status_code == 409
-        assert future.result(timeout=3).status_code == 200
-    assert len(calls) == expected_calls
-    assert app.state.store.approvals(run_id)[0]["status"] == ("completed" if expected_calls else "denied")
+        return {'ok': True, 'ts': '1234567890.123456'}
+    monkeypatch.setattr(app.state.connectors, 'call', call)
+    response = client.post(f'/broker/{run_id}/tools/call',
+                           json={'name': name, 'arguments': arguments}, headers=headers)
+    assert response.status_code == 200 and response.json()['ok']
+    assert calls == [(name, arguments)]
+    assert not app.state.store.approvals(run_id)
+    assert not any(e['kind'] == 'approval' for e in app.state.store.events(run_id))
+    connection = next(c for c in client.get('/api/connections').json() if c['id'] == provider)
+    assert all(not t['requires_approval'] for t in connection['tools'])
 
 
 def test_scope_denial_and_bad_arguments_never_reach_provider(workspace, monkeypatch):
@@ -152,13 +155,13 @@ def test_uncertain_write_is_not_retried(workspace, monkeypatch):
         calls.append(1)
         raise ConnectorError("The connection dropped after sending.")
     monkeypatch.setattr(app.state.connectors, "call", fail)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.post, f"/broker/{run_id}/tools/call", headers=headers, json={"name": "linear_comment", "arguments": {"issue_id": "LIT-123", "body": "Update"}})
-        approval = wait_for(lambda: app.state.store.approvals(run_id))[-1]
-        client.post(f"/api/approvals/{approval['id']}", json={"decision": "approve"})
-        assert future.result(timeout=3).json()["outcome_uncertain"] is True
+    response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
+                           json={'name': 'linear_comment', 'arguments': {'issue_id': 'LIT-123', 'body': 'Update'}})
+    assert response.json()['outcome_uncertain'] is True
+    assert response.json()['instruction'] == 'Verify the destination before retrying a write.'
     assert len(calls) == 1
-    assert app.state.store.approvals(run_id)[0]["status"] == "uncertain"
+    assert not app.state.store.approvals(run_id)
+    assert any(e['kind'] == 'error' for e in app.state.store.events(run_id))
 
 
 def test_members_can_use_org_connections_but_cannot_administer_them(workspace):
@@ -211,20 +214,18 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     assert len(client.get("/api/organization").json()["activity"]) == 2
 
 
-def test_pausing_an_org_connection_cancels_a_waiting_write(workspace, monkeypatch):
+def test_pausing_an_org_connection_expires_legacy_approval(workspace):
     app, client = workspace
-    run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
-        pytest.fail("A revoked approval reached the provider")
-    monkeypatch.setattr(app.state.connectors, "call", fail)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.post, f"/broker/{run_id}/tools/call", headers=headers,
-                             json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Pending"}})
-        approval = wait_for(lambda: app.state.store.approvals(run_id))[0]
-        client.patch("/api/connections/linear/policy", json={"enabled": False, "read_only": False})
-        assert future.result(timeout=3).json()["error"] == "Action denied, expired, or cancelled."
-        assert client.post(f"/api/approvals/{approval['id']}", json={"decision": "approve"}).status_code == 409
-    assert app.state.store.approvals(run_id)[0]["status"] == "expired"
+    run_id, _ = cloud_capability(app, ['linear'])
+    app.state.store.execute(
+        "INSERT INTO approvals(id,run_id,tool,arguments,status,created_at) VALUES(?,?,?,?,?,?)",
+        ('legacy', run_id, 'linear_comment', '{}', 'pending', '2026-01-01T00:00:00Z'))
+    app.state.store.update_run(run_id, status='awaiting_approval')
+    assert client.patch('/api/connections/linear/policy',
+                        json={'enabled': False, 'read_only': False}).status_code == 200
+    assert app.state.store.approvals(run_id)[0]['status'] == 'expired'
+    assert app.state.store.run(run_id)['status'] == 'running'
+    assert client.post('/api/approvals/legacy', json={'decision': 'approve'}).status_code == 409
 
 
 def test_oauth_state_is_bound_to_session_and_consumed_once(workspace, monkeypatch):
@@ -332,7 +333,7 @@ def test_linear_issue_creation_runs_directly_for_admins_and_members(workspace, m
     connection = next(c for c in client.get('/api/connections').json() if c['id'] == 'linear')
     policy = {tool['name']: tool for tool in connection['tools']}
     assert policy['linear_create_issue']['write'] and not policy['linear_create_issue']['requires_approval']
-    assert policy['linear_comment']['requires_approval']
+    assert not policy['linear_comment']['requires_approval']
     advertised = client.get(f'/broker/{run_id}/tools', headers=headers).json()
     tool = next(tool for tool in advertised if tool['name'] == 'linear_create_issue')
     assert tool['annotations']['readOnlyHint'] is False

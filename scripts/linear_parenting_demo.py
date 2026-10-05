@@ -1,10 +1,9 @@
-"""Exercise real broker/approval/connector code with an in-memory Linear API.
+"""Exercise real broker/connector code with an in-memory Linear API.
 
 Run: uv run python scripts/linear_parenting_demo.py [--pause 1.5]
 No provider credentials are loaded and no request leaves this process.
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import sys
@@ -65,7 +64,7 @@ def main(pause=0):
             headers = {'Authorization': 'Bearer demo-capability'}
             endpoint = f'/broker/{run_id}/tools/call'
             print('MOYAI DEVIN / LINEAR PARENT UPDATES', flush=True)
-            print('LOCAL DEMO: real broker + approval + connector; simulated Linear API', flush=True)
+            print('LOCAL DEMO: real broker + connector; no approval clicks; simulated Linear API', flush=True)
             print('Before: 5 existing children, no parents. 6 total issues including DEMO-100.\n', flush=True)
             with patch('app.connectors.httpx.AsyncClient', local_client):
                 tools = client.get(f'/broker/{run_id}/tools', headers=headers).json()
@@ -74,29 +73,22 @@ def main(pause=0):
                     args = {'issue_id': f'DEMO-{number}', 'parent_id': 'DEMO-100'}
                     print('POST linear_update_issue ' + json.dumps(args), flush=True)
                     time.sleep(pause)
-                    with ThreadPoolExecutor(max_workers=1) as pool:
-                        future = pool.submit(client.post, endpoint, headers=headers,
-                                             json={'name': 'linear_update_issue', 'arguments': args})
-                        deadline = time.monotonic() + 5
-                        while time.monotonic() < deadline:
-                            pending = [a for a in app.state.store.approvals(run_id) if a['status'] == 'pending']
-                            if pending:
-                                break
-                            time.sleep(0.01)
-                        else:
-                            raise RuntimeError('Expected workspace approval did not appear.')
-                        assert client.post(f"/api/approvals/{pending[0]['id']}", json={'decision': 'approve'}).status_code == 200
-                        updated = future.result(timeout=5).json()['issueUpdate']['issue']
+                    response = client.post(endpoint, headers=headers,
+                                           json={'name': 'linear_update_issue', 'arguments': args})
+                    assert response.status_code == 200
+                    updated = response.json()['issueUpdate']['issue']
+                    assert not app.state.store.approvals(run_id)
+                    assert app.state.store.run(run_id)['status'] == 'running'
                     read = client.post(endpoint, headers=headers,
                                        json={'name': 'linear_issue', 'arguments': {'issue_id': args['issue_id']}}).json()['issue']
                     assert read['id'] == original[args['issue_id']] == updated['id']
                     assert read['parent']['identifier'] == 'DEMO-100'
-                    print(f"  APPROVED / READ BACK: {read['identifier']} -> DEMO-100; same issue ID\n", flush=True)
+                    print(f"  EXECUTED / READ BACK: {read['identifier']} -> DEMO-100; same issue ID\n", flush=True)
                     time.sleep(pause)
             assert original == {key: issue['id'] for key, issue in issues.items()}
             assert len(writes) == 5 and all('issueUpdate(' in w['query'] for w in writes)
             print('PASS: 5 parent updates / 0 new issues / all 5 original IDs preserved', flush=True)
-            print('PASS: each update required approval and was verified with linear_issue', flush=True)
+            print('PASS: 0 approvals / every update executed directly and was verified with linear_issue', flush=True)
             print('The live Linear workspace was not contacted.', flush=True)
             app.state.store.update_run(run_id, status='completed', token_hash='')
 

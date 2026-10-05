@@ -1,10 +1,8 @@
-"""Existing issue IDs survive reparenting through the real broker/approval path."""
-from concurrent.futures import ThreadPoolExecutor
-
+"""Existing issue IDs survive reparenting through the real broker path without approval."""
 import pytest
 
 from app.connector_errors import ConnectorError
-from test_workspace import cloud_capability, wait_for, workspace
+from test_workspace import cloud_capability, workspace
 
 
 PARENT_ID = '12345678-1234-1234-1234-123456789abc'
@@ -29,7 +27,7 @@ def linear(workspace, monkeypatch):
         calls.append(body)
         query, variables = body['query'], body['variables']
         if 'issueUpdate(' in query:
-            assert app.state.store.approvals(run_id)[-1]['status'] == 'executing'
+            assert not app.state.store.approvals(run_id)
             issue = next(i for i in issues.values() if i['id'] == variables['id'])
             parent = next((i for i in issues.values() if i['id'] == variables['input']['parentId']), None)
             issue['parent'] = {k: parent[k] for k in ('id', 'identifier', 'title')} if parent else None
@@ -44,18 +42,13 @@ def linear(workspace, monkeypatch):
     return app, client, run_id, headers, issues, calls
 
 
-def update_with_approval(linear, arguments, decision='approve'):
+def update_directly(linear, arguments):
     app, client, run_id, headers, _, _ = linear
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.post, f'/broker/{run_id}/tools/call', headers=headers,
-                             json={'name': 'linear_update_issue', 'arguments': arguments})
-        approval = wait_for(lambda: next((a for a in app.state.store.approvals(run_id)
-                                         if a['status'] == 'pending'), None))
-        assert not future.done()
-        assert approval['arguments'] == arguments
-        assert client.post(f"/api/approvals/{approval['id']}", json={'decision': decision}).status_code == 200
-        response = future.result(timeout=5)
+    response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
+                           json={'name': 'linear_update_issue', 'arguments': arguments})
     assert response.status_code == 200
+    assert not app.state.store.approvals(run_id)
+    assert app.state.store.run(run_id)['status'] == 'running'
     return response.json()
 
 
@@ -68,13 +61,13 @@ def test_parent_tools_are_discoverable_with_explicit_clear_semantics(linear):
     assert {'type': 'null'} in update['inputSchema']['properties']['parent_id']['anyOf']
     assert 'parent_id' in tools['linear_create_issue']['inputSchema']['properties']
     assert 'parent_id' not in tools['linear_create_issue']['inputSchema']['required']
-    assert app.state.connectors.requires_approval('linear_update_issue')
+    assert 'No administrator approval step is required' in update['description']
 
 
 @pytest.mark.parametrize('issue_id,parent_id', [('TEST-2', 'TEST-1'), (CHILD_ID, PARENT_ID)])
 def test_reparent_existing_issue_by_identifier_or_uuid(linear, issue_id, parent_id):
     app, client, run_id, headers, issues, calls = linear
-    result = update_with_approval(linear, {'issue_id': issue_id, 'parent_id': parent_id})
+    result = update_directly(linear, {'issue_id': issue_id, 'parent_id': parent_id})
     updated = result['issueUpdate']['issue']
     assert updated['id'] == CHILD_ID and updated['parent']['id'] == PARENT_ID
     assert calls[-1]['variables'] == {'id': CHILD_ID, 'input': {'parentId': PARENT_ID}}
@@ -83,7 +76,7 @@ def test_reparent_existing_issue_by_identifier_or_uuid(linear, issue_id, parent_
     read = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                        json={'name': 'linear_issue', 'arguments': {'issue_id': 'TEST-2'}}).json()
     assert read['issue']['parent']['identifier'] == 'TEST-1'
-    assert app.state.store.approvals(run_id)[-1]['status'] == 'completed'
+    assert not app.state.store.approvals(run_id)
 
 
 def test_five_existing_tickets_keep_their_ids_and_titles(linear):
@@ -93,7 +86,7 @@ def test_five_existing_tickets_keep_their_ids_and_titles(linear):
                               'identifier': f'TEST-{n}', 'title': f'Existing child {n}', 'parent': None}
     before = {key: (issue['id'], issue['title']) for key, issue in issues.items()}
     for key in list(issues)[1:]:
-        result = update_with_approval(linear, {'issue_id': key, 'parent_id': 'TEST-1'})
+        result = update_directly(linear, {'issue_id': key, 'parent_id': 'TEST-1'})
         assert result['issueUpdate']['issue']['parent']['id'] == PARENT_ID
     assert before == {key: (issue['id'], issue['title']) for key, issue in issues.items()}
     assert sum('issueUpdate(' in c['query'] for c in calls) == 5
@@ -103,7 +96,7 @@ def test_five_existing_tickets_keep_their_ids_and_titles(linear):
 def test_explicit_null_removes_parent(linear):
     _, _, _, _, issues, calls = linear
     issues['TEST-2']['parent'] = {'id': PARENT_ID}
-    result = update_with_approval(linear, {'issue_id': 'TEST-2', 'parent_id': None})
+    result = update_directly(linear, {'issue_id': 'TEST-2', 'parent_id': None})
     assert result['issueUpdate']['issue']['parent'] is None
     assert calls[-1]['variables']['input'] == {'parentId': None}
     assert len(calls) == 2
@@ -141,7 +134,7 @@ def test_invalid_updates_never_request_approval_or_reach_linear(linear, argument
     {'issue_id': 'TEST-2', 'parent_id': CHILD_ID},
 ])
 def test_missing_issues_and_self_parenting_never_mutate(linear, arguments):
-    result = update_with_approval(linear, arguments)
+    result = update_directly(linear, arguments)
     assert result['error']
     assert not any('mutation' in c['query'] for c in linear[-1])
 
@@ -152,12 +145,6 @@ def test_missing_parent_does_not_create_standalone_replacement(linear):
                            json={'name': 'linear_create_issue', 'arguments': {**CREATE, 'parent_id': 'TEST-999'}})
     assert response.json()['error']
     assert not any('mutation' in c['query'] for c in calls)
-
-
-def test_denied_parent_update_never_reaches_linear(linear):
-    result = update_with_approval(linear, UPDATE, decision='deny')
-    assert result['error']
-    assert not linear[-1]
 
 
 @pytest.mark.parametrize('restriction', ['read_only', 'disabled', 'disconnect', 'plugin', 'cancelled', 'revoked'])
@@ -191,7 +178,7 @@ def test_read_only_enabled_during_resolution_prevents_mutation(linear, monkeypat
         return result
 
     monkeypatch.setattr(app.state.connectors, 'request', change_policy)
-    assert update_with_approval(linear, UPDATE)['error']
+    assert update_directly(linear, UPDATE)['error']
     assert not any('mutation' in c['query'] for c in linear[-1])
 
 
@@ -214,9 +201,9 @@ def test_failed_or_unconfirmed_update_is_uncertain_and_never_retried(linear, mon
                                         'issue': None if failure == 'missing_issue' else issue}}}
 
     monkeypatch.setattr(app.state.connectors, 'request', fail_update)
-    result = update_with_approval(linear, UPDATE)
+    result = update_directly(linear, UPDATE)
     assert result['error'] and result['outcome_uncertain'] is True
     assert result['instruction'] == 'Verify the destination before retrying a write.'
     assert sum('issueUpdate(' in c['query'] for c in calls) == 1
     assert not any('issueCreate(' in c['query'] for c in calls)
-    assert app.state.store.approvals(run_id)[-1]['status'] == 'uncertain'
+    assert any(e['kind'] == 'error' for e in app.state.store.events(run_id))
