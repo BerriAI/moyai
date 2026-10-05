@@ -117,14 +117,20 @@ class RunManager:
 
     async def chat(self, run):
         run_id = run["id"]
-        if self.prepare_context:
-            await self.prepare_context(run_id)
         while not self.closing:
             message = self.store.claim_message(run_id)
             if not message:
                 return
-            turn = {**self.store.run(run_id), "prompt": message["content"], "message_id": message["id"]}
             try:
+                if self.prepare_context:
+                    await self.prepare_context(run_id)
+                    message = self.store.rows('SELECT * FROM messages WHERE id=?', (message['id'],))[0]
+                if self.stopped(run_id):
+                    self.store.finish_message(run_id, message['id'], 'Stopped before starting the response.', 'cancelled')
+                    if self.store.run(run_id)['status'] == 'stopping':
+                        self.store.update_run(run_id, status='cancelled')
+                    return
+                turn = {**self.store.run(run_id), "prompt": message["content"], "message_id": message["id"]}
                 await self.execute(turn)
             except asyncio.CancelledError:
                 row = self.store.run(run_id)

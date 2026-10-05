@@ -97,3 +97,17 @@ test('file limits and names cannot inject markup into cards',()=>{
   const html=f.ctx.messageAttachments([{id:'safe',name:'<img src=x onerror="bad()">',size:3}]);
   assert.doesNotMatch(html,/<img src=x/);assert.match(html,/&lt;img/);
 });
+
+test('draft audio inserts an editable transcript without replacing typed text',async()=>{
+  const f=fixture();let changeEvents=0;
+  f.ctx.Event=class Event{constructor(type){this.type=type;}};
+  f.input.dispatchEvent=event=>{if(event.type==='input')changeEvents++;};
+  let useTranscript;
+  f.ctx.showAttachment=(file,insert)=>{useTranscript=()=>insert(file.transcript);};
+  f.paste([{name:'voice.wav',type:'audio/wav',size:123}]);await flush();
+  const id='1'.padStart(32,'0');f.requests[0].resolve({id,name:'voice.wav',size:123,media_type:'audio/wav',transcript:'Fix the health check.'});await flush();
+  f.form.children[0].onclick({target:{closest:()=>({dataset:{preview:id}})}});
+  assert.equal(useTranscript(),true);assert.equal(f.input.value,'My unsent text\n\nFix the health check.');assert.equal(changeEvents,1);
+  f.controller.lock(true);assert.equal(useTranscript(),false);
+  f.controller.lock(false);f.controller.destroy();assert.equal(useTranscript(),false);
+});

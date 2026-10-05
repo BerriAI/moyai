@@ -149,7 +149,7 @@ class SlackChat:
         for index, chunk in enumerate(split_reply(slack_text(self.scrub(text)))):
             self.queue(conn, run_id, f"input:{message['id']}:revision:{message['revision']}:{index}", 'input_update', chunk + '\n' + self.link(run_id))
 
-    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False):
+    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=()):
         """Reserve the physical Slack message and queue its turn atomically."""
         original_prompt, selected_model, model_error = prompt, None, ''
         command = prompt.strip().lower().lstrip('/')
@@ -263,6 +263,8 @@ class SlackChat:
                         self.settings.resolve_model(fallback=current)
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
+                    if file_ids:
+                        conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)', (message_id, json.dumps(file_ids)))
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))
                     if not threaded(binding):
                         self.queue(conn, run_id, 'received:' + str(message_id), 'reaction', ts)

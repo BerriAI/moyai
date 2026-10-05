@@ -13,6 +13,7 @@ from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
+from .slack_audio import SlackAudio, audio_files
 
 
 class SlackSessions:
@@ -22,6 +23,7 @@ class SlackSessions:
         self.jobs = set()
         self.identities = None
         self.automation_events = None
+        self.audio = SlackAudio(self)
         self.chat = SlackChat(self)
         self.agentchat, self.channel = connect_agentchat(self)
 
@@ -105,8 +107,11 @@ class SlackSessions:
         if addressed and mention not in addressed[1]:
             return {'ok': True}
         prompt = text.replace(mention, "").strip()
-        if not prompt:
+        file_ids = audio_files(event.get('files'))
+        if not prompt and not file_ids:
             return {"ok": True}
+        if file_ids:
+            prompt = (prompt + '\n\n' if prompt else '') + 'Please respond to the attached audio message.'
         if len(prompt) > 16000:
             raise HTTPException(400, "Slack task is too long.")
         direct_message = event.get('type') == 'message' and event.get('channel_type') == 'im' and channel.startswith('D')
@@ -114,16 +119,16 @@ class SlackSessions:
             return {'ok': True}
         await self.channel.handle_validated_event(team=bot['team_id'], event_id=event_id, channel=channel,
             ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
-            direct_message=direct_message, missing_cloud=missing_cloud)
+            direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids)
         return {'ok': True}
 
     async def accept_message(self, *, team, event_id, channel, ts, root, user, prompt,
-                             mentioned, direct_message, missing_cloud):
+                             mentioned, direct_message, missing_cloud, file_ids=()):
         if self.settings.slack_thread_chat_enabled:
             try:
                 run = self.chat.accept(team=team, event_id=event_id, channel=channel, ts=ts,
                                        root=root, user=user, prompt=prompt, mentioned=mentioned,
-                                       direct_message=direct_message, missing_cloud=missing_cloud)
+                                       direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids)
             except ValueError as exc:
                 raise HTTPException(503, str(exc))
             await self.checkpoints.flush()
@@ -138,7 +143,7 @@ class SlackSessions:
             raise HTTPException(503, 'Cloud sessions are not configured.')
         plugins = [x['id'] for x in self.connectors.list() if x['connected'] and x['enabled']]
         try:
-            run = self.store.create_slack_run(event_id, prompt, plugins, channel, root, user, ts, team)
+            run = self.store.create_slack_run(event_id, prompt, plugins, channel, root, user, ts, team, file_ids=file_ids)
         except ValueError:
             raise HTTPException(503, 'The session queue is full.')
         if run:
@@ -154,6 +159,7 @@ class SlackSessions:
         Reads can safely be retried after an interruption, but source messages
         are frozen at the mention timestamp and agent work is never replayed.
         """
+        await self.audio.prepare(run_id)
         source = self.store.slack_source(run_id)
         if not source or source["context_status"] not in {"pending", "fetching"}:
             return

@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
@@ -53,7 +53,7 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    prompt: str = Field(min_length=3, max_length=16000)
+    prompt: str = Field(default="", max_length=16000)
     repo_url: str = Field(default="", max_length=500)
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
@@ -63,6 +63,14 @@ class NewRun(BaseModel):
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
     side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+
+    @model_validator(mode='after')
+    def require_input(self):
+        if not self.prompt.strip() and self.attachment_ids:
+            self.prompt = 'Please respond to the attached files and audio transcripts.'
+        if len(self.prompt.strip()) < 3:
+            raise ValueError('Enter a message or attach a file or recording.')
+        return self
 
     @field_validator("repo_url")
     @classmethod
@@ -99,11 +107,19 @@ class Login(BaseModel):
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    content: str = Field(min_length=1, max_length=16000)
+    content: str = Field(default="", max_length=16000)
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=5)
     send_now: bool = False
+
+    @model_validator(mode='after')
+    def require_input(self):
+        if not self.content and self.attachment_ids:
+            self.content = 'Please respond to the attached files and audio transcripts.'
+        if not self.content:
+            raise ValueError('Enter a message or attach a file or recording.')
+        return self
 
 
 class QueueChange(BaseModel):
@@ -254,7 +270,7 @@ def create_app(settings: Settings | None = None):
                 return JSONResponse({"detail": "Cloud persistence could not be confirmed. Refresh before retrying an action."}, status_code=503)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if request.url.path == '/auth/github/register':
             response.headers['Content-Security-Policy'] += ' https://github.com'
         if request.url.path.startswith(("/api/", "/oauth/", "/auth/", "/broker/")):

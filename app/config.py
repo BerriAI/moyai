@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     litellm_api_base: str = ""
     litellm_api_key: str = ""
+    audio_transcription_model: str = "gpt-transcribe"
+    audio_transcription_prompt: str = Field(default="", max_length=800)
     # Separate destination/key; enabling traces never reroutes inference.
     litellm_trace_endpoint: str = ""
     litellm_trace_api_key: str = ""

@@ -86,13 +86,13 @@ class SlackWebhookChannel:
         self._closed.set()
 
     async def handle_validated_event(self, *, team, event_id, channel, ts, root, user,
-                                     prompt, mentioned, direct_message, missing_cloud):
+                                     prompt, mentioned, direct_message, missing_cloud, file_ids=()):
         conversation = f'slack:{team}:{channel}' + ('' if direct_message and root == ts else ':' + root)
         message = Message(id=f'slack:{team}:{event_id}', conversation_id=conversation, channel=self.name,
                           sender=Sender(id=user), text=prompt, role='user',
                           metadata=MappingProxyType({'team': team, 'event_id': event_id, 'channel': channel,
                               'ts': ts, 'root': root, 'mentioned': mentioned, 'direct_message': direct_message,
-                              'missing_cloud': tuple(missing_cloud)}))
+                              'missing_cloud': tuple(missing_cloud), 'file_ids': tuple(file_ids)}))
         await self._receiver(self, message)
 
     def source_for_run(self, run_id, delivery=None):

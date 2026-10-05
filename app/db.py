@@ -259,7 +259,7 @@ class Store:
         self.event(run_id, "status", "Task queued")
         return self.run(run_id)
 
-    def create_slack_run(self, event_id, prompt, plugins, channel, thread_ts, user_id, mention_ts=None, team_id=''):
+    def create_slack_run(self, event_id, prompt, plugins, channel, thread_ts, user_id, mention_ts=None, team_id='', file_ids=()):
         # Slack retries deliveries. Reserve the event and its run in the same
         # transaction so parallel deliveries cannot create multiple sandboxes.
         run_id, stamp = uuid4().hex, now()
@@ -274,6 +274,9 @@ class Store:
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal','queued',?,?,?,1,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, self.default_model, actor_id))
             conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, self.default_model, actor_id))
+            if file_ids:
+                message_id = conn.execute('SELECT id FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
+                conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)', (message_id, json.dumps(file_ids)))
             conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                          (event_id, run_id, channel, thread_ts, user_id, stamp, mention_ts or thread_ts))
             conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status','Session requested from Slack','{}',?)", (run_id, stamp))

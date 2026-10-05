@@ -103,7 +103,8 @@ class MessageQueue:
                 return {'steer_message_id': None}
             # A new requester or model needs a checkpointed capability handoff.
             # Never inject another person's input under the current person's private scope.
-            if message['user_id'] != run['active_user_id'] or message['model'] != run['active_model']:
+            pending_audio = conn.execute("SELECT 1 FROM slack_audio_inputs WHERE message_id=? AND status='pending'", (target,)).fetchone()
+            if pending_audio or message['user_id'] != run['active_user_id'] or message['model'] != run['active_model']:
                 return {'steer_message_id': target, 'handoff': True}
             conn.execute('UPDATE messages SET steering_parent_id=? WHERE id=?', (turn_id, target))
         from .attachments import attachment_context

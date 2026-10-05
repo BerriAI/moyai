@@ -165,3 +165,8 @@
 
 /* Organization infrastructure billing */
 .cost-summary .cost-total{background:#f0ebf7;border-color:#d7c9e7}.cost-summary .cost-total>span,.cost-summary .cost-total>strong{color:#51336e}.infra-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.infra-status{display:inline-block;border-radius:20px;padding:5px 10px;font-size:.72rem;background:#fff3db;color:#755723}.infra-status.complete{background:#eaf4ec;color:#376442}.infra-bill-editor,.infra-bills,.infra-setup{margin-top:22px;border-top:1px solid var(--line);padding-top:18px;font-size:.8rem}.infra-bill-editor summary,.infra-bills summary,.infra-setup summary{cursor:pointer;font-weight:550}.infra-bill-form{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-top:20px}.infra-bill-form label{display:grid;gap:8px;font-size:.76rem}.infra-bill-form input,.infra-bill-form select{width:100%;min-width:0}.infra-note{grid-column:1/-1}.infra-setup p,.infra-setup li{color:var(--muted);line-height:1.7}.infra-setup li{margin:8px 0}.infra-bill-form .error{grid-column:1/-1;color:#a53636}.infra-bills button{font-size:.72rem;padding:6px 10px}@media(max-width:800px){.infra-bill-form{grid-template-columns:1fr 1fr}.infra-actions{margin:8px 0}.cost-summary{grid-template-columns:1fr}}@media(max-width:500px){.infra-bill-form{grid-template-columns:1fr}}
+.audio-preview { padding: 20px; }
+.audio-preview audio { width: 100%; margin-bottom: 18px; }
+.audio-transcript { white-space: pre-wrap; line-height: 1.6; }
+.record-button { white-space: nowrap; font-size: 12px; }
+.recording-status { color: #b42336; font-size: 12px; }
