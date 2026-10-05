@@ -147,6 +147,9 @@ def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypat
         return {'messages': [
             {'ts': '1790718500.123456', 'thread_ts': root, 'user': 'U22222222', 'text': 'Need a staging environment.'},
             {'ts': mention, 'thread_ts': root, 'user': 'U12345678', 'text': 'Read the MCP issue; no writes.'},
+            {'ts': '1790718600.123456', 'user': 'U33333333', 'text': 'UNRELATED CHANNEL ROOT'},
+            {'ts': '1790718700.123456', 'thread_ts': '1790717000.123456', 'user': 'U33333333', 'text': 'OTHER THREAD REPLY'},
+            {'ts': '1790717999.123456', 'thread_ts': root, 'user': 'U33333333', 'text': 'BEFORE THREAD ROOT'},
             {'ts': '1790719001.123456', 'user': 'U12345678', 'text': 'FUTURE MUST NOT BE INCLUDED'},
             {'ts': '1790718800.123456', 'user': 'U99999999', 'text': 'BOT LINK MUST NOT BE INCLUDED'},
         ]}
@@ -170,25 +173,81 @@ def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypat
     assert 'FUTURE' not in prompt and 'BOT LINK' not in prompt
 
 
-def test_channel_context_bounds_and_reports_truncation(slack_app, monkeypatch):
+def test_thread_context_bounds_and_reports_truncation(slack_app, monkeypatch):
     import asyncio
     app, client, runs, _ = slack_app
-    client.post('/hooks/slack/events', **signed(event()))
+    root = '1790718000.123456'
+    client.post('/hooks/slack/events', **signed(event(thread_ts=root)))
     async def read(method, url, **kwargs):
         if url.endswith('chat.getPermalink'):
             raise ConnectorError('Link unavailable')
-        assert url.endswith('conversations.history')
-        assert kwargs['params'] == {'channel':'C12345678', 'latest':'1790719000.123456', 'inclusive':True, 'limit':30}
-        return {'messages': [{'ts': f'179071{8000+i}.123456', 'user':'U12345678', 'text':str(i)+'x'*5000,
+        assert url.endswith('conversations.replies')
+        assert kwargs['params'] == {'channel':'C12345678', 'ts':root, 'latest':'1790719000.123456', 'inclusive':True, 'limit':50}
+        return {'messages': [{'ts': f'179071{8000+i}.123456', 'thread_ts':root, 'user':'U12345678', 'text':str(i)+'x'*5000,
                               'files':[{'name':'reference.pdf'}]} for i in range(30)], 'has_more': True}
     monkeypatch.setattr(app.state.connectors, 'request', read)
     asyncio.run(app.state.slack.prepare(runs[0]['id']))
     source = app.state.store.slack_source(runs[0]['id'])
-    assert source['context_status'] == 'ready' and source['kind'] == 'channel'
+    assert source['context_status'] == 'ready' and source['kind'] == 'thread'
     assert source['truncated'] and 'Attached files' in source['warning']
     assert sum(len(m['text']) for m in source['messages']) <= 24000
     assert source['messages'][-1]['text'].startswith('29')
     assert source['permalink'] == ''
+
+
+def test_new_channel_threads_never_share_context_or_agentchat_history(slack_app, monkeypatch):
+    import asyncio
+    from sandbox.agent import conversation_prompt
+    app, client, runs, _ = slack_app
+    ryan, mateo = '1790718000.123456', '1790719000.123456'
+    old_task = 'Update the TypeSafe /v1/decisions playground.'
+    new_task = 'Help Yuneng investigate the typing regression in the attached screenshot.'
+    records = [
+        {'ts': ryan, 'user': 'U11111111', 'text': old_task},
+        {'ts': '1790718900.123456', 'thread_ts': ryan, 'user': 'U11111111', 'text': 'Keep the TypeSafe endpoint.'},
+        {'ts': mateo, 'user': 'U12345678', 'text': new_task},
+        {'ts': '1790719001.123456', 'thread_ts': mateo, 'user': 'U12345678', 'text': 'FUTURE REPLY'},
+    ]
+    reads = []
+    async def read(method, url, **kwargs):
+        if 'conversations.' in url:
+            reads.append((url, dict(kwargs['params'])))
+            return {'messages': records}  # Deliberately over-broad provider response.
+        return {'ok': True}
+    monkeypatch.setattr(app.state.connectors, 'request', read)
+    for event_id, ts, text in [('RyanTask', ryan, old_task), ('MateoTask', mateo, new_task)]:
+        client.post('/hooks/slack/events', **signed(event(event_id, ts=ts, text='<@U99999999> ' + text)))
+        asyncio.run(app.state.slack.prepare(runs[-1]['id']))
+    assert len(runs) == 2 and runs[0]['id'] != runs[1]['id']
+    for run, ts, text in zip(runs, (ryan, mateo), (old_task, new_task)):
+        source = app.state.store.slack_source(run['id'])
+        assert source['kind'] == 'thread' and source['context_status'] == 'ready'
+        assert [m['text'] for m in source['messages']] == [text]
+        history = asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:C12345678:' + ts))
+        assert [m.text for m in history] == [text]
+    assert all(url.endswith('conversations.replies') for url, _ in reads)
+    assert [params['ts'] for _, params in reads] == [ryan, mateo]
+    app.state.store.claim_message(runs[1]['id'])
+    spec = app.state.manager.spec(app.state.store.run(runs[1]['id']))
+    prompt = conversation_prompt(spec)
+    assert new_task in prompt
+    assert 'TypeSafe' not in prompt and '/v1/decisions' not in prompt and 'FUTURE' not in prompt
+
+
+def test_old_channel_context_is_scoped_before_display_or_prompt(slack_app):
+    from sandbox.agent import conversation_prompt
+    app, client, runs, _ = slack_app
+    client.post('/hooks/slack/events', **signed(event()))
+    run_id = runs[0]['id']
+    legacy = {'kind': 'channel', 'truncated': True, 'messages': [
+        {'ts': '1790718999.123456', 'user': 'U11111111', 'text': 'TypeSafe /v1/decisions'},
+        {'ts': '1790719000.123456', 'user': 'U12345678', 'text': runs[0]['prompt']},
+    ]}
+    app.state.store.execute("UPDATE slack_events SET context_status='ready',context_json=? WHERE run_id=?", (json.dumps(legacy), run_id))
+    source = app.state.store.slack_source(run_id)
+    assert source['kind'] == 'thread' and not source['truncated']
+    assert [m['text'] for m in source['messages']] == [runs[0]['prompt']]
+    assert 'TypeSafe' not in conversation_prompt({'prompt': runs[0]['prompt'], 'slack_source': source})
 
 
 def test_context_failure_and_paused_access_are_visible(slack_app, monkeypatch):
@@ -218,11 +277,11 @@ def test_webhook_ack_does_not_wait_for_context_and_execution_waits(slack_app, mo
     app, client, _, _ = slack_app
     release, started, executed = Event(), Event(), []
     async def request(method, url, **kwargs):
-        if url.endswith('conversations.history'):
+        if url.endswith('conversations.replies'):
             started.set()
             while not release.is_set():
                 await asyncio.sleep(.01)
-            return {'messages':[{'ts':'1790718999.123456','user':'U12345678','text':'the CI context'}]}
+            return {'messages':[{'ts':'1790719000.123456','user':'U12345678','text':'the CI context'}]}
         return {'ok': True}
     async def execute(run):
         source = app.state.store.slack_source(run['id'])
@@ -252,11 +311,11 @@ def test_cancel_during_context_fetch_never_starts_agent(slack_app, monkeypatch):
     app, client, _, _ = slack_app
     release, started = Event(), Event()
     async def request(method, url, **kwargs):
-        if url.endswith('conversations.history'):
+        if url.endswith('conversations.replies'):
             started.set()
             while not release.is_set():
                 await asyncio.sleep(.01)
-            return {'messages':[{'ts':'1790718999.123456','text':'context'}]}
+            return {'messages':[{'ts':'1790719000.123456','text':'context'}]}
         return {'ok':True}
     async def prohibited(run):
         pytest.fail('Cancelled session must not start the agent')

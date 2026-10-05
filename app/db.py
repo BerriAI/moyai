@@ -288,6 +288,13 @@ class Store:
             return None
         row = rows[0]
         context = json.loads(row.pop("context_json"))
+        if context.get('kind') == 'channel':
+            # Older snapshots included neighboring channel discussions. Do not
+            # expose them as this thread's context in the UI or new agent input.
+            messages = [item for item in context.get('messages', []) if item.get('ts') == row['mention_ts']]
+            context.update(kind='thread', messages=messages,
+                           truncated=any(item.get('text_truncated') for item in messages),
+                           warning='Neighboring channel messages are excluded.')
         return {**context, **row}
 
     def messages(self, run_id):

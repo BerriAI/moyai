@@ -165,7 +165,7 @@ class SlackSessions:
             return
         self.store.execute("UPDATE slack_events SET context_status='fetching' WHERE run_id=?", (run_id,))
         self.store.event(run_id, "context", "Reading the Slack conversation behind your request")
-        context = {"messages": [], "kind": "thread" if source["thread_ts"] != source["mention_ts"] else "channel",
+        context = {"messages": [], "kind": "thread",
                    "captured_at": now(), "truncated": False, "permalink": ""}
         if source['channel'].startswith('D'):
             # A DM begins with this explicitly addressed request. Subsequent
@@ -212,28 +212,29 @@ class SlackSessions:
         await self.checkpoints.flush()
 
     async def read_context(self, source, headers):
-        threaded = source["thread_ts"] != source["mention_ts"]
-        endpoint = "conversations.replies" if threaded else "conversations.history"
-        params = {"channel": source["channel"], "latest": source["mention_ts"], "inclusive": True,
-                  "limit": 50 if threaded else 30}
-        if threaded:
-            params["ts"] = source["thread_ts"]
+        # Every channel mention belongs to one thread, including a new root.
+        # Channel history would import unrelated neighboring tasks.
+        params = {"channel": source["channel"], "ts": source["thread_ts"],
+                  "latest": source["mention_ts"], "inclusive": True, "limit": 50}
         messages, truncated, cursor = {}, False, ""
-        for _ in range(3 if threaded else 1):
+        for _ in range(3):
             if cursor:
                 params["cursor"] = cursor
-            data = await self.connectors.request("GET", f"https://slack.com/api/{endpoint}", headers=headers, params=params)
+            data = await self.connectors.request("GET", "https://slack.com/api/conversations.replies", headers=headers, params=params)
             if not isinstance(data.get("messages"), list):
                 raise ConnectorError("Slack returned no message list.")
             for item in data["messages"]:
+                if not isinstance(item, dict):
+                    continue
                 ts = item.get("ts", "")
                 try:
-                    valid = bool(re.fullmatch(r"\d{10,16}\.\d{1,9}", ts)) and Decimal(ts) <= Decimal(source["mention_ts"])
+                    valid = (bool(re.fullmatch(r"\d{10,16}\.\d{1,9}", ts))
+                             and Decimal(source["thread_ts"]) <= Decimal(ts) <= Decimal(source["mention_ts"]))
                 except (TypeError, InvalidOperation):
                     valid = False
                 if not valid or item.get("user") == self.connectors.slack_installation().get("user_id"):
                     continue
-                if threaded and ts != source["thread_ts"] and item.get("thread_ts", source["thread_ts"]) != source["thread_ts"]:
+                if ts != source["thread_ts"] and item.get("thread_ts") != source["thread_ts"]:
                     continue
                 text = item.get("text") or "[Message has no text]"
                 clipped = len(text) > 3000
@@ -248,12 +249,12 @@ class SlackSessions:
             raise ConnectorError("No Slack messages could be read.")
         ordered = sorted(messages.values(), key=lambda item: Decimal(item["ts"]))
         # Keep the root and closest available messages within a bounded text budget.
-        root = messages.get(source["thread_ts"]) if threaded else None
+        root = messages.get(source["thread_ts"])
         selected, budget = ([root] if root else []), 24000 - (len(root["text"]) if root else 0)
         for item in reversed(ordered):
             if item is root:
                 continue
-            if len(selected) >= (50 if threaded else 30) or len(item["text"]) > budget:
+            if len(selected) >= 50 or len(item["text"]) > budget:
                 truncated = True
                 break
             selected.append(item)
@@ -263,7 +264,7 @@ class SlackSessions:
         warnings = []
         if truncated:
             warnings.append("Only a bounded excerpt is included; more messages or text may exist.")
-        if threaded and not root:
+        if not root:
             warnings.append("The thread's root message was not returned.")
         if any(m["has_attachments"] for m in selected):
             warnings.append("Attached files and rich attachments were not read.")
