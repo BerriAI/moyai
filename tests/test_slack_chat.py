@@ -50,6 +50,8 @@ def test_pr_completion_uses_confirmed_receipt_and_preserves_plain_replies(slack_
     assert posted['channel'] == 'C12345678' and posted['thread_ts'] == ROOT
     card = posted['attachments'][0]
     assert card['color'] == '#5B3FD1'
+    assert posted['blocks'][0]['expand'] is True
+    assert all(block['expand'] is True for block in card['blocks'] if block['type'] == 'section')
     assert '<@U88888888>' not in json.dumps(card)
     actions = next(block['elements'] for block in card['blocks'] if block['type'] == 'actions')
     assert [item['url'] for item in actions] == [url, url + '/files', f'https://workspace.example/#run={run_id}']
@@ -279,6 +281,7 @@ def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app
     assert 'model-test-key' not in sent['text'] and '[redacted]' in sent['text']
     assert sent['parse'] == 'none' and sent['link_names'] is False
     assert sent['blocks'][0]['text']['verbatim'] is True
+    assert sent['blocks'][0]['expand'] is True
 
 
 def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(slack_app):
@@ -602,6 +605,12 @@ def test_native_media_batch_then_one_card_and_dm_notice(media_delivery, dm):
     assert [raw for _, raw in uploaded] == [b'\x1aE\xdf\xa3webm-demo', b'\x89PNG\r\n\x1a\nresult']
     replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
     assert len(replies) == 2 and not replies[0].get('attachments') and replies[1]['attachments']
+    for reply in replies:
+        sections = [block for block in reply['blocks'] if block['type'] == 'section']
+        assert sections and all(block['expand'] is True for block in sections)
+        assert all(len(block['text']['text']) <= 3000 for block in sections)
+    assert replies[-1]['blocks'][-1]['type'] == 'context'
+    assert f'#run={run_id}' in replies[-1]['blocks'][-1]['elements'][0]['text']
     assert ('signed-in BerriAI teammates' in replies[-1]['text']) == dm
     assert all(row['status'] == 'sent' for row in app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'"))
     prior = len(calls)

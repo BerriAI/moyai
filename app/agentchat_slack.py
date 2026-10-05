@@ -173,8 +173,7 @@ class SlackWebhookChannel:
     def rich_reply(self, source, content, pull_requests=()):
         link = self.owner.chat.link(source.metadata['run_id'])
         body = content.removesuffix('\n\n' + link)
-        blocks = [{'type': 'section', 'expand': True,
-                   'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
         if body != content:
             blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
         cards = tuple(pr_delivery.attachment(pr_delivery.PullRequest.model_validate(pr),
