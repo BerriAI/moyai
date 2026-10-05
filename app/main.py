@@ -44,7 +44,7 @@ from .artifact_files import routes as artifact_file_routes
 from .automations import Automations
 from .computer import Computer
 from . import captures
-from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, MAX_WIRE, unseal
+from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, wire_limit, unseal
 
 STATIC = Path(__file__).parent / "static"
 Provider = Literal["linear", "slack", "notion", "github"]
@@ -236,7 +236,8 @@ def create_app(settings: Settings | None = None):
             length = int(request.headers.get("content-length", "0"))
         except ValueError:
             return JSONResponse({"detail": "Invalid request length"}, status_code=400)
-        limit = MAX_WIRE if request.url.path.startswith('/broker/') and request.headers.get('content-type') == CONTENT_TYPE else MAX_BODY
+        route = '/' + request.url.path.split('/', 3)[-1] if request.url.path.startswith('/broker/') else ''
+        limit = wire_limit(route) if route and request.headers.get('content-type') == CONTENT_TYPE else body_limit(route)
         if request.method == 'PUT' and request.url.path.startswith('/api/attachments/'):
             limit = upload_limit(request.headers.get('content-type', ''))
         if length < 0 or length > limit:
@@ -616,7 +617,7 @@ def create_app(settings: Settings | None = None):
                 raw = unseal(request.headers.get('authorization', '').removeprefix('Bearer '), route, raw)
             except ValueError:
                 raise HTTPException(400, 'Invalid or expired broker envelope.')
-        if len(raw) > MAX_BODY:
+        if len(raw) > body_limit(route):
             raise HTTPException(413, 'Broker request too large.')
         try:
             return json.loads(raw)

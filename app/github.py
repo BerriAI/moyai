@@ -8,11 +8,14 @@ import hashlib
 import json
 import re
 import time
+from typing import Literal
 from urllib.parse import quote
 
 import httpx
 import jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from sandbox.github_limits import MAX_FILE, MAX_TOTAL
 
 from .connector_errors import ConnectorError
 from .db import now
@@ -36,9 +39,23 @@ class PullRequest(Repository):
     number: int = Field(ge=1)
 
 
+class Checkout(Repository):
+    number: int | None = Field(default=None, ge=1, description="Optional PR number to check out its head in a fresh directory.")
+
+
+class Feedback(PullRequest):
+    kind: Literal["discussion", "inline", "reviews"] = "discussion"
+    page: int = Field(default=1, ge=1, le=10000)
+
+
+class Comment(PullRequest):
+    body: str = Field(min_length=1, max_length=20000, pattern=r"\S")
+    request_key: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
+
+
 class Change(Args):
     path: str = Field(min_length=1, max_length=500)
-    content: str | None = Field(default=None, max_length=1024 * 1024)
+    content: str | None = Field(default=None, max_length=MAX_FILE)
     executable: bool = False
 
     @field_validator('path')
@@ -58,17 +75,15 @@ class Change(Args):
     @field_validator('content')
     @classmethod
     def text_only(cls, content):
-        if content is not None and ('\x00' in content or len(content.encode('utf-8')) > 1024 * 1024):
-            raise ValueError('Publish UTF-8 text files of at most 1 MiB each.')
+        if content is not None and ('\x00' in content or len(content.encode('utf-8')) > MAX_FILE):
+            raise ValueError('Publish UTF-8 text files of at most 10 MiB each.')
         return content
 
 
-class Publish(Args):
+class Changes(Args):
     repository: str = Field(pattern='^' + REPOSITORY + '$')
     base_sha: str = Field(pattern='^' + SHA + '$')
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
-    title: str = Field(min_length=3, max_length=250)
-    body: str = Field(min_length=1, max_length=20000)
     files: list[Change] = Field(min_length=1, max_length=100)
 
     @model_validator(mode='after')
@@ -79,17 +94,39 @@ class Publish(Args):
         lowered = {p.lower() for p in paths}
         if any('/'.join(p.split('/')[:i]).lower() in lowered for p in paths for i in range(1, len(p.split('/')))):
             raise ValueError('A file cannot also be the parent of another change.')
-        if sum(len((f.content or '').encode()) for f in self.files) > 2 * 1024 * 1024:
-            raise ValueError('Publish at most 2 MiB of changed text per PR.')
+        if sum(len((f.content or '').encode()) for f in self.files) > MAX_TOTAL:
+            raise ValueError('Publish at most 20 MiB of changed text per publication.')
         return self
+
+
+class Publish(Args):
+    # Keep field order stable for receipts from the original publisher.
+    repository: str = Field(pattern='^' + REPOSITORY + '$')
+    base_sha: str = Field(pattern='^' + SHA + '$')
+    request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
+    title: str = Field(min_length=3, max_length=250)
+    body: str = Field(min_length=1, max_length=20000)
+    files: list[Change] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode='after')
+    def bounded_changes(self):
+        return Changes.bounded_changes(self)
+
+
+class Update(Changes):
+    number: int = Field(ge=1)
+    title: str = Field(min_length=3, max_length=250, description="Commit message for these follow-up changes.")
 
 
 TOOLS = {
     'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Use the exact owner/repository in checkout and PR tools.'),
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
-    'github_checkout': ('github', False, Repository, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
+    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
-    'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Cannot update existing branches, change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR created by this session. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
+    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR created by this session, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
+    'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
 }
 
 
@@ -105,6 +142,11 @@ class GitHub:
             id TEXT PRIMARY KEY, run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
             arguments_hash TEXT NOT NULL, branch TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '',
             result TEXT NOT NULL DEFAULT '', connection_version TEXT NOT NULL, created_at TEXT NOT NULL)''')
+
+        store.execute("""CREATE TABLE IF NOT EXISTS github_followups (
+            id TEXT PRIMARY KEY, arguments_hash TEXT NOT NULL, connection_version TEXT NOT NULL,
+            commit_sha TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '')""")
 
     def app_config(self):
         rows = self.store.rows('SELECT encrypted FROM github_app WHERE id=1')
@@ -221,15 +263,35 @@ class GitHub:
     async def call(self, run, name, arguments):
         if name not in TOOLS:
             raise ConnectorError('This GitHub operation is not available.')
-        if name == 'github_create_pull_request':
+        if name in {'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request'}:
             async with self.write_lock:
-                return await self.publish(run, Publish.model_validate(arguments))
+                if name == 'github_create_pull_request':
+                    return await self.publish(run, Publish.model_validate(arguments))
+                if name == 'github_update_pull_request':
+                    return await self.update(run, Update.model_validate(arguments))
+                return await self.comment(run, Comment.model_validate(arguments))
         if name == 'github_repositories':
             return {'repositories': self.connected_targets(await self.connectors.credentials('github'))}
         target = await self.selected_target(run, arguments.get('repository', ''))
         token = await self.installation_token(repository=target)
         if name in {'github_repository', 'github_checkout'}:
-            return {**await self.repository(token, target), 'git_path': '/github/' + target + '.git'}
+            repo = {**await self.repository(token, target), 'git_path': '/github/' + target + '.git'}
+            if name == 'github_checkout' and arguments.get('number'):
+                number = Checkout.model_validate(arguments).number
+                pr = await self.request('GET', f'/repos/{target}/pulls/{number}', token=token)
+                repo.update(base_sha=pr['head']['sha'], number=number, checkout_ref=f'refs/pull/{number}/head')
+            return repo
+        if name == 'github_pull_request_comments':
+            args = Feedback.model_validate(arguments)
+            suffix = {'discussion': f'issues/{args.number}/comments', 'inline': f'pulls/{args.number}/comments',
+                      'reviews': f'pulls/{args.number}/reviews'}[args.kind]
+            items = await self.request('GET', f'/repos/{target}/{suffix}', token=token,
+                                       params={'per_page': 30, 'page': args.page})
+            return {'kind': args.kind, 'items': [{
+                **{k: item.get(k) for k in ('id', 'html_url', 'state', 'path', 'line', 'in_reply_to_id', 'commit_id')},
+                'author': item.get('user', {}).get('login'), 'body': (item.get('body') or '')[:20000],
+                'body_truncated': len(item.get('body') or '') > 20000} for item in items],
+                'next_page': args.page + 1 if len(items) == 30 else None}
         number = PullRequest.model_validate(arguments).number
         prefix = f'/repos/{target}/pulls/{number}'
         pr = await self.request('GET', prefix, token=token)
@@ -253,13 +315,13 @@ class GitHub:
         return hashlib.sha256(((rows[0]['encrypted'] if rows else '') + (app[0]['encrypted'] if app else '')
                               + json.dumps(self.targets())).encode()).hexdigest()
 
-    def ensure_publish_allowed(self, run, connection_version):
+    def ensure_publish_allowed(self, run, connection_version, tool='github_create_pull_request'):
         current = self.store.run(run['id'])
         if (not current or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or current['active_message_id'] != run['active_message_id'] or not current['token_hash']
                 or current['token_hash'] != run['token_hash'] or 'github' not in current['plugins']
                 or connection_version != self.connection_version()
-                or not self.connectors.allowed('github_create_pull_request')):
+                or not self.connectors.allowed(tool)):
             raise ConnectorError('The session or GitHub connection changed. Publication has stopped; inspect the destination before retrying.')
 
     async def validate_tree_paths(self, token, tree_sha, changes, repository=''):
@@ -315,16 +377,7 @@ class GitHub:
                 comparison = await self.request('GET', prefix + '/compare/' + args.base_sha + '...' + repo['base_sha'], token=token, params={'per_page': 1})
                 if comparison.get('status') not in {'ahead', 'identical'}:
                     raise ConnectorError('The checkout base is not on the current default branch. Rebase and prepare a new publication with a new request_key.')
-            base = await self.request('GET', prefix + '/git/commits/' + args.base_sha, token=token)
-            await self.validate_tree_paths(token, base['tree']['sha'], args.files, target)
-            tree = [{'path': f.path, 'mode': '100755' if f.executable else '100644', 'type': 'blob',
-                     **({'sha': None} if f.content is None else {'content': f.content})} for f in args.files]
-            self.ensure_publish_allowed(run, version)
-            created_tree = await self.request('POST', prefix + '/git/trees', token=token, json={'base_tree': base['tree']['sha'], 'tree': tree})
-            self.ensure_publish_allowed(run, version)
-            created_commit = await self.request('POST', prefix + '/git/commits', token=token,
-                                                json={'message': args.title, 'tree': created_tree['sha'], 'parents': [args.base_sha]})
-            commit = created_commit['sha']
+            commit = await self.create_change_commit(run, args, token, target, version, 'github_create_pull_request')
             self.store.execute('UPDATE github_publications SET commit_sha=? WHERE id=?', (commit, identity))
         existing = await self.request('GET', prefix + '/git/ref/heads/' + branch, token=token, missing=True)
         if existing and existing['object']['sha'] != commit:
@@ -347,4 +400,115 @@ class GitHub:
         result = {'number': pr['number'], 'url': pr['html_url'], 'branch': branch, 'commit': commit,
                   'draft': pr['draft'], 'state': pr['state'], 'repository': target, 'title': pr.get('title') or args.title}
         self.store.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
+        return result
+
+    async def create_change_commit(self, run, args, token, target, version, tool):
+        prefix = '/repos/' + target
+        base = await self.request('GET', prefix + '/git/commits/' + args.base_sha, token=token)
+        await self.validate_tree_paths(token, base['tree']['sha'], args.files, target)
+        tree = []
+        for change in args.files:
+            sha = None
+            if change.content is not None:
+                self.ensure_publish_allowed(run, version, tool)
+                blob = await self.request('POST', prefix + '/git/blobs', token=token,
+                                          json={'content': change.content, 'encoding': 'utf-8'})
+                sha = blob['sha']
+            tree.append({'path': change.path, 'mode': '100755' if change.executable else '100644',
+                         'type': 'blob', 'sha': sha})
+        self.ensure_publish_allowed(run, version, tool)
+        created_tree = await self.request('POST', prefix + '/git/trees', token=token,
+                                          json={'base_tree': base['tree']['sha'], 'tree': tree})
+        self.ensure_publish_allowed(run, version, tool)
+        created_commit = await self.request('POST', prefix + '/git/commits', token=token,
+                                            json={'message': args.title, 'tree': created_tree['sha'], 'parents': [args.base_sha]})
+        return created_commit['sha']
+
+    def owned_publication(self, run, target, number, version):
+        for row in self.store.rows('SELECT * FROM github_publications WHERE run_id=? AND result!=?', (run['id'], '')):
+            result = json.loads(row['result'])
+            if result.get('repository', '').lower() == target.lower() and result.get('number') == number:
+                if row['connection_version'] != version:
+                    raise ConnectorError('The GitHub installation changed since this PR was published.')
+                return row
+        raise ConnectorError('Only PRs published by this session can be updated or commented on.')
+
+    async def owned_pr(self, token, target, number, publication):
+        pr = await self.request('GET', f'/repos/{target}/pulls/{number}', token=token)
+        head = pr.get('head', {})
+        if (pr.get('state') != 'open' or pr.get('merged') or head.get('ref') != publication['branch']
+                or (head.get('repo') or {}).get('full_name', '').lower() != target.lower()):
+            raise ConnectorError('The published PR is closed, merged or no longer points to its original Moyai branch.')
+        return pr
+
+    def followup(self, run, tool, args, version):
+        identity = hashlib.sha256(f"{run['id']}:{tool}:{args.request_key}".encode()).hexdigest()
+        fingerprint = hashlib.sha256(args.model_dump_json().encode()).hexdigest()
+        self.store.execute('INSERT OR IGNORE INTO github_followups(id,arguments_hash,connection_version) VALUES(?,?,?)',
+                           (identity, fingerprint, version))
+        row = self.store.rows('SELECT * FROM github_followups WHERE id=?', (identity,))[0]
+        if row['arguments_hash'] != fingerprint:
+            raise ConnectorError('That request_key already describes different changes. Use a new key.')
+        if row['connection_version'] != version:
+            raise ConnectorError('The GitHub installation changed since this operation.')
+        return row
+
+    async def update(self, run, args):
+        tool = 'github_update_pull_request'
+        target = await self.selected_target(run, args.repository)
+        version = run.get('github_connection_version') or self.connection_version()
+        self.ensure_publish_allowed(run, version, tool)
+        publication = self.owned_publication(run, target, args.number, version)
+        row = self.followup(run, tool, args, version)
+        if row['result']:
+            return json.loads(row['result'])
+        token = await self.installation_token(repository=target, write=True)
+        pr = await self.owned_pr(token, target, args.number, publication)
+        commit = row['commit_sha']
+        if pr['head']['sha'] != args.base_sha and (not commit or pr['head']['sha'] != commit):
+            raise ConnectorError('The PR head changed. Check out its current head in a fresh directory and reapply the changes with a new request_key.')
+        if not commit:
+            commit = await self.create_change_commit(run, args, token, target, version, tool)
+            self.store.execute('UPDATE github_followups SET commit_sha=? WHERE id=?', (commit, row['id']))
+        prefix = '/repos/' + target
+        ref = await self.request('GET', prefix + '/git/ref/heads/' + publication['branch'], token=token)
+        if ref['object']['sha'] != commit:
+            if ref['object']['sha'] != args.base_sha:
+                raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
+            await self.owned_pr(token, target, args.number, publication)
+            self.ensure_publish_allowed(run, version, tool)
+            await self.request('PATCH', prefix + '/git/refs/heads/' + publication['branch'], token=token,
+                               json={'sha': commit, 'force': False})
+        result = {**json.loads(publication['result']), 'commit': commit, 'state': pr['state'], 'draft': pr['draft']}
+        self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
+        return result
+
+    async def comment(self, run, args):
+        tool = 'github_comment_pull_request'
+        target = await self.selected_target(run, args.repository)
+        version = run.get('github_connection_version') or self.connection_version()
+        self.ensure_publish_allowed(run, version, tool)
+        publication = self.owned_publication(run, target, args.number, version)
+        row = self.followup(run, tool, args, version)
+        if row['result']:
+            return json.loads(row['result'])
+        token = await self.installation_token(repository=target, write=True)
+        await self.owned_pr(token, target, args.number, publication)
+        path = f'/repos/{target}/issues/{args.number}/comments'
+        marker = '<!-- moyai-comment:' + row['id'] + ' -->'
+        comment = None
+        if row['sent']:
+            for page in range(1, 101):
+                comments = await self.request('GET', path, token=token, params={'per_page': 100, 'page': page})
+                comment = next((item for item in comments if item.get('body') == args.body + '\n\n' + marker), None)
+                if comment or len(comments) < 100:
+                    break
+            if not comment:
+                raise ConnectorError('The earlier comment was not confirmed. Inspect the PR before choosing a new request_key; it will not be posted again automatically.')
+        else:
+            self.ensure_publish_allowed(run, version, tool)
+            self.store.execute('UPDATE github_followups SET sent=1 WHERE id=?', (row['id'],))
+            comment = await self.request('POST', path, token=token, json={'body': args.body + '\n\n' + marker})
+        result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number, 'repository': target}
+        self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
         return result

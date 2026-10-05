@@ -79,7 +79,7 @@ def serve():
                         if name not in {tool['name'] for tool in available}:
                             raise github_tools.GitHubToolError('Credential commands are not enabled for this session.')
                         data = credential_tools.run(args, broker)
-                    elif name in {'github_checkout', 'github_create_pull_request'}:
+                    elif name in {'github_checkout', 'github_create_pull_request', 'github_update_pull_request'}:
                         available = broker('/tools')  # Recheck revocation/read-only changes.
                         if name not in {tool['name'] for tool in available}:
                             raise github_tools.GitHubToolError('This GitHub operation is not enabled for the session.')

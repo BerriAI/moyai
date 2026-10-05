@@ -336,3 +336,29 @@ def test_superseded_model_wait_never_submits_another_gateway_call(monkeypatch):
             assert response.status_code == 409
     finally:
         relay.close()
+
+
+def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
+    received = []
+    payload = {'name': 'github_create_pull_request', 'arguments': {'content': 'x' * (6 * 1024 * 1024)}}
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers['Content-Length']))
+            received.append(json.loads(unseal('runtime-token', self.path, raw)))
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'runtime-token').start()
+    try:
+        with httpx.Client(base_url=relay.url, timeout=10) as client:
+            headers = {'Authorization': 'Bearer runtime-token'}
+            assert client.post('/tools/call', json=payload, headers=headers).json() == {'ok': True}
+            assert client.post('/v1/chat/completions', json=payload, headers=headers).status_code == 413
+        assert received == [payload]
+    finally:
+        relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)

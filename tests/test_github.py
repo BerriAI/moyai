@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.connector_errors import ConnectorError
-from app.github import Change, Publish, PERMISSIONS
+from app.github import Change, Publish, PERMISSIONS, MAX_FILE
 from app.security import digest
 from test_workspace import workspace, cloud_capability
 from test_spend import sign_in
@@ -59,6 +59,8 @@ class GitHubAPI:
             return {'tree': {'sha': TREE}}
         if method == 'GET' and '/git/trees/' in path:
             return {'tree': self.tree}
+        if method == 'POST' and path.endswith('/git/blobs'):
+            return {'sha': 'f' * 40}
         if method == 'POST' and path.endswith('/git/trees'):
             return {'sha': 'e' * 40}
         if method == 'POST' and path.endswith('/git/commits'):
@@ -94,7 +96,7 @@ def test_protected_paths(path):
 def test_bounds_and_ambiguous_changes():
     for files in [[{'path': 'a', 'content': 'x'}, {'path': 'A', 'content': 'x'}],
                   [{'path': 'a', 'content': 'x'}, {'path': 'a/b', 'content': 'x'}],
-                  [{'path': 'a', 'content': '\0'}], [{'path': 'a', 'content': 'a' * (1024 * 1024 + 1)}]]:
+                  [{'path': 'a', 'content': '\0'}], [{'path': 'a', 'content': 'a' * (MAX_FILE + 1)}]]:
         with pytest.raises(ValidationError):
             Publish.model_validate({**PAYLOAD, 'files': files})
 
@@ -119,7 +121,7 @@ def test_publish_normal_pr_once_across_lost_ack_and_new_turn(workspace, monkeypa
     assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/pulls')]) == 1
     assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/git/refs')]) == 1
     writes = [c for c in api.calls if c[0] != 'GET']
-    assert all(c[0] == 'POST' and c[1].rsplit('/', 1)[-1] in {'trees', 'commits', 'refs', 'pulls'} for c in writes)
+    assert all(c[0] == 'POST' and c[1].rsplit('/', 1)[-1] in {'blobs', 'trees', 'commits', 'refs', 'pulls'} for c in writes)
     ref = next(c[2]['json']['ref'] for c in writes if c[1].endswith('/refs'))
     assert ref.startswith('refs/heads/moyai/' + run_id[:12] + '/')
     with pytest.raises(ConnectorError, match='different changes'):
@@ -180,7 +182,7 @@ def test_revocation_during_publication_stops_further_mutations(workspace, monkey
     api.on_call = mutate
     with pytest.raises(ConnectorError, match='changed'):
         asyncio.run(github.publish(app.state.store.run(run_id), Publish.model_validate(PAYLOAD)))
-    assert [c[1].rsplit('/', 1)[-1] for c in api.calls if c[0] == 'POST'] == ['trees']
+    assert [c[1].rsplit('/', 1)[-1] for c in api.calls if c[0] == 'POST'] == ['blobs', 'trees']
 
 
 @pytest.mark.parametrize('user,role', [('alice', 'admin'), ('bob', 'member')])
@@ -393,7 +395,7 @@ def test_self_repository_pr_is_created_directly_without_approval(workspace, monk
     assert result['repository'] == 'BerriAI/moyai-devin' and not result['draft']
     assert not app.state.store.approvals(run_id)
     assert all(path.startswith('/repos/BerriAI/moyai-devin') for _, path, _ in api.calls)
-    assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
+    assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'blobs', 'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
 
 
 def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypatch):

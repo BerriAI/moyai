@@ -149,3 +149,89 @@ def test_specific_repository_real_checkout_and_publication_payload(checkout):
     with pytest.raises(local.GitHubToolError, match='another repository'):
         local.checkout(different, f'http://127.0.0.1:{server.server_port}', 'current-capability', str(repo))
     assert (repo / 'new.py').read_text() == 'answer = 42\n'
+
+
+@pytest.mark.parametrize('checkout', ['BerriAI/litellm'], indirect=True)
+def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(checkout):
+    repo, initial, _, _, server = checkout
+    source = repo.parent.parent / 'source'
+    upstream = repo.parent.parent / 'upstream/github/BerriAI/litellm.git'
+    calls = []
+
+    def broker(path, body):
+        assert path == '/tools/call'
+        args = body['arguments']
+        if body['name'] == 'github_checkout':
+            return {**initial, 'base_sha': git(source, 'rev-parse', 'HEAD'), 'number': 100,
+                    'checkout_ref': 'refs/pull/100/head', 'git_path': '/github/BerriAI/litellm.git'}
+        calls.append(body)
+        for change in args['files']:
+            target = source / change['path']
+            if change['content'] is None:
+                target.unlink()
+            else:
+                target.write_text(change['content'])
+        git(source, 'add', '.')
+        git(source, 'commit', '-m', args['title'])
+        commit = git(source, 'rev-parse', 'HEAD')
+        git(source, 'push', str(upstream), 'HEAD:refs/heads/moyai/test', 'HEAD:refs/pull/100/head')
+        return {'repository': 'BerriAI/litellm', 'number': 100, 'commit': commit, 'branch': 'moyai/test',
+                'url': 'https://github.com/BerriAI/litellm/pull/100'}
+
+    remote = f'http://127.0.0.1:{server.server_port}'
+    (repo / 'schema.d.ts').write_text('x' * 2_931_023)
+    (repo / 'new.py').write_text('keep = True\n')
+    result = local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Large schema',
+        'body': 'First publication', 'request_key': 'first-publication'}, broker, remote, 'current-capability')
+    assert 'checkout_warning' not in result
+    assert local.metadata(repo)['base_sha'] == result['commit']
+    with pytest.raises(local.GitHubToolError, match='between 1 and 100'):
+        local.collect(str(repo), 'No edits', 'Body', 'no-new-edits')
+    (repo / 'edit.py').write_text('after = 2\n')
+    result = local.call('github_update_pull_request', {'directory': str(repo), 'number': 100,
+        'title': 'Follow-up fix', 'request_key': 'followup-fix'}, broker, remote, 'current-capability')
+    assert 'checkout_warning' not in result
+    assert [f['path'] for f in calls[-1]['arguments']['files']] == ['edit.py']
+    assert 'body' not in calls[-1]['arguments']
+    assert (repo / 'new.py').read_text() == 'keep = True\n'
+    # A new checkout can resume the PR after sandbox loss, without touching old files.
+    fresh = repo.parent / 'fresh'
+    receipt = local.checkout(broker, remote, 'current-capability', str(fresh), 'BerriAI/litellm', number=100)
+    assert receipt['base_sha'] == result['commit'] and receipt['number'] == 100
+    assert (fresh / 'edit.py').read_text() == 'after = 2\n'
+    assert (fresh / 'schema.d.ts').stat().st_size == 2_931_023
+    (repo / 'new.py').unlink()
+    payload = local.collect(str(repo), 'Remove new file', 'Body', 'remove-new-file')
+    assert payload['files'] == [{'path': 'new.py', 'content': None, 'executable': False}]
+    assert 'current-capability' not in (fresh / '.git/config').read_text()
+
+
+def test_local_total_budget_and_byte_limits(checkout, monkeypatch):
+    repo, _, _, _, _ = checkout
+    monkeypatch.setattr(local, 'MAX_TOTAL', 10)
+    (repo / 'one').write_text('123456')
+    (repo / 'two').write_text('123456')
+    with pytest.raises(local.GitHubToolError, match='20 MiB'):
+        local.collect(str(repo), 'Total budget', 'Body', 'total-budget')
+
+
+def test_advertised_update_packages_local_files():
+    from app.github import TOOLS
+    tools = [{'name': name, 'inputSchema': spec[2].model_json_schema()} for name, spec in TOOLS.items()]
+    updated = {tool['name']: tool for tool in local.advertised_tools(tools)}
+    props = updated['github_update_pull_request']['inputSchema']['properties']
+    assert set(props) == {'directory', 'number', 'title', 'request_key'}
+    assert 'number' in updated['github_checkout']['inputSchema']['properties']
+
+
+def test_successful_publication_is_preserved_when_base_sync_fails(checkout, monkeypatch):
+    repo, _, _, _, _ = checkout
+    (repo / 'new.py').write_text('new = True\n')
+    receipt = {'repository': 'BerriAI/litellm', 'number': 100, 'commit': 'c' * 40,
+               'url': 'https://github.com/BerriAI/litellm/pull/100'}
+    def sync(*args):
+        raise OSError('disk unavailable')
+    monkeypatch.setattr(local, 'sync_publication', sync)
+    result = local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Publish change',
+        'body': 'A change', 'request_key': 'sync-failure'}, lambda *args: receipt, '', '')
+    assert result['url'] == receipt['url'] and 'succeeded' in result['checkout_warning']

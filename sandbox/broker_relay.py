@@ -12,10 +12,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import nullcontext
 
 try:
-    from .broker_transport import CONTENT_TYPE, MAX_BODY, seal
+    from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from .startup import StartupUnavailable, read_with_reconnect
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
-    from broker_transport import CONTENT_TYPE, MAX_BODY, seal
+    from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from startup import StartupUnavailable, read_with_reconnect
 
 EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
@@ -58,7 +58,7 @@ class BrokerRelay:
                     return self.error(404, 'Unknown broker route.')
                 try:
                     size = int(self.headers.get('Content-Length', '0'))
-                    if size < 0 or size > MAX_BODY:
+                    if size < 0 or size > body_limit(self.path):
                         return self.error(413, 'Broker request is too large.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command

@@ -110,9 +110,9 @@ class Connectors:
             self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
 
     def requires_approval(self, name):
-        # PR creation remains a write for read-only policies and uncertain results.
-        # Only this narrow tool can publish directly; other writes still wait.
-        return TOOLS[name][1] and name != 'github_create_pull_request'
+        # GitHub writes are narrow, session-owned operations enforced server-side.
+        return TOOLS[name][1] and name not in {
+            'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request'}
 
     def audit(self, provider, action):
         self.store.execute("INSERT INTO connection_audit(provider,action,actor,created_at) VALUES(?,?,?,?)",
