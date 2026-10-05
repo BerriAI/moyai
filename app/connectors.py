@@ -59,7 +59,7 @@ TOOLS = {
     "linear_search": ("linear", False, Search, "Search Linear issue titles by text. Returns at most 20 issues."),
     "linear_issue": ("linear", False, LinearIssue, "Read a Linear issue's description, status, and recent comments."),
     "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue. Requires workspace approval."),
-    "linear_create_issue": ("linear", True, LinearCreateIssue, "Prepare and create a Linear ticket with title and Markdown description. Include relevant source links. Exact fields require administrator approval before creation. The connected Linear credential needs Create issues permission."),
+    "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
     "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
     "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation."),
     "slack_send": ("slack", True, SlackSend, "Send a Slack message. Requires workspace approval."),
@@ -110,9 +110,11 @@ class Connectors:
             self.store.rows("SELECT provider FROM connections WHERE provider=?", (provider,)))
 
     def requires_approval(self, name):
-        # GitHub writes are narrow, session-owned operations enforced server-side.
+        # Ticket creation and the narrow GitHub publishing tools run directly.
+        # They remain writes for read-only policies and uncertain outcomes.
         return TOOLS[name][1] and name not in {
-            'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request'}
+            'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request',
+            'linear_create_issue'}
 
     def audit(self, provider, action):
         self.store.execute("INSERT INTO connection_audit(provider,action,actor,created_at) VALUES(?,?,?,?)",

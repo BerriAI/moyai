@@ -302,26 +302,39 @@ def test_model_proxy_pins_model_and_drops_gateway_overrides(workspace, monkeypat
     assert client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []}).status_code == 401
 
 
-@pytest.mark.parametrize('decision,expected_calls', [('approve', 1), ('deny', 0)])
-def test_linear_issue_creation_requires_exact_admin_approval(workspace, monkeypatch, decision, expected_calls):
+@pytest.mark.parametrize('user,role', [('alice', 'admin'), ('bob', 'member')])
+def test_linear_issue_creation_runs_directly_for_admins_and_members(workspace, monkeypatch, user, role):
+    from test_spend import sign_in
     app, client = workspace
     run_id, headers = cloud_capability(app, ['linear'])
+    owner = sign_in(app, client, user, user + '@berri.ai')
+    app.state.store.execute('UPDATE runs SET owner_id=?,active_user_id=? WHERE id=?', (owner, owner, run_id))
+    assert client.get('/api/session').json()['role'] == role
     args = {'team_id':'12345678-1234-1234-1234-123456789abc','title':'Improve support agent staging',
             'description':'Discussion context and source: https://test.slack.com/archives/C12345678/p1790719000123456'}
-    calls=[]
-    async def request(method,url,**kwargs):
+    calls = []
+    async def request(method, url, **kwargs):
+        assert not app.state.store.approvals(run_id)
+        assert app.state.store.run(run_id)['status'] == 'running'
         calls.append(kwargs['json'])
         return {'data':{'issueCreate':{'success':True,'issue':{'identifier':'TEST-1','url':'https://linear.app/test/TEST-1'}}}}
-    monkeypatch.setattr(app.state.connectors,'request',request)
-    with ThreadPoolExecutor() as pool:
-        future=pool.submit(client.post,f'/broker/{run_id}/tools/call',headers=headers,json={'name':'linear_create_issue','arguments':args})
-        approval=wait_for(lambda:app.state.store.approvals(run_id))[0]
-        assert approval['arguments']==args and not calls
-        client.post(f"/api/approvals/{approval['id']}",json={'decision':decision})
-        response=future.result(timeout=3)
-    assert len(calls)==expected_calls
-    if calls:
-        assert calls[0]['variables']['input']=={'teamId':args['team_id'],'title':args['title'],'description':args['description']}
-        assert 'issueCreate' in calls[0]['query']
-        assert response.status_code==200
-    assert app.state.store.approvals(run_id)[0]['status']==('completed' if expected_calls else 'denied')
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
+                           json={'name':'linear_create_issue', 'arguments':args})
+    assert response.status_code == 200
+    assert response.json()['issueCreate']['issue']['identifier'] == 'TEST-1'
+    assert len(calls) == 1
+    assert calls[0]['variables']['input'] == {'teamId':args['team_id'],'title':args['title'],'description':args['description']}
+    assert 'issueCreate' in calls[0]['query']
+    assert not app.state.store.approvals(run_id)
+    assert not any(event['kind'] == 'approval' for event in app.state.store.events(run_id))
+    assert app.state.store.run(run_id)['status'] == 'running'
+    connection = next(c for c in client.get('/api/connections').json() if c['id'] == 'linear')
+    policy = {tool['name']: tool for tool in connection['tools']}
+    assert policy['linear_create_issue']['write'] and not policy['linear_create_issue']['requires_approval']
+    assert policy['linear_comment']['requires_approval']
+    advertised = client.get(f'/broker/{run_id}/tools', headers=headers).json()
+    tool = next(tool for tool in advertised if tool['name'] == 'linear_create_issue')
+    assert tool['annotations']['readOnlyHint'] is False
+    if role == 'member':
+        assert client.patch('/api/connections/linear/policy', json={'enabled':True,'read_only':False}).status_code == 403
