@@ -262,6 +262,7 @@ class SlackChat:
                         self.settings.resolve_model(fallback=current)
                     message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
                     message_id = message['id']
+                    self.store.slack_mentions.queue_in(conn, message_id, team, prompt)
                     if file_ids:
                         conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)', (message_id, json.dumps(file_ids)))
                     conn.execute('UPDATE slack_threads SET paused=0,last_progress=? WHERE run_id=?', (time.time(), run_id))

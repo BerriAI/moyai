@@ -59,26 +59,31 @@ class SlackIdentities:
 
     async def sync_due(self):
         async with self.lock:
-            status = self.status()
-            if not status['ready']:
-                return
-            team = status['team_id']
-            refresh_before = datetime.fromtimestamp(time.time() - PROFILE_REFRESH_SECONDS, timezone.utc).isoformat()
-            # Only senders who actually have a session/message, not unrelated
-            # channel participants incidentally seen by the Slack event router.
-            rows = self.store.rows("""SELECT u.* FROM users u WHERE kind='slack'
-                AND id LIKE ? AND (profile_next_check<=?
-                    OR (profile_eligible=1 AND profile_checked_at<=?))
-                AND (EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
-                     OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
-                     OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id))
-                ORDER BY profile_next_check,id LIMIT 10""", (f'slack:{team}:%', int(time.time()), refresh_before))
-            for row in rows:
-                await self.resolve(row, team)
-            if rows:
+            await self.sync_profiles_due()
+            if await self.store.slack_mentions.sync_due(self.connectors):
                 await self.checkpoints.flush()
-            if len(rows) == 10:
-                self.wake.set()
+
+    async def sync_profiles_due(self):
+        status = self.status()
+        if not status['ready']:
+            return
+        team = status['team_id']
+        refresh_before = datetime.fromtimestamp(time.time() - PROFILE_REFRESH_SECONDS, timezone.utc).isoformat()
+        # Only senders who actually have a session/message, not unrelated
+        # channel participants incidentally seen by the Slack event router.
+        rows = self.store.rows("""SELECT u.* FROM users u WHERE kind='slack'
+            AND id LIKE ? AND (profile_next_check<=?
+                OR (profile_eligible=1 AND profile_checked_at<=?))
+            AND (EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
+                 OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
+                 OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id))
+            ORDER BY profile_next_check,id LIMIT 10""", (f'slack:{team}:%', int(time.time()), refresh_before))
+        for row in rows:
+            await self.resolve(row, team)
+        if rows:
+            await self.checkpoints.flush()
+        if len(rows) == 10:
+            self.wake.set()
 
     async def resolve(self, row, team):
         user = row['id'].removeprefix(f'slack:{team}:')

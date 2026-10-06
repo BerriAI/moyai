@@ -449,7 +449,9 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Task not found")
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": store.messages(run_id),
+        messages = store.messages(run_id)
+        identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
+        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None,
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),

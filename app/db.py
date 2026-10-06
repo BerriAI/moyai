@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .attachments import Attachments
+from .slack_mentions import SlackMentions
 
 
 def now() -> str:
@@ -186,6 +187,7 @@ class Store:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
         self.path.chmod(0o600)
         self.attachments = Attachments(self)
+        self.slack_mentions = SlackMentions(self)
 
     @contextmanager
     def connect(self):
@@ -306,7 +308,8 @@ class Store:
                 raise ValueError("The session queue is full.")
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal','queued',?,?,?,1,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, self.default_model, actor_id))
-            conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, self.default_model, actor_id))
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, self.default_model, actor_id)).lastrowid
+            self.slack_mentions.queue_in(conn, message_id, team_id, prompt)
             if file_ids:
                 message_id = conn.execute('SELECT id FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
                 conn.execute('INSERT INTO slack_audio_inputs(message_id,files_json) VALUES(?,?)', (message_id, json.dumps(file_ids)))
@@ -335,6 +338,11 @@ class Store:
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,
             COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
             u.name AS sender_name,u.email AS sender_email,
+            COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
+                AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
+                (SELECT substr(m.user_id,7,instr(substr(m.user_id,7),':')-1) FROM slack_events e
+                 WHERE e.run_id=m.run_id AND m.client_id='initial'
+                   AND m.user_id LIKE 'slack:%:'||e.user_id LIMIT 1)) AS slack_message_team,
             (SELECT r.user_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id
                 AND NOT EXISTS(SELECT 1 FROM slack_events e WHERE e.event_id=r.event_id)
@@ -355,6 +363,7 @@ class Store:
                 if name in {'', slack_user, 'Slack ' + slack_user, message['user_id']}:
                     name = (email or '').strip() or 'Slack teammate'
                 message['display_content'] = f'Slack reply from {name}:\n' + message['content'][len(prefix):]
+        self.slack_mentions.decorate(messages)
         # Inputs that never started (cancelled/failed while waiting) stay where
         # they were sent: before the first later-sent input that did run.
         ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]

@@ -35,6 +35,15 @@ test('Slack reply cards show escaped names while queue edits preserve canonical 
   assert.equal(b.requests[0].body.content,input.content);
 });
 
+test('resolved CC mentions remain plain text, including hostile profile names',()=>{
+  const b=controller();
+  b.setRun({status:'running',messages:[active,{...message,
+    content:'cc: <@U87654321> can you help?',
+    display_content:'cc: @Tin <img src=x onerror=alert(1)> & teammates can you help?'}]});
+  assert.match(b.element.html,/cc: @Tin &lt;img src=x onerror=alert\(1\)&gt; &amp; teammates/);
+  assert.doesNotMatch(b.element.html,/<img|U87654321/);
+});
+
 test('a new request is immediately in the transcript without changing its durable state',()=>{
   const input={...message,attachments:[{id:'file',name:'skill.md'}]},run={status:'queued',messages:[input]};
   const before=structuredClone(run),view=queue.presentation(run);
