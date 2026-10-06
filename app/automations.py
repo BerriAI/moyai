@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import uuid4
@@ -259,7 +260,7 @@ class Automations:
         result['trigger'] = self.events.public(row, actor)
         return result
 
-    def save(self, body, owner_id, automation_id=None):
+    def save(self, body, owner_id, automation_id=None, *, connection=None):
         definition = body.definition.model_copy(update={'model': self.settings.resolve_model(body.definition.model or None),
                                                       'plugins': sorted(set(body.definition.plugins))})
         old_triggers = {t.id:t for t in Definition.model_validate_json(self.row(automation_id)['definition']).triggers} if automation_id else {}
@@ -270,8 +271,9 @@ class Automations:
                              and old_triggers[trigger.id].schedule.run_at == trigger.schedule.run_at)):
                 raise ValueError('Choose a future date and time for a one-time trigger.')
         stamp = now()
-        with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+        with self.store.connect() if connection is None else nullcontext(connection) as conn:
+            if connection is None:
+                conn.execute('BEGIN IMMEDIATE')
             if automation_id:
                 row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
                 if not row or row['owner_id'] != owner_id:
@@ -293,8 +295,33 @@ class Automations:
                 automation_id = uuid4().hex
                 conn.execute('INSERT INTO automations(id,owner_id,definition,created_at,updated_at) VALUES(?,?,?,?,?)',
                              (automation_id, owner_id, definition.model_dump_json(), stamp, stamp))
+            result = dict(conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone())
         self.next_sync = 0
-        return self.row(automation_id)
+        return result
+
+    def set_state(self, automation_id, body, owner_id, *, admin_pause=False, connection=None):
+        """Shared by the web editor and agent tools; permission and revision checks stay here."""
+        with self.store.connect() if connection is None else nullcontext(connection) as conn:
+            if connection is None:
+                conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, 'Automation not found.')
+            if row['owner_id'] != owner_id and not (body.paused and admin_pause):
+                raise HTTPException(403, 'Only the owner can enable this automation. Administrators can pause it.')
+            if row['revision'] != body.revision:
+                raise HTTPException(409, 'This automation changed. Refresh and try again.')
+            if not body.paused:
+                if not self.settings.temporal_enabled:
+                    raise HTTPException(409, 'Enable Temporal before enabling automatic runs.')
+                if not self.events.ready(row):
+                    raise HTTPException(409, 'Configure the webhook or Slack connection before enabling this trigger.')
+                self.validate_execution(Definition.model_validate_json(row['definition']), row['owner_id'])
+            conn.execute("UPDATE automations SET paused=?,revision=revision+1,updated_at=?,sync_error='' WHERE id=?",
+                         (body.paused, now(), automation_id))
+            result = dict(conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone())
+        self.next_sync = 0
+        return result
 
     async def launch(self, automation_id, revision, occurrence, expires_at='', *, manual=False, event=False, trigger_id='default'):
         # No await inside the transaction: receipt + run + initial inbox + wake
@@ -415,12 +442,15 @@ class Automations:
                 catchup_window=timedelta(minutes=15)), state=ScheduleState(paused=bool(row['paused']) or used,
                     limited_actions=once and not used, remaining_actions=1 if once and not used else 0))
 
-    async def sync(self, client):
-        if asyncio.get_running_loop().time() < self.next_sync or self.sync_lock.locked():
+    async def sync(self, client, automation_id=None):
+        if (not automation_id and asyncio.get_running_loop().time() < self.next_sync) or self.sync_lock.locked():
             return
         async with self.sync_lock:
-            self.next_sync = asyncio.get_running_loop().time() + 15
-            for row in self.store.rows('SELECT * FROM automations WHERE revision>synced_revision ORDER BY updated_at LIMIT 20'):
+            if not automation_id:
+                self.next_sync = asyncio.get_running_loop().time() + 15
+            query = 'SELECT * FROM automations WHERE revision>synced_revision'
+            rows = self.store.rows(query + ' AND id=?', (automation_id,)) if automation_id else self.store.rows(query + ' ORDER BY updated_at LIMIT 20')
+            for row in rows:
                 try:
                     desired = set()
                     for trigger in Definition.model_validate_json(row['definition']).triggers:
@@ -488,21 +518,10 @@ class Automations:
         @router.post('/api/automations/{automation_id}/state')
         async def toggle(automation_id: str, body: Toggle, request: Request):
             self.security.require(request, mutation=True)
-            row = self.row(automation_id)
-            self.require_owner(row, request, pausing=body.paused)
-            if not body.paused:
-                if not self.settings.temporal_enabled:
-                    raise HTTPException(409, 'Enable Temporal before enabling automatic runs.')
-                if not self.events.ready(row):
-                    raise HTTPException(409, 'Configure the webhook or Slack connection before enabling this trigger.')
-                try:
-                    self.validate_execution(Definition.model_validate_json(row['definition']), row['owner_id'])
-                except ValueError as exc:
-                    raise HTTPException(422, str(exc)) from None
-            changed = self.store.execute("UPDATE automations SET paused=?,revision=revision+1,updated_at=?,sync_error='' WHERE id=? AND revision=?", (body.paused, now(), automation_id, body.revision))
-            if not changed:
-                raise HTTPException(409, 'This automation changed. Refresh and try again.')
-            self.next_sync = 0
+            try:
+                self.set_state(automation_id, body, self.actor(request), admin_pause=self.security.role(request) == 'admin')
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
             await self.checkpoints.flush()
             return self.public(self.row(automation_id), self.actor(request))
 

@@ -179,6 +179,8 @@ def create_app(settings: Settings | None = None):
     slack.identities = identities
     manager.prepare_context = slack.prepare
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
+    from .automation_tools import AutomationTools, TOOL_NAMES as AUTOMATION_TOOLS
+    automation_tools = AutomationTools(automations, credentials.same_requester)
     manager.automations = automations
     slack.automation_events = automations.events
     login_attempts = []
@@ -234,6 +236,7 @@ def create_app(settings: Settings | None = None):
     app.state.computer = computer
     app.include_router(computer.routes())
     app.state.automations = automations
+    app.state.automation_tools = automation_tools
     app.include_router(automations.routes())
     app.state.skills = skills
     app.state.environments = environments
@@ -670,7 +673,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -680,6 +683,13 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in AUTOMATION_TOOLS:
+            try:
+                return await automation_tools.call(run, body.name, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Invalid automation arguments. Check the current revision, schedule and tool schema.') from None
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
         if body.name in MEMORY_TOOLS:
             try:
                 result = memory.call(run, body.name, body.arguments)

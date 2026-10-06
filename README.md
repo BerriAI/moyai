@@ -1329,6 +1329,35 @@ Credential requests can be completed through **Open session**.
 
 ### Automations
 
+You can also manage schedules from a direct web or Slack chat. Ask, for example,
+“Every Monday at 9 AM Los Angeles time, audit the skills repository and open a PR
+only when updates are needed.” The agent uses `automation_list`,
+`automation_create`, `automation_update`, `automation_enable`, and
+`automation_pause`. These use the same saved automations and Temporal scheduler
+as Settings; no GitHub workflow is created.
+
+The agent lists existing work before creating a schedule. Create and update save
+a paused definition; enable completes an authorized scheduling request. A reply
+includes the next run time only after Temporal confirms it. `pending_sync` or
+`scheduler_unavailable` means the change is saved but its next run is not yet
+confirmed. Read that automation again to check recovery. Pausing blocks future
+launches immediately; it does not stop already running sessions.
+
+Chat tools manage only the current requester’s automations, including in shared
+Slack threads. Slack needs a fresh eligible profile matching an independently
+verified Google identity. An accounting link alone grants no access. Subagents
+and automated runs cannot create or manage schedules. Administrators retain the
+existing ability to pause other owners’ work in Settings. Connection selections,
+GitHub repository grants, runtime readiness and webhook requirements still apply;
+these tools cannot grant new access. Mutations check the active turn and revision
+and journal a stable `request_key`, so retries do not duplicate or replay changes.
+
+Local verification: `uv run pytest tests/test_automation_tools.py -q` includes a
+real Temporal schedule check. For a visible broker demo, run
+`uv run python scripts/automation_tools_demo.py` and open
+`http://127.0.0.1:8793/demo`. It uses a disposable local Temporal server and no
+provider credentials, model calls, or production schedules.
+
 Open **Settings → Automations** to save a workflow, repository/environment, model,
 connections, and one or more triggers. Triggers are **OR-ed**: any matching trigger
 can start the workflow. An event matching several triggers starts one session.
