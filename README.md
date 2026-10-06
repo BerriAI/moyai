@@ -892,7 +892,7 @@ a new turn to see the updated schema. The connector uses Linear's
 
 ## Shared organization GitHub
 
-Set `GITHUB_REPOSITORIES=BerriAI/litellm,BerriAI/moyai-devin` to allow both repositories, then use **Connections → GitHub → Connect** as an administrator. An empty allowlist preserves the legacy `GITHUB_REPOSITORY` setting (default `BerriAI/litellm`). All selected repositories must belong to the same organization. Connect an existing organization-owned App with its App ID and PEM private key, or register a new App through the manifest flow. The server validates its organization and exact permissions before encrypting the signing key. Install it on **only the configured repositories**, with Contents and Pull requests write access and Metadata read. Teammates use the shared installation without personal GitHub OAuth. New web and Slack sessions can select GitHub; existing sessions retain their original app selection.
+Set `GITHUB_REPOSITORIES=BerriAI/litellm,BerriAI/moyai-devin` to allow both repositories, then use **Connections → GitHub → Connect** as an administrator. An empty allowlist preserves the legacy `GITHUB_REPOSITORY` setting (default `BerriAI/litellm`). All selected repositories must belong to the same organization. Connect an existing organization-owned App with its App ID and PEM private key, or register a new App through the manifest flow. The server validates its organization and required permissions before encrypting the signing key. Install it on **only the configured repositories**, with Contents and Pull requests write access and Metadata read. New App registrations also request Administration write for ruleset reviewer edits. Existing installations continue working without that permission; additional granted permissions do not cause rejection, and each token is narrowed to the specific operation. Teammates use the shared installation without personal GitHub OAuth. New web and Slack sessions can select GitHub; existing sessions retain their original app selection.
 
 Use `github_repositories` to list connected repositories and pass an explicit `repository` to `github_checkout`, `github_repository`, or `github_pull_request`. Without it, tools use the session’s repository URL when allowed, then the first connected repository. A checkout records its repository and base; publishing follows those recorded values. Adding a repository to configuration requires reconnecting the installation before agents can access it. Removing a repository immediately revokes its broker access and invalidates pending publications.
 
@@ -901,6 +901,48 @@ Moyai can propose changes to `BerriAI/moyai-devin` through the same branch/PR to
 The agent can read repository details and PRs, check out private code, and publish up to 100 changed UTF-8 text files (10 MiB each, 20 MiB total) **without an administrator approval step** when the task requests a PR and the connection permits writes. Publishing creates a unique `moyai/...` branch and a normal, ready-for-review PR. Local commits, uncommitted edits, new nonignored files and deletions are compared against the recorded checkout base. Busy default branches are allowed when the recorded checkout base remains an ancestor. Existing files are never overwritten by checkout.
 
 GitHub's `pull_requests:write` permission includes review/merge capabilities, so GitHub scopes alone cannot restrict agents to publishing and commenting. Moyai enforces this boundary in its server broker: it exposes no approval, review, merge, auto-merge, arbitrary branch update, force-push, or generic GitHub API operation. Signing keys are encrypted on the server; short-lived installation tokens are narrowed to exactly one requested repository and never sent to Modal. Git transport is a streaming read-only `git-upload-pack` endpoint, authenticated with the current session capability. Credentials are not stored in Git URLs/config or command arguments. Workflow, access-control, credential, binary, symlink and submodule changes are rejected; the base tree is checked to prevent implicit directory deletion. Do not add the App as a branch-protection/ruleset bypass actor.
+
+### Repository rulesets and automatic reviewers
+
+Use `github_rulesets` (paginate with `next_page`) and `github_ruleset` to inspect
+repository and inherited organization rules, including the `pull_request` rule's
+`required_reviewers` and file patterns. These tools request only Metadata read;
+Administration access is not required to diagnose automatic reviewer requests.
+Check rulesets when CODEOWNERS and workflows do not explain the behavior.
+
+`github_update_ruleset_reviewers` replaces only the required-reviewer entries in
+one repository-owned branch ruleset. Supply an explicit `repository`,
+`ruleset_id`, the `revision` from `github_ruleset`, and the complete desired
+`required_reviewers` list (including narrower entries that should remain).
+For example, `required_reviewers: []` removes all required team entries from
+that one ruleset. Each entry uses GitHub's `reviewer: {id, type: "Team"}`,
+`file_patterns` and `minimum_approvals` fields. Other rulesets are unaffected.
+The tool preserves the general approval count, code-owner review, status checks,
+enforcement, branch conditions and bypass actors. It cannot edit inherited
+organization rules, create/delete rulesets, or change other protections.
+
+Editing requires the organization GitHub App **Administration: read and write**
+permission. For existing Apps, an organization owner enables that repository
+permission in GitHub App settings and approves the installation's pending
+permission request. No replacement signing key is needed. Missing permission
+produces actionable guidance; inspection and PR operations remain available.
+The server mints an administration-only token for reviewer updates, keeps it out
+of the sandbox, and rechecks the live session, connection and write policy
+before sending the update. Broader App grants never carry over into PR/checkout
+tokens. The existing connection's read-only setting blocks reviewer edits too.
+
+A changed revision stops the update. GitHub does not expose an atomic revision
+condition here, so this is a preflight conflict check, not a lock against an
+external edit between read and write. Only `rules` is sent, and a fresh read
+verifies both the requested result and the preserved settings. Unconfirmed
+writes are never retried automatically: inspect the current ruleset before an
+explicit retry. The `required_reviewers` API is currently a GitHub beta.
+
+Run `uv run python scripts/github_rulesets_demo.py` for a local broker demo, or
+add `--serve` and open `http://127.0.0.1:8794` for the browser recording flow.
+It exercises the real broker and GitHub HTTP client against an in-memory
+provider, removes only the wildcard reviewer entry, verifies preserved rules,
+and demonstrates stale-edit rejection. It never changes live GitHub settings.
 
 After publication, `github_update_pull_request` publishes another commit to the same open PR, and `github_comment_pull_request` posts a discussion comment (including a user-requested review-bot command). Both require a publication receipt owned by the current session and the same GitHub installation; a branch name alone never grants access. The server verifies the head repository/branch, rejects stale bases and uses a non-forced ref update. `github_pull_request_comments` reads discussion, inline comments and review summaries with explicit pagination. These tools do not submit reviews, approvals or merges.
 

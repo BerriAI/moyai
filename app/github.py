@@ -4,11 +4,12 @@ GitHub's pull_requests:write scope itself also permits reviews. Never expose an
 installation token, generic REST proxy, receive-pack, review or merge operation.
 """
 import asyncio
+import copy
 import hashlib
 import json
 import re
 import time
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import quote
 
 import httpx
@@ -22,8 +23,16 @@ from .db import now
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
+MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write'}
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
+
+
+def supports_permissions(actual, required=PERMISSIONS):
+    """Accept broader installations; token issuance still narrows every operation."""
+    levels = {'read': 1, 'write': 2}
+    return isinstance(actual, dict) and all(
+        levels.get(actual.get(name), 0) >= levels[level] for name, level in required.items())
 
 
 class Args(BaseModel):
@@ -37,6 +46,31 @@ class Repository(Args):
 
 class PullRequest(Repository):
     number: int = Field(ge=1)
+
+
+class Rulesets(Repository):
+    page: int = Field(default=1, ge=1, le=10000)
+
+
+class Ruleset(Repository):
+    ruleset_id: int = Field(gt=0)
+
+
+class ReviewingTeam(Args):
+    id: int = Field(gt=0, strict=True)
+    type: Literal['Team']
+
+
+class RequiredReviewer(Args):
+    reviewer: ReviewingTeam
+    file_patterns: list[Annotated[str, Field(min_length=1, max_length=1000)]] = Field(min_length=1, max_length=100)
+    minimum_approvals: int = Field(ge=0, strict=True)
+
+
+class RulesetReviewers(Ruleset):
+    repository: str = Field(pattern='^' + REPOSITORY + '$')
+    revision: str = Field(pattern=r'^[0-9a-f]{64}$', description='Revision returned by github_ruleset. Read again after a conflict or uncertain result.')
+    required_reviewers: list[RequiredReviewer] = Field(max_length=100, description='Complete replacement for required_reviewers only. Preserve narrower entries the user did not ask to change; [] removes all entries from this ruleset.')
 
 
 class Checkout(Repository):
@@ -119,6 +153,9 @@ class Update(Changes):
 
 
 TOOLS = {
+    'github_rulesets': ('github', False, Rulesets, 'List repository and inherited organization rulesets, including disabled rules. Use this to investigate automatic reviewer requests even when CODEOWNERS and workflows have no matching rule. Follow next_page until null.'),
+    'github_ruleset': ('github', False, Ruleset, 'Read a ruleset, its branch conditions, required reviewers and other rules, plus a revision for editing. Inspection only needs Metadata read access; it does not need Administration permission.'),
+    'github_update_ruleset_reviewers': ('github', True, RulesetReviewers, 'Change required reviewing teams/file patterns in one repository branch ruleset when requested by the user. Read github_ruleset first and pass its revision. Preserves approval count, code owner review, status checks and all other rules/settings. Requires GitHub Administration write access. Cannot edit inherited organization rulesets. On an uncertain result, read the ruleset before retrying; never retry blindly.'),
     'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Use the exact owner/repository in checkout and PR tools.'),
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
     'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
@@ -221,8 +258,8 @@ class GitHub:
         installation = await self.request('GET', f"/app/installations/{int(credentials['installation_id'])}", token=self.app_jwt())
         if (installation.get('account', {}).get('login', '').lower() != self.target().split('/')[0].lower()
                 or installation.get('account', {}).get('type') != 'Organization' or installation.get('suspended_at')
-                or installation.get('permissions') != PERMISSIONS):
-            raise ConnectorError('Use the organization installation with only Contents and Pull requests write access, plus Metadata read access.')
+                or not supports_permissions(installation.get('permissions'))):
+            raise ConnectorError('Use the organization installation with Contents and Pull requests write access, plus Metadata read access. Additional permissions are supported.')
         for target in targets:
             token = await self.installation_token(credentials, repository=target, fresh=True)
             repositories = await self.request('GET', '/installation/repositories', token=token)
@@ -230,19 +267,28 @@ class GitHub:
                 raise ConnectorError('A selected repository is not accessible to this installation.')
         return ', '.join(targets)
 
-    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False):
+    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False):
         credentials = credentials or await self.connectors.credentials('github')
         target = self.target(repository)
         if target not in self.connected_targets(credentials):
             raise ConnectorError('The GitHub installation does not match the configured repository.')
         installation = int(credentials['installation_id'])
         config = self.app_config()
-        key = (config.get('id'), installation, target.lower(), write)
+        key = (config.get('id'), installation, target.lower(), write, rules)
         async with self.token_lock:
             cached = self.tokens.get(key)
             if not fresh and cached and cached[0] > time.time():
                 return cached[1]
             permissions = {'contents': 'write' if write else 'read', 'pull_requests': 'write' if write else 'read'}
+            if rules:
+                permissions = {'administration': 'write'} if write else {'metadata': 'read'}
+            if rules and write:
+                installed = await self.request('GET', f'/app/installations/{installation}', token=self.app_jwt(config))
+                if (installed.get('suspended_at') or installed.get('account', {}).get('type') != 'Organization'
+                        or installed.get('account', {}).get('login', '').lower() != target.split('/')[0].lower()):
+                    raise ConnectorError('The GitHub installation is suspended or belongs to another organization. Reconnect GitHub.')
+                if not supports_permissions(installed.get('permissions'), {'administration': 'write'}):
+                    raise ConnectorError('Ruleset inspection is available, but editing requires Administration: read and write on the organization GitHub App. An organization owner must enable and approve that permission for this installation, then retry. Existing code and PR access still works.')
             result = await self.request('POST', f'/app/installations/{installation}/access_tokens', token=self.app_jwt(config),
                                         json={'repositories': [target.split('/')[1]], 'permissions': permissions})
             from datetime import datetime
@@ -263,6 +309,9 @@ class GitHub:
     async def call(self, run, name, arguments):
         if name not in TOOLS:
             raise ConnectorError('This GitHub operation is not available.')
+        if name == 'github_update_ruleset_reviewers':
+            async with self.write_lock:
+                return await self.update_ruleset_reviewers(run, RulesetReviewers.model_validate(arguments))
         if name in {'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request'}:
             async with self.write_lock:
                 if name == 'github_create_pull_request':
@@ -273,6 +322,17 @@ class GitHub:
         if name == 'github_repositories':
             return {'repositories': self.connected_targets(await self.connectors.credentials('github'))}
         target = await self.selected_target(run, arguments.get('repository', ''))
+        if name in {'github_rulesets', 'github_ruleset'}:
+            token = await self.installation_token(repository=target, rules=True)
+            if name == 'github_rulesets':
+                args = Rulesets.model_validate(arguments)
+                items = await self.request('GET', f'/repos/{target}/rulesets', token=token,
+                                           params={'includes_parents': 'true', 'per_page': 30, 'page': args.page})
+                return {'repository': target, 'rulesets': items, 'next_page': args.page + 1 if len(items) == 30 else None}
+            args = Ruleset.model_validate(arguments)
+            data = await self.request('GET', f'/repos/{target}/rulesets/{args.ruleset_id}', token=token,
+                                      params={'includes_parents': 'true'})
+            return self.ruleset_result(target, data)
         token = await self.installation_token(repository=target)
         if name in {'github_repository', 'github_checkout'}:
             repo = {**await self.repository(token, target), 'git_path': '/github/' + target + '.git'}
@@ -308,6 +368,51 @@ class GitHub:
                 'head': pr['head']['sha'], 'base': pr['base']['ref'],
                 'files': compact,
                 'files_truncated': pr['changed_files'] > len(files)}
+
+    @staticmethod
+    def ruleset_revision(data):
+        # Bypass actors are hidden from metadata-only reads and are never sent in
+        # our update. updated_at detects changes to those hidden settings too.
+        snapshot = {key: data.get(key) for key in ('id', 'name', 'target', 'source', 'source_type',
+                                                  'enforcement', 'conditions', 'rules', 'updated_at')}
+        return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    def ruleset_result(self, target, data):
+        return {'repository': target, 'ruleset': data, 'revision': self.ruleset_revision(data),
+                'reviewers_editable': data.get('source_type') == 'Repository'
+                    and data.get('source', '').lower() == target.lower() and data.get('target') == 'branch',
+                'edit_permission': 'Administration: write'}
+
+    async def update_ruleset_reviewers(self, run, args):
+        name = 'github_update_ruleset_reviewers'
+        version = run.get('github_connection_version', self.connection_version())
+        self.ensure_publish_allowed(run, version, name)
+        target = await self.selected_target(run, args.repository)
+        token = await self.installation_token(repository=target, write=True, rules=True, fresh=True)
+        path = f'/repos/{target}/rulesets/{args.ruleset_id}'
+        before = await self.request('GET', path, token=token, params={'includes_parents': 'true'})
+        if before.get('id') != args.ruleset_id or not self.ruleset_result(target, before)['reviewers_editable']:
+            raise ConnectorError('Only a branch ruleset owned by this repository can be edited. Inherited organization rulesets must be managed at their source.')
+        if self.ruleset_revision(before) != args.revision:
+            raise ConnectorError('The ruleset changed since it was read. Read github_ruleset again and review the current rules before retrying.')
+        rules = copy.deepcopy(before['rules'])
+        pr_rules = [rule for rule in rules if rule.get('type') == 'pull_request']
+        if len(pr_rules) != 1 or not isinstance(pr_rules[0].get('parameters'), dict):
+            raise ConnectorError('Expected one existing pull_request rule. No rules were changed.')
+        reviewers = [item.model_dump() for item in args.required_reviewers]
+        self.ensure_publish_allowed(run, version, name)
+        if pr_rules[0]['parameters'].get('required_reviewers', []) == reviewers:
+            return {**self.ruleset_result(target, before), 'changed': False}
+        pr_rules[0]['parameters']['required_reviewers'] = reviewers
+        # Send only rules: omitted name/conditions/enforcement/bypass_actors stay
+        # untouched, including bypass actors omitted from metadata-only reads.
+        await self.request('PUT', path, token=token, json={'rules': rules})
+        self.ensure_publish_allowed(run, version, name)
+        after = await self.request('GET', path, token=token, params={'includes_parents': 'true'})
+        preserved = ('id', 'name', 'target', 'source', 'source_type', 'enforcement', 'conditions', 'bypass_actors')
+        if after.get('rules') != rules or any(after.get(key) != before.get(key) for key in preserved):
+            raise ConnectorError('The ruleset update could not be verified exactly. Read its current state before making another change; no automatic retry was sent.')
+        return {**self.ruleset_result(target, after), 'changed': True}
 
     def connection_version(self):
         rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'")

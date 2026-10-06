@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from .connector_errors import ConnectorError
-from .github import PERMISSIONS
+from .github import MANIFEST_PERMISSIONS, supports_permissions
 from .security import digest
 
 
@@ -63,9 +63,9 @@ def routes(connectors, security, store, settings):
             data = await github.request('GET', '/app', token=github.app_jwt(config))
             if (data.get('id') != args.app_id or data.get('owner', {}).get('type') != 'Organization'
                     or data.get('owner', {}).get('login', '').lower() != github.target().split('/')[0].lower()
-                    or data.get('permissions') != PERMISSIONS
+                    or not supports_permissions(data.get('permissions'))
                     or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', data.get('slug', ''))):
-                raise ConnectorError('Use the organization-owned App with only Contents and Pull requests write access, plus Metadata read access.')
+                raise ConnectorError('Use the organization-owned App with Contents and Pull requests write access, plus Metadata read access. Additional permissions are supported.')
             config['slug'] = data['slug']
             github.save_app(config)
             connectors.expire_approvals('github')
@@ -87,19 +87,21 @@ def routes(connectors, security, store, settings):
         owner = github.target().split('/')[0]
         origin = settings.public_url.rstrip('/')
         manifest = {'name': 'Moyai Devin ' + owner, 'url': origin,
-                    'description': 'Shared Moyai coding integration. Server-enforced branch and PR publishing; agents cannot approve or merge.',
+                    'description': 'Shared Moyai integration for code, PRs and ruleset required reviewers; agents cannot approve or merge PRs.',
                     'redirect_url': origin + '/oauth/github/app-callback',
                     'setup_url': origin + '/oauth/github/callback', 'setup_on_update': True,
                     'hook_attributes': {'url': origin + '/hooks/github', 'active': False},
                     'public': False, 'request_oauth_on_install': False, 'default_events': [],
-                    'default_permissions': PERMISSIONS}
+                    'default_permissions': MANIFEST_PERMISSIONS}
         action = 'https://github.com/organizations/' + owner + '/settings/apps/new?' + urlencode({'state': state})
         return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai Devin</title>'
             '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
             '<h1>Connect GitHub for your organization</h1><p>Repositories: <strong>' + html.escape(', '.join(github.targets())) + '</strong></p>'
             '<p>Moyai can read code, create normal pull requests, and update or comment on PRs created by the current session without an administrator approval step. It cannot approve or merge pull requests, '
             'enable auto-merge, or change workflow and access-control files.</p>'
-            '<p>GitHub combines these operations under Contents and Pull requests write permissions. The credential stays on the server; '
+            '<p>Moyai can inspect repository rulesets and change their required reviewing teams and file patterns when requested. '
+            'Ruleset edits preserve approval counts, code owner review, status checks and other settings. '
+            'This requires Administration write access in addition to Contents and Pull requests write permissions. The credential stays on the server; '
             'Moyai agents receive only the specific operations listed above. No personal GitHub sign-in is needed for teammates.</p>'
             '<form method="post" action="' + html.escape(action, quote=True) + '"><input type="hidden" name="manifest" value="'
             + html.escape(json.dumps(manifest), quote=True) + '"><button type="submit">Continue to GitHub</button></form></main></body></html>')
@@ -115,7 +117,7 @@ def routes(connectors, security, store, settings):
                 raise HTTPException(409, 'An organization GitHub App is already registered. Connect that app instead.')
             data = await github.request('POST', '/app-manifests/' + code + '/conversions')
             owner = github.target().split('/')[0]
-            if (data.get('owner', {}).get('login', '').lower() != owner.lower() or data.get('permissions') != PERMISSIONS
+            if (data.get('owner', {}).get('login', '').lower() != owner.lower() or not supports_permissions(data.get('permissions'))
                     or not re.fullmatch(r'[a-z0-9][a-z0-9-]*', data.get('slug', ''))):
                 raise ConnectorError('The registered GitHub App has a different owner or permissions. An administrator must inspect it.')
             config = {k: data[k] for k in ('id', 'slug', 'pem')}
@@ -135,7 +137,7 @@ def routes(connectors, security, store, settings):
         connectors.expire_approvals('github')
         connectors.save('github', credentials, label)
         connectors.record_check('github', 'healthy')
-        connectors.audit('github', 'Connected ' + label + ': normal PR publishing; PR reviews and merges blocked')
+        connectors.audit('github', 'Connected ' + label + ': PR publishing and ruleset inspection; reviewer edits require Administration write; PR reviews and merges blocked')
         return RedirectResponse('/?connection=success#connections', status_code=303)
 
     return router

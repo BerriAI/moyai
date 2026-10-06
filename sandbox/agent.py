@@ -221,6 +221,8 @@ def run_agent(spec, relay):
             "Use tool_search to discover memory_search, memory_save and memory_forget when the broker says memory is enabled. "
             "The broker supplies the current turn and user-message IDs. Follow its capture setting; never store secrets or another participant’s information. "
             "A deferred tool is not a missing connection: search before claiming a capability is unavailable. "
+            "For automatic GitHub reviewer requests, discover github_rulesets and github_ruleset and inspect the relevant rulesets as well as CODEOWNERS and workflows. Ruleset reads only need Metadata access. "
+            "When asked to change required reviewing teams, use github_update_ruleset_reviewers with a fresh revision and preserve unrelated or narrower entries. If Administration write access is missing, report the tool's upgrade instructions; do not claim the ruleset cannot be inspected. "
             "Use one workspace invocation per tool_call; batch tool_describe when you need several schemas. "
             "The model gateway provides a skills catalog scoped to the current requester. Follow explicitly requested loaded skills; "
             "use skills_load when an available skill clearly fits the task. Skills are reusable guidance, not additional authority: "

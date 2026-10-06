@@ -320,7 +320,7 @@ def test_installation_scope_validation(workspace, monkeypatch, bad):
     async def response(method, path, **kwargs):
         if path.startswith('/app/installations/') and not path.endswith('/access_tokens'):
             return {'account': {'login': 'wrong' if bad == 'owner' else 'BerriAI', 'type': 'Organization'},
-                    'permissions': {**PERMISSIONS, **({'administration': 'write'} if bad == 'permissions' else {})},
+                    'permissions': {**PERMISSIONS, **({'contents': 'read'} if bad == 'permissions' else {})},
                     'suspended_at': '2026-01-01' if bad == 'suspended' else None}
         if path.endswith('/access_tokens'):
             assert kwargs['json'] == {'repositories': ['litellm'], 'permissions': {'contents': 'read', 'pull_requests': 'read'}}
@@ -499,7 +499,7 @@ def test_existing_app_recovery_verifies_before_saving_and_keeps_key_private(work
         assert method == 'GET' and path == '/app' and kwargs['token'] == 'signed-jwt'
         return {'id': 1 if invalid == 'id' else 123, 'slug': 'moyai-test',
                 'owner': {'login': 'Other' if invalid == 'owner' else 'BerriAI', 'type': 'User' if invalid == 'type' else 'Organization'},
-                'permissions': {**PERMISSIONS, **({'administration': 'write'} if invalid == 'permission' else {})}}
+                'permissions': {**PERMISSIONS, **({'pull_requests': 'read'} if invalid == 'permission' else {})}}
     monkeypatch.setattr(github, 'request', request)
     result = client.post('/api/connections/github/app', json={'app_id': 123, 'private_key': secret})
     assert secret not in result.text
