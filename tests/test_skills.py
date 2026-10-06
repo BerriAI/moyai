@@ -117,6 +117,36 @@ def test_sharing_changes_require_owner_and_org_admin(workspace):
     assert client.get('/api/skills/'+skill).status_code==404
 
 
+@pytest.mark.parametrize('scope,capacity', [('personal', 50), ('organization', 200)])
+def test_library_capacity_allows_retries_edits_and_counts_archived(workspace, scope, capacity):
+    app,client=workspace
+    sign_in(app,client)
+    for i in range(capacity):
+        response=create(client,scope,name=f'workflow-{i}',client_id=f'workflow-{i}')
+        assert response.status_code==201
+    skill=response.json()['id']
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
+    retry=create(client,scope,name=f'workflow-{capacity-1}',client_id=f'workflow-{capacity-1}')
+    assert retry.status_code==201 and retry.json()['id']==skill
+    assert edit(client,skill,description='Updated at capacity').status_code==200
+    assert client.post('/api/skills/'+skill+'/archive',json={'archived':True,'revision':2}).status_code==200
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
+    assert len(client.get('/api/skills?archived=true').json()['skills'])==capacity
+
+
+def test_sharing_into_organization_uses_the_200_skill_capacity(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    for i in range(199):
+        assert create(client,'organization',name=f'workflow-{i}',client_id=f'workflow-{i}').status_code==201
+    shared=create(client,name='share-last-slot',client_id='share-last-slot').json()['id']
+    overflow=create(client,name='share-overflow',client_id='share-overflow').json()['id']
+    assert edit(client,shared,scope='organization').status_code==200
+    assert edit(client,overflow,scope='organization').status_code==409
+    assert client.get('/api/skills/'+overflow).json()['scope']=='personal'
+    assert edit(client,shared,description='Organization edit at capacity').status_code==200
+
+
 def test_explicit_skill_and_loaded_revision_survive_service_restart_but_not_other_actor(workspace):
     app,client=workspace
     sign_in(app,client)

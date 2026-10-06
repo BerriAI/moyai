@@ -1130,9 +1130,10 @@ rather than returned in sandbox tool results or copied into workspace files.
 Each turn pins the revision it first loads, including across durable resumes;
 later turns use the latest revision. Permissions and archive status are checked
 again on every model call. At most five skills may be loaded per turn, with
-32,000 instruction characters per skill, 50 personal skills per user and 100 shared skills
-(including archived entries). Skills cannot bypass tool permissions, provide
-credentials, or approve writes. Personal skills do not make shared session
+32,000 instruction characters per skill, 50 personal skills per user and 200 shared skills
+(including archived entries). Library caps bound the catalog size: every model
+call includes the names and descriptions of all available skills. Skills cannot
+bypass tool permissions, provide credentials, or approve writes. Personal skills do not make shared session
 outputs private; generated results keep the session's existing sharing.
 
 Each skill supports up to 20 UTF-8 supporting files, 1 MiB each and 4 MiB total.

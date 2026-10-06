@@ -14,6 +14,10 @@ from .skill_tools import (SAVE_TOOL, READ_TOOL, SaveSkill, ReadSkillFile, bundle
                           bundle, save_skill, read_file)
 
 
+# Every inference includes the visible catalog, so keep library sizes bounded.
+LIBRARY_LIMITS = {'personal': 50, 'organization': 200}
+
+
 class SkillForm(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     name: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
@@ -149,6 +153,7 @@ class Skills:
         if body.scope == 'organization' and not admin:
             raise HTTPException(403,'Only an administrator can publish organization skills.')
         namespace = 'organization' if body.scope == 'organization' else actor
+        limit = LIBRARY_LIMITS[body.scope]
         try:
             own_transaction = conn is None
             with (self.store.connect() if own_transaction else nullcontext(conn)) as conn:
@@ -162,7 +167,7 @@ class Skills:
                         raise HTTPException(403,'Only the owner can change a skill’s sharing.')
                     if old['revision'] != body.revision:
                         raise HTTPException(409,'This skill changed. Reopen it before saving.')
-                    if old['namespace'] != namespace and conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= (100 if body.scope=='organization' else 50):
+                    if old['namespace'] != namespace and conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
                         raise HTTPException(409,'The destination skill library is full.')
                     conn.execute('UPDATE skills SET name=?,description=?,encrypted=?,scope=?,namespace=?,revision=revision+1,updated_at=? WHERE id=?',
                                  (body.name,body.description,self.security.encrypt(body.instructions),body.scope,namespace,now(),skill_id))
@@ -173,7 +178,6 @@ class Skills:
                                 or self.security.decrypt(prior['encrypted'])!=body.instructions):
                             raise HTTPException(409,'This save was already used. Reopen the form.')
                         return prior['id']
-                    limit = 100 if body.scope=='organization' else 50
                     if conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
                         raise HTTPException(409,'The skill library is full. Reuse or edit an existing skill.')
                     skill_id = uuid4().hex
