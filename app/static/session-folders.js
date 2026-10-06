@@ -14,6 +14,70 @@ function toggleSessionFolder(id){
 function saveSessionFolderView(){
   try{localStorage.setItem(state.folderStorageKey,JSON.stringify([...state.closedFolders]));}catch{}
 }
+async function assignSessionFolder(run,folderId){
+  await api('/api/runs/'+run.id+'/folder',{method:'PUT',body:JSON.stringify({folder_id:folderId||null})});
+  state.closedFolders.delete(folderId);
+  saveSessionFolderView();
+}
+function bindSessionFolderDragDrop(list){
+  let source=null,hovered=null;
+  const mime='application/x-moyai-session';
+  function highlight(target){
+    if(target===hovered)return;
+    hovered?.classList.remove('folder-drop-target');
+    hovered=target;
+    hovered?.classList.add('folder-drop-target');
+  }
+  function destination(event){
+    if(!state.draggedSessionId||!event.dataTransfer?.types.includes(mime))return null;
+    const target=event.target.closest('[data-drop-folder]');
+    if(!target||!list.contains(target))return null;
+    const run=state.runs.find(run=>run.id===state.draggedSessionId),folderId=target.dataset.dropFolder||null;
+    if(!run||(run.folder_id||null)===folderId)return null;
+    if(folderId&&!state.folders.some(folder=>folder.id===folderId))return null;
+    return {target,run,folderId};
+  }
+  function finish(){
+    const wasDragging=!!state.draggedSessionId;
+    state.draggedSessionId=null;
+    highlight(null);
+    source?.classList.remove('session-dragging');source=null;
+    list.classList.remove('session-list-dragging');
+    if(wasDragging)renderSidebar();
+  }
+  list.addEventListener('dragstart',event=>{
+    const row=event.target.closest('[data-drag-session]');
+    const run=state.runs.find(run=>run.id===row?.dataset.dragSession);
+    if(!run||state.folderMovePending||!event.dataTransfer){event.preventDefault();return;}
+    event.dataTransfer.setData(mime,run.id);
+    event.dataTransfer.effectAllowed='move';
+    state.draggedSessionId=run.id;source=row;
+    row.classList.add('session-dragging');list.classList.add('session-list-dragging');
+  });
+  const over=event=>{
+    const drop=destination(event);
+    highlight(drop?.target||null);
+    if(drop){event.preventDefault();event.dataTransfer.dropEffect='move';}
+    else if(state.draggedSessionId&&event.dataTransfer)event.dataTransfer.dropEffect='none';
+  };
+  list.addEventListener('dragenter',over);
+  list.addEventListener('dragover',over);
+  list.addEventListener('dragleave',event=>{if(!list.contains(event.relatedTarget))highlight(null);});
+  list.addEventListener('dragend',finish);
+  list.addEventListener('drop',async event=>{
+    const drop=destination(event);
+    if(!drop){finish();return;}
+    event.preventDefault();event.stopPropagation();
+    const folderName=state.folders.find(folder=>folder.id===drop.folderId)?.name;
+    state.folderMovePending=true;finish();list.setAttribute('aria-busy','true');
+    try{
+      await assignSessionFolder(drop.run,drop.folderId);
+      await refreshRuns();
+      toast(folderName?'Moved to '+folderName+'.':'Session removed from folder.');
+    }catch(error){showError(error);}
+    finally{state.folderMovePending=false;list.removeAttribute('aria-busy');}
+  });
+}
 function sessionFolderDialog(title,body){
   const dialog=$('#session-folder-dialog');
   if(dialog.open)dialog.close();
@@ -72,11 +136,7 @@ function moveSessionToFolder(run){
   dialog.querySelectorAll('[data-folder-choice]').forEach(button=>button.onclick=()=>{
     const folderId=button.dataset.folderChoice;
     if(folderId===(run.folder_id||'')){dialog.close();return;}
-    saveFolderChange(dialog,async()=>{
-      await api('/api/runs/'+run.id+'/folder',{method:'PUT',body:JSON.stringify({folder_id:folderId||null})});
-      state.closedFolders.delete(folderId);
-      saveSessionFolderView();
-    },folderId?'Session moved.':'Session removed from folder.');
+    saveFolderChange(dialog,()=>assignSessionFolder(run,folderId),folderId?'Session moved.':'Session removed from folder.');
   });
   dialog.querySelector('[data-folder-create]').onclick=()=>{
     const create=sessionFolderDialog('New folder',`
@@ -90,7 +150,7 @@ function moveSessionToFolder(run){
       saveFolderChange(create,async()=>{
         // Retain the new folder if moving fails, so a retry does not create another.
         if(!created){created=await api('/api/session-folders',{method:'POST',body:JSON.stringify({name})});create.querySelector('input').disabled=true;}
-        await api('/api/runs/'+run.id+'/folder',{method:'PUT',body:JSON.stringify({folder_id:created.id})});
+        await assignSessionFolder(run,created.id);
       },'Folder created and session moved.');
     };
     create.querySelector('input').focus();

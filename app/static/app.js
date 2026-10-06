@@ -41,7 +41,7 @@ function sidebarGroups(runs,search){
 }
 function sidebarRow(run,child=false){
   const selected=state.selected===run.id, label=run.status==='idle'?'Ready':run.status.replaceAll('_',' ');
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${selected?'aria-current="page"':''} title="${esc(sessionTitle(run))}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(sessionTitle(run))}</span><small data-session-time="${esc(run.id)}">${relative(run.updated_at||run.created_at)}${child?' · '+esc(label):run.mode==='demo'?' · Demo':''}</small></span><span class="session-dot ${esc(run.status)}" aria-label="${esc(label)}" title="${esc(label)}"></span></button>`;
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} title="${esc(sessionTitle(run))}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-link-title">${esc(sessionTitle(run))}</span><small data-session-time="${esc(run.id)}">${relative(run.updated_at||run.created_at)}${child?' · '+esc(label):run.mode==='demo'?' · Demo':''}</small></span><span class="session-dot ${esc(run.status)}" aria-label="${esc(label)}" title="${esc(label)}"></span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
@@ -57,6 +57,8 @@ function sidebarRenderSessions(groups,search){return groups.map(parent=>{
     return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent)}<button class="session-move" data-move-session="${esc(parent.id)}" title="Move to folder" aria-label="Move ${esc(sessionTitle(parent))} to folder">⋯</button></div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${parent.children.map(child=>sidebarRow(child,true)).join('')}</div>`:''}</div>`;
   }).join('');}
 function renderSidebar(){
+  // Polling must not replace the source element during a native drag.
+  if(state.draggedSessionId)return;
   const search=($('#session-search').value||'').trim().toLowerCase();
   const sections=sidebarSections(state.runs,state.folders,search);
   $('#task-count').textContent=state.runs.length;
@@ -70,8 +72,8 @@ function renderSidebar(){
   const focused=focusAttrs.map(attr=>[attr,document.activeElement?.getAttribute(attr)]).find(([,value])=>value);
   list.innerHTML=sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
-    return `<section class="session-folder"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Use a session’s ⋯ menu to move it here.</p>'}</div></section>`;
-  }).join('')+(sections.recent.length?`${state.folders.length?'<div class="unfiled-heading">Recent · not in a folder</div>':''}${sidebarRenderSessions(sections.recent,search)}`:'');
+    return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
+  }).join('')+(state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:sidebarRenderSessions(sections.recent,search));
   if(!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`;
   list.scrollTop=scroll;
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
@@ -359,6 +361,7 @@ document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dat
 $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
 $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const move=e.target.closest('[data-move-session]');if(move){const run=state.runs.find(r=>r.id===move.dataset.moveSession);if(run)moveSessionToFolder(run);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
+bindSessionFolderDragDrop($('#session-list'));
 $('#session-search').oninput=renderSidebar;
 $('#open-sidebar').onclick=()=>setSidebar(true);$('#close-sidebar').onclick=()=>setSidebar(false);$('#sidebar-scrim').onclick=()=>setSidebar(false);
 window.addEventListener('keydown',e=>{if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();$('#new-task').click();}});
