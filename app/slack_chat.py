@@ -159,7 +159,7 @@ class SlackChat:
             try:
                 selected_model = self.settings.resolve_model(directive[1] or '')
             except ValueError:
-                model_error = 'Choose `model astra` or `model opus`, or use the model picker in the web session.'
+                model_error = 'Choose an enabled model: ' + ', '.join(item['name'] for item in self.settings.model_choices()) + '. Use `model glm-5.3`, for example, or the model picker in the web session.'
             prompt = (directive[2] or '').strip()
             if not prompt or model_error:
                 command = 'model'

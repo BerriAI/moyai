@@ -223,7 +223,9 @@ class Settings(BaseSettings):
             'claude/opus-5-5': 'anthropic/claude-opus-5-5', 'claude-opus-5-5': 'anthropic/claude-opus-5-5',
             'glm': 'fireworks_ai/glm-5p3', 'glm-5.3': 'fireworks_ai/glm-5p3',
             'glm-5p3': 'fireworks_ai/glm-5p3',
+            'glm 5.3': 'fireworks_ai/glm-5p3', 'glm 5p3': 'fireworks_ai/glm-5p3',
         }
+        aliases.update({item['name'].lower(): item['id'] for item in self.model_choices()})
         selected = value if value is not None else fallback or self.agent_model or (self.allowed_models() or [''])[0]
         selected = aliases.get(selected.strip().lower(), selected.strip())
         if selected not in self.allowed_models():

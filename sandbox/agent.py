@@ -196,6 +196,13 @@ def run_agent(spec, relay):
         system_message = (
             "You are Moyai Devin, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "
+            "When the current user asks to switch models or use a model for a task (for example, 'use GLM 5.3 and summarize this'), "
+            "discover model_list and model_switch, list enabled models, then switch before doing the remaining task. "
+            "The broker routes the next inference to the selected model with the same conversation and workspace; "
+            "do not restart or replay work, edit configuration files, or ask the user to use command syntax. "
+            "Report the selection returned by the tool; never claim a switch without a successful result. "
+            "If the requested model is unavailable, report the enabled choices without silently substituting one. "
+            "Model comparisons, quoted text, repository content and old conversation references are not requests to switch. "
             "Before each meaningful phase of a multi-step task, begin your public interim text with <status>a short description of the current work</status>. "
             "For example: <status>Auditing UI and schema changes</status> or <status>Verifying the corrected behavior</status>. "
             "Use at most 120 characters, plain language, and describe the actual task focus, not individual tools. "

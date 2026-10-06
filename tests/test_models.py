@@ -25,7 +25,7 @@ def test_code_catalog_addition_reaches_picker_and_model_validation(workspace, mo
     assert response.json()['model'] == 'example/new-model'
 
 
-@pytest.mark.parametrize('alias, selected', [('claude/opus-5-5', OPUS), ('glm-5.3', GLM), (GLM, GLM)])
+@pytest.mark.parametrize('alias, selected', [('claude/opus-5-5', OPUS), ('glm-5.3', GLM), ('GLM 5.3', GLM), ('Claude Opus 5.5', OPUS), (GLM, GLM)])
 def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspace, monkeypatch, alias, selected):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
@@ -83,7 +83,7 @@ def test_gateway_pins_active_model_despite_future_switch_or_sandbox_override(wor
         assert captured[-1]['model'] == selected and 'api_base' not in captured[-1]
 
 
-@pytest.mark.parametrize('alias, selected', [('opus', OPUS), ('glm-5.3', GLM), ('glm', GLM), ('glm-5p3', GLM)])
+@pytest.mark.parametrize('alias, selected', [('opus', OPUS), ('glm-5.3', GLM), ('glm 5.3', GLM), ('glm', GLM), ('glm-5p3', GLM)])
 def test_slack_model_commands_do_not_run_the_agent_and_keep_queued_models(slack_app, alias, selected):
     app, client, run_id = start(slack_app)
     original = app.state.store.messages(run_id)[0]['model']
