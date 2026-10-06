@@ -179,6 +179,10 @@ class GitHub:
             id TEXT PRIMARY KEY, run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
             arguments_hash TEXT NOT NULL, branch TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '',
             result TEXT NOT NULL DEFAULT '', connection_version TEXT NOT NULL, created_at TEXT NOT NULL)''')
+        with store.connect() as conn:
+            if 'attempted' not in {row['name'] for row in conn.execute('PRAGMA table_info(github_publications)')}:
+                conn.execute('ALTER TABLE github_publications ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0')
+                conn.execute("UPDATE github_publications SET attempted=1 WHERE commit_sha!='' AND result=''")
 
         store.execute("""CREATE TABLE IF NOT EXISTS github_followups (
             id TEXT PRIMARY KEY, arguments_hash TEXT NOT NULL, connection_version TEXT NOT NULL,
@@ -490,20 +494,58 @@ class GitHub:
         if not existing:
             self.ensure_publish_allowed(run, version)
             await self.request('POST', prefix + '/git/refs', token=token, json={'ref': 'refs/heads/' + branch, 'sha': commit})
-        # Resolve a lost PR-creation ACK by reading the deterministic head branch.
-        pulls = await self.request('GET', prefix + '/pulls', token=token,
-                                   params={'state': 'all', 'head': target.split('/')[0] + ':' + branch, 'base': repo['default_branch']})
-        if pulls:
-            if len(pulls) != 1:
-                raise ConnectorError('Several PRs use this branch. Inspect them before continuing.')
-            pr = pulls[0]
-        else:
+        def receipt(pr):
+            if not isinstance(pr, dict):
+                raise ConnectorError('The PR response is not an object.')
+            head, base = pr.get('head'), pr.get('base')
+            if not isinstance(head, dict) or not isinstance(base, dict):
+                raise ConnectorError('The PR response has no valid head and base.')
+            def repository_name(value):
+                return value.get('full_name') if isinstance(value, dict) else None
+            number = pr.get('number')
+            if (type(number) is not int or number <= 0
+                    or pr.get('html_url') != f'https://github.com/{target}/pull/{number}'
+                    or type(pr.get('draft')) is not bool or pr.get('state') not in ('open', 'closed')
+                    or head.get('ref') != branch or head.get('sha') != commit
+                    or repository_name(head.get('repo')) != target
+                    or repository_name(base.get('repo')) != target or base.get('ref') != repo['default_branch']):
+                raise ConnectorError('The PR response does not match the expected publication.')
+            return {'number': number, 'url': pr['html_url'], 'branch': branch, 'commit': commit,
+                    'draft': pr['draft'], 'state': pr['state'], 'repository': target, 'title': args.title}
+
+        async def lookup():
             self.ensure_publish_allowed(run, version)
-            pr = await self.request('POST', prefix + '/pulls', token=token,
-                                    json={'title': args.title, 'body': args.body, 'head': branch, 'base': repo['default_branch'],
-                                          'draft': False, 'maintainer_can_modify': True})
-        result = {'number': pr['number'], 'url': pr['html_url'], 'branch': branch, 'commit': commit,
-                  'draft': pr['draft'], 'state': pr['state'], 'repository': target, 'title': pr.get('title') or args.title}
+            pulls = await self.request('GET', prefix + '/pulls', token=token,
+                                       params={'state': 'all', 'head': target.split('/')[0] + ':' + branch, 'base': repo['default_branch']})
+            self.ensure_publish_allowed(run, version)
+            if not isinstance(pulls, list) or len(pulls) > 1:
+                raise ConnectorError('Readback did not return a unique PR list.')
+            return receipt(pulls[0]) if pulls else None
+
+        try:
+            result = await lookup()
+            if result is None:
+                if row['attempted']:
+                    raise ConnectorError('Creation was already attempted; readback has not confirmed the PR.')
+                self.ensure_publish_allowed(run, version)
+                self.store.execute('UPDATE github_publications SET attempted=1 WHERE id=?', (identity,))
+                try:
+                    pr = await self.request('POST', prefix + '/pulls', token=token,
+                                            json={'title': args.title, 'body': args.body, 'head': branch, 'base': repo['default_branch'],
+                                                  'draft': False, 'maintainer_can_modify': True})
+                    result = receipt(pr)
+                except ConnectorError as creation_error:
+                    try:
+                        result = await lookup()
+                        if result is None:
+                            raise ConnectorError('Readback has not confirmed the PR.')
+                    except ConnectorError as read_error:
+                        raise ConnectorError(f'{creation_error} Read-only recovery: {read_error}') from None
+            self.ensure_publish_allowed(run, version)
+        except ConnectorError as error:
+            raise ConnectorError(f'Publication unconfirmed for {target}, branch {branch}: {error} '
+                                 'No creation retry was sent. Inspect this destination; use the same request_key '
+                                 'and unchanged arguments for read-only recovery after an attempted creation.') from None
         self.store.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
         return result
 

@@ -78,6 +78,8 @@ class GitHubAPI:
                 return [self.pr] if self.pr else []
             assert kwargs['json']['draft'] is False
             self.pr = {'number': 100, 'html_url': 'https://github.com/' + self.repository + '/pull/100', 'draft': False, 'state': 'open'}
+            self.pr.update(head={'ref': kwargs['json']['head'], 'sha': self.branch, 'repo': {'full_name': self.repository}},
+                           base={'ref': kwargs['json']['base'], 'repo': {'full_name': self.repository}})
             if self.lose == 'pr':
                 self.lose = ''
                 raise ConnectorError('Lost response')
@@ -109,7 +111,7 @@ def test_publish_normal_pr_once_across_lost_ack_and_new_turn(workspace, monkeypa
     api = GitHubAPI(github, monkeypatch)
     api.lose = lost
     args = Publish.model_validate(PAYLOAD)
-    if lost:
+    if lost == 'branch':
         with pytest.raises(ConnectorError, match='Lost'):
             asyncio.run(github.publish(app.state.store.run(run_id), args))
     app.state.store.execute('UPDATE runs SET active_message_id=2 WHERE id=?', (run_id,))
@@ -241,7 +243,7 @@ def test_direct_pr_still_requires_connection_policy_and_live_capability(workspac
         assert 'github_checkout' in names and 'github_create_pull_request' not in names
 
 
-def test_direct_pr_lost_response_is_uncertain_and_explicit_retry_reuses_pr(workspace, monkeypatch):
+def test_direct_pr_lost_response_is_reconciled_without_replaying_write(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = connected(app)
     api = GitHubAPI(app.state.connectors.github, monkeypatch)
@@ -249,9 +251,10 @@ def test_direct_pr_lost_response_is_uncertain_and_explicit_retry_reuses_pr(works
     url = f'/broker/{run_id}/tools/call'
     body = {'name': 'github_create_pull_request', 'arguments': PAYLOAD}
     result = client.post(url, headers=headers, json=body).json()
-    assert result['outcome_uncertain'] is True and 'Lost response' in result['error']
+    assert result['url'] == api.pr['html_url'] and 'error' not in result
+    assert app.state.store.rows('SELECT result FROM github_publications')[0]['result']
     assert len([c for c in api.calls if c[0] == 'POST' and c[1].endswith('/pulls')]) == 1
-    # A follow-up retry recovers the published PR instead of opening another one.
+    # A follow-up reads the saved receipt instead of opening another PR.
     app.state.store.execute('UPDATE runs SET active_message_id=2 WHERE id=?', (run_id,))
     retry = client.post(url, headers=headers, json=body).json()
     assert retry['url'] == api.pr['html_url'] and retry['draft'] is False
