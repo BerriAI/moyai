@@ -143,9 +143,10 @@ class AgentSteer(RotationDeadline):
 
 class ActiveTurnSteering(AgentSteer):
     """Deliver acknowledged user corrections through Hermes' native redirect API."""
-    def __init__(self, relay, prepare=lambda item: None):
+    def __init__(self, relay, prepare=lambda item: None, on_input=lambda item: None):
         super().__init__(relay)
         self.prepare = prepare
+        self.on_input = on_input
         self.applied = set()
         self.generation = 0
         self.latest_input_id = None
@@ -202,6 +203,7 @@ class ActiveTurnSteering(AgentSteer):
         text = ('[User correction to the current task]\n' + item['content'])
         accepted = agent.steer(text) if boundary else agent.redirect(text)
         if accepted:
+            self.on_input(item)
             self.applied.add(item['id'])
             self.latest_input_id = item['id']
             self.generation += 1

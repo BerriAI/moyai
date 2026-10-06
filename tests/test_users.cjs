@@ -5,7 +5,8 @@ const vm = require('node:vm');
 
 function setup() {
   const elements = new Map();
-  const context = {state:{pageVersion:1,role:'admin',identity:{email:'alex@example.test'}},
+  const context = {state:{pageVersion:1,role:'admin',identity:{email:'alex@example.test'},runsRefresh:0},
+    restoreSessionScope:()=>{},renderSidebar:()=>{},
     $:key => {if(!elements.has(key))elements.set(key,{});return elements.get(key);},
     esc: value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))};
   vm.createContext(context);

@@ -60,6 +60,15 @@ def edit(client,skill_id,**changes):
     return client.put('/api/skills/'+skill_id,json={**body,'client_id':'skill-edit-1',**changes})
 
 
+def search(client,run,query,**changes):
+    return client.post('/broker/'+run['id']+'/tools/call',headers={'Authorization':'Bearer capability'},
+                       json={'name':'skills_search','arguments':{'query':query,'turn_id':run['active_message_id'],**changes}})
+
+
+def skill_context(app,run):
+    return json.loads(app.state.skills.context(run).split('\n',1)[1])
+
+
 def test_personal_library_is_owner_only_and_org_skill_is_visible_to_ishaan(workspace):
     app,client=workspace
     sign_in(app,client)
@@ -107,14 +116,47 @@ def test_sharing_changes_require_owner_and_org_admin(workspace):
     sign_in(app,client)
     skill=create(client).json()['id']
     assert edit(client,skill,scope='organization').status_code==200
+    run=active(app,'google:ishaan')
+    assert search(client,run,'benchmark').json()['matches']
     sign_in(app,client,'ishaan','ishaan@berri.ai')
     app.state.settings.google_admin_emails='alice@berri.ai,ishaan@berri.ai'
     assert edit(client,skill,description='An admin can maintain it').status_code==200
     assert edit(client,skill,scope='personal').status_code==403
     sign_in(app,client)
     assert edit(client,skill,scope='personal').status_code==200
+    assert skill_context(app,run)['matches']==[]
     sign_in(app,client,'ishaan','ishaan@berri.ai')
     assert client.get('/api/skills/'+skill).status_code==404
+
+
+@pytest.mark.parametrize('scope,capacity', [('personal', 50), ('organization', 200)])
+def test_library_capacity_allows_retries_edits_and_counts_archived(workspace, scope, capacity):
+    app,client=workspace
+    sign_in(app,client)
+    for i in range(capacity):
+        response=create(client,scope,name=f'workflow-{i}',client_id=f'workflow-{i}')
+        assert response.status_code==201
+    skill=response.json()['id']
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
+    retry=create(client,scope,name=f'workflow-{capacity-1}',client_id=f'workflow-{capacity-1}')
+    assert retry.status_code==201 and retry.json()['id']==skill
+    assert edit(client,skill,description='Updated at capacity').status_code==200
+    assert client.post('/api/skills/'+skill+'/archive',json={'archived':True,'revision':2}).status_code==200
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
+    assert len(client.get('/api/skills?archived=true').json()['skills'])==capacity
+
+
+def test_sharing_into_organization_uses_the_200_skill_capacity(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    for i in range(199):
+        assert create(client,'organization',name=f'workflow-{i}',client_id=f'workflow-{i}').status_code==201
+    shared=create(client,name='share-last-slot',client_id='share-last-slot').json()['id']
+    overflow=create(client,name='share-overflow',client_id='share-overflow').json()['id']
+    assert edit(client,shared,scope='organization').status_code==200
+    assert edit(client,overflow,scope='organization').status_code==409
+    assert client.get('/api/skills/'+overflow).json()['scope']=='personal'
+    assert edit(client,shared,description='Organization edit at capacity').status_code==200
 
 
 def test_explicit_skill_and_loaded_revision_survive_service_restart_but_not_other_actor(workspace):
@@ -122,6 +164,7 @@ def test_explicit_skill_and_loaded_revision_survive_service_restart_but_not_othe
     sign_in(app,client)
     skill=create(client).json()['id']
     run=active(app)
+    assert search(client,run,'benchmark').status_code==200
     app.state.store.execute('UPDATE messages SET content=? WHERE id=?',('$personal:benchmark-review Run this benchmark',run['active_message_id']))
     context=app.state.skills.context(run)
     assert INSTRUCTIONS in json.loads(context.split('\n',1)[1])['loaded'][0]['instructions']
@@ -132,6 +175,7 @@ def test_explicit_skill_and_loaded_revision_survive_service_restart_but_not_othe
     from app.skills import Skills
     reopened=Skills(app.state.store,app.state.security,app.state.credentials.same_requester)
     assert MARKER in reopened.context(run)
+    assert json.loads(reopened.context(run).split('\n',1)[1])['matches'][0]['revision']==2
     app.state.store.execute("UPDATE runs SET active_user_id='google:ishaan' WHERE id=?",(run['id'],))
     next_actor=reopened.context(app.state.store.run(run['id']))
     assert MARKER not in next_actor and 'unavailable' in next_actor
@@ -163,12 +207,14 @@ def test_archive_revokes_loaded_skill_and_restore_is_available(workspace):
     sign_in(app,client)
     skill=create(client).json()['id']
     run=active(app)
+    assert search(client,run,'benchmark').json()['matches']
     app.state.skills.load(run,'benchmark-review')
     url='/api/skills/'+skill+'/archive'
     assert client.post(url,json={'archived':True,'revision':1}).status_code==200
     assert not client.get('/api/skills').json()['skills']
     assert client.get('/api/skills?archived=true').json()['skills'][0]['archived']
     assert MARKER not in app.state.skills.context(run)
+    assert skill_context(app,run)['matches']==[]
     assert client.post(url,json={'archived':False,'revision':1}).status_code==409
     assert client.post(url,json={'archived':False,'revision':2}).status_code==200
     assert len(client.get('/api/skills').json()['skills'])==1
@@ -182,6 +228,8 @@ def test_personal_and_org_name_collision_is_explicit_and_child_identity_can_load
     run=active(app)
     child=active(app)
     app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?',(run['id'],child['id']))
+    assert len(search(client,child,'benchmark').json()['matches'])==2
+    assert skill_context(app,run)['matches']==[]
     assert app.state.skills.load(child,'benchmark-review')['scope']=='personal'
     assert app.state.skills.load(child,'org:benchmark-review')['scope']=='organization'
     context=app.state.skills.context(child)
@@ -198,11 +246,14 @@ def test_slack_personal_access_needs_fresh_verified_email_not_accounting_link(wo
     store=app.state.store
     store.execute("INSERT INTO users(id,kind,email,name,linked_user_id,created_at,updated_at) VALUES('slack:member','slack','wrong@berri.ai','Slack user','google:alice',?,?)",(now(),now()))
     run=active(app,'slack:member')
+    assert search(client,run,'benchmark').json()['matches']==[]
     with pytest.raises(HTTPException):app.state.skills.load(run,'personal:benchmark-review')
     store.execute("UPDATE users SET email='alice@berri.ai',profile_eligible=1,profile_checked_at=? WHERE id='slack:member'",(now(),))
+    assert search(client,run,'benchmark').json()['matches']
     assert app.state.skills.load(run,'personal:benchmark-review')['loaded']
     store.execute("UPDATE users SET profile_conflict=1 WHERE id='slack:member'")
     assert MARKER not in app.state.skills.context(run)
+    assert skill_context(app,run)['matches']==[]
 
 
 def test_broker_injects_authorized_skills_without_persisting_definitions_in_run(workspace,monkeypatch):
@@ -226,12 +277,91 @@ def test_broker_injects_authorized_skills_without_persisting_definitions_in_run(
     assert MARKER not in json.dumps(app.state.manager.spec(run))
 
 
+def test_search_keeps_gateway_prompt_bounded_and_returns_only_references(workspace,monkeypatch):
+    app,client=workspace
+    sign_in(app,client)
+    run=active(app)
+    captured=[]
+    app.state.settings.litellm_api_base='https://gateway.example/v1'
+    def upstream(request):
+        captured.append(json.loads(request.content)['messages'])
+        return httpx.Response(200,json={'id':'response','choices':[],'usage':{'total_tokens':10}})
+    actual=httpx.AsyncClient
+    monkeypatch.setattr('app.main.httpx.AsyncClient',lambda **kw:actual(transport=httpx.MockTransport(upstream),**kw))
+    monkeypatch.setattr(app.state.memory,'context',lambda run:'')
+    url='/broker/'+run['id']+'/v1/chat/completions'
+    headers={'Authorization':'Bearer capability'}
+    assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
+    for i in range(12):
+        assert create(client,'organization',name=f'workflow-{i}',client_id=f'workflow-{i}').status_code==201
+    assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
+    assert captured[0]==captured[1]
+    assert skill_context(app,run)=={'turn_id':run['active_message_id'],'matches':[],'loaded':[],'unavailable':[]}
+    response=search(client,run,'coverage')
+    assert response.status_code==200 and len(response.json()['matches'])==5
+    assert all(set(m)=={'reference','revision'} for m in response.json()['matches'])
+    assert 'Review benchmark coverage and results.' not in response.text and MARKER not in response.text
+    assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
+    context=json.loads(captured[-1][0]['content'].split('\n',1)[1])
+    assert len(context['matches'])==5 and not context['loaded'] and 'available' not in context
+    assert context['matches'][0]['description']=='Review benchmark coverage and results.'
+    assert MARKER not in json.dumps(captured) and not app.state.store.rows('SELECT * FROM skill_uses')
+    assert 'Review benchmark coverage and results.' not in client.get('/api/runs/'+run['id']).text
+
+
+def test_search_ranks_exact_references_replaces_matches_and_never_scans_bodies(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    create(client)
+    create(client,'organization',client_id='shared-search')
+    for i in range(6):create(client,'organization',name=f'benchmark-{i}',client_id=f'benchmark-{i}')
+    run=active(app)
+    result=search(client,run,'ORG:BENCHMARK-REVIEW').json()
+    assert result['matches'][0]['reference']=='org:benchmark-review'
+    assert len(result['matches'])==5
+    result=search(client,run,'BENCHMARK-REVIEW').json()
+    assert {m['reference'] for m in result['matches'][:2]}=={'personal:benchmark-review','org:benchmark-review'}
+    selected=app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')
+    for query in ['', '   ', 'the and for', 'x'*201]:
+        assert search(client,run,query).status_code==422
+        assert app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')==selected
+    assert search(client,run,MARKER).json()['matches']==[]
+    assert skill_context(app,run)['matches']==[]
+    assert not app.state.store.rows('SELECT * FROM skill_searches')
+    assert not app.state.store.rows('SELECT * FROM skill_uses')
+
+
+def test_search_stale_actor_and_turn_do_not_replace_current_selection(workspace):
+    app,client=workspace
+    sign_in(app,client)
+    create(client)
+    create(client,'organization',client_id='shared-search')
+    old=active(app)
+    assert search(client,old,'benchmark').status_code==200
+    app.state.store.execute("UPDATE runs SET active_user_id='google:ishaan' WHERE id=?",(old['id'],))
+    current=app.state.store.run(old['id'])
+    assert skill_context(app,current)['matches']==[]
+    assert search(client,current,'benchmark').json()['matches']==[{'reference':'org:benchmark-review','revision':1}]
+    selected=app.state.store.rows('SELECT * FROM skill_searches')
+    with pytest.raises(HTTPException) as exc:
+        app.state.skills.call(old,'skills_search',{'query':'coverage','turn_id':old['active_message_id']})
+    assert exc.value.status_code==409
+    assert app.state.store.rows('SELECT * FROM skill_searches')==selected
+    app.state.store.finish_message(old['id'],old['active_message_id'],'Done')
+    app.state.store.enqueue_message(old['id'],'Next request','next-request',user_id='google:ishaan')
+    app.state.store.claim_message(old['id'])
+    app.state.store.update_run(old['id'],status='running')
+    assert search(client,old,'coverage').status_code==409
+    assert app.state.store.rows('SELECT * FROM skill_searches')==selected
+    assert skill_context(app,app.state.store.run(old['id']))['matches']==[]
+
+
 def test_five_skill_limit_and_untrusted_old_context_cannot_select_skills(workspace):
     app,client=workspace
     sign_in(app,client)
     for i in range(6):assert create(client,name='workflow-'+str(i),client_id='workflow-'+str(i)).status_code==201
     run=active(app)
-    # Merely having a library gives a catalog, without any instruction bodies.
+    # Merely having a library loads neither metadata nor instruction bodies.
     context=app.state.skills.context(run)
     assert MARKER not in context
     for i in range(5):app.state.skills.load(run,'workflow-'+str(i))

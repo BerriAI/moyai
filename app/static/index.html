@@ -14,9 +14,9 @@
   <link rel="stylesheet" href="/static/memory.css?v=1"><script src="/static/memory.js?v=1" defer></script>
   <script src="/static/environments.js?v=environments-repos-1" defer></script>
   <script src="/static/users.js?v=settings-1" defer></script>
-  <script src="/static/saved-files.js?v=inline-previews-1" defer></script><script src="/static/markdown.js?v=inline-previews-1" defer></script><script src="/static/infrastructure.js?v=costs-1" defer></script><script src="/static/spend.js?v=costs-1" defer></script><script src="/static/credentials.js?v=onepassword-1" defer></script><script src="/static/skills.js?v=skills-inline-1" defer></script><script src="/static/skill-composer.js?v=skills-inline-1" defer></script><script src="/static/attachment-transport.js?v=attachments-2" defer></script><script src="/static/audio-recorder.js?v=audio-1" defer></script><script src="/static/attachments.js?v=reference-2" defer></script><script src="/static/activity.js?v=reference-2" defer></script><script src="/static/message-queue.js?v=slack-names-1" defer></script><script src="/static/session-folders.js?v=folders-2" defer></script><script src="/static/app.js?v=reference-2" defer></script>
+  <script src="/static/saved-files.js?v=inline-previews-1" defer></script><script src="/static/markdown.js?v=inline-previews-1" defer></script><script src="/static/infrastructure.js?v=costs-1" defer></script><script src="/static/spend.js?v=costs-1" defer></script><script src="/static/credentials.js?v=onepassword-1" defer></script><script src="/static/skills.js?v=skills-inline-1" defer></script><script src="/static/skill-composer.js?v=goal-1" defer></script><script src="/static/attachment-transport.js?v=attachments-2" defer></script><script src="/static/audio-recorder.js?v=audio-1" defer></script><script src="/static/attachments.js?v=reference-2" defer></script><script src="/static/activity.js?v=reference-2" defer></script><script src="/static/message-queue.js?v=slack-names-1" defer></script><script src="/static/session-folders.js?v=folders-2" defer></script><script src="/static/app.js?v=reference-3" defer></script>
   <link rel="stylesheet" href="/static/session-folders.css?v=folders-2">
-  <link rel="stylesheet" href="/static/polish.css?v=reference-2">
+  <link rel="stylesheet" href="/static/polish.css?v=reference-3">
 </head>
 <body>
   <button id="sidebar-scrim" class="sidebar-scrim" aria-label="Close sidebar" hidden></button>
@@ -25,7 +25,7 @@
     <button class="new-task" id="new-task"><span class="nav-icon" data-icon="plus" data-icon-size="17"></span>New session<kbd>⌘K</kbd></button>
     <label class="session-search"><span class="nav-icon" data-icon="search" data-icon-size="16"></span><input id="session-search" type="search" placeholder="Search" aria-label="Search sessions" autocomplete="off"></label>
     <nav class="workspace-nav rail-links" aria-label="Workspace"><button class="nav-button" data-view="automations"><span class="nav-icon" data-icon="clock" data-icon-size="17"></span>Automations</button><button class="nav-button" data-view="skills"><span class="nav-icon" data-icon="book" data-icon-size="17"></span>Skills</button><button class="nav-button" data-view="connections"><span class="nav-icon" data-icon="grid" data-icon-size="17"></span>Connections</button></nav>
-    <div class="sessions-label"><span>Sessions</span><span id="task-count">0</span><button id="new-folder" class="folder-add icon-button" data-icon="plus" data-icon-size="16" title="New folder" aria-label="New folder"></button></div>
+    <div class="sessions-label"><select id="session-scope" aria-label="Filter sessions" disabled><option value="mine">My sessions</option></select><span id="task-count">0</span><button id="new-folder" class="folder-add icon-button" data-icon="plus" data-icon-size="16" title="New folder" aria-label="New folder"></button></div>
     <nav id="session-list" class="session-list" aria-label="Recent sessions"></nav>
     <div class="rail-foot"><button class="nav-button rail-settings" data-view="settings" data-icon="gear" data-icon-size="17" aria-label="Settings" title="Settings"></button><small>Private workspace</small></div>
   </aside>

@@ -6,7 +6,8 @@ const vm = require('node:vm');
 function setup({automations = false, role = 'admin'} = {}) {
   const elements = new Map();
   const context = {
-    state: {pageVersion: 1, role: 'admin'},
+    state: {pageVersion: 1, role: 'admin', runsRefresh: 0},
+    restoreSessionScope:()=>{},renderSidebar:()=>{},
     $: key => {if (!elements.has(key)) elements.set(key, {}); return elements.get(key);},
     api: async () => ({authenticated: true, role, csrf: 'fresh', user_id: 'test-user'}),
   };
@@ -26,6 +27,20 @@ test('standalone Settings has working sections without depending on automations'
   }
   assert.doesNotMatch(html, /href="#automations"/);
   assert.equal(vm.runInContext("settingsViews.has('automations')", context), false);
+});
+
+test('every Settings card renders a non-empty decorative icon, including Adoption', async () => {
+  const {context, elements} = setup({automations: true});
+  await context.renderSettings();
+  const html = elements.get('#content').innerHTML;
+  const views = vm.runInContext('settingsGroups.flatMap(group => group.items.map(item => item.view))', context);
+  assert.ok(views.includes('adoption'));
+  for (const view of views) {
+    const card = html.match(new RegExp(`<a class="settings-link" href="#${view}">([\\s\\S]*?)</a>`));
+    assert.ok(card, `${view} card should be rendered`);
+    assert.match(card[1], /<svg[^>]*aria-hidden="true"[^>]*>\s*<(?:path|circle|rect)\b/, `${view} icon should contain geometry`);
+    assert.match(card[1], /viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"/);
+  }
 });
 
 test('an installed automation page is included in Settings and direct-link routing', async () => {

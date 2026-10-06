@@ -50,6 +50,12 @@ def main():
         assert {'directory', 'title', 'body', 'request_key'} <= fields.keys()
         assert 'files' not in fields
 
+        skills = ['mcp__workspace__skills_search', 'mcp__workspace__skills_load']
+        found = dispatch('tool_search', {'queries': ['skills search', 'skills load']})
+        assert all(name in found['tools'] for name in skills), found
+        described = dispatch('tool_describe', {'names': skills})['tools']
+        assert {'query', 'turn_id'} <= described[skills[0]]['parameters']['properties'].keys()
+
         memory = ['mcp__workspace__memory_search', 'mcp__workspace__memory_save']
         found = dispatch('tool_search', {'queries': ['memory search', 'memory save']})
         assert all(name in found['tools'] for name in memory), found

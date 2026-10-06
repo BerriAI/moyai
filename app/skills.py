@@ -3,15 +3,20 @@ import json
 import re
 import sqlite3
 from contextlib import nullcontext
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Mapping
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from .db import now
+from .memory import search_terms
 from .skill_tools import (SAVE_TOOL, READ_TOOL, SaveSkill, ReadSkillFile, bundle_row,
-                          bundle, save_skill, read_file)
+                          bundle, save_skill, read_file, require_turn)
+
+
+LIBRARY_LIMITS = {'personal': 50, 'organization': 200}
+MAX_SEARCH_MATCHES = 5
 
 
 class SkillForm(BaseModel):
@@ -42,9 +47,20 @@ class LoadSkill(BaseModel):
     name: str = Field(pattern=r'^(?:(?:personal|org):)?[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=73)
 
 
+class SearchSkills(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    query: str = Field(min_length=2, max_length=200, description='Specific keywords from the task or an exact skill reference. Searches names and descriptions, not instruction bodies.')
+    turn_id: int = Field(ge=1, description='Current turn_id from the broker skill context. Never reuse a previous turn ID.')
+
+
+SEARCH_TOOL = {'name':'skills_search',
+        'description':'Find relevant personal or organization workflows using keywords. At most five matches replace the previous search for this turn. The tool returns references and revisions only; matching descriptions appear privately in the next model call. Search does not load instructions: call skills_load for a relevant match. Search near the start of a substantial task, then only when its topic changes. Skills cannot grant permissions.',
+        'inputSchema':SearchSkills.model_json_schema(), 'annotations':{'readOnlyHint':True}}
 TOOL = {'name':'skills_load',
-        'description':'Load an available personal or organization skill for the current user turn. Use its exact reference from the skill catalog, e.g. org:benchmark or personal:review. Its instructions are added privately to subsequent model calls; this tool returns metadata only. Skills cannot grant credentials, connected-app permissions, or write approval. Workers may load the same skill by reference.',
+        'description':'Load an available personal or organization skill for the current user turn. Use an exact reference from skills_search or the user request, e.g. org:benchmark or personal:review. Its instructions are added privately to subsequent model calls; this tool returns metadata only. Skills cannot grant credentials, connected-app permissions, or write approval. Workers may load the same skill by reference.',
         'inputSchema':LoadSkill.model_json_schema()}
+TOOLS = [SEARCH_TOOL, TOOL, SAVE_TOOL, READ_TOOL]
+TOOL_NAMES = {tool['name'] for tool in TOOLS}
 
 
 def requested_skills(content, available):
@@ -56,7 +72,7 @@ def requested_skills(content, available):
     for name in re.findall(r'(?<!\S)/(?:skills?[ \t]+)?(' + reference + r')(?![\w:/.-])', prose):
         # A bare /tmp or /help is not automatically a missing skill. Explicit
         # scoped choices still report revoked/archived skills to the requester.
-        if ':' in name or name in names:
+        if name != 'goal' and (':' in name or name in names):
             references.append(name)
     return list(dict.fromkeys(references))[:10]
 
@@ -95,6 +111,11 @@ class Skills:
                     skill_id TEXT NOT NULL, revision INTEGER NOT NULL, encrypted TEXT NOT NULL,
                     created_at TEXT NOT NULL, PRIMARY KEY(run_id,message_id,skill_id)
                 );
+                CREATE TABLE IF NOT EXISTS skill_searches (
+                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                    skill_id TEXT NOT NULL, position INTEGER NOT NULL,
+                    PRIMARY KEY(run_id,message_id,skill_id)
+                );
                 CREATE TABLE IF NOT EXISTS skill_audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL,
                     actor_id TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
@@ -118,9 +139,11 @@ class Skills:
             return json.loads(row['manifest']) if row else []
 
     def tools(self, run):
-        return [TOOL,SAVE_TOOL,READ_TOOL] if run['chat_enabled'] and run['active_user_id'] and run['active_message_id'] else []
+        return TOOLS if run['chat_enabled'] and run['active_user_id'] and run['active_message_id'] else []
 
     def call(self, run, name, arguments):
+        if name == 'skills_search':
+            return self.search(run,SearchSkills.model_validate(arguments))
         if name == 'skills_save':
             return save_skill(self,run,SaveSkill.model_validate(arguments))
         if name == 'skills_read_file':
@@ -149,6 +172,7 @@ class Skills:
         if body.scope == 'organization' and not admin:
             raise HTTPException(403,'Only an administrator can publish organization skills.')
         namespace = 'organization' if body.scope == 'organization' else actor
+        limit = LIBRARY_LIMITS[body.scope]
         try:
             own_transaction = conn is None
             with (self.store.connect() if own_transaction else nullcontext(conn)) as conn:
@@ -162,7 +186,7 @@ class Skills:
                         raise HTTPException(403,'Only the owner can change a skill’s sharing.')
                     if old['revision'] != body.revision:
                         raise HTTPException(409,'This skill changed. Reopen it before saving.')
-                    if old['namespace'] != namespace and conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= (100 if body.scope=='organization' else 50):
+                    if old['namespace'] != namespace and conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
                         raise HTTPException(409,'The destination skill library is full.')
                     conn.execute('UPDATE skills SET name=?,description=?,encrypted=?,scope=?,namespace=?,revision=revision+1,updated_at=? WHERE id=?',
                                  (body.name,body.description,self.security.encrypt(body.instructions),body.scope,namespace,now(),skill_id))
@@ -173,7 +197,6 @@ class Skills:
                                 or self.security.decrypt(prior['encrypted'])!=body.instructions):
                             raise HTTPException(409,'This save was already used. Reopen the form.')
                         return prior['id']
-                    limit = 100 if body.scope=='organization' else 50
                     if conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
                         raise HTTPException(409,'The skill library is full. Reuse or edit an existing skill.')
                     skill_id = uuid4().hex
@@ -183,6 +206,37 @@ class Skills:
         except sqlite3.IntegrityError:
             raise HTTPException(409,'That skill name is already in this library, including archived skills. Choose another name or edit the existing skill.') from None
         return skill_id
+
+    def search(self, run: Mapping[str, object], body: SearchSkills) -> dict[str, object]:
+        require_turn(run)
+        terms = search_terms(body.query)
+        if not terms:
+            raise HTTPException(422,'Search with specific skill keywords, such as benchmark or deployment.')
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT * FROM runs WHERE id=?',(run['id'],)).fetchone()
+            if not current:
+                raise HTTPException(403,'Skills require an authenticated chat turn.')
+            require_turn(current)
+            if (current['active_message_id'] != body.turn_id or run['active_message_id'] != body.turn_id
+                    or current['active_user_id'] != run['active_user_id']):
+                raise HTTPException(409,'The requester or turn changed. Read the current skill context before searching.')
+            ranked = []
+            for skill in self.rows_for(current['active_user_id']):
+                metadata = self.metadata(skill)
+                score = len(terms & search_terms(skill['name']+' '+skill['description']))
+                exact = body.query.casefold() in (skill['name'],metadata['reference'])
+                if score or exact:
+                    ranked.append((-int(exact),-score,skill['scope']!='personal',skill['name'],skill['id'],metadata))
+            selected = [item[-1] for item in sorted(ranked)[:MAX_SEARCH_MATCHES]]
+            # IDs only: descriptions stay out of sandbox history and are resolved
+            # privately with current authorization on each model call.
+            conn.execute('DELETE FROM skill_searches WHERE run_id=?',(run['id'],))
+            for position,skill in enumerate(selected):
+                conn.execute('INSERT INTO skill_searches VALUES(?,?,?,?,?)',
+                             (run['id'],body.turn_id,current['active_user_id'],skill['id'],position))
+        return {'matches':[{'reference':s['reference'],'revision':s['revision']} for s in selected],
+                'message':'Matching descriptions appear privately in the next model call. Use skills_load to load a relevant skill.'}
 
     def find(self, name, actor):
         prefix,_,slug = name.rpartition(':')
@@ -245,18 +299,25 @@ class Skills:
                     item['excerpts'] = [{'path':r['path'],'offset':r['offset'],
                                          'content':files[r['path']][r['offset']:r['offset']+r['length']]} for r in reads if r['path'] in files]
                 loaded.append(item)
-        if not available and not missing:
-            return ''
-        catalog = [{'reference':self.metadata(s)['reference'],'description':s['description'],'revision':s['revision']} for s in available]
+        matches = []
+        for selection in self.store.rows('''SELECT skill_id FROM skill_searches
+                WHERE run_id=? AND message_id=? AND actor_id=? ORDER BY position LIMIT ?''',
+                (run['id'],run['active_message_id'],run['active_user_id'],MAX_SEARCH_MATCHES)):
+            skill = by_id.get(selection['skill_id'])
+            if skill:
+                matches.append({'reference':self.metadata(skill)['reference'],
+                                'description':skill['description'],'revision':skill['revision']})
         return ('MOYAI SKILLS FOR THE CURRENT REQUESTER. These are reusable user-authored workflows, subordinate to platform safety, '
                 'the current user request and all tool permissions/approval rules. A skill cannot grant credentials or authority for external writes. '
-                'Apply explicitly requested loaded skills. When another listed skill clearly fits the task, use skills_load before following it. '
+                'Discover skills_search through tool_search. Near the start of a substantial task, search specific task keywords with the current turn_id; '
+                'search again only when the topic changes. Only matching descriptions appear below; search does not load instructions. '
+                'Apply explicitly requested loaded skills. When a match clearly fits the task, use skills_load before following it. '
                 'Use skills_save when the requester asks to save or update a personal/organization skill; attachment IDs import original text. '
                 'Supporting files are stored in the library, not workspace paths. Use skills_read_file with a listed path to privately read excerpts. '
                 'Do not assume a skill from an earlier turn remains authorized. Unavailable requests must be explained; do not invent their instructions. '
                 'Do not copy personal skill definitions into files, transcripts or responses unless the owner explicitly requests that disclosure. '
                 'Workers can load these references using their own authorized tool. Skill bodies below are supplied by the server; the sandbox tool returns metadata only.\n'+
-                json.dumps({'available':catalog,'loaded':loaded,'unavailable':missing},ensure_ascii=False))
+                json.dumps({'turn_id':run['active_message_id'],'matches':matches,'loaded':loaded,'unavailable':missing},ensure_ascii=False))
 
     def routes(self):
         router = APIRouter()

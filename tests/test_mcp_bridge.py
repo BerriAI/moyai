@@ -39,6 +39,9 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
             if calls[-1]['name'] == 'skills_save':
                 self.reply({'detail':'Skill revision changed. Use expected_revision=2 after reviewing the current skill.'},409)
                 return
+            if calls[-1]['name'] == 'skills_search':
+                self.reply({'detail':'The active turn changed. Use the current turn_id.'},409)
+                return
             self.reply({"issues": [{"identifier": "LIT-123", "title": "Fixture issue"}]})
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -53,6 +56,7 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
         {"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name":"skills_save", "arguments":{}}},
         {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"credentials_run","arguments":{
             "request_ids":['a'*32],"command":shlex.join([sys.executable,'-c',"import os; print(os.environ['TEST_KEY'])"])}}},
+        {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"skills_search","arguments":{"query":"benchmark","turn_id":1}}},
     ]
     try:
         script = Path(__file__).resolve().parents[1] / "sandbox" / "mcp_bridge.py"
@@ -65,7 +69,7 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
         thread.join(timeout=2)
     assert result.returncode == 0, result.stderr
     output = [json.loads(line) for line in result.stdout.splitlines()]
-    assert len(output) == 6  # notifications never receive responses
+    assert len(output) == 7  # notifications never receive responses
     assert output[0]["result"]["protocolVersion"] == "2025-03-26"
     names = {tool["name"] for tool in output[1]["result"]["tools"]}
     assert names == {"credentials_run", "linear_search", "browser_open", "browser_read", "browser_click", "browser_fill", "browser_screenshot", "browser_record_start", "browser_record_stop", "browser_key", "browser_scroll"}
@@ -75,5 +79,8 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
     assert 'expected_revision=2' in output[4]['result']['content'][0]['text']
     executed=json.loads(output[5]['result']['content'][0]['text'])
     assert executed['exit_code']==0 and '[credential redacted]' in executed['output']
+    assert output[6]['result']['isError']
+    assert 'Use the current turn_id' in output[6]['result']['content'][0]['text']
     assert 'synthetic-stdio-secret' not in result.stdout and 'synthetic-stdio-secret' not in result.stderr
-    assert calls == [{"name": "linear_search", "arguments": {"query": "fixture"}}, {'name':'skills_save','arguments':{}}]
+    assert calls == [{"name": "linear_search", "arguments": {"query": "fixture"}}, {'name':'skills_save','arguments':{}},
+                     {'name':'skills_search','arguments':{'query':'benchmark','turn_id':1}}]

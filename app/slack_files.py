@@ -27,8 +27,6 @@ class SlackFiles:
         installation = connectors.slack_installation()
         if not self.owner.status()['enabled'] or installation.get('team_id') != team:
             raise ValueError('Slack access changed. Reconnect Slack and resend the attachment.')
-        if 'files:read' not in installation.get('scopes', []):
-            raise ValueError('Reconnect Slack with files:read permission, then resend the attachment.')
 
     async def read(self, file_id, team):
         connectors = self.owner.connectors
@@ -37,7 +35,14 @@ class SlackFiles:
         headers = {'Authorization': 'Bearer ' + token}
 
         async def request(api, payload):
-            return await connectors.request('GET', 'https://slack.com/api/' + api, headers=headers, params=payload)
+            # Saved OAuth scopes can be stale after an installation changes.
+            # Let Slack authorize the bot token rather than rejecting locally.
+            result = await connectors.request('GET', 'https://slack.com/api/' + api,
+                                              headers=headers, params=payload,
+                                              allowed_errors=('missing_scope',))
+            if result.get('ok') is False and result.get('error') == 'missing_scope':
+                raise ValueError('Reconnect Slack with files:read permission, then resend the attachment.')
+            return result
 
         async def guard():
             self.check_access(team)

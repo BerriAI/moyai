@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import SchemaValidator, core_schema
 
 EVENT_CHOICES = {
+    'session': [('message.posted','New session message')],
     'slack': [('message.posted','New message'), ('reaction.added','Reaction added')],
     'github': [('issues','Issue'), ('issue_comment','Issue comment'), ('pull_request','Pull request'),
                ('pull_request_review','PR review'), ('pull_request_review_comment','PR review comment'),
@@ -45,7 +46,8 @@ def items(value):
 
 class EventTrigger(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
-    provider: Literal['slack','github','gitlab','linear','jira','pylon','pagerduty','webhook']
+    provider: Literal['session','slack','github','gitlab','linear','jira','pylon','pagerduty','webhook']
+    session_id: str = Field(default='', max_length=32)
     event: str = Field(default='*', min_length=1, max_length=80)
     repository: str = Field(default='', max_length=200)
     team_id: str = Field(default='', max_length=36)
@@ -71,6 +73,14 @@ class EventTrigger(BaseModel):
 
     @model_validator(mode='after')
     def valid_filters(self):
+        if self.session_id and (self.provider != 'session' or not re.fullmatch(r'[0-9a-f]{32}', self.session_id)):
+            raise ValueError('Session filters require a session source and a 32-character session ID.')
+        if self.provider == 'session':
+            allowed = {'provider', 'event', 'session_id', 'text_contains', 'text_starts_with', 'sender_type'}
+            if self.sender_type == 'bot' or any(
+                getattr(self, name) != field.default for name, field in type(self).model_fields.items() if name not in allowed
+            ):
+                raise ValueError('Session messages support only session ID and text filters, from human senders.')
         supported = dict(EVENT_CHOICES[self.provider])
         legacy_github = self.provider == 'github' and self.event.split('.')[0] in supported
         if self.provider != 'webhook' and self.event not in supported and not legacy_github:
@@ -105,7 +115,17 @@ def normalize(t, payload, event_header=''):
     event, action, title, body, url, item, branch, status, conclusion = '', '', '', '', '', '', '', '', ''
     extra = {}
     bot = False
-    if t.provider == 'github':
+    if t.provider == 'session':
+        if t.session_id and p.get('session_id') != t.session_id:return None
+        event = text(p.get('event'))
+        title, body, url = 'Session message', p.get('body'), p.get('url')
+        item = scalar(p.get('session_id')) + ':' + scalar(p.get('message_id'))
+        extra = {'session_id':text(p.get('session_id'),32), 'message_id':p.get('message_id'),
+                 'user_id':text(p.get('user_id'),200),
+                 'conversation':[{'role':text(obj(m).get('role'),20), 'content':text(obj(m).get('content'),1000)}
+                                 for m in items(p.get('conversation'))[:10]],
+                 'context_truncated':bool(p.get('context_truncated'))}
+    elif t.provider == 'github':
         if text(obj(p.get('repository')).get('full_name')).lower() != t.repository.lower():
             return None
         action, event = text(p.get('action')), event_header
@@ -261,6 +281,11 @@ def normalize(t, payload, event_header=''):
 
 
 def example(t):
+    if t.provider == 'session':
+        return {'event':'message.posted', 'session_id':t.session_id or '0' * 32, 'message_id':123,
+                'body':(t.text_starts_with or '') + ' ' + (t.text_contains or 'This still fails; please investigate.'),
+                'conversation':[{'role':'assistant','content':'The previous attempt is ready to check.'}],
+                'context_truncated':False}
     if t.provider == 'github':
         kind, _, action = t.event.partition('.')
         action = t.action or action or {'issues':'opened', 'issue_comment':'created', 'pull_request_review':'submitted',

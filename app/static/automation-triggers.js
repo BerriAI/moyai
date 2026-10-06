@@ -1,4 +1,4 @@
-const automationSources = {schedule:'Schedule',slack:'Slack',github:'GitHub',gitlab:'GitLab',linear:'Linear',jira:'Jira',pylon:'Pylon',pagerduty:'PagerDuty',webhook:'Generic webhook'};
+const automationSources = {schedule:'Schedule',session:'Moyai sessions',slack:'Slack',github:'GitHub',gitlab:'GitLab',linear:'Linear',jira:'Jira',pylon:'Pylon',pagerduty:'PagerDuty',webhook:'Generic webhook'};
 const automationDefaultSchedule = () => ({frequency:'weekdays',time:'09:00',weekday:1,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC'});
 function automationTriggers(d) {
   return d.triggers || [{id:'default',...(d.event?{event:d.event}:{schedule:d.timing||automationDefaultSchedule()})}];
@@ -11,6 +11,7 @@ function automationTriggerFields() {
   return '<fieldset class="automation-trigger-group"><legend>Start when any trigger matches</legend><p class="automation-policy">Each trigger can start this workflow independently. An event matching several triggers starts one run.</p><div data-triggers></div><button type="button" class="quiet" data-add-trigger>＋ Add trigger</button></fieldset>';
 }
 const automationEventFields = {
+  session:[['session_id','Session ID (optional)','Leave blank for all shared sessions'],['text_contains','Message contains (optional)','error'],['text_starts_with','Message starts with (optional)','bug:']],
   github:[['repository','Repository','BerriAI/litellm',true],['action','Action (optional)','opened, labeled, closed…'],['label','Label (optional)','bug'],['branch','Branch (optional)','main'],['conclusion','CI conclusion (optional)','failure'],['text_contains','Text contains (optional)','investigate']],
   gitlab:[['repository','Project path','group/project',true],['action','Action (optional)','open, update, merge…'],['status','Status (optional)','failed'],['branch','Branch (optional)','main'],['text_contains','Text contains (optional)','investigate']],
   linear:[['team_id','Team ID','Linear team UUID',true],['assignee_id','Assignee ID (optional)','Linear user UUID'],['label_id','Label ID (optional)','Linear label UUID'],['status','Status ID (optional)','Linear state UUID'],['priority','Priority (optional)','0–4']],
@@ -28,6 +29,7 @@ function automationEventEditor(provider,e={}) {
   return event+`<div class="automation-fields">${fields.map(([key,label,placeholder,required])=>`<label>${label}<input name="${key}" value="${esc(e[key]??'')}" placeholder="${esc(placeholder)}" ${required?'required':''} ${key==='priority'?'type="number" min="0" max="4"':''}></label>`).join('')}</div>`+
     (['slack','github','gitlab'].includes(provider)?`<label>Sender<select name="sender_type">${[['any','Anyone'],['human','People only'],['bot','Bots only']].map(([key,label])=>`<option value="${key}" ${e.sender_type===key?'selected':''}>${label}</option>`).join('')}</select></label>`:'')+
     (provider==='slack'?`<label class="automation-check"><input type="checkbox" name="include_thread_replies" ${e.include_thread_replies?'checked':''}>Include thread replies</label><p class="automation-policy">Uses the installed Slack app and its allowed users. Add the bot to watched channels. Messages require history scopes; reactions require reactions:read and the reaction_added subscription. Moyai’s own messages are excluded.</p>`:'')+
+    (provider==='session'?'<p class="automation-policy">Watches human messages in shared sessions in this organization, including teammates’ sessions and ordinary side chats. Only new messages after enabling are eligible; history and messages posted while paused are not replayed. Assistant messages, automation and worker sessions and their descendants are excluded. No webhook or Slack credentials needed. The existing shared hourly cap still applies.</p>':'')+
     (provider==='pylon'?'<p class="automation-policy">Connect Pylon’s Send webhook action for each selected event. Setup includes the payload mapping and authentication.</p>':'');
 }
 function automationScheduleEditor(t) {
@@ -119,8 +121,10 @@ const automationSetupNotes={
   pylon:'In Pylon Settings → Webhooks, add this URL and Authorization: Bearer <secret> or X-Webhook-Secret. Then create a Pylon Trigger with the matching kickoff and Send webhook action. Template the body with event_type (issue.created, issue.tag_added, or issue.status_changed) and data: {id, title, description, status, tags, url}. Include event_id or occurred_at in the body so separate changes to the same issue remain distinct; keep it stable on retries.',
   webhook:'Send a JSON object using Authorization: Bearer <secret> or X-Webhook-Secret. Include a unique X-Moyai-Event-Id and reuse it on retries. Without an ID, identical payloads deduplicate. You can also use the timestamped HMAC format documented below.'
 };
+function automationWebhookProviders(a) {return a.trigger.providers.filter(p=>!['slack','session'].includes(p.provider));}
 function setupAutomationWebhook(a) {
-  const providers=a.trigger.providers.filter(p=>p.provider!=='slack');
+  const providers=automationWebhookProviders(a);
+  if(!providers.length)return;
   const form=automationTriggerDialog('Connect event sources',a.definition.name,`<label>Provider<select name="provider">${providers.map(p=>`<option value="${p.provider}">${automationSources[p.provider]}${p.ready?' · configured':''}</option>`).join('')}</select></label><div data-provider-setup></div><footer><button type="submit" class="primary">Save webhook secret</button></footer>`);
   let revision=a.revision;
   function draw() {

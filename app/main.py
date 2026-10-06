@@ -34,7 +34,7 @@ from .identities import SlackIdentities
 from .agents import AgentCoordinator, TOOLS as AGENT_TOOLS
 from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
-from .skills import Skills
+from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from sandbox.memory_history import scrub_memory_history
@@ -386,16 +386,16 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = ''):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None):
         owner = session_folders.actor(request)
+        if scope == 'all':
+            security.require(request, admin=True)
+        if scope is None:
+            scope = 'all' if security.role(request) == 'admin' else 'mine'
         memberships = session_folders.memberships(owner)
-        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
-        # Filed sessions remain reachable even after leaving the recent 100.
-        ids = list(dict.fromkeys([*ids, *memberships]))
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
-        if parent_id and parent_id not in ids and store.run(parent_id):
-            ids.append(parent_id)
+        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id])
         runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
         if ids:
             children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
@@ -716,7 +716,7 @@ def create_app(settings: Settings | None = None):
                 raise HTTPException(422, 'Invalid item key.') from None
             await checkpoints.flush()
             return result
-        if body.name in {'skills_load','skills_save','skills_read_file'}:
+        if body.name in SKILL_TOOLS:
             try:
                 result = skills.call(run,body.name,body.arguments)
             except ValidationError:
@@ -763,6 +763,7 @@ def create_app(settings: Settings | None = None):
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
+                      else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
             return result

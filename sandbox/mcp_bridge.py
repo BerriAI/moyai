@@ -91,7 +91,7 @@ def serve():
                     result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}
                 except HTTPError as exc:
                     message = f'Tool failed (HTTP {exc.code}). The action was not confirmed.'
-                    if name in {'skills_load', 'skills_save', 'skills_read_file'} or name.startswith(('credentials_', 'memory_')):
+                    if name in {'skills_search', 'skills_load', 'skills_save', 'skills_read_file'} or name.startswith(('credentials_', 'memory_')):
                         # The skill API supplies sanitized permission/conflict
                         # messages. Preserve them so the agent can correct its
                         # arguments instead of repeating an unexplained failure.

@@ -6,12 +6,17 @@ authenticate a web session. This is JIT matching, not SCIM lifecycle management.
 import asyncio
 import re
 import time
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
 from .db import now
 
 PROFILE_SCOPES = {'users:read', 'users:read.email'}
+# Refresh with headroom for worker delays and retries, without extending the
+# authorization lifetime used by personal memory, skills and credentials.
+PROFILE_MAX_AGE_SECONDS = 3600
+PROFILE_REFRESH_SECONDS = PROFILE_MAX_AGE_SECONDS // 2
 
 
 class SlackIdentities:
@@ -58,14 +63,16 @@ class SlackIdentities:
             if not status['ready']:
                 return
             team = status['team_id']
+            refresh_before = datetime.fromtimestamp(time.time() - PROFILE_REFRESH_SECONDS, timezone.utc).isoformat()
             # Only senders who actually have a session/message, not unrelated
             # channel participants incidentally seen by the Slack event router.
             rows = self.store.rows("""SELECT u.* FROM users u WHERE kind='slack'
-                AND id LIKE ? AND profile_next_check<=?
+                AND id LIKE ? AND (profile_next_check<=?
+                    OR (profile_eligible=1 AND profile_checked_at<=?))
                 AND (EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
                      OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
                      OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id))
-                ORDER BY profile_next_check,id LIMIT 10""", (f'slack:{team}:%', int(time.time())))
+                ORDER BY profile_next_check,id LIMIT 10""", (f'slack:{team}:%', int(time.time()), refresh_before))
             for row in rows:
                 await self.resolve(row, team)
             if rows:
@@ -114,9 +121,12 @@ class SlackIdentities:
                 status = 'manual'
             elif current['linked_user_id'] and not eligible:
                 status = 'review'
+            # Eligible profiles saved by older releases can still carry a daily
+            # timer; sync_due also considers their last successful check above.
+            refresh_after = PROFILE_REFRESH_SECONDS if eligible and not blocked else 86400
             conn.execute('UPDATE users SET email=?,name=?,profile_eligible=?,profile_conflict=?,profile_checked_at=?,profile_next_check=?,link_status=?,updated_at=? WHERE id=?',
                          (email if eligible else current['email'], name, int(eligible and not blocked), int(blocked), checked,
-                          int(time.time()) + 86400, status, now(), row['id']))
+                          int(time.time()) + refresh_after, status, now(), row['id']))
             for value in {email, current['email']}:
                 self.store.reconcile_email_in(conn, value)
 

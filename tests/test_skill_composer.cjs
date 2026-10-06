@@ -68,9 +68,9 @@ test('Enter selects rather than sends; caret and surrounding draft survive',asyn
 test('loading and empty menus cannot accidentally submit, Escape and IME work',async()=>{
   let resolve;
   const b=fixture(()=>new Promise(r=>{resolve=r;}));
-  b.type('/');
+  b.type('/bench');
   assert.equal(b.key('Enter').handled,true);
-  assert.equal(b.input.value,'/');
+  assert.equal(b.input.value,'/bench');
   assert.equal(b.key('Enter',{isComposing:true}).handled,false);
   assert.equal(b.key('Escape').handled,true);
   resolve({skills:[]});await flush();
@@ -89,6 +89,19 @@ test('slow catalog replies cannot reopen a picker after navigation',async()=>{
   assert.equal(b.popup.hidden,true);
   assert.equal(b.popup.removed,true);
   assert.equal(b.globals.size,0);
+});
+
+test('built-in goal works without skills and only at the start of the request',async()=>{
+  const b=fixture(async()=>{throw new Error('Unavailable');});
+  b.type('/go');
+  assert.equal(b.key('Enter').handled,true);
+  assert.equal(b.input.value,'/goal ');
+  await flush();
+  assert.equal(b.popup.hidden,true);
+  b.type('Please /go');
+  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/small>/);
+  b.type('/goal verify the suite');
+  assert.equal(b.popup.hidden,true);
 });
 
 test('provider failure is visible and untrusted descriptions stay text',async()=>{

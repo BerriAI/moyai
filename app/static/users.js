@@ -18,8 +18,11 @@ function userTable(users, query, filter) {
 }
 
 function applyUserSession(session) {
+  const changed=state.role!==(session.role||'member')||state.userId!==session.user_id||state.authenticated!==session.authenticated;
   state.role = session.role || 'member'; state.identity = session.identity; state.csrf = session.csrf;
   state.authenticated = session.authenticated; state.userId = session.user_id;
+  restoreSessionScope();
+  if(changed){++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
   if (session.identity) $('.rail-foot small').title = state.role === 'admin' ? 'Organization admin' : 'Internal user';
 }
 

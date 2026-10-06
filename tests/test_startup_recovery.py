@@ -109,8 +109,12 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
         def close(self): calls.append('closed')
         def run_conversation(self, *args, **kwargs):
             assert any(e[2].get('phase') == 'execution_started' for e in events)
+            instructions = kwargs['system_message']
+            assert 'before the first tool call' in instructions
+            assert 'Do not send only a status tag as the opening' in instructions
+            assert 'Before delegating to agents' in instructions
             calls.append('inference')
-            self.commentary('<status>Auditing UI and schema changes</status>')
+            self.commentary('<status>Auditing UI and schema changes</status>I’m checking the UI and schema before making changes.')
             self.commentary('<status>Verifying the corrected behavior</status>One public milestone.',
                             already_streamed=False)
             return {'final_response': '<status>Finishing the task</status>Done',
@@ -133,7 +137,7 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     monkeypatch.setenv('HERMES_HOME', '/home')
     monkeypatch.chdir(tmp_path)
-    spec = {'broker_url':'https://example.test','repo_url':'','model':'test','max_iterations':0,'timeout':None,'prompt':'Question'}
+    spec = {'run_id':'startup-test','broker_url':'https://example.test','repo_url':'','model':'test','max_iterations':0,'timeout':None,'prompt':'Question'}
     assert agent.run(spec) == 75
     assert calls == ['closed']
     assert events[-1][3]['startup_retry'] == {'version':1,'stage':'workspace_tools','reason':'HTTP 503'}
@@ -152,7 +156,8 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     assert not any(e[3].get('startup_retry') for e in events)
     assert [(kind, message) for kind, message, data, _ in events if data.get('phase') == 'focus'] == [
         ('status', 'Auditing UI and schema changes'), ('status', 'Verifying the corrected behavior')]
-    assert [message for kind, message, _, _ in events if kind == 'message'] == ['One public milestone.']
+    assert [message for kind, message, _, _ in events if kind == 'message'] == [
+        'I’m checking the UI and schema before making changes.', 'One public milestone.']
     assert [message for kind, message, _, _ in events if kind == 'final'] == ['Done']
     assert (tmp_path / 'artifacts/result.md').read_text() == 'Done'
 

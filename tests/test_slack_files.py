@@ -129,7 +129,8 @@ def test_context_recovers_mention_files_and_only_imports_prior_files_from_invoke
     earlier = '1790718000.123456'
     other_file = {**FILE, 'id': 'F87654321', 'url_private': 'https://evil.example/ignored'}
     history = [{'ts': earlier, 'text': 'Original screenshot', 'user': 'U87654321', 'files': [other_file]},
-               {'ts': ROOT, 'text': 'Inspect this', 'user': 'U12345678', 'files': [FILE]},
+               {'ts': ROOT, 'thread_ts': earlier if threaded else ROOT,
+                'text': 'Inspect this', 'user': 'U12345678', 'files': [FILE]},
                {'ts': '1790719999.123456', 'text': 'Future file', 'user': 'U12345678', 'files': [{**FILE, 'id': 'F99999999'}]}]
     calls, _ = provider(app, monkeypatch, history=history)
     # app_mention can omit files; recover them from the bounded Slack read.
@@ -174,8 +175,13 @@ def test_slack_image_actual_download_limit_and_connection_changes(slack_app, mon
         asyncio.run(app.state.slack.files.read(FILE['id'], 'T87654321'))
 
 
-def test_slack_images_require_file_scope_and_existing_message_authorization(slack_app):
+@pytest.mark.parametrize('scopes', ['', 'reactions:write'])
+def test_slack_images_check_live_access_when_saved_scopes_are_stale(slack_app, monkeypatch, scopes):
     app, client, runs, _ = slack_app
+    calls, _ = provider(app, monkeypatch)
+    app.state.connectors.save('slack', {'access_token': 'user-token', 'kind': 'oauth',
+        'bot': {'access_token': 'bot-token', 'team': {'id': 'T12345678'},
+                'bot_user_id': 'U99999999', 'scope': scopes}}, 'Test')
     client.post('/hooks/slack/events', **signed(event(type='message', text='', files=[FILE])))
     assert not runs  # Unaddressed channel uploads do not start sessions.
     client.post('/hooks/slack/events', **signed(event(files=[FILE])))
@@ -183,4 +189,73 @@ def test_slack_images_require_file_scope_and_existing_message_authorization(slac
     app.state.store.claim_message(run_id)
     asyncio.run(app.state.slack.files.prepare(run_id))
     message = app.state.store.messages(run_id)[0]
-    assert not message['attachments'] and 'files:read' in message['content']
+    assert calls == [FILE['id']]
+    assert message['attachments'][0]['preview_url']
+    assert 'could not be read' not in message['content']
+
+
+@pytest.mark.parametrize('saved_scope', ['', 'files:read'])
+@pytest.mark.parametrize('error,expected', [
+    ('missing_scope', 'Reconnect Slack with files:read permission'),
+    ('file_not_found', 'Could not read this Slack attachment'),
+    ('invalid_auth', 'Could not read this Slack attachment'),
+])
+def test_slack_file_access_errors_come_from_live_api(slack_app, monkeypatch, saved_scope, error, expected):
+    app, client, runs, _ = slack_app
+    app.state.connectors.save('slack', {'access_token': 'user-token', 'kind': 'oauth',
+        'bot': {'access_token': 'bot-token', 'team': {'id': 'T12345678'},
+                'bot_user_id': 'U99999999', 'scope': saved_scope}}, 'Test')
+    client.post('/hooks/slack/events', **signed(event(files=[FILE])))
+    run_id = runs[0]['id']
+    app.state.store.claim_message(run_id)
+    calls = []
+
+    def transport(request):
+        assert str(request.url).startswith('https://slack.com/api/files.info?')
+        assert request.headers['Authorization'] == 'Bearer bot-token'
+        calls.append(request.url.params['file'])
+        return httpx.Response(200, json={'ok': False, 'error': error})
+
+    # Exercise the real connector's error handling, not only the SDK adapter.
+    from app.connectors import Connectors
+    monkeypatch.setattr(app.state.connectors, 'request',
+                        Connectors.request.__get__(app.state.connectors))
+    gateway(monkeypatch, transport)
+    asyncio.run(app.state.slack.files.prepare(run_id))
+    message = app.state.store.messages(run_id)[0]
+    assert calls == [FILE['id']]
+    assert not message['attachments'] and expected in message['content']
+    assert 'Do not guess the missing content' in message['content']
+    assert 'bot-token' not in message['content']
+    if error != 'missing_scope':
+        assert 'files:read' not in message['content']
+
+
+@pytest.mark.parametrize('change', ['paused', 'team_changed'])
+@pytest.mark.parametrize('during_read', [False, True])
+def test_live_file_scope_check_preserves_connection_guards(slack_app, monkeypatch, change, during_read):
+    app, *_ = slack_app
+    calls, _ = provider(app, monkeypatch)
+    original = app.state.connectors.request
+
+    def revoke():
+        if change == 'paused':
+            app.state.store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0) "
+                                    "ON CONFLICT(provider) DO UPDATE SET enabled=0")
+        else:
+            app.state.connectors.save('slack', {'kind': 'oauth', 'bot': {
+                'access_token': 'replacement-token', 'team': {'id': 'T87654321'},
+                'bot_user_id': 'U99999999', 'scope': 'files:read'}}, 'Other team')
+
+    async def request(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        revoke()
+        return result
+
+    if during_read:
+        monkeypatch.setattr(app.state.connectors, 'request', request)
+    else:
+        revoke()
+    with pytest.raises(ValueError, match='Slack access changed'):
+        asyncio.run(app.state.slack.files.read(FILE['id'], 'T12345678'))
+    assert calls == ([FILE['id']] if during_read else [])

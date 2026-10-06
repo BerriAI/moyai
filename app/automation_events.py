@@ -68,8 +68,12 @@ class AutomationEvents:
             revision INTEGER NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
             detail TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
         self.store.execute('CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(status,received_at)')
+        self.store.execute('''CREATE TABLE IF NOT EXISTS automation_session_cursors (
+            automation_id TEXT PRIMARY KEY REFERENCES automations(id), message_id INTEGER NOT NULL)''')
 
     def source_ready(self, row, event):
+        if event.provider == 'session':
+            return True
         if event.provider == 'slack':
             c = self.automations.connectors
             bot = c.slack_installation()
@@ -90,7 +94,7 @@ class AutomationEvents:
             matching = [(key,t) for key,t in configured if t.provider == provider]
             providers.append({'provider':provider, 'ready':all(self.source_ready(row,t) for _,t in matching),
                 'url': (self.automations.settings.public_url.rstrip('/') + '/hooks/automations/' + row['id'] + '/' + provider)
-                    if provider != 'slack' and row['owner_id'] == actor else '',
+                    if provider not in {'slack','session'} and row['owner_id'] == actor else '',
                 'examples':[{'trigger_id':key,'payload':example(t),'event_header':t.event.split('.')[0] if provider == 'github' else ''} for key,t in matching]})
         return {'ready':self.ready(row),'providers':providers,
                 'deliveries': self.store.rows("""SELECT e.status,COALESCE(NULLIF(e.detail,''),a.detail,'') AS detail,e.received_at,a.run_id FROM automation_events e
@@ -115,35 +119,101 @@ class AutomationEvents:
         return matched[0][1] | {'matched_trigger_ids':[key for key,_ in matched]}
 
     async def accept(self, row, delivery, context):
-        occurrence = 'event:' + row['id'] + ':' + hashlib.sha256(delivery.encode()).hexdigest()
-        stamp = now()
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            if conn.execute('SELECT 1 FROM automation_events WHERE occurrence=?', (occurrence,)).fetchone():
-                result = 'duplicate'
-            else:
-                current = conn.execute('SELECT revision,paused FROM automations WHERE id=?', (row['id'],)).fetchone()
-                # Bounded intake, including ignored deliveries, protects the receiver.
-                minute = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-                if conn.execute('SELECT COUNT(*) FROM automation_events WHERE automation_id=? AND received_at>?', (row['id'], minute)).fetchone()[0] >= 120:
-                    raise HTTPException(429, 'Event delivery limit reached. Retry later.', headers={'Retry-After': '60'})
-                pending = bool(context and not current['paused'] and current['revision'] == row['revision'])
-                if pending and conn.execute("SELECT COUNT(*) FROM automation_events WHERE status='pending'").fetchone()[0] >= 1000:
-                    raise HTTPException(503, 'The event inbox is full. Retry later.', headers={'Retry-After': '60'})
-                status = 'pending' if pending else 'ignored'
-                detail = 'Waiting to run.' if pending else ('Automation paused or changed.' if current['paused'] or current['revision'] != row['revision'] else 'Event did not match the filters.')
-                conn.execute('INSERT INTO automation_events VALUES(?,?,?,?,?,?,?,?)',
-                             (occurrence, row['id'], row['revision'], json.dumps(context if pending else {}), status, detail, stamp,
-                              (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()))
-                result = 'accepted' if pending else 'ignored'
+            result = self.accept_in(conn, row, delivery, context)
         # Do not ACK before the local durable write / optional volume checkpoint.
         await self.automations.checkpoints.flush()
         return {'status': result}
+
+    def accept_in(self, conn, row, delivery, context):
+        """Caller owns the write transaction, including any native cursor advance."""
+        occurrence = 'event:' + row['id'] + ':' + hashlib.sha256(delivery.encode()).hexdigest()
+        if conn.execute('SELECT 1 FROM automation_events WHERE occurrence=?', (occurrence,)).fetchone():
+            return 'duplicate'
+        current = conn.execute('SELECT revision,paused FROM automations WHERE id=?', (row['id'],)).fetchone()
+        # Bounded intake, including ignored webhook deliveries, protects the receiver.
+        minute = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        if conn.execute('SELECT COUNT(*) FROM automation_events WHERE automation_id=? AND received_at>?', (row['id'], minute)).fetchone()[0] >= 120:
+            raise HTTPException(429, 'Event delivery limit reached. Retry later.', headers={'Retry-After': '60'})
+        pending = bool(context and not current['paused'] and current['revision'] == row['revision'])
+        if pending and conn.execute("SELECT COUNT(*) FROM automation_events WHERE status='pending'").fetchone()[0] >= 1000:
+            raise HTTPException(503, 'The event inbox is full. Retry later.', headers={'Retry-After': '60'})
+        status = 'pending' if pending else 'ignored'
+        detail = 'Waiting to run.' if pending else ('Automation paused or changed.' if current['paused'] or current['revision'] != row['revision'] else 'Event did not match the filters.')
+        conn.execute('INSERT INTO automation_events VALUES(?,?,?,?,?,?,?,?)',
+                     (occurrence, row['id'], row['revision'], json.dumps(context if pending else {}), status, detail, now(),
+                      (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()))
+        return 'accepted' if pending else 'ignored'
+
+    @staticmethod
+    def seed_session_cursor(conn, automation_id):
+        conn.execute('''INSERT INTO automation_session_cursors VALUES(?,(SELECT COALESCE(MAX(id),0) FROM messages))
+            ON CONFLICT(automation_id) DO UPDATE SET message_id=excluded.message_id''', (automation_id,))
+
+    @staticmethod
+    def human_session(conn, run_id):
+        # Workers are never eligible. Follow side-chat ancestry too, failing
+        # closed on broken, cyclic or excessively deep lineage.
+        seen = set()
+        while run_id:
+            if run_id in seen or len(seen) >= 100:
+                return False
+            seen.add(run_id)
+            run = conn.execute('SELECT parent_run_id,side_chat_of,chat_enabled FROM runs WHERE id=?', (run_id,)).fetchone()
+            if not run or not run['chat_enabled'] or run['parent_run_id']:
+                return False
+            if conn.execute('SELECT 1 FROM automation_runs WHERE run_id=?', (run_id,)).fetchone():
+                return False
+            run_id = run['side_chat_of']
+        return True
+
+    def session_payload(self, conn, message):
+        prior = conn.execute('''SELECT role,substr(content,1,1000) AS content,length(content) AS size FROM messages
+            WHERE run_id=? AND id<? AND status!='deleted' AND role IN ('user','assistant')
+            ORDER BY id DESC LIMIT 11''', (message['run_id'], message['id'])).fetchall()
+        return {'event':'message.posted', 'session_id':message['run_id'], 'message_id':message['id'],
+                'user_id':message['user_id'], 'body':message['content'],
+                'url':self.automations.settings.public_url.rstrip('/') + '/#run=' + message['run_id'],
+                'conversation':[{'role':m['role'],'content':m['content']} for m in reversed(prior[:10])],
+                'context_truncated':len(prior) > 10 or any(m['size'] > 1000 for m in prior[:10]) or len(message['content']) > 4000}
+
+    async def capture_sessions(self):
+        changed = False
+        for candidate in self.store.rows('SELECT id FROM automations WHERE paused=0'):
+            with self.store.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute('SELECT * FROM automations WHERE id=?', (candidate['id'],)).fetchone()
+                if not row or row['paused'] or not any(t.provider == 'session' for _,t in sources(row)):
+                    continue
+                cursor = conn.execute('SELECT message_id FROM automation_session_cursors WHERE automation_id=?', (row['id'],)).fetchone()
+                if not cursor:
+                    # Upgraded/uninitialized sources start now, never with history.
+                    self.seed_session_cursor(conn, row['id'])
+                    changed = True
+                    continue
+                messages = conn.execute('SELECT * FROM messages WHERE id>? ORDER BY id LIMIT 100', (cursor['message_id'],)).fetchall()
+                for message in messages:
+                    if (message['role'] == 'user' and message['status'] != 'deleted' and message['user_id']
+                            and message['content'].strip() and self.human_session(conn, message['run_id'])):
+                        context = self.match(row, 'session', self.session_payload(conn, message))
+                        if context:
+                            try:
+                                self.accept_in(conn, row, 'session:' + str(message['id']), context)
+                            except HTTPException as exc:
+                                if exc.status_code not in {429,503}:
+                                    raise
+                                break  # Commit earlier progress; retry this unaccepted message.
+                    conn.execute('UPDATE automation_session_cursors SET message_id=? WHERE automation_id=?', (message['id'], row['id']))
+                    changed = True
+        if changed:
+            await self.automations.checkpoints.flush()
 
     async def dispatch(self):
         if self.lock.locked():
             return
         async with self.lock:
+            await self.capture_sessions()
             # One head item per automation avoids a busy inbox starving others.
             rows = self.store.rows("""SELECT e.* FROM automation_events e WHERE e.status='pending' AND e.rowid IN
                 (SELECT MIN(rowid) FROM automation_events WHERE status='pending' GROUP BY automation_id)
@@ -176,6 +246,8 @@ class AutomationEvents:
     async def receive(self, automation_id, request, provider=''):
         row = self.automations.row(automation_id)
         provider = self.provider(row, provider)
+        if provider == 'session':
+            raise HTTPException(404, 'Session events are captured internally.')
         if provider == 'slack':
             raise HTTPException(404, 'Use the installed Slack app event endpoint.')
         keys = self.store.rows('SELECT encrypted FROM automation_webhooks WHERE automation_id=? AND provider=?', (automation_id, provider))
@@ -268,7 +340,7 @@ class AutomationEvents:
             row = self.automations.row(automation_id)
             self.automations.require_owner(row, request)
             provider = self.provider(row, body.provider)
-            if provider == 'slack':
+            if provider in {'slack','session'}:
                 raise HTTPException(409, 'This automation does not use a webhook secret.')
             if provider in {'linear','pagerduty'} and not body.secret:
                 raise HTTPException(422, 'Enter the signing secret from your provider webhook settings.')

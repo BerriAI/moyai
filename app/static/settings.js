@@ -31,6 +31,7 @@ function settingsIcon(view) {
     environments:'<path d="M3 8h18v12H3Zm0 0V4h7l3 4m-5 6 2 2-2 2m5-2h4"/>',
     users:'<circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3m2-15a3 3 0 0 1 0 6m4 9v-3a6 6 0 0 0-3-5"/>',
     spend:'<path d="M4 20V10m6 10V4m6 16v-7m5 7H2"/>',
+    adoption:'<path d="m3 17 6-6 4 4L21 7m-6 0h6v6"/>',
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[view] || ''}</svg>`;
 }

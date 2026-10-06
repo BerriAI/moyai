@@ -317,6 +317,8 @@ class Automations:
                 if not self.events.ready(row):
                     raise HTTPException(409, 'Configure the webhook or Slack connection before enabling this trigger.')
                 self.validate_execution(Definition.model_validate_json(row['definition']), row['owner_id'])
+                if any(t.event and t.event.provider == 'session' for t in Definition.model_validate_json(row['definition']).triggers):
+                    self.events.seed_session_cursor(conn, automation_id)
             conn.execute("UPDATE automations SET paused=?,revision=revision+1,updated_at=?,sync_error='' WHERE id=?",
                          (body.paused, now(), automation_id))
             result = dict(conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone())

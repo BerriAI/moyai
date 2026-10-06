@@ -33,7 +33,7 @@ def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     sign_in(app,client)
     run = active(app)
     names = {t['name'] for t in client.get('/broker/'+run['id']+'/tools', headers={'Authorization':'Bearer capability'}).json()}
-    assert {'skills_save','skills_load','skills_read_file'} <= names
+    assert {'skills_search','skills_save','skills_load','skills_read_file'} <= names
     saved = call(client,run,**form()).json()
     assert saved['saved'] and saved['reference']=='personal:team-review' and saved['revision']==1
     assert client.get('/api/skills/'+saved['id']).json()['instructions']==form()['instructions']

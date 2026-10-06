@@ -120,7 +120,7 @@ def test_writes_execute_without_approval(workspace, monkeypatch, role, provider,
         assert client.post('/api/login', json={'password': 'member-password'}).json()['role'] == 'member'
         client.headers['X-CSRF-Token'] = client.get('/api/session').json()['csrf']
     calls = []
-    async def call(name, arguments):
+    async def call(name, arguments, **kwargs):
         assert app.state.store.run(run_id)['status'] == 'running'
         assert not app.state.store.approvals(run_id)
         calls.append((name, arguments))

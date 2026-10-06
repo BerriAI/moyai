@@ -4,6 +4,122 @@ from uuid import uuid4
 from app.db import now
 from test_workspace import workspace
 from test_spend import sign_in
+from test_slack import slack_app, event, signed
+from test_slack_chat import start
+from app.db import Store
+
+
+def mine(client, **params):
+    response = client.get('/api/runs', params={'scope': 'mine', **params})
+    assert response.status_code == 200
+    return {row['id'] for row in response.json()}
+
+
+def test_my_sessions_created_or_participated_not_viewed_or_assistant(workspace, monkeypatch):
+    app, client = workspace
+    store = app.state.store
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    own = client.post('/api/runs', json={'prompt': 'My created session'}).json()['id']
+    other = store.create_run('Shared session', '', 'demo', [], chat_enabled=True, user_id='google:alice')['id']
+    unrelated = store.create_run('Unrelated session', '', 'demo', [], chat_enabled=True, user_id='google:alice')['id']
+    store.execute("INSERT INTO messages(run_id,role,content,status,created_at,user_id) VALUES(?,'assistant','Attributed answer','completed',?,?)", (unrelated, now(), 'google:bob'))
+    assert mine(client) == {own}
+    assert client.get('/api/runs/'+other).status_code == 200
+    assert mine(client, focus=other, user_id='google:alice') == {own}
+    assert client.post('/api/runs/'+other+'/messages', json={'content': 'Joining via shared link', 'client_id': 'joining-shared'}).status_code == 202
+    assert mine(client) == {own, other}
+    store.execute("UPDATE messages SET status='deleted' WHERE run_id=? AND user_id='google:bob'", (other,))
+    store.execute("UPDATE runs SET active_user_id='google:alice' WHERE id=?", (other,))
+    assert mine(client) == {own, other}
+    assert {r['id'] for r in client.get('/api/runs').json()} == {own, other}
+    assert client.get('/api/runs?scope=all').status_code == 403
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    assert {r['id'] for r in client.get('/api/runs?scope=all').json()} == {own, other, unrelated}
+    assert {r['id'] for r in client.get('/api/runs').json()} == {own, other, unrelated}
+    assert mine(client) == {other, unrelated}
+    assert client.get('/api/runs?scope=invalid').status_code == 422
+    sign_in(app, client, 'nobody', 'nobody@berri.ai')
+    assert mine(client) == set()
+    assert client.get('/api/runs').json() == []
+    assert client.get('/api/runs?scope=all&role=admin&user_id=google:alice').status_code == 403
+    client.cookies.clear()
+    assert client.get('/api/runs?scope=mine').status_code == 401
+    assert client.get('/api/runs?scope=all').status_code == 401
+    reopened = Store(app.state.settings.data_dir)
+    assert set(reopened.sidebar_run_ids('google:bob')) == {own, other}
+    assert reopened.sidebar_run_ids('') == []
+
+
+def test_all_sessions_rechecks_role_after_demotion_without_new_login(workspace):
+    app, client = workspace
+    store = app.state.store
+    own = store.create_run('Bob session', '', 'demo', [], user_id='google:bob')['id']
+    other = store.create_run('Alice session', '', 'demo', [], user_id='google:alice')['id']
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    assert client.put('/api/admin/users/role', json={
+        'email': 'bob@berri.ai', 'role': 'admin', 'revision': 0}).status_code == 200
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    assert {row['id'] for row in client.get('/api/runs?scope=all').json()} == {own, other}
+    assert client.put('/api/admin/users/role', json={
+        'email': 'bob@berri.ai', 'role': 'member', 'revision': 1}).status_code == 200
+    assert client.get('/api/runs?scope=all').status_code == 403
+    assert {row['id'] for row in client.get('/api/runs').json()} == {own}
+
+
+def test_my_sessions_filters_before_limit_and_guards_folder_and_focus(workspace):
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    old = store.create_run('Old matching session', '', 'demo', [], user_id='google:bob')['id']
+    for i in range(101):
+        other = store.create_run(f'Unrelated {i}', '', 'demo', [], user_id='google:alice')['id']
+    folder = client.post('/api/session-folders', json={'name': 'Research'}).json()['id']
+    assert client.put('/api/runs/'+other+'/folder', json={'folder_id': folder}).status_code == 200
+    assert mine(client, focus=other) == {old}
+    assert {r['id'] for r in client.get('/api/runs', params={'focus': other}).json()} == {old}
+    assert client.put('/api/runs/'+old+'/folder', json={'folder_id': folder}).status_code == 200
+    for i in range(101):
+        store.create_run(f'New matching {i}', '', 'demo', [], user_id='google:bob')
+    assert len(mine(client)) == 101 and old in mine(client)
+    assert other not in mine(client, focus=other)
+    assert client.put('/api/runs/'+old+'/folder', json={'folder_id': None}).status_code == 200
+    assert old not in mine(client)
+    assert old in mine(client, focus=old)
+
+
+def test_my_sessions_child_participant_includes_parent(workspace, monkeypatch):
+    app, client = workspace
+    parent, child, _ = seeded_group(app)
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    assert mine(client, focus=child) == set()
+    assert client.post('/api/runs/'+child+'/messages', json={'content': 'Participate in agent chat', 'client_id': 'child-mine-message'}).status_code == 202
+    assert mine(client) == {parent}
+    row = client.get('/api/runs?scope=mine').json()[0]
+    assert row['children'][0]['id'] == child
+
+
+def test_my_sessions_slack_participation_follows_persisted_identity_links(slack_app):
+    app, client, run_id = start(slack_app)
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    assert mine(client) == set()
+    payload = event(event_id='MineSecondSender', text='<@U99999999> Joining this session')
+    payload['event'].update(user='U87654321', ts='1790720765.000001', thread_ts=store.slack_source(run_id)['thread_ts'])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert store.messages(run_id)[-1]['user_id'] == 'slack:T12345678:U87654321'
+    assert mine(client) == set()  # Unresolved Slack profiles cannot guess identity.
+    store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:bob', 'slack:T12345678:U87654321'))
+    assert mine(client) == {run_id}
+    store.execute('UPDATE users SET linked_user_id=NULL WHERE id=?', ('slack:T12345678:U87654321',))
+    assert mine(client) == set()
+    # The creator qualifies even without any messages (e.g. control-only creation).
+    creator = store.run(run_id)['owner_id']
+    store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:bob', creator))
+    store.execute('DELETE FROM messages WHERE run_id=?', (run_id,))
+    assert mine(client) == {run_id}
+
 
 
 def seeded_group(app):

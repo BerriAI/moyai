@@ -59,7 +59,11 @@ def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace,
     headers = {'Authorization': 'Bearer capability', 'Content-Type': CONTENT_TYPE}
     response = client.post(endpoint, content=packet, headers=headers)
     assert response.status_code == 200 and '[DONE]' in response.text
-    assert received[0]['messages'] == payload['messages']
+    guidance, *forwarded = received[0]['messages']
+    assert guidance['role'] == 'system' and guidance['content'].startswith('MOYAI SKILLS FOR THE CURRENT REQUESTER.')
+    assert json.loads(guidance['content'].split('\n', 1)[1]) == {
+        'turn_id': run['active_message_id'], 'matches': [], 'loaded': [], 'unavailable': []}
+    assert forwarded == payload['messages']
     assert received[0]['model'] == 'openai/gpt-6-astra'
     record = app.state.store.rows('SELECT * FROM model_requests')[0]
     assert record['user_id'] == 'google:alice' and record['cost'] == '0.000123'
@@ -76,7 +80,7 @@ def test_sealed_tool_writes_execute_directly_without_approval(workspace, monkeyp
     app, client = workspace
     run_id, headers = cloud_capability(app, ['slack'])
     calls = []
-    async def send(name, arguments):
+    async def send(name, arguments, **kwargs):
         calls.append((name,arguments))
         return {'ok': True}
     monkeypatch.setattr(app.state.connectors,'call',send)

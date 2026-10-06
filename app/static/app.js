@@ -110,7 +110,24 @@ async function navigate(view) {
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='adoption')await renderAdoption();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
 }
-async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const [runs,folders]=await Promise.all([api('/api/runs'+(focus?'?focus='+encodeURIComponent(focus):'')),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+function restoreSessionScope(){
+  const canViewAll=state.authenticated&&state.role==='admin';
+  state.sessionScope='mine';
+  state.sessionScopeKey='moyai-session-scope:'+state.userId;
+  try{if(canViewAll&&localStorage.getItem(state.sessionScopeKey)==='all')state.sessionScope='all';else if(!canViewAll)localStorage.setItem(state.sessionScopeKey,'mine');}catch{}
+  $('#session-scope').innerHTML='<option value="mine">My sessions</option>'+(canViewAll?'<option value="all">All sessions</option>':'');
+  $('#session-scope').value=state.sessionScope;
+  $('#session-scope').disabled=!canViewAll;
+  $('#session-scope').title=state.userId?.startsWith('google:')?'Sessions you created or messaged in, including linked Slack activity. Opening a link alone does not count.':'Sessions created or messaged in by this shared login. Sign in with Google for a personal view.';
+}
+async function changeSessionScope(){
+  state.sessionScope=state.role==='admin'&&$('#session-scope').value==='all'?'all':'mine';
+  $('#session-scope').value=state.sessionScope;
+  try{localStorage.setItem(state.sessionScopeKey,state.sessionScope);}catch{}
+  state.runs=[];renderSidebar();
+  try{await refreshRuns();}catch(error){showError(error);}
+}
 async function renderHome(){
   const version=state.pageVersion;
   const [,connections,environments]=await Promise.all([refreshRuns(),api('/api/connections'),api('/api/environments')]);
@@ -364,6 +381,7 @@ $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).cat
 $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const move=e.target.closest('[data-move-session]');if(move){const run=state.runs.find(r=>r.id===move.dataset.moveSession);if(run)moveSessionToFolder(run);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
 bindSessionFolderDragDrop($('#session-list'));
+$('#session-scope').onchange=changeSessionScope;
 $('#session-search').oninput=()=>{$('.session-search').classList.toggle('has-query',!!$('#session-search').value);renderSidebar();};
 const wideRail=()=>!matchMedia('(max-width:850px)').matches;$('#open-sidebar').onclick=()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);};$('#search-sessions').onclick=()=>{if(!wideRail())setSidebar(true);else openSessionSearch();};$('#session-search').onblur=()=>{if(!$('#session-search').value)$('.session-search').classList.remove('is-open');};$('#close-sidebar').onclick=()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);};$('#sidebar-scrim').onclick=()=>setSidebar(false);
 window.addEventListener('keydown',e=>{if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();$('#new-task').click();}});

@@ -15,7 +15,7 @@ def folder(client, name='Today'):
 
 
 def run(app, title='Fix the sidebar'):
-    return app.state.store.create_run(title, '', 'demo', [], chat_enabled=True)
+    return app.state.store.create_run(title, '', 'demo', [], chat_enabled=True, user_id='google:maya')
 
 
 def assignment(client, run_id):
