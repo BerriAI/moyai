@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
 from .db import now
+from .identities import PROFILE_MAX_AGE_SECONDS
 
 
 # Inference keys retain fixed origins/routes and never enter the sandbox.
@@ -295,7 +296,7 @@ class Credentials:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(actor['profile_checked_at'])).total_seconds()
         except (ValueError, TypeError):
             return False
-        return 0 <= age < 3600 and owner['email'] == actor['email']
+        return 0 <= age < PROFILE_MAX_AGE_SECONDS and owner['email'] == actor['email']
 
     def audit_in(self, conn, actor, secret, action, run_id=''):
         conn.execute('INSERT INTO credential_audit(actor_id,secret_id,action,run_id,created_at) VALUES(?,?,?,?,?)',

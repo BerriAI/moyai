@@ -1,7 +1,9 @@
 import asyncio
 import sqlite3
 import time
+from datetime import datetime, timezone
 from threading import Event
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -10,6 +12,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.db import Store
 from app.main import create_app
+from app.memory import Note
 from test_slack import event, signed, slack_app, wait_for
 from test_spend import sign_in
 
@@ -335,3 +338,93 @@ def test_spend_identities_exclude_unrelated_channel_participants(profiles):
     google(app.state.store)
     app.state.store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:alice', stranger))
     assert stranger in {row['id'] for row in app.state.spend.report()['identities']}
+
+
+@pytest.fixture
+def memory_profiles(profiles, monkeypatch):
+    from app import credentials, identities
+
+    app, control = profiles
+    clock = [time.time()]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromtimestamp(clock[0], tz)
+
+    monkeypatch.setattr(identities, 'time', SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(identities, 'now', lambda: Clock.now(timezone.utc).isoformat())
+    monkeypatch.setattr(credentials, 'datetime', Clock)
+    app.state.settings.google_client_id = 'test-client'
+    app.state.settings.google_client_secret = 'test-secret'
+    google(app.state.store)
+    actor = sender(app.state.store)
+    run = app.state.store.run(app.state.store.rows('SELECT id FROM runs')[0]['id'])
+    sync(app)
+    assert len(app.state.memory.tools(run)) == 3
+    app.state.memory.save('google:alice', Note(key='response-style', title='Response style',
+        content='Use a 25-word TLDR.', request_id='response-style-demo'))
+    return app, control, clock, actor, run
+
+
+def test_automatic_refresh_keeps_memory_available_across_hours(memory_profiles):
+    app, control, clock, actor, run = memory_profiles
+    for _ in range(4):
+        clock[0] += 31 * 60
+        assert len(app.state.memory.tools(run)) == 3  # Refresh happens before expiry.
+        sync(app)
+        assert len(app.state.memory.tools(run)) == 3
+        assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
+        assert '25-word TLDR' in app.state.memory.context(run)
+        calls = len(control['calls'])
+        sync(app)
+        assert len(control['calls']) == calls  # No request on every worker tick.
+    assert control['calls'] == [USER] * 5
+    assert account(app, actor)['linked_user_id'] == 'google:alice'
+    assert len(app.state.store.rows('SELECT * FROM identity_audit')) == 1
+
+
+def test_old_daily_timer_recovers_expired_memory_automatically(memory_profiles):
+    app, control, clock, actor, run = memory_profiles
+    app.state.store.execute('UPDATE users SET profile_next_check=? WHERE id=?',
+                            (int(clock[0]) + 86400, actor))
+    clock[0] += 2 * 3600
+    assert account(app, actor)['link_status'] == 'linked'
+    assert not app.state.memory.tools(run)
+    sync(app)
+    assert control['calls'] == [USER, USER]
+    assert len(app.state.memory.tools(run)) == 3
+    assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
+
+
+def test_refresh_failure_blocks_memory_and_recovers_after_retry(memory_profiles):
+    app, control, clock, actor, run = memory_profiles
+    control['fail'] = True
+    clock[0] += 31 * 60
+    sync(app)
+    assert not app.state.memory.tools(run)
+    assert app.state.memory.context(run) == ''
+    assert not account(app, actor)['profile_eligible']
+    calls = len(control['calls'])
+    clock[0] += 299
+    sync(app)
+    assert len(control['calls']) == calls
+    control['fail'] = False
+    clock[0] += 2
+    sync(app)
+    assert len(control['calls']) == calls + 1
+    assert len(app.state.memory.tools(run)) == 3
+
+
+@pytest.mark.parametrize('change', ['deleted', 'email'])
+def test_refresh_revokes_personal_access_for_changed_profiles(memory_profiles, change):
+    app, control, clock, actor, run = memory_profiles
+    if change == 'deleted':
+        control['profile']['deleted'] = True
+    else:
+        control['profile']['profile']['email'] = 'someone-else@berri.ai'
+    clock[0] += 31 * 60
+    sync(app)
+    assert not app.state.memory.tools(run)
+    assert not app.state.credentials.same_requester('google:alice', actor)
+    assert account(app, actor)['linked_user_id'] == 'google:alice'

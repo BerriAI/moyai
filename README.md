@@ -165,6 +165,16 @@ model-supplied user ID. Each model call rechecks requester, settings, expiry,
 repository scope and current note revisions. Subagents and automation runs can
 recall authorized notes, but cannot automatically write personal memories.
 
+Slack profile verification refreshes automatically every 30 minutes, ahead of
+its one-hour authorization limit; users do not need to sign in again. The worker
+also refreshes older eligible profiles still carrying a daily refresh timer.
+Failed lookups retain the five-minute retry delay and disable personal access
+until verification succeeds.
+
+Run `uv run python scripts/memory_refresh_demo.py` to exercise recovery, refresh
+across two hours, and recall in a new session through the local broker. The demo
+uses a synthetic Slack profile and an advanced clock, without external calls.
+
 Notes (including titles and source quotes) are encrypted in the existing durable
 SQLite database. Preserve the database and encryption key across deployments;
 Temporal and sandbox snapshots are not the memory store. Retrieved note bodies
