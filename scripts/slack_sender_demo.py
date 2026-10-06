@@ -42,7 +42,7 @@ def demo(directory):
     values.update(data_dir=Path(directory), public_url='http://127.0.0.1:8796', auto_prepare_repositories=False)
     app = create_app(Settings(_env_file=None, **values))
     credentials = {'access_token': 'local-shared-user-placeholder', 'kind': 'oauth',
-                   'bot': {'access_token': 'local-bot-placeholder', 'scope': 'chat:write,im:write',
+                   'bot': {'access_token': 'local-bot-placeholder', 'scope': 'chat:write,im:write,im:history',
                            'bot_user_id': 'U99999999', 'team': {'id': 'T12345678'}}}
     state = {}
     lock = asyncio.Lock()
@@ -81,10 +81,13 @@ def demo(directory):
             def slack_api(request):
                 assert request.url.host == 'slack.com'
                 assert request.headers['Authorization'] == 'Bearer local-bot-placeholder'
-                body = json.loads(request.content)
+                body = json.loads(request.content) if request.content else dict(request.url.params)
                 requests.append({'method': request.url.path.rsplit('/', 1)[-1], **body})
                 if request.url.path.endswith('conversations.open'):
                     return httpx.Response(200, json={'ok': True, 'channel': {'id': 'D12345678'}})
+                if request.url.path.endswith('conversations.replies'):
+                    return httpx.Response(200, json={'ok': True, 'messages': [
+                        {'user': 'U99999999', 'text': requests[-2]['text']}]})
                 assert request.url.path.endswith('chat.postMessage')
                 return httpx.Response(200, json={'ok': True, 'channel': body['channel'],
                     'ts': '1790719999.123456', 'message': {'user': 'U99999999', 'text': body['text']}})
@@ -99,16 +102,23 @@ def demo(directory):
                     response = await client.post(f'/broker/{run_id}/tools/call',
                         headers={'Authorization': 'Bearer local-demo-capability'},
                         json={'name': 'slack_send', 'arguments': {'channel': 'U12345678', 'text': 'Hello from my chat'}})
+                    if step < 2:
+                        sent = response.json()
+                        read = await client.post(f'/broker/{run_id}/tools/call',
+                            headers={'Authorization': 'Bearer local-demo-capability'},
+                            json={'name': 'slack_thread', 'arguments': {'channel': sent['channel'],
+                                  'thread_ts': sent['ts'], 'as_bot': True}})
+                        assert read.json()['messages'][0]['text'] == sent['message']['text']
             response.raise_for_status()
             result = response.json()
             if step < 2:
                 name = 'Moe' if step == 0 else 'Tin'
                 assert result['message']['user'] == 'U99999999'
                 assert result['message']['text'] == name + ': Hello from my chat'
-                assert [r['method'] for r in requests] == ['conversations.open', 'chat.postMessage']
+                assert [r['method'] for r in requests] == ['conversations.open', 'chat.postMessage', 'conversations.replies']
                 output = {'title': name + ' requests a DM · delivered by Moyai Devin',
                           'message': result['message']['text'],
-                          'detail': 'conversations.open → bot DM D12345678 → chat.postMessage\n'
+                          'detail': 'Bot DM D12345678 · conversations.open → chat.postMessage → conversations.replies\n'
                                     'Sender credential: bot · Requester: ' + name + (' · Same chat; creator remains Moe' if step == 1 else '')}
             else:
                 assert 'Reconnect Slack' in result['error'] and not requests
