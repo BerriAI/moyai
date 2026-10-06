@@ -21,7 +21,7 @@ test('standalone Settings has working sections without depending on automations'
   const {context, elements} = setup();
   await context.renderSettings();
   const html = elements.get('#content').innerHTML;
-  for (const view of ['skills', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend']) {
+  for (const view of ['skills', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend', 'adoption']) {
     assert.match(html, new RegExp(`href="#${view}"`));
   }
   assert.doesNotMatch(html, /href="#automations"/);
@@ -41,7 +41,7 @@ test('Settings refreshes access and hides administrative sections for members', 
   const html = elements.get('#content').innerHTML;
   assert.equal(context.state.role, 'member');
   assert.match(html, /href="#connections"/);
-  assert.doesNotMatch(html, /href="#(?:users|spend|environments)"|settings-administration/);
+  assert.doesNotMatch(html, /href="#(?:users|spend|adoption|environments)"|settings-administration/);
 });
 
 test('a delayed Settings access check cannot overwrite a different page', async () => {

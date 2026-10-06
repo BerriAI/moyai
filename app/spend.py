@@ -236,6 +236,12 @@ class Spend:
             self.security.require(request, admin=True)
             return self.report(start, end)
 
+        @router.get('/api/admin/adoption')
+        async def adoption(request: Request, start: date | None = None, end: date | None = None):
+            self.security.require(request, admin=True)
+            from .adoption import report as adoption_report
+            return adoption_report(self.store, start, end)
+
         @router.post('/api/admin/spend/link-slack')
         async def link(body: IdentityLink, request: Request):
             self.security.require(request, mutation=True, admin=True)
