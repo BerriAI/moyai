@@ -661,9 +661,13 @@ def create_app(settings: Settings | None = None):
         run = require_run(run_id, request)
         body = await broker_body(request, '/control')
         if isinstance(body, dict) and body.get('version') == 2:
-            result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
+            if body.get('receipt_only') is True:
+                message_queue.acknowledge(run_id, run['active_message_id'], body.get('applied', []))
+                result = {'steer_message_id': None}
+            else:
+                result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
             await checkpoints.flush()
-            return result
+            return {**result, 'receipt_only_supported': True}
         target = message_queue.accept_steer(run_id, run['active_message_id'])
         if target:
             await checkpoints.flush()

@@ -150,6 +150,9 @@ class ActiveTurnSteering(AgentSteer):
         self.applied = set()
         self.generation = 0
         self.latest_input_id = None
+        self.poll_lock = threading.Lock()
+        self.pending_input = None
+        self.receipt_only_supported = False
 
     def receipts(self):
         with self.lock:
@@ -167,44 +170,90 @@ class ActiveTurnSteering(AgentSteer):
             yield generation
 
     def _listen(self, agent):
+        while True:
+            with self.lock:
+                if self.closed or self.requested:
+                    return
+            self._poll(agent, boundary=False)
+            with self.changed:
+                if not self.closed and not self.requested:
+                    self.changed.wait(timeout=0.2)
+
+    def close(self):
+        # In-flight reads may finish later. They check closed before delivery;
+        # a slow control server must not delay publishing the final answer.
         with self.changed:
-            while not self.closed and not self.requested:
-                self._poll(agent, boundary=False)
-                self.changed.wait(timeout=1)
+            self.closed = True
+            self.pending_input = None
+            self.changed.notify_all()
 
     def step(self, agent):
+        self._deliver(agent, boundary=True)
+        self._poll(agent, boundary=True)
+
+    def _deliver(self, agent, *, boundary):
         with self.lock:
-            if not self.closed and not self.requested:
-                self._poll(agent, boundary=True)
+            item = self.pending_input
+            if self.closed or self.requested or item is None:
+                return False
+            text = '[User correction to the current task]\n' + item['content']
+            accepted = agent.steer(text) if boundary else agent.redirect(text)
+            if accepted:
+                self.on_input(item)
+                self.applied.add(item['id'])
+                self.latest_input_id = item['id']
+                self.pending_input = None
+                self.generation += 1
+                self.notify()
+            return accepted
 
     def _poll(self, agent, *, boundary):
-        control = self.relay.control({'version': 2, 'applied': self.receipts()})
-        target = control.get('steer_message_id')
-        if type(target) is int and target > 0:
-            # Cross-requester/model handoffs still use a saved capability boundary.
-            # A stale HTTP handler can outlive its model call, so check Hermes too.
-            model_active = getattr(agent, '_model_request_active', None)
-            if boundary or (model_active and model_active.is_set()):
-                self.message_id, self.requested = target, True
-                self.generation += 1
-                agent.interrupt()
-                self.notify()
+        # Serialize network/preparation work separately from runtime state.
+        # A boundary can drain ready input even while this owner is blocked.
+        if not self.poll_lock.acquire(blocking=False):
             return
-        item = control.get('input')
-        if not isinstance(item, dict) or type(item.get('id')) is not int or not isinstance(item.get('content'), str):
-            return
-        if item['id'] in self.applied:
-            return  # Retried delivery after a lost acknowledgement.
         try:
-            self.prepare(item)
-        except Exception:
-            # Immutable attachment reads can retry; never deliver an incomplete input.
-            return
-        text = ('[User correction to the current task]\n' + item['content'])
-        accepted = agent.steer(text) if boundary else agent.redirect(text)
-        if accepted:
-            self.on_input(item)
-            self.applied.add(item['id'])
-            self.latest_input_id = item['id']
-            self.generation += 1
-            self.notify()
+            with self.lock:
+                if self.closed or self.requested:
+                    return
+                pending = self.pending_input is not None
+            if pending:
+                accepted = self._deliver(agent, boundary=boundary)
+            else:
+                control = self.relay.control({'version': 2, 'applied': self.receipts()})
+                with self.lock:
+                    if self.closed or self.requested:
+                        return
+                    self.receipt_only_supported = control.get('receipt_only_supported') is True
+                    target = control.get('steer_message_id')
+                    if type(target) is int and target > 0:
+                        # Never sample a model-active flag then globally interrupt
+                        # from the monitor: Hermes can start tools between them.
+                        # Reclassify at the next boundary, since model_switch can
+                        # make this a native input while tools are running.
+                        if boundary:
+                            self.message_id, self.requested = target, True
+                            self.generation += 1
+                            agent.interrupt()
+                            self.notify()
+                        return
+                    item = control.get('input')
+                    if (not isinstance(item, dict) or type(item.get('id')) is not int
+                            or not isinstance(item.get('content'), str) or item['id'] in self.applied):
+                        return
+                try:
+                    self.prepare(item)
+                except Exception:
+                    # Immutable reads can retry; never deliver incomplete input.
+                    return
+                with self.lock:
+                    if self.closed or self.requested:
+                        return
+                    self.pending_input = item
+                accepted = self._deliver(agent, boundary=boundary)
+            if accepted and self.receipt_only_supported:
+                # Old servers would also claim the next Slack input, so only
+                # use this optimization after explicit capability negotiation.
+                self.relay.control({'version': 2, 'applied': self.receipts(), 'receipt_only': True})
+        finally:
+            self.poll_lock.release()
