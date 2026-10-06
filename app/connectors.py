@@ -46,10 +46,11 @@ class LinearUpdateIssue(LinearIssue):
 class SlackThread(Args):
     channel: str = Field(pattern=r"^[CDG][A-Z0-9]{7,30}$")
     thread_ts: str = Field(pattern=r"^\d{10,16}\.\d{1,9}$")
+    as_bot: bool = Field(default=False, description="Use the Moyai Devin app identity to read its DMs, including verification of a sent DM. Otherwise use the shared read connection.")
 
 
 class SlackSend(Args):
-    channel: str = Field(pattern=r"^[CDG][A-Z0-9]{7,30}$")
+    channel: str = Field(pattern=r"^[CDGU][A-Z0-9]{7,30}$", description="For a DM, use the recipient's U-prefixed Slack user ID, not a D-prefixed conversation from shared search. C/G IDs must be accessible to the bot; D IDs must belong to the bot's own DM.")
     text: str = Field(min_length=1, max_length=10000)
 
 
@@ -71,8 +72,8 @@ TOOLS = {
     "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
     "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
     "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
-    "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation."),
-    "slack_send": ("slack", True, SlackSend, "Send a Slack message directly. No administrator approval step is required."),
+    "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation. Set as_bot=true to read or verify the app's own DMs."),
+    "slack_send": ("slack", True, SlackSend, "Send as the Moyai Devin app, never as the connected human. For DMs provide the recipient's U-prefixed user ID (search results expose channel.user for a one-to-one DM), not the shared account's D-prefixed conversation. Verify a sent DM with slack_thread using the returned channel and ts and as_bot=true. No administrator approval step is required. Missing bot access requires reconnecting Slack; never fall back to a human sender."),
     "notion_search": ("notion", False, Search, "Search Notion page titles visible to the connected integration (not full-text content)."),
     "notion_page": ("notion", False, NotionPage, "Read a Notion page's first 100 top-level blocks. Nested blocks are indicated, not expanded."),
     "notion_append": ("notion", True, NotionAppend, "Append a paragraph to a Notion page directly. No administrator approval step is required."),
@@ -97,6 +98,9 @@ class Connectors:
             row = connected.get(provider, {})
             credentials = json.loads(self.security.decrypt(row["encrypted"])) if row else {}
             identity = ("Shared user OAuth" if provider == "slack" else "OAuth connection") if credentials.get("kind") == "oauth" else ("Personal API key" if provider == "linear" else "Integration token")
+            if provider == 'slack':
+                identity = ('Moyai Devin app writes · shared account reads' if credentials.get('bot', {}).get('access_token')
+                            else 'Shared account reads · reconnect Slack for app writes')
             if provider == 'github':
                 identity = 'Organization GitHub App'
             result.append({"id": provider, "connected": bool(row), "scope": "organization",
@@ -248,9 +252,14 @@ class Connectors:
             raise ConnectorError('My Linear tickets requires an authenticated session owner.')
         provider, _, schema, _ = TOOLS[name]
         args = schema.model_validate(arguments).model_dump()
-        headers = self.headers(provider, await self.credentials(provider))
         if not self.allowed(name):
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
+        if provider == "slack" and (name == "slack_send" or args.get("as_bot")):
+            # Keep outbound identity independent of the shared search user's
+            # token, including its expiry/refresh. Never fall back to that user.
+            headers = {"Authorization": f"Bearer {await self.slack_bot_token()}"}
+        else:
+            headers = self.headers(provider, await self.credentials(provider))
         if provider == "linear":
             if name == "linear_teams":
                 query = "{teams(first:50){nodes{id name key} pageInfo{hasNextPage endCursor}}}"
@@ -300,11 +309,24 @@ class Connectors:
                     raise ConnectorError("Linear did not confirm the parent update. Read the issue to verify its parent before retrying.")
             return data
         if provider == "slack":
+            if name == "slack_send" and args["channel"].startswith("U"):
+                opened = await self.slack_app_request("POST", "conversations.open", headers=headers,
+                                            json={"users": args["channel"], "return_im": True})
+                channel = opened.get("channel", {}).get("id", "")
+                if not channel.startswith("D"):
+                    raise ConnectorError("Slack did not confirm the app's DM channel. No message was sent.")
+                args["channel"] = channel
+            # Opening a DM or refreshing a token may yield while policy changes.
+            if not self.allowed(name):
+                raise ConnectorError("This operation is disabled by your organization's connection policy.")
             endpoint, method, payload = {
                 "slack_search": ("search.messages", "GET", {"query": args.get("query"), "count": 20, "highlight": False}),
                 "slack_thread": ("conversations.replies", "GET", {"channel": args.get("channel"), "ts": args.get("thread_ts"), "limit": 50}),
                 "slack_send": ("chat.postMessage", "POST", {"channel": args.get("channel"), "text": args.get("text"), "unfurl_links": False, "unfurl_media": False}),
             }[name]
+            if name == "slack_send" or args.get("as_bot"):
+                return await self.slack_app_request(method, endpoint, headers=headers,
+                                                    **({"params": payload} if method == "GET" else {"json": payload}))
             return await self.request(method, f"https://slack.com/api/{endpoint}", headers=headers, **({"params": payload} if method == "GET" else {"json": payload}))
         if name == "notion_search":
             return await self.request("POST", "https://api.notion.com/v1/search", headers=headers, json={"query": args["query"], "page_size": 20, "filter": {"value": "page", "property": "object"}})
@@ -313,6 +335,15 @@ class Connectors:
             return await self.request("GET", url, headers=headers, params={"page_size": 100})
         return await self.request("PATCH", url, headers=headers, json={"children": [{"object": "block", "type": "paragraph", "paragraph": {"rich_text": [{"type": "text", "text": {"content": args["text"]}}]}}]})
 
+    async def slack_app_request(self, method, endpoint, **kwargs):
+        result = await self.request(method, f"https://slack.com/api/{endpoint}",
+                                    allowed_errors=("missing_scope", "not_in_channel", "channel_not_found"), **kwargs)
+        if result.get("error") == "missing_scope":
+            raise ConnectorError("Reconnect Slack with bot chat:write, im:write and im:history permissions to send and verify app DMs. Human credentials will not be used.")
+        if result.get("error") in {"not_in_channel", "channel_not_found"}:
+            raise ConnectorError("The Moyai Devin app cannot access this conversation. For DMs use the recipient's U-prefixed user ID; for channels invite the app. Human credentials will not be used.")
+        return result
+
     def authorization_url(self, provider, state):
         client_id = getattr(self.settings, f"{provider}_client_id")
         params = {"client_id": client_id, "redirect_uri": self.redirect_uri(provider), "state": state, "response_type": "code"}
@@ -320,15 +351,13 @@ class Connectors:
             params.update(scope="read,write", actor="user")
             base = "https://linear.app/oauth/authorize"
         elif provider == "slack":
-            params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history,chat:write")
+            params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history")
             if self.settings.slack_bot_enabled:
-                params["scope"] = "app_mentions:read,chat:write,reactions:write,assistant:write,files:write,files:read"
+                params["scope"] = "app_mentions:read,chat:write,im:write,im:history,reactions:write,assistant:write,files:write,files:read"
                 if self.settings.slack_identity_linking_enabled:
                     params["scope"] += ",users:read,users:read.email"
                 if self.settings.slack_thread_chat_enabled:
                     params["scope"] += ",channels:history,groups:history"
-                    if self.settings.slack_dm_enabled:
-                        params["scope"] += ",im:history"
             base = "https://slack.com/oauth/v2/authorize"
         else:
             params["owner"] = "user"
