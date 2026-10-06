@@ -1,4 +1,5 @@
 """Detached, idempotent project builds. Runs only inside a Modal sandbox."""
+import base64
 import fcntl
 import json
 import os
@@ -23,8 +24,10 @@ def build(recipe):
     token = os.environ.pop('MOYAI_CLONE_TOKEN', '')
     env = {**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
     if token:
+        # GitHub's Git transport uses Basic auth, unlike its REST API.
+        auth = base64.b64encode(('x-access-token:' + token).encode()).decode()
         env.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
-                   GIT_CONFIG_VALUE_0='Authorization: Bearer ' + token)
+                   GIT_CONFIG_VALUE_0='Authorization: Basic ' + auth)
     REPO.parent.mkdir(parents=True, exist_ok=True)
     print('Cloning ' + recipe['repository'] + ' at ' + recipe['ref'], flush=True)
     subprocess.run(['git', 'init', str(REPO)], check=True)

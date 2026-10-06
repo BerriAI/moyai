@@ -256,6 +256,7 @@ def test_project_startup_omits_agent_capabilities(monkeypatch, tmp_path):
 
 
 def test_clone_token_is_not_available_to_setup_or_saved_config(monkeypatch, tmp_path):
+    import base64
     import os
     from sandbox import environment_build
     root = tmp_path / 'repo'
@@ -269,9 +270,87 @@ def test_clone_token_is_not_available_to_setup_or_saved_config(monkeypatch, tmp_
     monkeypatch.setattr(environment_build, 'shell', lambda *a, **kw: scopes.append(os.environ.get('MOYAI_CLONE_TOKEN')))
     environment_build.build(recipe().model_dump())
     fetch = next(env for args, env in calls if 'fetch' in args)
-    assert fetch['GIT_CONFIG_VALUE_0'] == 'Authorization: Bearer clone-only-test-token'
+    scheme, encoded = fetch['GIT_CONFIG_VALUE_0'].removeprefix('Authorization: ').split(' ')
+    assert scheme == 'Basic'
+    assert base64.b64decode(encoded).decode() == 'x-access-token:clone-only-test-token'
     assert scopes == [None, None, None, None]
     assert 'clone-only-test-token' not in (root / '.git/moyai.json').read_text()
+
+
+def test_environment_build_fetches_through_authenticated_git_http(monkeypatch, tmp_path):
+    """Exercise real Git fetch/checkout against a Basic-only smart HTTP server."""
+    import base64
+    import os
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlsplit
+    from sandbox import environment_build
+
+    run = subprocess.run
+    source = tmp_path / 'source'
+    run(['git', 'init', '-b', 'main', str(source)], check=True, capture_output=True)
+    (source / 'marker.txt').write_text('authenticated checkout')
+    run(['git', '-C', str(source), 'add', '.'], check=True)
+    run(['git', '-C', str(source), '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+         'commit', '-m', 'Fixture'], check=True, capture_output=True)
+    run(['git', 'clone', '--bare', str(source), str(tmp_path / 'repository.git')], check=True, capture_output=True)
+    authenticated = []
+
+    class GitServer(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def serve(self):
+            header = self.headers.get('Authorization', '')
+            if not header.startswith('Basic ') or base64.b64decode(header[6:]).decode() != 'x-access-token:fixture-token':
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="Git"')
+                self.end_headers()
+                return
+            authenticated.append(self.command)
+            path = urlsplit(self.path)
+            env = {**os.environ, 'GIT_PROJECT_ROOT': str(tmp_path), 'GIT_HTTP_EXPORT_ALL': '1',
+                   'REQUEST_METHOD': self.command, 'PATH_INFO': path.path, 'QUERY_STRING': path.query,
+                   'CONTENT_TYPE': self.headers.get('Content-Type', ''), 'REMOTE_USER': 'fixture',
+                   'HTTP_GIT_PROTOCOL': self.headers.get('Git-Protocol', '')}
+            body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+            result = run(['git', 'http-backend'], env=env, input=body, capture_output=True, check=True)
+            headers, response = result.stdout.split(b'\r\n\r\n', 1)
+            self.send_response(200)
+            for line in headers.decode().split('\r\n'):
+                name, value = line.split(':', 1)
+                self.send_header(name, value.strip())
+            self.end_headers()
+            self.wfile.write(response)
+
+        do_GET = do_POST = serve
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), GitServer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    checkout = tmp_path / 'checkout'
+    monkeypatch.setattr(environment_build, 'REPO', checkout)
+    monkeypatch.setenv('MOYAI_CLONE_TOKEN', 'fixture-token')
+
+    def local_git(args, **kwargs):
+        if 'fetch' in args:
+            args = [f'http://127.0.0.1:{server.server_port}/repository.git' if arg == 'origin' else arg for arg in args]
+            # Scope the production header to the local GitHub stand-in.
+            kwargs['env'] = {**kwargs['env'], 'GIT_CONFIG_KEY_0': 'http.extraHeader'}
+        return run(args, **kwargs)
+
+    monkeypatch.setattr(environment_build.subprocess, 'run', local_git)
+    try:
+        sha, _ = environment_build.build(recipe().model_dump())
+        assert (checkout / 'marker.txt').read_text() == 'authenticated checkout'
+        assert len(sha) == 40 and 'GET' in authenticated and 'POST' in authenticated
+        assert 'fixture-token' not in (checkout / '.git/config').read_text()
+        assert 'MOYAI_CLONE_TOKEN' not in os.environ
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 @pytest.mark.asyncio

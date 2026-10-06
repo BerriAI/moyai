@@ -223,6 +223,20 @@ class Environments:
                 return row
         return None
 
+    def setup_blocker(self, selection, repo_url):
+        """Check shared setup without starting a build or discarding a good one."""
+        selected = self.choose(selection, repo_url)
+        if not selected or selected['active_build']:
+            return ''
+        recent = self.store.rows('SELECT phase FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY rowid DESC LIMIT 1',
+                                 (selected['id'], selected['revision']))
+        if not recent:
+            return ''  # The first session still initiates automatic preparation.
+        recipe = json.loads(selected['recipe'])
+        if recent[0]['phase'] in {'failed', 'cancelling'}:
+            return 'Project setup failed for ' + recipe['repository'] + '. Rebuild its environment in Environments.'
+        return 'Preparing project environment: ' + recipe['name'] + '. Waiting for a successful build.'
+
     def bind(self, run_id):
         """Pin once. Existing session snapshots always win over project templates."""
         run = self.store.run(run_id)
