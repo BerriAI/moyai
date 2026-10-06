@@ -11,6 +11,47 @@ function helpers(){
     script.slice(script.indexOf('function sidebarGroups('),script.indexOf('function renderSidebar(')),context);
   return context;
 }
+function scopeHelpers(){
+  const element={value:'mine'}, saved=new Map(), errors=[];
+  const context={state:{userId:'google:alice',authenticated:true,runsRefresh:0,runs:[]},URLSearchParams,
+    location:{hash:''},$:()=>element,localStorage:{getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)},
+    renderSidebar:()=>{},showError:error=>errors.push(error.message)};
+  vm.createContext(context);
+  vm.runInContext(script.slice(script.indexOf('async function refreshRuns('),script.indexOf('async function renderHome(')),context);
+  return {context,element,saved,errors};
+}
+test('personal scope defaults to mine and preferences are isolated per user',()=>{
+  const {context:c,element,saved}=scopeHelpers();
+  c.restoreSessionScope();assert.equal(element.value,'mine');
+  saved.set('moyai-session-scope:google:alice','all');
+  c.restoreSessionScope();assert.equal(element.value,'all');
+  c.state.userId='google:bob';c.restoreSessionScope();assert.equal(element.value,'mine');
+  saved.set('moyai-session-scope:google:bob','invalid');c.restoreSessionScope();assert.equal(element.value,'mine');
+  c.localStorage.getItem=()=>{throw Error('Denied');};c.restoreSessionScope();assert.equal(element.value,'mine');
+});
+test('scope and focus are forwarded and stale list responses cannot replace newer scope',async()=>{
+  const {context:c,element}=scopeHelpers(),pending=[];
+  c.state.selected='a'.repeat(32);c.restoreSessionScope();
+  c.api=path=>path==='/api/session-folders'?Promise.resolve({folders:[]}):new Promise(resolve=>pending.push({path,resolve}));
+  const first=c.refreshRuns();
+  element.value='all';const second=c.changeSessionScope();
+  assert.equal(new URL(pending[0].path,'http://local').searchParams.get('scope'),'mine');
+  assert.equal(new URL(pending[0].path,'http://local').searchParams.get('focus'),'a'.repeat(32));
+  assert.equal(new URL(pending[1].path,'http://local').searchParams.get('scope'),'all');
+  pending[1].resolve([{id:'all-results'}]);await second;
+  pending[0].resolve([{id:'stale-results'}]);await first;
+  assert.equal(c.state.runs[0].id,'all-results');
+});
+test('failed filter change clears foreign rows and preserves selected chat',async()=>{
+  const {context:c,element,errors}=scopeHelpers();c.restoreSessionScope();
+  c.state.runs=[{id:'foreign'}];c.state.selected='shared-chat';element.value='mine';
+  c.api=async()=>{throw Error('List unavailable');};
+  c.localStorage.setItem=()=>{throw Error('Denied');};
+  await c.changeSessionScope();
+  assert.equal(c.state.runs.length,0);assert.equal(c.state.selected,'shared-chat');
+  assert.deepEqual(errors,['List unavailable']);
+});
+
 const runs=[{id:'parent',prompt:'Benchmark models',children:[
   {id:'worker-a',agent_label:'Cases 1–20',status:'running'},
   {id:'worker-b',agent_label:'Cases 21–40',status:'idle'},

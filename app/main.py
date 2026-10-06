@@ -383,16 +383,12 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = ''):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] = 'all'):
         owner = session_folders.actor(request)
         memberships = session_folders.memberships(owner)
-        ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
-        # Filed sessions remain reachable even after leaving the recent 100.
-        ids = list(dict.fromkeys([*ids, *memberships]))
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
-        if parent_id and parent_id not in ids and store.run(parent_id):
-            ids.append(parent_id)
+        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id])
         runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
         if ids:
             children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
