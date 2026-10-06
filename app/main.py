@@ -36,6 +36,7 @@ from .github_setup import routes as github_routes
 from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_TOOLS
 from .skills import Skills
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
+from .session_folders import SessionFolders
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
@@ -223,6 +224,9 @@ def create_app(settings: Settings | None = None):
     app.include_router(skills.routes())
     app.include_router(memory.routes())
     app.state.memory = memory
+    session_folders = SessionFolders(store, security, checkpoints)
+    app.state.session_folders = session_folders
+    app.include_router(session_folders.routes())
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
@@ -377,13 +381,16 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/api/runs")
     async def runs(request: Request, focus: str = ''):
-        security.require(request)
+        owner = session_folders.actor(request)
+        memberships = session_folders.memberships(owner)
         ids = [row['id'] for row in store.rows("SELECT id FROM runs WHERE parent_run_id='' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100")]
+        # Filed sessions remain reachable even after leaving the recent 100.
+        ids = list(dict.fromkeys([*ids, *memberships]))
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
         if parent_id and parent_id not in ids and store.run(parent_id):
             ids.append(parent_id)
-        runs = {run_id: {**public_run(store.run(run_id)), 'children': []} for run_id in ids}
+        runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
         if ids:
             children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
             for child in children:

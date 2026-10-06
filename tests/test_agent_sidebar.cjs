@@ -39,3 +39,25 @@ test('assignment labels cannot inject sidebar markup',()=>{
   assert.doesNotMatch(html,/<img/);
   assert.match(html,/&lt;img/);
 });
+
+test('folders group parent sessions once and searching a worker keeps its folder',()=>{
+  const h=helpers(),filed=[{...runs[0],folder_id:'today'},runs[1]];
+  const folders=[{id:'today',name:'Today'},{id:'empty',name:'Research'}];
+  const all=h.sidebarSections(filed,folders,'');
+  assert.equal(all.folders.length,2);
+  assert.equal(all.folders[0].groups[0].id,'parent');
+  assert.equal(all.folders[1].groups.length,0);
+  assert.equal(all.recent.length,1);
+  assert.equal(all.recent[0].id,'other');
+  const found=h.sidebarSections(filed,folders,'21–40');
+  assert.equal(found.folders.length,1);
+  assert.equal(found.folders[0].groups[0].children[0].id,'worker-b');
+  assert.equal(found.recent.length,0);
+  assert.equal(h.sidebarSections(filed,folders,'today').folders[0].groups[0].children.length,2);
+  assert.equal(h.sidebarSections(filed,folders,'unmatched').folders.length,0);
+});
+test('a removed or stale folder leaves its sessions in Recent',()=>{
+  const h=helpers(),sections=h.sidebarSections([{...runs[0],folder_id:'removed'}],[],'');
+  assert.equal(sections.folders.length,0);
+  assert.equal(sections.recent[0].id,'parent');
+});
