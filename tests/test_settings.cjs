@@ -6,7 +6,8 @@ const vm = require('node:vm');
 function setup({automations = false, role = 'admin'} = {}) {
   const elements = new Map();
   const context = {
-    state: {pageVersion: 1, role: 'admin'},
+    state: {pageVersion: 1, role: 'admin', runsRefresh: 0},
+    restoreSessionScope:()=>{},renderSidebar:()=>{},
     $: key => {if (!elements.has(key)) elements.set(key, {}); return elements.get(key);},
     api: async () => ({authenticated: true, role, csrf: 'fresh', user_id: 'test-user'}),
   };

@@ -386,8 +386,12 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] = 'all'):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None):
         owner = session_folders.actor(request)
+        if scope == 'all':
+            security.require(request, admin=True)
+        if scope is None:
+            scope = 'all' if security.role(request) == 'admin' else 'mine'
         memberships = session_folders.memberships(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''

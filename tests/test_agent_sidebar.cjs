@@ -13,14 +13,15 @@ function helpers(){
 }
 function scopeHelpers(){
   const element={value:'mine'}, saved=new Map(), errors=[];
-  const context={state:{userId:'google:alice',authenticated:true,runsRefresh:0,runs:[]},URLSearchParams,
+  const context={state:{userId:'google:alice',role:'admin',authenticated:true,runsRefresh:0,runs:[]},URLSearchParams,
     location:{hash:''},$:()=>element,localStorage:{getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)},
     renderSidebar:()=>{},showError:error=>errors.push(error.message)};
   vm.createContext(context);
   vm.runInContext(script.slice(script.indexOf('async function refreshRuns('),script.indexOf('async function renderHome(')),context);
+  vm.runInContext(readFileSync('app/static/users.js','utf8'),context);
   return {context,element,saved,errors};
 }
-test('personal scope defaults to mine and preferences are isolated per user',()=>{
+test('admin scope defaults to mine and preferences are isolated per user',()=>{
   const {context:c,element,saved}=scopeHelpers();
   c.restoreSessionScope();assert.equal(element.value,'mine');
   saved.set('moyai-session-scope:google:alice','all');
@@ -28,6 +29,43 @@ test('personal scope defaults to mine and preferences are isolated per user',()=
   c.state.userId='google:bob';c.restoreSessionScope();assert.equal(element.value,'mine');
   saved.set('moyai-session-scope:google:bob','invalid');c.restoreSessionScope();assert.equal(element.value,'mine');
   c.localStorage.getItem=()=>{throw Error('Denied');};c.restoreSessionScope();assert.equal(element.value,'mine');
+});
+test('members and signed-out users cannot restore a saved all-sessions preference',()=>{
+  for(const session of [{role:'member',authenticated:true},{role:'admin',authenticated:false}]){
+    const {context:c,element,saved}=scopeHelpers();Object.assign(c.state,session);
+    saved.set('moyai-session-scope:google:alice','all');
+    c.restoreSessionScope();
+    assert.equal(c.state.sessionScope,'mine');assert.equal(element.value,'mine');
+    assert.equal(element.disabled,true);assert.doesNotMatch(element.innerHTML,/value="all"/);
+    assert.equal(saved.get('moyai-session-scope:google:alice'),'mine');
+    c.localStorage.setItem=()=>{throw Error('Denied');};c.restoreSessionScope();
+    assert.equal(c.state.sessionScope,'mine');
+  }
+});
+test('member requests stay personal even if cached state or the picker is set to all',async()=>{
+  const {context:c,element}=scopeHelpers(),paths=[];
+  c.state.role='member';c.state.sessionScope='all';element.value='all';
+  c.api=async path=>{paths.push(path);return path==='/api/session-folders'?{folders:[]}:[];};
+  await c.refreshRuns();await c.changeSessionScope();
+  assert.equal(c.state.sessionScope,'mine');assert.equal(element.value,'mine');
+  for(const path of paths.filter(path=>path.startsWith('/api/runs'))){
+    assert.equal(new URL(path,'http://local').searchParams.get('scope'),'mine');
+  }
+});
+test('a refreshed demotion removes all-sessions controls and discards in-flight admin results',async()=>{
+  const {context:c,element,saved}=scopeHelpers();
+  saved.set('moyai-session-scope:google:alice','all');c.restoreSessionScope();
+  assert.equal(element.disabled,false);assert.match(element.innerHTML,/value="all"/);
+  let resolve;
+  c.api=path=>path==='/api/session-folders'?Promise.resolve({folders:[]}):new Promise(done=>resolve=done);
+  const pending=c.refreshRuns();
+  c.state.runs=[{id:'unrelated'}];c.state.folders=[{id:'old-folder'}];
+  c.applyUserSession({role:'member',authenticated:true,user_id:'google:alice'});
+  assert.equal(c.state.runs.length,0);assert.equal(c.state.folders.length,0);
+  assert.equal(element.value,'mine');assert.equal(element.disabled,true);
+  assert.doesNotMatch(element.innerHTML,/value="all"/);
+  resolve([{id:'stale-admin-result'}]);await pending;
+  assert.equal(c.state.runs.length,0);
 });
 test('scope and focus are forwarded and stale list responses cannot replace newer scope',async()=>{
   const {context:c,element}=scopeHelpers(),pending=[];

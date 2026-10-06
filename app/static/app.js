@@ -109,17 +109,20 @@ async function navigate(view) {
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='adoption')await renderAdoption();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
 }
-async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const params=new URLSearchParams({scope:state.sessionScope||'mine'});if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
 function restoreSessionScope(){
+  const canViewAll=state.authenticated&&state.role==='admin';
   state.sessionScope='mine';
   state.sessionScopeKey='moyai-session-scope:'+state.userId;
-  try{if(localStorage.getItem(state.sessionScopeKey)==='all')state.sessionScope='all';}catch{}
+  try{if(canViewAll&&localStorage.getItem(state.sessionScopeKey)==='all')state.sessionScope='all';else if(!canViewAll)localStorage.setItem(state.sessionScopeKey,'mine');}catch{}
+  $('#session-scope').innerHTML='<option value="mine">My sessions</option>'+(canViewAll?'<option value="all">All sessions</option>':'');
   $('#session-scope').value=state.sessionScope;
-  $('#session-scope').disabled=!state.authenticated;
+  $('#session-scope').disabled=!canViewAll;
   $('#session-scope').title=state.userId?.startsWith('google:')?'Sessions you created or messaged in, including linked Slack activity. Opening a link alone does not count.':'Sessions created or messaged in by this shared login. Sign in with Google for a personal view.';
 }
 async function changeSessionScope(){
-  state.sessionScope=$('#session-scope').value;
+  state.sessionScope=state.role==='admin'&&$('#session-scope').value==='all'?'all':'mine';
+  $('#session-scope').value=state.sessionScope;
   try{localStorage.setItem(state.sessionScopeKey,state.sessionScope);}catch{}
   state.runs=[];renderSidebar();
   try{await refreshRuns();}catch(error){showError(error);}
@@ -388,7 +391,7 @@ window.addEventListener('hashchange',()=>{
 });
 async function boot(){
   try{
-    const session=await api('/api/session');applyUserSession(session);restoreSessionFolderView();restoreSessionScope();
+    const session=await api('/api/session');applyUserSession(session);restoreSessionFolderView();
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
     if(!session.authenticated){
       const passwordForm='<form id="login-form"><div class="field"><label for="password">Workspace password</label><input id="password" type="password" autocomplete="current-password" required></div><button class="primary full">Sign in</button></form>';

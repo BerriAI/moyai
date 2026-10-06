@@ -32,15 +32,39 @@ def test_my_sessions_created_or_participated_not_viewed_or_assistant(workspace, 
     store.execute("UPDATE messages SET status='deleted' WHERE run_id=? AND user_id='google:bob'", (other,))
     store.execute("UPDATE runs SET active_user_id='google:alice' WHERE id=?", (other,))
     assert mine(client) == {own, other}
+    assert {r['id'] for r in client.get('/api/runs').json()} == {own, other}
+    assert client.get('/api/runs?scope=all').status_code == 403
+    sign_in(app, client, 'alice', 'alice@berri.ai')
     assert {r['id'] for r in client.get('/api/runs?scope=all').json()} == {own, other, unrelated}
+    assert {r['id'] for r in client.get('/api/runs').json()} == {own, other, unrelated}
+    assert mine(client) == {other, unrelated}
     assert client.get('/api/runs?scope=invalid').status_code == 422
     sign_in(app, client, 'nobody', 'nobody@berri.ai')
     assert mine(client) == set()
+    assert client.get('/api/runs').json() == []
+    assert client.get('/api/runs?scope=all&role=admin&user_id=google:alice').status_code == 403
     client.cookies.clear()
     assert client.get('/api/runs?scope=mine').status_code == 401
+    assert client.get('/api/runs?scope=all').status_code == 401
     reopened = Store(app.state.settings.data_dir)
     assert set(reopened.sidebar_run_ids('google:bob')) == {own, other}
     assert reopened.sidebar_run_ids('') == []
+
+
+def test_all_sessions_rechecks_role_after_demotion_without_new_login(workspace):
+    app, client = workspace
+    store = app.state.store
+    own = store.create_run('Bob session', '', 'demo', [], user_id='google:bob')['id']
+    other = store.create_run('Alice session', '', 'demo', [], user_id='google:alice')['id']
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    assert client.put('/api/admin/users/role', json={
+        'email': 'bob@berri.ai', 'role': 'admin', 'revision': 0}).status_code == 200
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    assert {row['id'] for row in client.get('/api/runs?scope=all').json()} == {own, other}
+    assert client.put('/api/admin/users/role', json={
+        'email': 'bob@berri.ai', 'role': 'member', 'revision': 1}).status_code == 200
+    assert client.get('/api/runs?scope=all').status_code == 403
+    assert {row['id'] for row in client.get('/api/runs').json()} == {own}
 
 
 def test_my_sessions_filters_before_limit_and_guards_folder_and_focus(workspace):
@@ -53,6 +77,7 @@ def test_my_sessions_filters_before_limit_and_guards_folder_and_focus(workspace)
     folder = client.post('/api/session-folders', json={'name': 'Research'}).json()['id']
     assert client.put('/api/runs/'+other+'/folder', json={'folder_id': folder}).status_code == 200
     assert mine(client, focus=other) == {old}
+    assert {r['id'] for r in client.get('/api/runs', params={'focus': other}).json()} == {old}
     assert client.put('/api/runs/'+old+'/folder', json={'folder_id': folder}).status_code == 200
     for i in range(101):
         store.create_run(f'New matching {i}', '', 'demo', [], user_id='google:bob')
