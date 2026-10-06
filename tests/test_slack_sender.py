@@ -13,7 +13,7 @@ from app.security import digest
 USER = 'shared-search-user-secret'
 BOT = 'workspace-bot-secret'
 CREDENTIALS = {'access_token': USER, 'kind': 'oauth',
-               'bot': {'access_token': BOT, 'scope': 'chat:write,im:write',
+               'bot': {'access_token': BOT, 'scope': 'chat:write,im:write,im:history',
                        'bot_user_id': 'U99999999', 'team': {'id': 'T12345678'}}}
 
 
@@ -144,7 +144,7 @@ def test_bot_refresh_preserves_user_and_uses_rotated_bot(sender):
     assert sender[-1][-1].headers['Authorization'] == 'Bearer rotated-bot-secret'
     stored = json.loads(app.state.security.decrypt(app.state.store.rows("SELECT encrypted FROM connections WHERE provider='slack'")[0]['encrypted']))
     assert stored['access_token'] == USER
-    assert stored['bot']['scope'] == 'chat:write,im:write'
+    assert stored['bot']['scope'] == 'chat:write,im:write,im:history'
 
 
 @pytest.mark.parametrize('problem', ['missing', 'expired', 'no_chat_scope', 'no_im_scope'])
@@ -214,11 +214,37 @@ def test_read_tools_retain_the_existing_read_credential(sender, name, args):
     assert sender[-1][0].headers['Authorization'] == f'Bearer {USER}'
 
 
+def test_bot_dm_can_be_verified_without_loading_shared_user(sender):
+    app = sender[0]
+    creds = copy.deepcopy(CREDENTIALS)
+    creds.update(expires_at=1, refresh_token='must-never-refresh-user')
+    app.state.connectors.save('slack', creds, 'Test team')
+    sent = invoke(sender, arguments={'channel': 'U12345678', 'text': 'Hello'})
+    assert invoke(sender, 'slack_thread', {'channel': sent['channel'], 'thread_ts': sent['ts'], 'as_bot': True})['ok']
+    read = sender[-1][-1]
+    assert read.url.path == '/api/conversations.replies'
+    assert read.headers['Authorization'] == f'Bearer {BOT}'
+    assert dict(read.url.params) == {'channel': sent['channel'], 'ts': sent['ts'], 'limit': '50'}
+
+
+@pytest.mark.parametrize('problem', ['missing_bot', 'missing_history'])
+def test_bot_read_never_falls_back_to_shared_user(sender, problem):
+    app = sender[0]
+    creds = copy.deepcopy(CREDENTIALS)
+    if problem == 'missing_bot':
+        creds.pop('bot')
+    else:
+        creds['bot']['scope'] = 'chat:write,im:write'
+    app.state.connectors.save('slack', creds, 'Test team')
+    result = invoke(sender, 'slack_thread', {'channel': 'D12345678', 'thread_ts': '1790719999.123456', 'as_bot': True})
+    assert 'Reconnect Slack' in result['error'] and not sender[-1]
+
+
 def test_oauth_only_requests_bot_write_permissions(sender):
     app = sender[0]
     app.state.settings.slack_bot_enabled = True
     params = parse_qs(urlparse(app.state.connectors.authorization_url('slack', 'state')).query)
-    assert {'chat:write', 'im:write'} <= set(params['scope'][0].split(','))
+    assert {'chat:write', 'im:write', 'im:history'} <= set(params['scope'][0].split(','))
     assert all(not scope.endswith(':write') for scope in params['user_scope'][0].split(','))
     connection = next(c for c in app.state.connectors.list() if c['id'] == 'slack')
     assert connection['identity'] == 'Moyai Devin bot sends · shared user reads'

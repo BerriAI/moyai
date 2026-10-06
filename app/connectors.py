@@ -48,6 +48,7 @@ class LinearUpdateIssue(LinearIssue):
 class SlackThread(Args):
     channel: str = Field(pattern=r"^[CDG][A-Z0-9]{7,30}$")
     thread_ts: str = Field(pattern=r"^\d{10,16}\.\d{1,9}$")
+    as_bot: bool = Field(default=False, description="Use true to verify a DM sent by slack_send. Reads the bot's conversation instead of the shared search account's conversation.")
 
 
 class SlackSend(Args):
@@ -73,7 +74,7 @@ TOOLS = {
     "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
     "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
     "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
-    "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation."),
+    "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation. To verify a bot DM sent with slack_send, use as_bot=true and the returned channel and ts as thread_ts."),
     "slack_send": ("slack", True, SlackSend, "Send a Slack message as the Moyai Devin app, never as the shared connection owner. The server prefixes the body with the current requester's profile name: 'Name: message'. For a DM, pass the recipient's Slack user ID as channel; the server opens the bot's own DM. Requires the installed bot; never falls back to a user token. No administrator approval step is required."),
     "notion_search": ("notion", False, Search, "Search Notion page titles visible to the connected integration (not full-text content)."),
     "notion_page": ("notion", False, NotionPage, "Read a Notion page's first 100 top-level blocks. Nested blocks are indicated, not expanded."),
@@ -256,7 +257,12 @@ class Connectors:
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         if name == 'slack_send':
             return await self.slack_send(args, run)
-        headers = self.headers(provider, await self.credentials(provider))
+        if name == 'slack_thread' and args['as_bot']:
+            headers = {'Authorization': f'Bearer {await self.slack_bot_token()}'}
+            if args['channel'].startswith('D') and 'im:history' not in self.slack_installation().get('scopes', []):
+                raise ConnectorError('Reconnect Slack with the Moyai Devin bot im:history permission to read its DMs.')
+        else:
+            headers = self.headers(provider, await self.credentials(provider))
         if not self.allowed(name):
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         if provider == "linear":
@@ -368,13 +374,11 @@ class Connectors:
         elif provider == "slack":
             params.update(user_scope="search:read,channels:history,groups:history,im:history,mpim:history")
             if self.settings.slack_bot_enabled:
-                params["scope"] = "app_mentions:read,chat:write,im:write,reactions:write,assistant:write,files:write,files:read"
+                params["scope"] = "app_mentions:read,chat:write,im:write,im:history,reactions:write,assistant:write,files:write,files:read"
                 if self.settings.slack_identity_linking_enabled:
                     params["scope"] += ",users:read,users:read.email"
                 if self.settings.slack_thread_chat_enabled:
                     params["scope"] += ",channels:history,groups:history"
-                    if self.settings.slack_dm_enabled:
-                        params["scope"] += ",im:history"
             base = "https://slack.com/oauth/v2/authorize"
         else:
             params["owner"] = "user"
