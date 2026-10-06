@@ -1,0 +1,35 @@
+/* Small line icons shared by the shell. Decorative only: callers keep accessible labels. */
+(function(root){
+  const paths={
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    search:'<circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/>',
+    sidebar:'<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/>',
+    panel:'<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M14.5 4.5v15"/>',
+    list:'<path d="M10 7h10M10 12h10M10 17h10"/><rect x="3.5" y="5.5" width="3" height="3" rx=".6"/><rect x="3.5" y="10.5" width="3" height="3" rx=".6"/><rect x="3.5" y="15.5" width="3" height="3" rx=".6"/>',
+    monitor:'<rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8.5 20h7M12 16.5V20"/>',
+    terminal:'<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="m7.5 9.5 2.5 2.5-2.5 2.5M12.5 15h4"/>',
+    file:'<path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/>',
+    chat:'<path d="M20 12a8 8 0 0 1-11.8 7l-4.2 1 1.1-3.9A8 8 0 1 1 20 12Z"/>',
+    gear:'<circle cx="12" cy="12" r="2.8"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5v.2a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1h-.2a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5v-.2a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/>',
+    clock:'<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+    bolt:'<path d="M13 3 5 13.5h6L10 21l8-10.5h-6Z"/>',
+    book:'<path d="M3.5 5.5A1.5 1.5 0 0 1 5 4h4.5A2.5 2.5 0 0 1 12 6.5V20a2 2 0 0 0-2-2H3.5Zm17 0A1.5 1.5 0 0 0 19 4h-4.5A2.5 2.5 0 0 0 12 6.5V20a2 2 0 0 1 2-2h6.5Z"/>',
+    grid:'<rect x="4" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.5"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.5"/><path d="M16.75 13.5v6.5M13.5 16.75H20"/>',
+    expand:'<path d="M14.5 4H20v5.5M20 4l-6.5 6.5M9.5 20H4v-5.5M4 20l6.5-6.5"/>',
+    up:'<path d="M12 19V5.5M6 11l6-6 6 6"/>',
+    slash:'<rect x="4" y="4" width="16" height="16" rx="3"/><path d="m14 8.5-4 7"/>',
+    chevron:'<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>',
+    more:'<circle cx="5.5" cy="12" r=".9" fill="currentColor"/><circle cx="12" cy="12" r=".9" fill="currentColor"/><circle cx="18.5" cy="12" r=".9" fill="currentColor"/>',
+    x:'<path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>',
+  };
+  function icon(name,size=16){
+    const body=paths[name];if(!body)return '';
+    return `<svg class="ui-icon icon-${name}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
+  }
+  root.MoyaiIcon=icon;
+  if(typeof document!=='undefined'){
+    // Static shell controls declare data-icon so their markup stays readable.
+    const apply=()=>document.querySelectorAll('[data-icon]').forEach(node=>{if(!node.querySelector('.ui-icon'))node.insertAdjacentHTML('afterbegin',icon(node.dataset.icon,Number(node.dataset.iconSize)||16));});
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',apply);else apply();
+  }
+})(typeof globalThis!=='undefined'?globalThis:this);

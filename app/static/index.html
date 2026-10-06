@@ -4,31 +4,33 @@
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Chat with Moyai Devin. Work with your team's context in a cloud workspace.">
   <title>Moyai Devin</title><link rel="icon" href="/static/favicon.svg?v=agent-2"><link rel="stylesheet" href="/static/style.css?v=audio-1">
-  <script src="/static/vendor/marked.js" defer></script><script src="/static/vendor/purify.js" defer></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400..600&display=swap">
+  <script src="/static/icons.js?v=1" defer></script><script src="/static/vendor/marked.js" defer></script><script src="/static/vendor/purify.js" defer></script>
   <link rel="stylesheet" href="/static/computer.css?v=panel-1"><script src="/static/computer.js?v=panel-1" defer></script>
-  <link rel="stylesheet" href="/static/workspace-panel.css?v=panel-1"><script src="/static/workspace-panel.js?v=slack-names-1" defer></script>
+  <link rel="stylesheet" href="/static/workspace-panel.css?v=panel-1"><script src="/static/workspace-panel.js?v=reference-2" defer></script>
   <link rel="stylesheet" href="/static/automations.css?v=events-2"><script src="/static/automation-triggers.js?v=2" defer></script><script src="/static/automations.js?v=events-3" defer></script>
   <link rel="stylesheet" href="/static/settings.css?v=1"><script src="/static/settings.js?v=adoption-1" defer></script>
   <link rel="stylesheet" href="/static/adoption.css?v=1"><script src="/static/adoption.js?v=1" defer></script>
   <link rel="stylesheet" href="/static/memory.css?v=1"><script src="/static/memory.js?v=1" defer></script>
   <script src="/static/environments.js?v=environments-repos-1" defer></script>
   <script src="/static/users.js?v=settings-1" defer></script>
-  <script src="/static/saved-files.js?v=inline-previews-1" defer></script><script src="/static/markdown.js?v=inline-previews-1" defer></script><script src="/static/infrastructure.js?v=costs-1" defer></script><script src="/static/spend.js?v=costs-1" defer></script><script src="/static/credentials.js?v=onepassword-1" defer></script><script src="/static/skills.js?v=skills-inline-1" defer></script><script src="/static/skill-composer.js?v=skills-inline-1" defer></script><script src="/static/attachment-transport.js?v=attachments-2" defer></script><script src="/static/audio-recorder.js?v=audio-1" defer></script><script src="/static/attachments.js?v=audio-1" defer></script><script src="/static/activity.js?v=access-setup-2" defer></script><script src="/static/message-queue.js?v=slack-names-1" defer></script><script src="/static/session-folders.js?v=folders-2" defer></script><script src="/static/app.js?v=adoption-1" defer></script>
+  <script src="/static/saved-files.js?v=inline-previews-1" defer></script><script src="/static/markdown.js?v=inline-previews-1" defer></script><script src="/static/infrastructure.js?v=costs-1" defer></script><script src="/static/spend.js?v=costs-1" defer></script><script src="/static/credentials.js?v=onepassword-1" defer></script><script src="/static/skills.js?v=skills-inline-1" defer></script><script src="/static/skill-composer.js?v=skills-inline-1" defer></script><script src="/static/attachment-transport.js?v=attachments-2" defer></script><script src="/static/audio-recorder.js?v=audio-1" defer></script><script src="/static/attachments.js?v=reference-2" defer></script><script src="/static/activity.js?v=reference-2" defer></script><script src="/static/message-queue.js?v=slack-names-1" defer></script><script src="/static/session-folders.js?v=folders-2" defer></script><script src="/static/app.js?v=reference-2" defer></script>
   <link rel="stylesheet" href="/static/session-folders.css?v=folders-2">
+  <link rel="stylesheet" href="/static/polish.css?v=reference-2">
 </head>
 <body>
   <button id="sidebar-scrim" class="sidebar-scrim" aria-label="Close sidebar" hidden></button>
   <aside class="rail" id="sidebar" aria-label="Workspace sidebar">
-    <div class="rail-brand"><a class="brand" href="#tasks" aria-label="Moyai Devin home"><img src="/static/favicon.svg?v=agent-2" alt=""><span>moyai <small>devin</small></span></a><button id="close-sidebar" class="icon-button" aria-label="Close sidebar">×</button></div>
-    <button class="new-task" id="new-task"><span aria-hidden="true">＋</span> New session <kbd>⌘ K</kbd></button>
-    <label class="session-search"><span aria-hidden="true">⌕</span><input id="session-search" type="search" placeholder="Search sessions" aria-label="Search sessions" autocomplete="off"></label>
-    <div class="sessions-label"><span>Sessions</span><span id="task-count">0</span><button id="new-folder" class="folder-add" title="New folder" aria-label="New folder">＋</button></div>
+    <div class="rail-brand"><a class="brand" href="#tasks" aria-label="Moyai Devin home"><span class="avatar" aria-hidden="true">W</span><span id="workspace-name">Workspace</span><span class="brand-chevron" data-icon="chevron" data-icon-size="14"></span></a><div class="rail-tools"><button id="search-sessions" class="icon-button" data-icon="search" data-icon-size="18" aria-label="Search sessions" title="Search sessions"></button><button id="close-sidebar" class="icon-button" data-icon="sidebar" data-icon-size="18" aria-label="Close sidebar" title="Hide sidebar"></button></div></div>
+    <button class="new-task" id="new-task"><span class="nav-icon" data-icon="plus" data-icon-size="17"></span>New session<kbd>⌘K</kbd></button>
+    <label class="session-search"><span class="nav-icon" data-icon="search" data-icon-size="16"></span><input id="session-search" type="search" placeholder="Search" aria-label="Search sessions" autocomplete="off"></label>
+    <nav class="workspace-nav rail-links" aria-label="Workspace"><button class="nav-button" data-view="automations"><span class="nav-icon" data-icon="clock" data-icon-size="17"></span>Automations</button><button class="nav-button" data-view="skills"><span class="nav-icon" data-icon="book" data-icon-size="17"></span>Skills</button><button class="nav-button" data-view="connections"><span class="nav-icon" data-icon="grid" data-icon-size="17"></span>Connections</button></nav>
+    <div class="sessions-label"><span>Sessions</span><span id="task-count">0</span><button id="new-folder" class="folder-add icon-button" data-icon="plus" data-icon-size="16" title="New folder" aria-label="New folder"></button></div>
     <nav id="session-list" class="session-list" aria-label="Recent sessions"></nav>
-    <nav class="workspace-nav" aria-label="Workspace settings"><button class="nav-button" data-view="settings"><svg class="settings-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 3-1 3-3 1-2 5 2 5 3 1 1 3h6l1-3 3-1 2-5-2-5-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></svg> Settings</button></nav>
-    <div class="rail-foot"><span class="avatar">L</span><div><span id="workspace-name">Workspace</span><small>Private workspace</small></div></div>
+    <div class="rail-foot"><button class="nav-button rail-settings" data-view="settings" data-icon="gear" data-icon-size="17" aria-label="Settings" title="Settings"></button><small>Private workspace</small></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><button id="open-sidebar" class="icon-button" aria-label="Open sidebar" aria-expanded="false" aria-controls="sidebar">☰</button><span id="page-title">New session</span><div id="header-actions" class="header-right"><span class="environment">Your team's agent</span></div></header>
+    <header class="topbar"><button id="open-sidebar" class="icon-button" aria-label="Open sidebar" aria-expanded="false" aria-controls="sidebar" data-icon="sidebar" data-icon-size="18" title="Show sidebar"></button><span id="page-title">New session</span><div id="header-actions" class="header-right"><span class="environment">Your team's agent</span></div></header>
     <main id="content"></main>
   </div>
   <div id="toast" role="status" hidden></div>

@@ -6,25 +6,26 @@
     try{
       const data=JSON.parse(value);
       const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','files','file','activity','chat'].includes(t.kind)&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
-      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||52)),tabs};
-    }catch{return {visible:false,active:'',width:52,tabs:[]};}
+      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||60)),tabs};
+    }catch{return {visible:false,active:'',width:60,tabs:[]};}
   }
   function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
     const activity=layout.querySelector('#session-details');
+    const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',files:'file',file:'file',chat:'chat',activity:'list'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
-    panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" aria-expanded="false">＋</button><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel">⤢</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel">◫</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
+    panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" title="Add tab" aria-expanded="false">${ico('plus',18)}</button><span class="panel-spacer"></span><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel" title="Expand">${ico('expand',17)}</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel" title="Hide panel">${ico('panel',18)}</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
     if(activity){parking.append(activity);activity.hidden=false;}
     function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
-    function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
+    function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');layout.closest('.workspace')?.style.setProperty('--workspace-panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
     resize(width);q('.panel-resize').setAttribute('aria-valuemin','30');q('.panel-resize').setAttribute('aria-valuemax','70');
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
     q('.panel-resize').onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();resize(width+(e.key==='ArrowLeft'?3:-3));}};
     function draw(){
-      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span aria-hidden="true">${{computer:'▧',files:'▤',file:'▤',chat:'◌',activity:'☷'}[t.kind]}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab">×</button></div>`).join('');
+      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab">${ico('x',13)}</button></div>`).join('');
       q('.panel-tabs').querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
       q('.panel-tabs').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
       document.querySelector('#toggle-details')?.setAttribute('aria-expanded',String(visible&&tabs.get(active)?.kind==='activity'));
@@ -39,7 +40,7 @@
     function drawMenu(){
       const search=q('.panel-menu input').value.toLowerCase();
       const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
-      q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span aria-hidden="true">${{computer:'▧',files:'▤',chat:'◌',activity:'☷'}[item.kind]}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
+      q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span class="panel-tab-icon">${ico(glyph[item.kind],16)}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
     q('.panel-menu input').oninput=drawMenu;q('[data-add]').onclick=()=>menu(q('.panel-menu').hidden);q('[data-hide]').onclick=hide;
