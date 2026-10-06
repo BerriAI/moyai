@@ -94,7 +94,7 @@ def test_web_input_reuses_the_exact_dm_destination(mirror, changes):
     drain(app)
     post = next(r for r in sent if 'text' in r)
     assert post['channel'] == 'D12345678'
-    assert post['thread_ts'] == changes.get('thread_ts')
+    assert post['thread_ts'] == changes.get('thread_ts', payload['event']['ts'])
 
 
 def test_long_input_is_complete_scrubbed_and_cannot_ping_or_echo(mirror):

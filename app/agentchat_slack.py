@@ -18,7 +18,6 @@ from agentchat.channels.slack_media import rich_payload, upload_slack_files
 from fastapi import HTTPException
 
 from . import captures, pr_delivery
-from .slack_activity import threaded
 
 
 class MissingFileScope(RuntimeError):
@@ -51,12 +50,11 @@ class SessionState:
 
     async def history(self, conversation_id, *, limit=None):
         parts = conversation_id.split(':')
-        if len(parts) not in {3, 4} or parts[0] != 'slack':
+        if len(parts) != 4 or parts[0] != 'slack':
             return ()
-        _, team, channel, *thread = parts
-        bindings = self.store.rows('SELECT run_id FROM slack_threads WHERE team_id=? AND channel=?' +
-                                   (' AND thread_ts=?' if thread else ' AND thread_ts=started_ts') + ' ORDER BY started_ts LIMIT 1',
-                                   (team, channel, *thread))
+        _, team, channel, thread = parts
+        bindings = self.store.rows('SELECT run_id FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
+                                   (team, channel, thread))
         if not bindings:
             return ()
         rows = self.store.messages(bindings[0]['run_id'])
@@ -87,7 +85,7 @@ class SlackWebhookChannel:
 
     async def handle_validated_event(self, *, team, event_id, channel, ts, root, user,
                                      prompt, mentioned, direct_message, missing_cloud, file_ids=()):
-        conversation = f'slack:{team}:{channel}' + ('' if direct_message and root == ts else ':' + root)
+        conversation = f'slack:{team}:{channel}:{root}'
         message = Message(id=f'slack:{team}:{event_id}', conversation_id=conversation, channel=self.name,
                           sender=Sender(id=user), text=prompt, role='user',
                           attachments=tuple(Attachment(id=file_id) for file_id in file_ids),
@@ -98,9 +96,7 @@ class SlackWebhookChannel:
 
     def source_for_run(self, run_id, delivery=None):
         binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (run_id,))[0]
-        conversation = f"slack:{binding['team_id']}:{binding['channel']}"
-        if not binding['channel'].startswith('D') or binding['thread_ts'] != binding['started_ts']:
-            conversation += ':' + binding['thread_ts']
+        conversation = f"slack:{binding['team_id']}:{binding['channel']}:{binding['thread_ts']}"
         return Message(id='moyai:' + run_id, conversation_id=conversation, channel=self.name,
                        sender=Sender(id='moyai'), text='', role='user',
                        metadata=MappingProxyType({'run_id': run_id, 'delivery': delivery or {}}))
@@ -116,9 +112,7 @@ class SlackWebhookChannel:
                 or (files and 'files:write' not in installation.get('scopes', []))):
             raise RuntimeError('Slack destination changed before delivery.')
         binding = rows[0]
-        conversation = f"slack:{binding['team_id']}:{binding['channel']}"
-        if threaded(binding):
-            conversation += ':' + binding['thread_ts']
+        conversation = f"slack:{binding['team_id']}:{binding['channel']}:{binding['thread_ts']}"
         if conversation != source.conversation_id:
             raise RuntimeError('Slack session binding changed before delivery.')
         return binding
@@ -140,7 +134,7 @@ class SlackWebhookChannel:
                 headers={'Authorization': f'Bearer {token}'}, **body)
 
         return await upload_slack_files(files, request=request, channel_id=binding['channel'],
-            thread_ts=binding['thread_ts'] if threaded(binding) else None, before_send=guard)
+            thread_ts=binding['thread_ts'], before_send=guard)
 
     async def upload_captures(self, source, selected):
         # Moyai owns saved-file eligibility and frozen bytes; AgentChat owns transport.
@@ -192,7 +186,7 @@ class SlackWebhookChannel:
         binding = self.destination(source, identity)
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={**rich_payload(content),
-                'channel': binding['channel'], 'thread_ts': binding['thread_ts'] if threaded(binding) else None})
+                'channel': binding['channel'], 'thread_ts': binding['thread_ts']})
         timestamp = response.get('ts')
         if response.get('ok') is not True or not isinstance(timestamp, str) or not timestamp:
             raise RuntimeError('Slack reply delivery could not be confirmed.')
@@ -209,7 +203,7 @@ class SlackWebhookChannel:
         if (not rows or not self.owner.settings.slack_thread_chat_enabled
                 or not self.owner.status()['enabled']
                 or rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id')
-                or not threaded(rows[0]) or (status and rows[0]['paused'])):
+                or (status and rows[0]['paused'])):
             raise RuntimeError('Slack destination changed before working status.')
         if status != self.owner.chat.activity.desired_status(run_id):
             raise RuntimeError('Task activity changed before working status.')
@@ -230,7 +224,7 @@ class SlackWebhookChannel:
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={
                 **payload, 'channel': binding['channel'],
-                'thread_ts': None if binding['channel'].startswith('D') and binding['thread_ts'] == binding['started_ts'] else binding['thread_ts'],
+                'thread_ts': binding['thread_ts'],
             })
         if not response.get('ts'):
             raise RuntimeError('Slack mirror delivery could not be confirmed.')

@@ -400,37 +400,81 @@ def test_long_markdown_replies_have_bounded_balanced_code_blocks():
     assert '<https://example.com|Docs>' in parts[-1]
 
 
-def dm_event(index, text, channel='D12345678', user='U12345678'):
+def dm_event(index, text, channel='D12345678', user='U12345678', **overrides):
     return event(f'EvDM{index}', type='message', channel_type='im', channel=channel,
-                 user=user, text=text, ts=f'17907290{index:02d}.123456')
+                 user=user, text=text, ts=f'17907290{index:02d}.123456', **overrides)
 
 
-def test_agentchat_dm_followups_preserve_session_model_sender_and_top_level_replies(slack_app):
-    from agentchat import AgentChat
+def test_agentchat_dm_roots_are_independent_and_followups_keep_thread_context(slack_app, monkeypatch):
+    from app.agentchat_slack import SessionState
     app, client, submitted, sent = slack_app
-    assert isinstance(app.state.slack.agentchat, AgentChat)
+    conversations = []
+    receive = app.state.slack.channel._receiver
+
+    async def observed(channel, message) -> None:
+        conversations.append(message.conversation_id)
+        await receive(channel, message)
+
+    monkeypatch.setattr(app.state.slack.channel, '_receiver', observed)
     first = dm_event(1, 'Remember granite and read <@U87654321> as source text')
-    assert client.post('/hooks/slack/events', **signed(first)).status_code == 200
+    root = first['event']['ts']
+    client.post('/hooks/slack/events', **signed(first))
     run_id = submitted[0]['id']
     finish(app, run_id, 'Remembering granite.')
-    assert client.post('/hooks/slack/events', **signed(dm_event(2, 'model opus'))).status_code == 200
-    second = dm_event(3, 'What was the phrase?')
-    assert client.post('/hooks/slack/events', **signed(second)).status_code == 200
+    client.post('/hooks/slack/events', **signed(dm_event(2, 'model opus', thread_ts=root)))
+    second = dm_event(3, 'What was the phrase?', thread_ts=root)
+    client.post('/hooks/slack/events', **signed(second))
     second['event_id'] = 'EvDMDuplicate'
-    assert client.post('/hooks/slack/events', **signed(second)).status_code == 200
-    assert len(app.state.store.rows('SELECT * FROM runs')) == 1
+    client.post('/hooks/slack/events', **signed(second))
+    fresh = dm_event(4, 'A separate task')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(lambda _: client.post('/hooks/slack/events', **signed(fresh)).status_code, range(2)))
+    assert statuses == [200, 200]
+    bindings = app.state.store.rows('SELECT * FROM slack_threads ORDER BY thread_ts')
+    assert len(bindings) == 2
+    fresh_id = bindings[1]['run_id']
+    assert fresh_id != run_id and bindings[1]['thread_ts'] == fresh['event']['ts']
     messages = app.state.store.messages(run_id)
-    assert len(messages) == 3
-    assert '<@U87654321>' in messages[0]['content']
+    assert len(messages) == 3 and '<@U87654321>' in messages[0]['content']
     assert messages[-1]['model'] == 'anthropic/claude-opus-5-5'
     assert messages[-1]['user_id'] == 'slack:T12345678:U12345678'
     assert app.state.store.run(run_id)['owner_id'] == messages[-1]['user_id']
+    isolated = app.state.store.messages(fresh_id)
+    assert len(isolated) == 1 and isolated[0]['content'] == 'A separate task'
+    assert isolated[0]['model'] == app.state.settings.resolve_model()
+    assert set(conversations) == {f'slack:T12345678:D12345678:{r}' for r in (root, fresh['event']['ts'])}
+    # Reconstruct the adapter against the persisted bindings; no channel-wide fallback.
+    state = SessionState(Store(app.state.settings.data_dir))
+    for binding in bindings:
+        source = app.state.slack.channel.source_for_run(binding['run_id'])
+        assert source.conversation_id == 'slack:T12345678:D12345678:' + binding['thread_ts']
+        history = asyncio.run(state.history(source.conversation_id))
+        assert [m.text for m in history] == [m['content'] for m in app.state.store.messages(binding['run_id'])]
+        assert asyncio.run(state.history(source.conversation_id, limit=0)) == ()
+    assert asyncio.run(state.history('slack:T12345678:D12345678')) == ()
     wait_for(lambda: any('text' in item for item in sent))
-    assert all(msg['channel'] == 'D12345678' and msg.get('thread_ts') is None for msg in sent)
-    assert 'signed-in BerriAI teammates can view it' in next(item['text'] for item in sent if 'text' in item)
-    history = asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:D12345678'))
-    assert [m.text for m in history] == [m['content'] for m in messages]
-    assert asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:D12345678',limit=0)) == ()
+    replies = [item for item in sent if 'text' in item]
+    assert replies and all(msg['channel'] == 'D12345678' and msg['thread_ts'] == root for msg in replies)
+    assert 'signed-in BerriAI teammates can view it' in replies[0]['text']
+
+
+def test_dm_commands_only_control_their_thread(slack_app):
+    app, client, submitted, _ = slack_app
+    first = dm_event(1, 'First task')
+    client.post('/hooks/slack/events', **signed(first))
+    first_id = submitted[-1]['id']
+    client.post('/hooks/slack/events', **signed(dm_event(2, 'Second task')))
+    second_id = submitted[-1]['id']
+    assert first_id != second_id
+    for index, command in enumerate(['stop', 'sleep', 'wake', 'status'], 3):
+        client.post('/hooks/slack/events', **signed(dm_event(index, command)))
+    assert all(app.state.store.run(r)['status'] == 'queued' for r in [first_id, second_id])
+    client.post('/hooks/slack/events', **signed(dm_event(7, 'sleep', thread_ts=first['event']['ts'])))
+    assert app.state.store.rows('SELECT paused FROM slack_threads WHERE run_id=?', (first_id,))[0]['paused'] == 1
+    assert app.state.store.run(second_id)['status'] == 'queued'
+    client.post('/hooks/slack/events', **signed(dm_event(8, 'model opus')))
+    client.post('/hooks/slack/events', **signed(dm_event(9, 'New default model task')))
+    assert submitted[-1]['model'] == app.state.settings.resolve_model()
 
 
 def test_dm_users_and_channel_threads_cannot_share_a_session(slack_app):
@@ -563,7 +607,7 @@ def test_dm_visibility_notice_moves_to_first_answer(slack_app):
     client.post('/hooks/slack/events', **signed(dm_event(1, 'Hello')))
     run_id = runs[0]['id']
     finish(app, run_id, 'Hello back.')
-    client.post('/hooks/slack/events', **signed(dm_event(2, 'Again')))
+    client.post('/hooks/slack/events', **signed(dm_event(2, 'Again', thread_ts=dm_event(1, '')['event']['ts'])))
     finish(app, run_id, 'Again back.')
     answers = app.state.store.rows("SELECT text FROM slack_outbox WHERE kind='answer' ORDER BY id")
     assert 'signed-in BerriAI teammates' in answers[0]['text']
@@ -585,8 +629,9 @@ def test_agent_panel_threads_stay_separate_from_each_other_and_plain_dms(slack_a
     followup = dm_event(4, 'Continue the first agent panel thread')
     followup['event']['thread_ts'] = threads[0]
     client.post('/hooks/slack/events', **signed(followup))
-    client.post('/hooks/slack/events', **signed(dm_event(5, 'Continue the plain DM')))
-    assert len(app.state.store.messages(main_run)) == 2
+    client.post('/hooks/slack/events', **signed(dm_event(5, 'A new DM session')))
+    assert len(app.state.store.messages(main_run)) == 1
+    assert len(app.state.store.rows('SELECT * FROM runs')) == 4
     assert len(app.state.store.messages(thread_runs[0])) == 2
     assert len(app.state.store.messages(thread_runs[1])) == 1
     channel = app.state.slack.channel
@@ -659,10 +704,11 @@ def test_native_media_batch_then_one_card_and_dm_notice(media_delivery, dm):
     assert len(completions) == 1
     assert [f['id'] for f in completions[0]['files']] == ['demo.webm', 'result.png']
     assert completions[0]['channel_id'].startswith('D' if dm else 'C')
-    assert completions[0].get('thread_ts') == (None if dm else ROOT)
+    assert completions[0].get('thread_ts') == (dm_event(20, '')['event']['ts'] if dm else ROOT)
     assert [raw for _, raw in uploaded] == [b'\x1aE\xdf\xa3webm-demo', b'\x89PNG\r\n\x1a\nresult']
     replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
     assert len(replies) == 2 and not replies[0].get('attachments') and replies[1]['attachments']
+    assert all(reply['thread_ts'] == completions[0]['thread_ts'] for reply in replies)
     for reply in replies:
         sections = [block for block in reply['blocks'] if block['type'] == 'section']
         assert sections and all(block['expand'] is True for block in sections)

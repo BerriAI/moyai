@@ -24,12 +24,6 @@ STATUSES = {
 }
 
 
-def threaded(binding):
-    # setStatus opens a DM thread. Plain DMs still reply at top level, so do not
-    # unexpectedly move their users into a thread where no answer will arrive.
-    return not (binding['channel'].startswith('D') and binding['thread_ts'] == binding['started_ts'])
-
-
 class SlackActivity:
     def __init__(self, owner):
         self.owner = owner
@@ -66,8 +60,6 @@ class SlackActivity:
             LEFT JOIN slack_activity a ON a.run_id=t.run_id
             WHERE t.team_id=? ORDER BY COALESCE(a.retry_at,0),COALESCE(a.refreshed_at,0)''', (team,))
         for row in rows:
-            if not threaded(row):
-                continue
             status = self.status_for(row)
             # Coalesce changing focus without delaying lifecycle transitions.
             if status and status not in STATUSES.values() and row['last_status'] not in STATUSES.values():

@@ -123,17 +123,18 @@ def test_posting_during_work_refreshes_indicator_and_web_followup_starts_it(acti
     assert activity[3][-1]['status'] == 'is getting ready…'
 
 
-def test_plain_dm_keeps_top_level_routing_and_threaded_dm_gets_status(activity):
+def test_dm_roots_and_panel_threads_both_get_threaded_status(activity):
     app, client, submitted, _ = activity
     client.post('/hooks/slack/events', **signed(dm_event(1, 'Plain DM')))
-    assert app.state.store.rows("SELECT 1 FROM slack_outbox WHERE kind='reaction'")
+    assert not app.state.store.rows("SELECT 1 FROM slack_outbox WHERE kind='reaction'")
     sync(app)
-    assert activity[3] == []
+    assert activity[3] == [{'channel_id': 'D12345678', 'thread_ts': dm_event(1, '')['event']['ts'], 'status': 'is getting ready…'}]
     payload = dm_event(2, 'Panel thread')
     payload['event']['thread_ts'] = '1790728000.123456'
     client.post('/hooks/slack/events', **signed(payload))
     sync(app)
-    assert activity[3] == [{'channel_id': 'D12345678', 'thread_ts': '1790728000.123456', 'status': 'is getting ready…'}]
+    assert len(activity[3]) == 2
+    assert activity[3][-1] == {'channel_id': 'D12345678', 'thread_ts': '1790728000.123456', 'status': 'is getting ready…'}
 
 
 def test_historical_idle_sessions_are_not_backfilled_and_refresh_is_bounded(activity):
