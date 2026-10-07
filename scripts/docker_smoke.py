@@ -137,6 +137,9 @@ def main():
         assert docker("inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"
         docker("start", name)
         healthy(name)
+        docker("exec", "--user", "10001:10001", name, python, "-c",
+               "import sqlite3; db=sqlite3.connect('/var/data/moyai/workspace.db'); "
+               "assert db.execute('SELECT summary FROM runs').fetchone()[0] == 'write-after-migration'")
         log(docker("exec", "--user", "10001:10001", name, python, "-c", VERIFY).stdout.strip())
         log("PASS: graceful stop and restart preserve the same database and credentials.")
 
