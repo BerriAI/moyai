@@ -1,0 +1,77 @@
+/* Restore Moyai's purple identity over the current workspace layout.
+   Keep typography, panel geometry, responsive rules and semantic errors intact. */
+:root {
+  --text: #28282b;
+  --muted: #73717b;
+  --line: #e9e5ef;
+  --border: #e4dfea;
+  --purple: #7155ba;
+  --accent: #7155ba;
+  --soft: #f3effa;
+  --brand-hover: #60449f;
+  --brand-selected: #e9e2f4;
+}
+button:focus-visible, a:focus-visible, summary:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline-color: var(--purple);
+}
+input[type="checkbox"], input[type="radio"] { accent-color: var(--purple); }
+.rail { background: #f7f5fa; border-right-color: var(--line); }
+.brand { color: #332842; flex: 1; }
+.brand img { width: 27px; height: 27px; flex: 0 0 27px; filter: none; }
+.brand-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.brand-product { color: var(--purple); }
+.brand #workspace-name { font-size: 10px; color: var(--muted); margin: 2px 0 0; }
+.rail-tools { flex-shrink: 0; }
+.welcome-mark { display: flex; color: #332842; }
+.welcome-mark img, .message-label img { filter: none; }
+.new-task, .new-task .nav-icon { color: var(--purple); }
+button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
+.agent-disclosure:hover, .folder-toggle:hover, .folder-menu:hover, .folder-add:hover,
+.parent-session:hover, .header-icon:hover, .panel-icon:hover,
+.panel-tab [data-close]:hover { background: var(--soft); }
+.nav-button.active, .parent-session:has(.selected), .parent-session:has(.selected):hover,
+.header-icon.is-active, .header-icon[aria-expanded="true"], .panel-tab.is-active {
+  background: var(--brand-selected); color: #543d79;
+}
+.nav-button.active .nav-icon, .panel-tab.is-active > button { color: #543d79; }
+.child-session.selected { background: var(--brand-selected); }
+.sessions-label #session-scope:not(:disabled):hover { background-color: var(--soft); }
+.folder-sessions, .child-sessions, .panel-open > .workspace-panel { border-color: var(--line); }
+.session-search.is-open, .session-search:focus-within, .session-search.has-query {
+  box-shadow: inset 0 0 0 1px #d8cce8;
+}
+.session-dot.running, .session-dot.queued, .session-dot.provisioning,
+.session-dot.saving, .session-dot.reconnecting, .session-dot.waiting_children,
+.work-live-dot, .chat-working.busy:before { background: var(--purple); }
+.is-live > .work-heading .work-indicator { border-color: #e9dff5; border-top-color: var(--purple); }
+.work-action.running .work-action-state, .work-action.running .work-icon { color: var(--purple); }
+.work-body { border-color: var(--line); }
+.work-action summary:hover, .work-action details[open] { background: #faf9fc; border-color: var(--line); }
+.chat-message.user { background: var(--soft); }
+.composer, .reply-composer { border-color: #e4dfea; }
+.composer:focus-within { border-color: #b4a4ca; box-shadow: 0 0 0 3px #b6a4d319; }
+.send-button, button.primary { background: var(--purple); border-color: var(--purple); color: #fff; }
+.send-button:hover, button.primary:hover { background: var(--brand-hover); border-color: var(--brand-hover); }
+.send-button:disabled { background: #d6cbe7; }
+.stop-button { background: var(--soft); color: #654a8d; }
+.attach-button:hover, .record-button.is-idle:hover, .skill-picker-button:hover {
+  background: var(--soft); color: #654a8d;
+}
+.model-picker select:hover { background-color: var(--soft); }
+.message-queue { background: #faf9fc; border-color: var(--line); }
+.queued-message + .queued-message { border-color: var(--line); }
+.queue-editor textarea { border-color: #d7cbe3; }
+.queue-edit-actions button:last-child { background: #ede7f4; border-color: #e1d8eb; color: #654a8d; }
+.markdown a { color: var(--purple); text-decoration-color: #c6b9da; }
+.markdown code { background: #f0eef4; color: #5d546e; }
+.markdown blockquote { border-color: #dbd5e7; }
+.code-block { background: #f8f7fa; border-color: var(--line); }
+.code-header { background: #f1eff5; }
+.code-header button, .code-block code { color: #645e70; }
+.markdown th { background: #f8f7fa; }
+.suggestions button { border-color: var(--line); color: #665476; }
+.suggestions button:hover, .settings-link:hover { background: var(--soft); }
+.settings-icon, .settings-group h2 > span { background: var(--soft); color: var(--purple); border-color: var(--line); }
+.approval, #credential-requests .credential-request { border-color: #e4dfea; background: #faf8fd; }
+.panel-resize:hover, .panel-resize:focus-visible { background: #7155ba33; }

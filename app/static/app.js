@@ -64,7 +64,6 @@ function renderSidebar(){
   const sections=sidebarSections(state.runs,state.folders,search);
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
-  $('.avatar').textContent=(state.organization.name||'W')[0].toUpperCase();
   const signature=JSON.stringify([state.selected,search,[...state.expandedParents],[...state.closedFolders],sections]);
   if(state.sidebarSignature===signature)return;
   state.sidebarSignature=signature;

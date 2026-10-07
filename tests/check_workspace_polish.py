@@ -20,11 +20,16 @@ def fits(page):
 def main():
     url = os.environ.get('MOYAI_TEST_URL', 'http://127.0.0.1:8787')
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=['--no-sandbox'])
+        browser = p.chromium.launch(executable_path=os.environ.get('MOYAI_TEST_BROWSER'), args=['--no-sandbox'])
         page = browser.new_page(viewport={'width': 1600, 'height': 960})
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.goto(url)
+        expect(page.locator('.brand')).to_contain_text('Moyai Devin')
+        expect(page.locator('.welcome-mark')).to_be_visible()
+        assert page.locator('.brand img').evaluate('(el) => el.complete && el.naturalWidth > 0')
+        assert page.locator('.brand img').evaluate('(el) => getComputedStyle(el).filter') == 'none'
+        assert page.locator('.send-button').evaluate('(el) => getComputedStyle(el).backgroundColor') == 'rgb(113, 85, 186)'
         page.get_by_label('Message Moyai Devin', exact=True).fill('Workspace polish browser regression — local demo only')
         # Explicitly select demo; never rely on the server's execution default.
         page.locator('.task-options > summary').click()
@@ -35,7 +40,8 @@ def main():
         session_url = page.url
         expect(page.locator('.chat-message.assistant')).to_contain_text('Demo complete')
         assert page.locator('.rail').bounding_box()['width'] == 300
-        assert page.locator('.chat-message.user').evaluate('(el) => getComputedStyle(el).backgroundColor') == 'rgb(244, 244, 244)'
+        assert page.locator('.chat-message.user').evaluate('(el) => getComputedStyle(el).backgroundColor') == 'rgb(243, 239, 250)'
+        assert page.locator('.parent-session:has(.selected)').evaluate('(el) => getComputedStyle(el).backgroundColor') == 'rgb(233, 226, 244)'
         for width, height in [(1600, 960), (1280, 800), (1024, 768), (844, 390), (390, 844), (320, 568)]:
             page.set_viewport_size({'width': width, 'height': height})
             fits(page)
@@ -65,6 +71,8 @@ def main():
             if width <= 850:
                 page.get_by_role('button', name='Open sidebar', exact=True).click()
                 expect(page.get_by_role("searchbox", name="Search sessions")).to_be_focused()
+                expect(page.locator('.brand')).to_be_visible()
+                assert page.locator('.brand').evaluate('(el) => el.scrollWidth <= el.clientWidth')
                 page.locator('#close-sidebar').click()
                 expect(page.locator('#sidebar')).to_have_attribute('inert', '')
             print(f'PASS {width}x{height}: composer, overflow, panel, resize, sidebar')
@@ -87,7 +95,7 @@ def main():
         expect(page.get_by_role('searchbox', name='Search sessions')).to_be_focused()
         # Inter comes from Google Fonts (CSP-allowed); system fonts are the offline fallback.
         assert 'Inter' in page.evaluate("getComputedStyle(document.body).fontFamily")
-        print('PASS real demo submit/follow-up, persisted tab, reload, no browser errors')
+        print('PASS purple branding and original logo; real demo submit/follow-up, persisted tab, reload, no browser errors')
         browser.close()
 
 
