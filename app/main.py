@@ -930,11 +930,12 @@ def create_app(settings: Settings | None = None):
         status = 'unknown'
         trace_started = time.time_ns()
         trace_response = {}
+        gateway_id = ''
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
                 async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
                                          json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
-                    spend.headers(request_id, upstream, False)
+                    gateway_id = spend.headers(request_id, upstream, False)
                     if upstream.status_code >= 400:
                         status = 'failed'
                         raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.')
@@ -959,7 +960,8 @@ def create_app(settings: Settings | None = None):
                 # Account before returning any data, including if the sandbox
                 # stopped while the already-submitted inference was completing.
                 spend.finish(request_id, capture, status)
-                tracing.model(run, request_id, trace_started, body['messages'], trace_response, status)
+                tracing.model(run, request_id, trace_started, body['messages'],
+                              {**trace_response, **capture.response}, status, gateway_id=gateway_id)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:

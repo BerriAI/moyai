@@ -57,7 +57,10 @@ def authorized_payload(body, route, model, context):
 
 class NativeUsageCapture(UsageCapture):
     """Observe native usage fields; never rewrite the response bytes."""
-    failed = False
+    def __init__(self, streaming: bool, *, route: str) -> None:
+        super().__init__(streaming)
+        self.route = route
+        self.failed = False
 
     def consume(self, value):
         if not isinstance(value, dict):
@@ -80,11 +83,16 @@ class NativeUsageCapture(UsageCapture):
                 self.usage[canonical] = self.usage[native]
         # Messages reports uncached input separately; Responses includes cached
         # input in input_tokens already. Keep the native cache fields as well.
-        if 'input_tokens' in self.usage and any(key in self.usage for key in ('cache_read_input_tokens', 'cache_creation_input_tokens')):
-            self.usage['prompt_tokens'] = sum(self.usage.get(key, 0) for key in
-                ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
-        if 'prompt_tokens' in self.usage and 'completion_tokens' in self.usage:
-            self.usage['total_tokens'] = self.usage['prompt_tokens'] + self.usage['completion_tokens']
+        if 'input_tokens' in self.usage and self.route == '/v1/messages':
+            counts = [self.usage.get(key, 0) for key in
+                      ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens')]
+            if all(type(value) is int and value >= 0 for value in counts):
+                self.usage['prompt_tokens'] = sum(counts)
+            else:
+                self.usage.pop('prompt_tokens', None)
+        counts = [self.usage.get(key) for key in ('prompt_tokens', 'completion_tokens')]
+        if all(type(value) is int and value >= 0 for value in counts):
+            self.usage['total_tokens'] = sum(counts)
 
 
 class HarnessGateway:
@@ -140,6 +148,7 @@ class HarnessGateway:
         client = None
         upstream = None
         request_id = None
+        gateway_id = ''
         capture = None
         status = 'failed'
         started = time.time_ns()
@@ -159,7 +168,7 @@ class HarnessGateway:
                     self.spend.finish(request_id, capture, status)
                     # Only usage/status: native output can contain private reasoning.
                     self.tracing.model(run, request_id, started, [],
-                        {'model': model, 'usage': capture.usage if capture else {}}, status)
+                        capture.response if capture else {}, status, gateway_id=gateway_id)
                     await self.checkpoints.flush()
             finally:
                 self.model_slots.release()
@@ -190,7 +199,7 @@ class HarnessGateway:
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
-            capture = NativeUsageCapture(bool(payload.get('stream')))
+            capture = NativeUsageCapture(bool(payload.get('stream')), route=route)
             headers = {'Authorization': 'Bearer ' + self.settings.litellm_api_key,
                        'x-litellm-call-id': request_id,
                        'x-litellm-spend-logs-metadata': json.dumps({'moyai_request_id': request_id})}
@@ -204,7 +213,7 @@ class HarnessGateway:
             upstream_route = '/v1/chat/completions' if compact else route
             url = base + upstream_route.removeprefix('/v1') if base.endswith('/v1') else base + upstream_route
             upstream = await client.send(client.build_request('POST', url, json=payload, headers=headers), stream=True)
-            self.spend.headers(request_id, upstream, capture.streaming)
+            gateway_id = self.spend.headers(request_id, upstream, capture.streaming)
             if upstream.status_code >= 400:
                 if compact:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}

@@ -309,3 +309,16 @@ def test_user_session_model_totals_match_exactly_and_requests_keep_original_date
     for field in ['users','sessions','models']:
         assert sum(Decimal(row['spend']) for row in report[field]) == Decimal(report['total']['spend']) == Decimal('0.160')
     assert app.state.spend.report(start=datetime(2026,9,30).date(),end=datetime(2026,9,30).date())['total']['spend'] == '0'
+
+
+def test_usage_capture_normalizes_cache_aliases_without_overwriting_zero() -> None:
+    capture = UsageCapture(False)
+    capture.consume({'usage': {'prompt_tokens': 125, 'cache_read_input_tokens': 0,
+        'cache_creation_input_tokens': None, 'prompt_tokens_details': {'cached_tokens': 100,
+            'cache_write_tokens': None, 'cache_creation_tokens': 20,
+            'cache_creation_token_details': {'ephemeral_5m_input_tokens': 20}}}})
+    assert capture.usage['cache_read_input_tokens'] == 0
+    assert capture.usage['cache_creation_input_tokens'] == 20
+    assert capture.usage['cache_creation'] == {'ephemeral_5m_input_tokens': 20}
+    capture.consume({'usage': {'prompt_tokens_details': 'malformed'}})
+    assert 'cache_read_input_tokens' not in capture.usage

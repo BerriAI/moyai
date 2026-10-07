@@ -78,7 +78,7 @@ def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, mon
 
 
 def test_native_error_event_is_not_accounted_as_success():
-    capture = NativeUsageCapture(True)
+    capture = NativeUsageCapture(True, route='/v1/responses')
     capture.feed(b'data: {"type":"response.failed","response":{"status":"failed"}}\n\n')
     capture.finish()
     assert capture.done and capture.failed
@@ -127,7 +127,7 @@ def test_prompt_cache_policy_and_usage_survive_gateway(workspace, monkeypatch):
 
 
 def test_response_cache_tokens_are_not_double_counted():
-    capture = NativeUsageCapture(False)
+    capture = NativeUsageCapture(False, route='/v1/responses')
     capture.feed(b'{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":80},"output_tokens":5}}')
     capture.finish()
     assert capture.usage['prompt_tokens'] == 100 and capture.usage['total_tokens'] == 105

@@ -1,7 +1,10 @@
 import json
 import time
+from pathlib import Path
 
 import httpx
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 import pytest
 
@@ -145,3 +148,84 @@ def test_model_broker_emits_span_without_rerouting_or_exposing_system_prompts(wo
     span = tracing.processor.spans[0]
     assert 'private-system-prompt' not in str(span.attributes)
     assert 'Hello' in span.attributes['input.value'] and 'Done' in span.attributes['output.value']
+
+
+@pytest.mark.parametrize('route,model', [('chat/completions', 'openai/gpt-6-astra'),
+                                        ('chat/completions', 'anthropic/claude-opus-5-5'),
+                                        ('responses', 'openai/gpt-6-astra'),
+                                        ('messages', 'anthropic/claude-opus-5-5')])
+@pytest.mark.parametrize('stream', [False, True])
+def test_broker_exports_cost_inputs_and_distinct_provider_gateway_ids(
+    workspace: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch, route: str, model: str, stream: bool,
+) -> None:
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    tracing = app.state.tracing
+    tracing.enabled = True
+    tracing.processor = Processor()
+    native = route == 'messages'
+    anthropic = model.startswith('anthropic/')
+    run = active(app, model=model)
+    usage = ({'input_tokens': 5, 'output_tokens': 3, 'cache_read_input_tokens': 100,
+              'cache_creation_input_tokens': 20, 'service_tier': 'standard',
+              'cache_creation': {'ephemeral_5m_input_tokens': 15, 'ephemeral_1h_input_tokens': 5}}
+             if native else {'input_tokens': 125, 'output_tokens': 3,
+                             'input_tokens_details': {'cached_tokens': 100}})
+    if route == 'chat/completions':
+        usage = {'prompt_tokens': 125, 'completion_tokens': 3, 'prompt_tokens_details': {'cached_tokens': 100}}
+        if anthropic:
+            usage['prompt_tokens_details'].update(cache_write_tokens=20,
+                cache_creation_token_details={'ephemeral_5m_input_tokens': 15, 'ephemeral_1h_input_tokens': 5})
+    value = {'id': 'provider-response', 'model': 'resolved-model', 'usage': usage,
+             'choices': [{'message': {'content': 'Hello', 'reasoning_content': 'private-thought'}}]}
+    if not native:
+        value['service_tier'] = 'standard' if anthropic else 'flex'
+    def gateway(request: httpx.Request) -> httpx.Response:
+        assert request.headers['x-litellm-call-id'] != 'observed-gateway-id'
+        if stream and route != 'chat/completions':
+            frames = ([{'type': 'message_start', 'message': {**value, 'usage': {**usage, 'output_tokens': 0}}},
+                       {'type': 'message_delta', 'usage': {'output_tokens': 3}}, {'type': 'message_stop'}]
+                      if native else [{'type': 'response.completed', 'response': value}])
+            wire = ''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames).encode()
+        else:
+            wire = json.dumps(value).encode()
+        return httpx.Response(200, content=wire, headers={'x-litellm-call-id': 'observed-gateway-id'})
+    real = httpx.AsyncClient
+    monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))
+    response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer capability'},
+        json={'messages': [{'role': 'system', 'content': 'private-system'}, {'role': 'user', 'content': 'Hello'}],
+              'input': 'Hello', 'stream': stream})
+    assert response.status_code == 200
+    assert len(tracing.processor.spans) == 1
+    attrs = tracing.processor.spans[0].attributes
+    assert attrs['gen_ai.response.id'] == 'provider-response'
+    assert attrs['litellm.call_id'] == 'observed-gateway-id'
+    assert attrs['gen_ai.response.model'] == 'resolved-model'
+    assert attrs['gen_ai.usage.input_tokens'] == 125
+    assert attrs['gen_ai.usage.output_tokens'] == 3
+    assert attrs['gen_ai.usage.cache_read.input_tokens'] == 100
+    assert attrs['gen_ai.usage.total_tokens'] == 128
+    assert 'private-system' not in str(attrs) and 'private-thought' not in str(attrs)
+    if anthropic:
+        assert attrs['gen_ai.usage.cache_write.input_tokens'] == 20
+        assert attrs['anthropic.usage.cache_creation.ephemeral_5m_input_tokens'] == 15
+        assert attrs['anthropic.usage.cache_creation.ephemeral_1h_input_tokens'] == 5
+        assert attrs['anthropic.response.service_tier'] == 'standard'
+    else:
+        assert 'gen_ai.usage.cache_write.input_tokens' not in attrs
+        assert attrs['openai.response.service_tier'] == 'flex'
+    row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
+    assert row['cache_read_input_tokens'] == 100
+
+
+@pytest.mark.parametrize('value', [True, -1, '10', None])
+def test_model_usage_rejects_invalid_counts_and_preserves_explicit_zero(tmp_path: Path, value: object) -> None:
+    _, tracing, processor, run, _ = setup(tmp_path)
+    tracing.model(run, 'local-request-id', time.time_ns(), [],
+                  {'usage': {'prompt_tokens': value, 'completion_tokens': 0,
+                             'cache_read_input_tokens': 0, 'cache_creation_input_tokens': value}}, 'completed')
+    attrs = processor.spans[0].attributes
+    assert attrs['gen_ai.usage.output_tokens'] == attrs['gen_ai.usage.cache_read.input_tokens'] == 0
+    for key in ('gen_ai.response.id', 'gen_ai.response.model', 'litellm.call_id', 'gen_ai.usage.input_tokens',
+                'gen_ai.usage.total_tokens', 'gen_ai.usage.cache_write.input_tokens'):
+        assert key not in attrs
