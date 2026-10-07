@@ -48,6 +48,14 @@ class RunManager:
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
 
+    def receive_result(self, run_id: str, result: dict[str, object]) -> None:
+        """Persist the answer and wake browser readers without settling its turn."""
+        serialized = json.dumps(result)
+        if self.store.run(run_id)['pending_result'] == serialized:
+            return
+        self.store.update_run(run_id, summary=str(result.get('message', '')), pending_result=serialized)
+        self.store.event(run_id, 'chat', 'Response received', {'message_id': result.get('message_id')})
+
     def preserve_answer(self, run_id, reason=SAVE_WARNING):
         """Called on failure/restart; never turn an unsaved workspace into success."""
         row = self.store.run(run_id)
@@ -406,7 +414,7 @@ class RunManager:
                             # Store the answer independently of artifacts and the Modal
                             # checkpoint. Recovery can finish this exact turn after a crash.
                             result["message_id"] = run.get("message_id")
-                            self.store.update_run(run_id, summary=str(result.get("message", "")), pending_result=json.dumps(result))
+                            self.receive_result(run_id, result)
                             await self.persist()
                         elif event.get('kind') == 'trace' and self.store.tracing:
                             self.store.tracing.tool(run_id, event.get('data'))

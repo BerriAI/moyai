@@ -457,7 +457,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, "Task not found")
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        messages = store.messages(run_id)
+        messages = public_messages(run, store.messages(run_id))
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
@@ -936,6 +936,32 @@ def create_app(settings: Settings | None = None):
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
+
+
+def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Show a durable answer receipt while its canonical turn is still saving."""
+    raw = run.get('pending_result')
+    if not isinstance(raw, str) or not raw:
+        return messages
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        return messages
+    message_id = run.get('active_message_id')
+    active = next((m for m in messages if m['id'] == message_id and m['role'] == 'user' and m['status'] == 'running'), None)
+    if (not active or not isinstance(message_id, int) or not isinstance(result, dict)
+            or result.get('message_id') != message_id or result.get('completed') is not True
+            or any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential'))
+            or not isinstance(result.get('message'), str) or not result['message'].strip()):
+        return messages
+    # Keep settlement, model history and Slack delivery owned by finish_message.
+    # Its user-status update removes this projection, even across a stale run read.
+    reply = {'id': -message_id, 'role': 'assistant', 'content': run.get('summary') or result['message'],
+             'status': 'save_failed' if result.get('save_failed') else 'saving',
+             'model': run.get('active_model') or active.get('model', ''),
+             'created_at': run['updated_at'], 'attachments': []}
+    index = next((i for i, m in enumerate(messages) if m['role'] == 'user' and m['status'] == 'queued'), len(messages))
+    return messages[:index] + [reply] + messages[index:]
 
 
 def public_run(run):

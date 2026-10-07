@@ -1,16 +1,19 @@
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.db import Store
-from app.main import create_app
+from app.main import create_app, public_messages
 from app.persistence import Checkpoints, restore_checkpoint
+from app.runner import RunManager
 from test_runner import FakeSandbox, Lines, aio, runner
-from test_workspace import wait_for
+from test_workspace import wait_for, workspace
 
 
 class SessionSandbox(FakeSandbox):
@@ -184,6 +187,9 @@ async def test_answer_is_durable_before_snapshot_and_survives_restart(runner, mo
     row = reopened.run(run['id'])
     assert row['status'] == 'saving' and row['summary'] == 'Tests passed'
     assert json.loads(row['pending_result'])['message'] == 'Tests passed'
+    visible = public_messages(row, reopened.messages(run['id']))
+    assert [m['content'] for m in visible if m['role'] == 'assistant'] == ['Tests passed']
+    assert not [m for m in reopened.messages(run['id']) if m['role'] == 'assistant']
     from app.runner import RunManager
     recovery = RunManager(reopened, runner.settings)
     recovery.settings = runner.settings.model_copy(update={'modal_token_id': ''})
@@ -195,6 +201,82 @@ async def test_answer_is_durable_before_snapshot_and_survives_restart(runner, mo
     release.set()
     await wait_jobs(runner)
     assert len([m for m in reopened.messages(run['id']) if m['role'] == 'assistant']) == 1
+
+
+async def test_answer_notification_precedes_artifacts_without_releasing_followups(runner: RunManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    machine = SessionSandbox(1)
+    async def create(**kwargs: object) -> SessionSandbox:
+        return machine
+    async def archive(*args: object) -> None:
+        started.set()
+        await release.wait()
+    monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
+    monkeypatch.setattr(runner, 'save_artifact', archive)
+    run = runner.store.create_run('Say hello', '', 'modal', [], chat_enabled=True)
+    runner.submit(run)
+    await started.wait()
+    try:
+        row = runner.store.run(run['id'])
+        result = json.loads(row['pending_result'])
+        runner.receive_result(run['id'], result)  # Replayed receipt is idempotent.
+        assert len([e for e in runner.store.events(run['id']) if e['message'] == 'Response received']) == 1
+        runner.store.enqueue_message(run['id'], 'Next question', 'queued-next')
+        assert runner.store.claim_message(run['id']) is None
+        visible = public_messages(row, runner.store.messages(run['id']))
+        assert [m['role'] for m in visible] == ['user', 'assistant', 'user']
+        assert visible[1]['content'] == 'Tests passed' and visible[2]['status'] == 'queued'
+        assert not row['snapshot_id']
+        # Avoid launching the queued fixture again; cancellation follows existing policy.
+        runner.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run['id'],))
+    finally:
+        release.set()
+        await wait_jobs(runner)
+    answers = [m for m in public_messages(runner.store.run(run['id']), runner.store.messages(run['id'])) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['id'] > 0 and answers[0]['status'] == 'completed'
+
+
+@pytest.mark.parametrize('control', [None, 'continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential', 'incomplete', 'wrong_turn', 'empty', 'malformed', 'non_object'])
+def test_run_api_exposes_only_current_completed_answer_receipts(workspace: tuple[FastAPI, TestClient], control: str | None) -> None:
+    app, client = workspace
+    store = app.state.store
+    run = store.create_run('Say hello', '', 'demo', [], chat_enabled=True)
+    message = store.claim_message(run['id'])
+    result = {'message_id': message['id'], 'completed': True, 'message': 'Hello!', 'private_protocol_data': 'must-stay-private'}
+    if control == 'incomplete':
+        result['completed'] = False
+    elif control == 'wrong_turn':
+        result['message_id'] += 1
+    elif control == 'empty':
+        result['message'] = ' '
+    elif control:
+        result[control] = True
+    raw = '{' if control == 'malformed' else '[]' if control == 'non_object' else json.dumps(result)
+    store.update_run(run['id'], status='saving', summary='Hello!', pending_result=raw)
+    response = client.get('/api/runs/' + run['id'])
+    assert response.status_code == 200 and 'must-stay-private' not in response.text
+    assert 'pending_result' not in response.json()
+    answers = [m for m in response.json()['messages'] if m['role'] == 'assistant']
+    assert len(answers) == (0 if control else 1)
+    if control:
+        return
+    assert answers[0]['id'] == -message['id'] and answers[0]['attachments'] == []
+    assert answers[0]['status'] == 'saving' and answers[0]['content'] == 'Hello!'
+    assert not [m for m in store.messages(run['id']) if m['role'] == 'assistant']
+    store.enqueue_message(run['id'], 'Use a different model next', 'next-model', model='next-model')
+    reply = next(m for m in client.get('/api/runs/' + run['id']).json()['messages'] if m['role'] == 'assistant')
+    assert reply['model'] == message['model'] and reply['model'] != 'next-model'
+    # Legacy cleanup may await termination after setting the run completed.
+    store.update_run(run['id'], status='completed')
+    assert len([m for m in client.get('/api/runs/' + run['id']).json()['messages'] if m['role'] == 'assistant']) == 1
+    result['save_failed'] = True
+    store.update_run(run['id'], summary='Hello!\nWorkspace save warning', pending_result=json.dumps(result))
+    reply = next(m for m in client.get('/api/runs/' + run['id']).json()['messages'] if m['role'] == 'assistant')
+    assert reply['status'] == 'save_failed' and reply['content'].endswith('Workspace save warning')
+    stale_run = store.run(run['id'])
+    store.finish_message(run['id'], message['id'], 'Hello!\nWorkspace save warning', 'save_failed')
+    answers = [m for m in public_messages(stale_run, store.messages(run['id'])) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['id'] > 0 and answers[0]['status'] == 'save_failed'
 
 
 async def test_failed_save_retains_prior_checkpoint_and_next_turn_uses_saved_chat(runner, monkeypatch):

@@ -10,6 +10,7 @@ import pytest
 
 from app.config import MODEL_CATALOG, Settings
 from app.db import Store
+from app.main import public_messages
 from app.durable_runner import DurableRunner
 from app.temporal_runtime import TemporalRunManager
 from app.runner import RunManager
@@ -155,6 +156,23 @@ async def test_every_step_can_lose_worker_and_launch_ack_without_repeating_work(
     assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 1
     assert manager.store.run(run_id)['status'] == 'idle'
     assert [m['content'] for m in manager.store.messages(run_id) if m['role'] == 'assistant'] == ['Saved answer']
+
+
+async def test_final_receipt_is_visible_before_save_and_survives_worker_restart(durable: tuple[TemporalRunManager, Cloud, str]) -> None:
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='save')
+    assert cloud.snapshots == 0
+    # Reopen authoritative storage and replay the supervisor receipt.
+    manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    row = manager.store.run(run_id)
+    manager.receive_result(run_id, json.loads(row['pending_result']))
+    assert len([e for e in manager.store.events(run_id) if e['message'] == 'Response received']) == 1
+    answers = [m for m in public_messages(row, manager.store.messages(run_id)) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['content'] == 'Saved answer' and answers[0]['id'] < 0
+    assert not [m for m in manager.store.messages(run_id) if m['role'] == 'assistant']
+    await drive(manager, run_id)
+    answers = [m for m in public_messages(manager.store.run(run_id), manager.store.messages(run_id)) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['status'] == 'completed' and answers[0]['id'] > 0
 
 
 async def test_queued_followup_restores_checkpoint_and_has_own_user_and_model(durable, monkeypatch):
