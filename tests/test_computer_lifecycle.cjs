@@ -13,13 +13,13 @@ function node(){
     querySelector(s){if(!children.has(s))children.set(s,node());return children.get(s);},querySelectorAll(){return [];},append(el){this.child=el;}};
 }
 function browser(api){
-  const timers=new Map();let next=0;
+  const timers=new Map(),intervals=new Map();let next=0;
   const document={hidden:false,createElement:node,addEventListener(name,fn){this[name]=fn;}};
   const context={window:{},document,setTimeout:(fn,delay)=>{timers.set(++next,{fn,delay});return next;},
-    clearTimeout:id=>timers.delete(id),setInterval:()=>1,clearInterval(){}};
+    clearTimeout:id=>timers.delete(id),setInterval:fn=>{intervals.set(++next,fn);return next;},clearInterval:id=>intervals.delete(id)};
   vm.createContext(context);vm.runInContext(fs.readFileSync(process.env.COMPUTER_SOURCE||'app/static/computer.js','utf8'),context);
   const view=context.window.MoyaiComputer.create({api,escape:s=>s});
-  return {view,document,async flush(delay=25){
+  return {view,document,async renew(){for(const fn of intervals.values())fn();await tick();},async flush(delay=25){
     for(const [id,timer] of [...timers])if(timer.delay<=delay){timers.delete(id);timer.fn();}
     await tick();
   }};
@@ -304,4 +304,94 @@ test('PR cleanup waits for in-flight input, discards its queue, and targets only
   finishInput();await tick();assert.deepEqual(commands.map(command=>command.action),['input','close_tab']);
   assert.equal(commands[1].tab,prA);assert.notEqual(host.child.removed,true);
   finishClose();await closing;view.close();await tick();
+});
+
+test('explicit wake stays scoped, blocks duplicate clicks and leaves control voluntary',async()=>{
+  const requests=[];let finish,ready=false;
+  const asleep={available:false,has_sandbox:false,can_wake:true,wake_supported:true,actor:'owner',tab:''};
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options)return ready?frame(undefined,''):asleep;
+    const command=JSON.parse(options.body);requests.push(command);
+    if(command.action==='wake')return new Promise(resolve=>finish=resolve);
+    return frame();
+  });
+  const host=node();await view.open('one',host);
+  const wake=host.child.querySelector('[data-wake]');assert.equal(wake.hidden,false);
+  const waking=wake.onclick();await tick();assert.equal(wake.disabled,true);
+  await wake.onclick();assert.equal(requests.length,1);
+  finish({...asleep,waking:true});await waking;
+  assert.equal(wake.textContent,'Waking up…');assert.equal(wake.disabled,true);
+  assert.equal(host.child.querySelector('[data-control]').disabled,true);
+  ready=true;await flush(1000);
+  assert.equal(wake.hidden,true);
+  assert.equal(host.child.querySelector('[data-control]').textContent,'Take control');
+  assert.deepEqual(requests,[{action:'wake',args:{},tab:''}]);view.close();
+});
+
+test('wake errors stay retryable without input-error copy and stale completion cannot switch sessions',async()=>{
+  const asleep={available:false,has_sandbox:false,can_wake:true,wake_supported:true,actor:'owner',tab:''};
+  let tries=0,finish;
+  const {view}=browser(async(path,options)=>{
+    if(!options)return path.includes('/next/')?frame('next',''):asleep;
+    if(JSON.parse(options.body).action!=='wake')return frame();
+    if(++tries===1)throw new Error('All workspaces are busy');
+    return new Promise(resolve=>finish=resolve);
+  });
+  const host=node();await view.open('one',host);
+  const wake=host.child.querySelector('[data-wake]');await wake.onclick();
+  assert.equal(wake.disabled,false);
+  assert.equal(host.child.querySelector('[data-notice]').textContent,'All workspaces are busy');
+  const retry=wake.onclick();await tick();
+  const next=node(),opening=view.open('next',next);finish({...asleep,waking:true});
+  await retry;await opening;
+  assert.equal(next.child.querySelector('[data-screen]').src,'data:image/jpeg;base64,next');
+  assert.equal(next.child.querySelector('[data-wake]').hidden,true);view.close();
+});
+
+test('PR wake preserves tab scope and transient disconnect does not offer a false wake',async()=>{
+  const calls=[];let state={available:false,has_sandbox:false,can_wake:true,wake_supported:true,tab:prA};
+  const {view,flush}=browser(async(path,options)=>{
+    if(options)calls.push(JSON.parse(options.body));return state;
+  });
+  const host=node();await view.open('one',host,{tab:prA});
+  await host.child.querySelector('[data-wake]').onclick();assert.equal(calls[0].tab,prA);
+  state={...state,can_wake:false,notice:'Computer is reconnecting'};await flush(1000);
+  assert.equal(host.child.querySelector('[data-wake]').hidden,true);
+  assert.equal(host.child.querySelector('[data-empty-text]').textContent,'Computer is reconnecting');view.close();
+});
+
+test('agent startup and blocked lifecycle states never invite another wake',async()=>{
+  let state={available:false,has_sandbox:false,can_wake:false,starting:true,wake_notice:'Your workspace is starting. Its live computer will appear here.'};
+  const {view,flush}=browser(async()=>state),host=node();await view.open('one',host);
+  assert.equal(host.child.querySelector('[data-wake]').hidden,true);
+  assert.equal(host.child.querySelector('[data-status]').textContent,'Starting workspace…');
+  assert.equal(host.child.querySelector('[data-empty-text]').textContent,state.wake_notice);
+  state={...state,starting:false,wake_notice:'This session is waiting for approval.'};await flush(1000);
+  assert.equal(host.child.querySelector('[data-wake]').hidden,true);
+  assert.equal(host.child.querySelector('[data-empty-text]').textContent,state.wake_notice);
+  state={...frame(undefined,''),starting:true};await flush(1000);
+  assert.equal(host.child.querySelector('[data-status]').textContent,'Live desktop');
+  assert.equal(host.child.querySelector('[data-control]').disabled,false);view.close();
+});
+
+test('shutdown revokes controls and queued input while preserving the live frame',async()=>{
+  for(const tab of ['',prA]){
+    let state={...frame(),tab,surface:tab?'browser':'desktop',controller_tab:tab};
+    const commands=[];
+    const {view,flush,document,renew}=browser(async(path,options)=>{if(options)commands.push(JSON.parse(options.body));return state;});
+    const host=node();await view.open('one',host,{tab});
+    await renew();assert.equal(commands.pop().action,'claim');
+    const input=host.child.querySelector('[data-keyboard]');type(input,'discard on cleanup');
+    state={...state,shutting_down:true,wake_notice:'This workspace is shutting down.',wake_error:'Desktop startup failed.'};
+    document.visibilitychange();await tick();
+    assert.equal(host.child.querySelector('[data-control]').disabled,true);
+    assert.equal(host.child.querySelector('[data-open]').hidden,true);
+    assert.equal(input.readOnly,true);
+    assert.equal(host.child.querySelector('[data-status]').textContent,'Shutting down…');
+    assert.match(host.child.querySelector('[data-screen]').src,/example/);
+    type(input,'blocked');await flush();assert.equal(commands.length,0);
+    await renew();await host.child.querySelector('[data-control]').onclick();
+    assert.equal(commands.length,0);
+    view.close();await tick();
+  }
 });

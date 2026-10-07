@@ -29,6 +29,30 @@ p{font-size:14px;color:#70677e}output{display:block;margin-top:20px;color:#30704
 <label>Password<input name="password" type="password" autocomplete="off"></label><button>Continue</button></form><output></output></main>'''
 
 
+async def wake_processes(output: Path) -> None:
+    """Fresh clients must observe the service after the wake client exits.
+
+    Run in a disposable container; its lifetime also bounds the detached service.
+    """
+    output.mkdir(parents=True, exist_ok=True)
+    async def request(action, bridge=False):
+        body = json.dumps({'action': action})
+        args = ['bridge'] if bridge else ['request', body]
+        process = await asyncio.create_subprocess_exec(sys.executable, computer.__file__, *args,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(process.communicate((body+'\n').encode() if bridge else None), 540)
+        assert process.returncode == 0, stderr.decode()
+        return json.loads(stdout)
+    assert not (await request('state'))['available']
+    assert (await request('wake'))['available']
+    for bridge in (False, True):
+        state = await request('state', bridge)
+        assert state['available'] and state['frame'] and not state['controller']
+    (output/'wake-live.jpg').write_bytes(base64.b64decode(state['frame']))
+    (output/'wake-verification.txt').write_text('PASS: wake client exits; fresh request and bridge clients retain live desktop/frame without taking control\n')
+    print((output/'wake-verification.txt').read_text(), flush=True)
+
+
 async def exercise(output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
     computer.CAPTURES = output
@@ -69,6 +93,9 @@ async def exercise(output: Path) -> None:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         url = f'http://127.0.0.1:{server.server_port}/'
         try:
+            assert not (await command('state'))['available']
+            awake = await command('wake')
+            assert awake['available'] and not awake['controller']
             await command('claim')
             await command('open')
             await asyncio.sleep(1)
@@ -152,4 +179,6 @@ async def exercise(output: Path) -> None:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    asyncio.run(exercise(parser.parse_args().output))
+    parser.add_argument('--wake-only', action='store_true', help='Verify desktop ownership across fresh command processes')
+    args = parser.parse_args()
+    asyncio.run(wake_processes(args.output) if args.wake_only else exercise(args.output))

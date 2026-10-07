@@ -3,12 +3,12 @@ window.MoyaiComputer = {
   create({api, escape:esc, onCapture}) {
     let dialog, runId, timer, leaseTimer, inputTimer, compositionTimer, current;
     let busy=false, changingControl=false, active=false, composing=false, closing=false, browserTab='', version=0, revision=0;
-    let queue=[], pointer=null, inputError='', releasing=Promise.resolve(), pending=Promise.resolve();
+    let queue=[], pointer=null, inputError='', wakeError='', releasing=Promise.resolve(), pending=Promise.resolve();
     const q=selector=>dialog.querySelector(selector);
     const own=()=>!!(current?.controller && current.controller===current.actor && (current.controller_tab||'')===browserTab);
     const surface=()=>browserTab?'browser':'desktop';
     const legacy=()=>current?.available && current.surface!==surface();
-    const canInput=()=>active && own() && current?.available && current.surface===surface() && !inputError && !changingControl && !closing;
+    const canInput=()=>active && own() && current?.available && !current.shutting_down && current.surface===surface() && !inputError && !changingControl && !closing;
     // The proxy also bounds JSON after Python's ASCII escaping and whitespace.
     const inputSize=events=>JSON.stringify({events}).replace(/[^\x00-\x7f]/g,'xxxxxx').length+events.length*16;
 
@@ -24,7 +24,7 @@ window.MoyaiComputer = {
         method:'POST',body:JSON.stringify({action:'release',tab})
       })).catch(()=>{});
       dialog?.querySelectorAll('video').forEach(video=>video.pause());
-      dialog?.remove();dialog=null;current=null;busy=false;changingControl=false;closing=false;inputError='';
+      dialog?.remove();dialog=null;current=null;busy=false;changingControl=false;closing=false;inputError='';wakeError='';
     }
     function render(data){
       const controlled=own();
@@ -32,9 +32,10 @@ window.MoyaiComputer = {
         data={available:false,has_sandbox:false,notice:'This workspace needs an updated browser. Open the PR in GitHub until the workspace browser restarts.'};
       }
       current=data;
-      if(controlled&&(!own()||!data.available||data.surface!==surface()))discardInput();
+      if(controlled&&(!own()||!data.available||data.shutting_down||data.surface!==surface()))discardInput();
       if(browserTab)q('[data-address]').textContent=data.url||browserTab;
-      q('[data-status]').textContent=data.recording?'● Recording':data.available?(browserTab?'Live browser':'Live desktop'):(browserTab?'Workspace browser':'Workspace computer');
+      const starting=data.starting&&!data.has_sandbox;
+      q('[data-status]').textContent=data.shutting_down?'Shutting down…':data.waking?'Waking up…':starting?'Starting workspace…':data.recording?'● Recording':data.available?(browserTab?'Live browser':'Live desktop'):(browserTab?'Workspace browser':'Workspace computer');
       q('[data-status]').classList.toggle('recording',!!data.recording);
       q('[data-screen]').hidden=!data.frame;
       q('[data-empty]').hidden=!!data.frame;
@@ -42,14 +43,17 @@ window.MoyaiComputer = {
       q('[data-screen]').classList.toggle('controlled',canInput());
       q('[data-keyboard]').readOnly=!canInput();
       q('[data-keyboard]').tabIndex=canInput()?0:-1;
-      q('[data-empty-text]').textContent=data.has_sandbox?(browserTab?'Take control to open this pull request in the browser.':'Take control to open your desktop and browser.'):'This workspace is asleep. Send Moyai a message to start it again.';
-      q('[data-open]').hidden=!data.has_sandbox||!!data.frame;
+      q('[data-empty-text]').textContent=data.waking?'Waking your workspace. Your live computer will appear here.':data.has_sandbox?(browserTab?'Take control to open this pull request in the browser.':'Take control to open your desktop and browser.'):data.notice||data.wake_notice||(data.wake_supported===false?'This workspace is asleep. Enable durable sessions to wake its computer here.':'This workspace is asleep. Wake it up to see it live, then take control to use it.');
+      q('[data-wake]').hidden=!!data.frame||!!data.has_sandbox||(!data.can_wake&&!data.waking);
+      q('[data-wake]').textContent=data.waking?'Waking up…':'Wake up to see live';
+      q('[data-wake]').disabled=busy||changingControl||closing||!!data.waking;
+      q('[data-open]').hidden=!data.has_sandbox||!!data.frame||!!data.waking||!!data.shutting_down;
       q('[data-open]').disabled=busy||changingControl||closing||!!(data.controller&&!own());
       q('[data-control]').textContent=own()?(inputError?'Resume control':'Release control'):data.controller?'Someone has control':'Take control';
-      q('[data-control]').disabled=changingControl||closing||!data.has_sandbox||!!(data.controller&&!own())||!!legacy();
+      q('[data-control]').disabled=changingControl||closing||!!data.waking||!!data.shutting_down||!data.has_sandbox||!!(data.controller&&!own())||!!legacy();
       q('[data-record]').textContent=data.recording?'■ Stop recording':'● Record flow';
       dialog.querySelectorAll('[data-action]').forEach(button=>button.disabled=busy||changingControl||!canInput()||!data.available);
-      q('[data-notice]').textContent=legacy()?'Restart this workspace to enable desktop control. This browser is running an older version.':inputError||data.notice||(own()?
+      q('[data-notice]').textContent=legacy()?'Restart this workspace to enable desktop control. This browser is running an older version.':wakeError||data.wake_error||inputError||data.notice||((data.shutting_down||!data.has_sandbox)&&data.wake_notice)||(own()?
         `You have control. Click and type in the ${surface()}. Ctrl+Alt+Esc returns to these controls.`:
         browserTab?'Take control to use this pull request’s browser.':'Watch Moyai work here. Take control to use the desktop.');
       const captures=data.captures||[],signature=JSON.stringify(captures);
@@ -116,7 +120,7 @@ window.MoyaiComputer = {
           else if(current)render({...current,captures:data.captures||current.captures});
           return true;
         }catch(error){
-          if(v===version&&active)pauseInput(error.message);
+          if(v===version&&active){if(action==='wake')wakeError=error.message;else pauseInput(error.message);}
           return false;
         }finally{
           if(v===version&&active){busy=false;if(current)render(current);scheduleInput();timer=setTimeout(poll,own()?100:1000);}
@@ -126,8 +130,9 @@ window.MoyaiComputer = {
       return operation;
     }
     async function command(action,args={}){
-      if(!active||changingControl||closing||(busy&&action!=='release'))return false;
+      if(!active||changingControl||closing||current?.shutting_down||(busy&&action!=='release'))return false;
       const v=version;
+      if(action==='wake'){wakeError='';return send('wake');}
       if(action==='claim'||action==='release'){
         changingControl=true;clearTimeout(inputTimer);inputTimer=null;
         if(action==='claim')discardInput();
@@ -170,11 +175,12 @@ window.MoyaiComputer = {
       const controls=browserTab?`<div><a class="computer-github-link" href="${esc(browserTab)}" target="_blank" rel="noopener noreferrer">Open in GitHub ↗</a>${control}</div>`:control;
       dialog.innerHTML=`<header class="computer-heading"><div><h2>${browserTab?'Pull request':'Computer'}</h2><span data-status>Connecting…</span></div>${controls}</header>
         ${browserTab?'<div class="computer-address"><span data-address>Sandbox browser</span></div>':''}
-        <div class="computer-stage"><img data-screen alt="Live ${surface()}. Take control to click and type." draggable="false" hidden><textarea data-keyboard class="computer-keyboard" aria-label="${browserTab?'Browser':'Desktop'} keyboard" aria-describedby="computer-input-hint" autocomplete="off" autocapitalize="off" spellcheck="false" tabindex="-1" readonly></textarea><div data-empty class="computer-empty"><span aria-hidden="true">▧</span><h3>Your ${browserTab?'browser':'computer'} in the cloud</h3><p data-empty-text>Connecting to the workspace…</p><button type="button" data-open hidden>Open ${surface()}</button></div></div>
+        <div class="computer-stage"><img data-screen alt="Live ${surface()}. Take control to click and type." draggable="false" hidden><textarea data-keyboard class="computer-keyboard" aria-label="${browserTab?'Browser':'Desktop'} keyboard" aria-describedby="computer-input-hint" autocomplete="off" autocapitalize="off" spellcheck="false" tabindex="-1" readonly></textarea><div data-empty class="computer-empty"><span aria-hidden="true">▧</span><h3>Your ${browserTab?'browser':'computer'} in the cloud</h3><p data-empty-text>Connecting to the workspace…</p><button type="button" data-wake hidden>Wake up to see live</button><button type="button" data-open hidden>Open ${surface()}</button></div></div>
         <div class="computer-toolbar"><div>${browserTab?'<button type="button" data-action="back" disabled>← Back</button>':'<button type="button" data-action="open" disabled>Open browser</button>'}<button type="button" data-action="screenshot" disabled>Screenshot</button><button type="button" data-action="record" data-record disabled>● Record flow</button></div><p id="computer-input-hint" data-notice role="status">Connecting…</p></div>
         <section class="computer-captures"><div class="computer-captures-heading"><h3>Saved captures</h3><p>Available after the workspace closes · Shared with session viewers</p></div><div data-captures></div><p class="computer-limits">${browserTab?'Browser':'Desktop'} captures · No audio · Up to 10 minutes or 25 MB per recording · 64 MB of captures per session</p></section>`;
       q('[data-control]').onclick=()=>{commitText();return command(own()&&!inputError?'release':'claim');};
       q('[data-open]').onclick=()=>command('claim');
+      q('[data-wake]').onclick=()=>command('wake');
       if(browserTab)q('[data-action="back"]').onclick=()=>command('back');
       else q('[data-action="open"]').onclick=()=>command('open');
       q('[data-action="screenshot"]').onclick=()=>command('screenshot',{name:'screenshot'});
@@ -253,7 +259,7 @@ window.MoyaiComputer = {
       if(!active||opening!==version)return;
       if(options.autoload&&current?.has_sandbox&&!legacy())await command('claim');
       if(!active||opening!==version)return;
-      leaseTimer=setInterval(()=>{if(active&&!document.hidden&&own()&&!busy&&!changingControl&&!closing&&!queue.length&&!inputError)send('claim');},25000);
+      leaseTimer=setInterval(()=>{if(!document.hidden&&canInput()&&!busy&&!queue.length)send('claim');},25000);
     }
     function closeTab(id,tab){
       const v=version, selected=active&&id===runId&&tab===browserTab;

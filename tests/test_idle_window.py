@@ -1,15 +1,22 @@
 """Saved top-level chats reuse machines; cleanup and attribution remain durable."""
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import json
+import sqlite3
+from threading import Event
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.db import Store
 from app.computer import Computer
 from app.config import MODEL_CATALOG
 from app.durable_runner import DurableRunner
 from app.security import digest
+from app.session_lifecycle import SessionLifecycle
 from app.temporal_runtime import TemporalRunManager
 from test_durable import aio, durable, drive
 from test_agents import launch, pause_parent
@@ -317,3 +324,337 @@ async def test_computer_capture_scope_follows_turn_and_workspace_lifetime(durabl
     else:
         await drive(manager, root)
     assert calls == [False, True] and not cloud.machines[0].alive
+
+
+async def sleeping_computer(durable):
+    manager, cloud, run_id = durable
+    await drive(manager, run_id)
+    manager.settings.modal_token_id = 'test-token-id'
+    manager.settings.modal_token_secret = 'test-token-secret'
+    manager.computer = SimpleNamespace(touched=lambda _: 0,
+        wake=AsyncMock(return_value={'available': True}), save_captures=AsyncMock())
+    return manager, cloud, run_id
+
+
+@pytest.mark.parametrize('status', ['idle', 'cancelled', 'interrupted'])
+async def test_computer_wake_preserves_chat_and_deduplicates_without_agent_capability(durable, monkeypatch, status):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    manager.store.update_run(run_id, status=status)
+    before = manager.store.messages(run_id)
+    revision = manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))[0]['revision']
+    restored, provisions = [], []
+    monkeypatch.setattr('app.sandboxes.modal.modal.Image.from_id',
+                        lambda identity, **_: restored.append(identity) or 'image')
+    async def create(**kwargs):
+        provisions.append(kwargs)
+        return await cloud.create(**kwargs)
+    monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(create))
+    await asyncio.gather(manager.wake_computer(run_id), manager.wake_computer(run_id))
+    operation = manager.state(run_id)['message_id']
+    await drive(manager, run_id, phase='warm')
+    await manager.wake_computer(run_id)
+    assert manager.state(run_id)['message_id'] == operation
+    assert manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))[0]['revision'] == revision + 1
+    assert restored == ['im-1'] and len(provisions) == 1 and provisions[0]['secrets'] == []
+    assert manager.store.run(run_id)['token_hash'] == ''
+    assert manager.store.run(run_id)['status'] == status
+    assert manager.store.messages(run_id) == before and len(cloud.launches) == 1
+    manager.computer.wake.assert_awaited_once_with(cloud.machines[-1])
+
+
+async def test_computer_wake_reconnects_lost_create_ack_after_restart(durable, monkeypatch):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    async def create(**kwargs):
+        await cloud.create(**kwargs)
+        raise ConnectionError('Create acknowledgement lost')
+    monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(create))
+    await manager.wake_computer(run_id)
+    operation = manager.state(run_id)['message_id']
+    with pytest.raises(ConnectionError):
+        await manager.advance(run_id)
+    restored = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    restored.computer = manager.computer
+    await drive(restored, run_id, phase='warm')
+    assert restored.state(run_id)['message_id'] == operation
+    assert len(cloud.machines) == 2 and len(cloud.launches) == 1
+    assert restored.store.run(run_id)['sandbox_id'] == cloud.machines[-1].object_id
+    assert len(answers(restored, run_id)) == 1
+
+
+@pytest.mark.parametrize('lose_ack', [False, True])
+async def test_stop_during_computer_provision_cleans_unacknowledged_machine(durable, monkeypatch, lose_ack):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    async def create(**kwargs):
+        machine = await cloud.create(**kwargs)
+        await manager.cancel(run_id)
+        if lose_ack:
+            raise ConnectionError('Create acknowledgement lost after Stop')
+        return machine
+    monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(create))
+    await manager.wake_computer(run_id)
+    if lose_ack:
+        with pytest.raises(ConnectionError):
+            await manager.advance(run_id)
+    else:
+        await manager.advance(run_id)
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'cancelled'
+    assert manager.store.run(run_id)['sandbox_id'] == ''
+    assert not cloud.machines[-1].alive and len(cloud.launches) == 1
+    manager.computer.wake.assert_not_awaited()
+    manager.computer.save_captures.assert_awaited_once_with(cloud.machines[-1], run_id, releasing=True)
+
+
+@pytest.mark.parametrize('idle_seconds,stop', [(0, False), (300, False), (0, True)])
+async def test_computer_wake_has_bounded_idle_cleanup_without_changing_answer(durable, monkeypatch, idle_seconds, stop):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    tick = clock(monkeypatch)
+    manager.settings.sandbox_idle_seconds = idle_seconds
+    await manager.wake_computer(run_id)
+    await drive(manager, run_id, phase='warm')
+    assert (await manager.advance(run_id))['idle_seconds'] == 300
+    if stop:
+        await manager.cancel(run_id)
+    else:
+        tick.now += 300
+    assert await manager.advance(run_id) is False
+    assert manager.state(run_id)['phase'] == 'idle'
+    assert not cloud.machines[-1].alive and len(cloud.launches) == 1
+    assert [message['content'] for message in answers(manager, run_id)] == ['Saved answer']
+    manager.computer.save_captures.assert_awaited_once_with(cloud.machines[-1], run_id, releasing=True)
+
+
+async def test_real_message_reuses_awakened_computer_with_real_turn_capability(durable):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    manager.store.update_run(run_id, status='cancelled')
+    await manager.wake_computer(run_id)
+    await drive(manager, run_id, phase='warm')
+    machine = cloud.machines[-1]
+    manager.store.enqueue_message(run_id, 'Continue from the desktop', 'desktop-followup', user_id='desktop-person')
+    await drive(manager, run_id, phase='monitor')
+    assert len(cloud.machines) == len(cloud.launches) == 2
+    assert manager.state(run_id)['sandbox_id'] == machine.object_id
+    assert not manager.state(run_id).get('computer_only')
+    assert manager.store.run(run_id)['active_user_id'] == 'desktop-person'
+    assert manager.store.run(run_id)['token_hash'] == digest(cloud.launch_tokens[-1])
+
+
+async def test_computer_wake_reserves_capacity_and_blocks_delete_until_cleanup(durable):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    manager.settings.max_concurrent_runs = 1
+    lifecycle = SessionLifecycle(manager.store, None, manager, None)
+    await manager.wake_computer(run_id)
+    other = new_chat(manager)
+    assert await manager.advance(other) == 'capacity'
+    with pytest.raises(HTTPException) as deleting:
+        lifecycle.delete(run_id, '', True)
+    assert deleting.value.status_code == 409
+    await drive(manager, run_id, phase='warm')
+    await manager.cancel(run_id)
+    await drive(manager, run_id)
+    assert lifecycle.delete(run_id, '', True)['deleted']
+    with pytest.raises(HTTPException) as waking:
+        await manager.wake_computer(run_id)
+    assert waking.value.status_code == 404
+    assert len(cloud.machines) == 2 and len(cloud.launches) == 1
+
+
+@pytest.mark.parametrize('failure', ['exception', 'unavailable'])
+async def test_computer_start_failure_cleans_up_and_retry_preserves_chat(durable, failure):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    before = manager.store.messages(run_id)
+    if failure == 'exception':
+        manager.computer.wake.side_effect = HTTPException(503, 'private runtime detail')
+    else:
+        manager.computer.wake.return_value = {'available': False}
+    await manager.wake_computer(run_id)
+    await drive(manager, run_id)
+    assert manager.state(run_id)['computer_error'] == 'The computer could not start. Try waking it again.'
+    assert not cloud.machines[-1].alive
+    assert manager.store.messages(run_id) == before
+    manager.computer.wake.side_effect = None
+    manager.computer.wake.return_value = {'available': True}
+    await manager.wake_computer(run_id)
+    await drive(manager, run_id, phase='warm')
+    assert not manager.state(run_id).get('computer_error')
+    assert manager.store.messages(run_id) == before and len(cloud.launches) == 1
+
+
+async def test_recover_dispatches_computer_intent_on_a_cancelled_session(durable):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    manager.store.update_run(run_id, status='cancelled')
+    await manager.wake_computer(run_id)
+    restored = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    restored.serve = AsyncMock()
+    restored.computer = manager.computer
+    revision = restored.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))[0]['revision']
+    try:
+        await restored.recover()
+        assert restored.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))[0]['revision'] == revision + 1
+        await drive(restored, run_id, phase='warm')
+        assert restored.store.run(run_id)['status'] == 'cancelled'
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.parametrize('other_action', ['delete', 'enqueue'])
+async def test_computer_admission_rechecks_writes_committed_during_capacity_wait(durable, monkeypatch, other_action):
+    manager, _, run_id = await sleeping_computer(durable)
+    other_store = Store(manager.settings.data_dir)
+    lifecycle = SessionLifecycle(other_store, None, manager, None)
+    before = manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,))
+    capacity = manager.make_capacity
+    async def competing_write(identity):
+        available = await capacity(identity)
+        with ThreadPoolExecutor(1) as pool:
+            if other_action == 'delete':
+                pool.submit(lifecycle.delete, identity, '', True).result(timeout=5)
+            else:
+                pool.submit(other_store.enqueue_message, identity, 'Real follow-up', 'admission-race').result(timeout=5)
+        return available
+    monkeypatch.setattr(manager, 'make_capacity', competing_write)
+    with pytest.raises(HTTPException) as rejected:
+        await manager.wake_computer(run_id)
+    assert rejected.value.status_code in {404, 409}
+    assert manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,)) == before
+    assert bool(manager.store.run(run_id)['deleted_at']) == (other_action == 'delete')
+    assert manager.store.has_queued_messages(run_id) == (other_action == 'enqueue')
+
+
+@pytest.mark.parametrize('other_action', ['delete', 'enqueue'])
+async def test_computer_admission_holds_writer_lock_until_intent_and_wake_commit(durable, monkeypatch, other_action):
+    manager, _, run_id = await sleeping_computer(durable)
+    other_store = Store(manager.settings.data_dir)
+    lifecycle = SessionLifecycle(other_store, None, manager, None)
+    submit = manager.submit_in
+    started, competing = Event(), []
+    def write():
+        try:
+            with other_store.connect() as conn:
+                conn.execute('PRAGMA busy_timeout=0')
+                with pytest.raises(sqlite3.OperationalError, match='locked'):
+                    conn.execute('BEGIN IMMEDIATE')
+        finally:
+            started.set()
+        if other_action == 'delete':
+            try:
+                lifecycle.delete(run_id, '', True)
+                return 'deleted'
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                return 'busy'
+        other_store.enqueue_message(run_id, 'Real follow-up', 'admission-race')
+        return 'queued'
+    with ThreadPoolExecutor(1) as pool:
+        def concurrent_submit(conn, run):
+            competing.append(pool.submit(write))
+            assert started.wait(5)
+            return submit(conn, run)
+        monkeypatch.setattr(manager, 'submit_in', concurrent_submit)
+        await manager.wake_computer(run_id)
+        assert competing[0].result(timeout=5) == ('busy' if other_action == 'delete' else 'queued')
+    assert manager.store.run(run_id)['deleted_at'] == ''
+    assert manager.state(run_id)['phase'] == 'provision'
+    assert manager.store.has_queued_messages(run_id) == (other_action == 'enqueue')
+
+
+async def test_computer_admission_rolls_back_intent_and_dispatch_together(durable, monkeypatch):
+    manager, _, run_id = await sleeping_computer(durable)
+    before = manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,))
+    connect, failed = manager.store.connect, []
+    @contextmanager
+    def fail_before_commit():
+        with connect() as conn:
+            yield conn
+            if conn.in_transaction and not failed:
+                state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
+                if state and json.loads(state['state']).get('computer_only'):
+                    failed.append(True)
+                    raise RuntimeError('Simulated admission commit failure')
+    monkeypatch.setattr(manager.store, 'connect', fail_before_commit)
+    with pytest.raises(RuntimeError, match='admission commit'):
+        await manager.wake_computer(run_id)
+    assert failed
+    assert manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,)) == before
+    assert manager.has_capacity()
+
+
+@pytest.mark.parametrize('phase,status,computer_only,pending,action,starting,shutting_down', [
+    *[('idle', status, False, False, 'start', False, False)
+      for status in ['idle', 'completed', 'failed', 'cancelled', 'interrupted']],
+    ('warm', 'idle', False, False, 'reuse', False, False),
+    ('warm', 'cancelled', False, False, 'blocked', False, True),
+    ('warm', 'interrupted', False, False, 'blocked', False, True),
+    ('warm', 'cancelled', True, False, 'reuse', False, False),
+    ('warm', 'interrupted', True, False, 'reuse', False, False),
+    ('warm', 'idle', True, True, 'blocked', True, False),
+    ('idle', 'idle', False, True, 'blocked', True, False),
+    *[(phase, 'provisioning', False, False, 'blocked', True, False)
+      for phase in ['prepare', 'provision', 'install', 'launch', 'waiting_environment', 'startup_wait']],
+    *[(phase, 'cancelled', True, False, 'pending', False, False)
+      for phase in ['provision', 'install', 'waiting_environment']],
+    ('provision', 'queued', True, True, 'pending', False, False),
+    ('monitor', 'running', False, False, 'blocked', False, False),
+    ('monitor', 'reconnecting', False, False, 'blocked', True, False),
+    *[(phase, 'queued', False, True, 'blocked', False, False)
+      for phase in ['waiting_children', 'waiting_credential', 'save', 'checkpointed', 'finish']],
+    *[(phase, 'idle', True, False, 'blocked', False, True) for phase in ['cleanup', 'warm_cleanup']],
+    ('idle', 'stopping', False, False, 'blocked', False, True),
+    ('provision', 'stopping', True, False, 'blocked', False, True),
+    ('unrecognized_phase', 'idle', False, False, 'blocked', False, False),
+])
+async def test_computer_lifecycle_matrix_agrees_with_wake_admission(
+        durable, phase, status, computer_only, pending, action, starting, shutting_down):
+    manager, _, run_id = await sleeping_computer(durable)
+    manager.store.update_run(run_id, status=status)
+    state = {'phase': phase, 'computer_only': computer_only}
+    manager.save(run_id, state)
+    policy = manager.computer_wake_state(manager.store.run(run_id), state, pending)
+    assert policy['wake_action'] == action
+    assert policy['can_wake'] == (action in {'start', 'reuse'})
+    assert policy['waking'] == (action == 'pending')
+    assert policy['starting'] == starting
+    assert policy['shutting_down'] == shutting_down
+    if not pending and action == 'blocked':
+        with pytest.raises(HTTPException) as blocked:
+            await manager.wake_computer(run_id)
+        assert blocked.value.status_code == 409
+        assert blocked.value.detail == policy['wake_notice']
+    elif not pending and action == 'pending':
+        before = manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,))
+        await manager.wake_computer(run_id)
+        assert manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,)) == before
+
+
+@pytest.mark.parametrize('message_status', ['queued', 'running', 'injected'])
+async def test_computer_state_and_admission_share_pending_inbox_scope(durable, message_status):
+    manager, _, run_id = await sleeping_computer(durable)
+    manager.store.execute("UPDATE messages SET status=? WHERE run_id=? AND role='user'", (message_status, run_id))
+    policy = manager.computer_state(run_id)
+    assert policy['can_wake'] is False and policy['starting'] is True
+    assert policy['shutting_down'] is False
+    with pytest.raises(HTTPException) as busy:
+        await manager.wake_computer(run_id)
+    assert busy.value.status_code == 409 and busy.value.detail == policy['wake_notice']
+
+
+@pytest.mark.parametrize('unavailable', ['closing', 'missing', 'deleted', 'demo', 'configuration'])
+async def test_computer_lifecycle_honors_runtime_and_session_availability(durable, unavailable):
+    manager, _, run_id = await sleeping_computer(durable)
+    if unavailable == 'closing':
+        manager.closing = True
+    elif unavailable == 'missing':
+        run_id = 'missing'
+    elif unavailable == 'configuration':
+        manager.settings.modal_token_secret = ''
+    elif unavailable == 'deleted':
+        manager.store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (run_id,))
+    else:
+        manager.store.execute("UPDATE runs SET mode='demo' WHERE id=?", (run_id,))
+    policy = manager.computer_state(run_id)
+    assert not any(policy[key] for key in ['can_wake', 'waking', 'starting'])
+    assert policy['shutting_down'] is (unavailable != 'configuration')
+    with pytest.raises(HTTPException) as blocked:
+        await manager.wake_computer(run_id)
+    assert blocked.value.detail == policy['wake_notice']
+    assert blocked.value.status_code == {'closing': 409, 'configuration': 503}.get(unavailable, 404)

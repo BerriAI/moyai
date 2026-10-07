@@ -19,7 +19,7 @@ TAB_UPDATE_NOTICE = 'This workspace browser needs a restart to support PR tabs. 
 
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['claim', 'release', 'input', 'open', 'click', 'type', 'key', 'scroll', 'back', 'screenshot', 'record_start', 'record_stop', 'close_tab']
+    action: Literal['wake', 'claim', 'release', 'input', 'open', 'click', 'type', 'key', 'scroll', 'back', 'screenshot', 'record_start', 'record_stop', 'close_tab']
     args: dict = Field(default_factory=dict)
     tab: str = Field(default='', max_length=512, pattern=TAB_PATTERN)
 
@@ -88,14 +88,16 @@ class Computer:
         rows = self.store.rows('SELECT touched FROM computer_activity WHERE run_id=?', (run_id,))
         return rows[0]['touched'] if rows else 0
 
-    def shutting_down(self, run_id, sandbox_id):
-        return (self.store.run(run_id)['status'] == 'stopping' or
+    def shutting_down(self, run_id, sandbox_id, lifecycle=None):
+        if lifecycle is None:
+            lifecycle = self.manager.computer_state(run_id) if hasattr(self.manager, 'computer_state') else {}
+        return (lifecycle.get('shutting_down', False) or self.store.run(run_id)['status'] == 'stopping' or
                 bool(sandbox_id and self.releasing.get(run_id) == sandbox_id))
 
     def authorize(self, request, run_id, mutation=False):
         self.security.require(request, mutation=mutation)
         run = self.store.run(run_id)
-        if not run or run['mode'] != 'modal':
+        if not run or run.get('deleted_at') or run['mode'] != 'modal':
             raise HTTPException(404, 'Cloud session not found.')
         actor = self.store.identity(self.security.session_info(request))
         if self.security.role(request) != 'admin' and not any(
@@ -144,6 +146,15 @@ class Computer:
     async def close(self):
         connections, self.connections = list(self.connections.values()), {}
         await asyncio.gather(*(connection.close() for connection in connections))
+
+    async def wake(self, sandbox):
+        # Startup can prepare old checkpoints for several minutes. Share the
+        # interactive transport's budget, without sharing a pipe with polling.
+        connection = DesktopConnection(sandbox, sandbox.object_id)
+        try:
+            return await connection.request({'action': 'wake'})
+        finally:
+            await connection.close()
 
     async def execute(self, sandbox, *args, timeout=45):
         async with self.slots:
@@ -231,7 +242,16 @@ class Computer:
                     if len(self.cache) >= 32:
                         self.cache.pop(min(self.cache, key=lambda key: self.cache[key][0]), None)
                     self.cache[run_id, tab] = (time.monotonic(), run.get('sandbox_id'), value)
+                lifecycle = self.manager.computer_state(run_id) if hasattr(self.manager, 'wake_computer') else {}
+                shutting_down = self.shutting_down(run_id, run.get('sandbox_id'), lifecycle)
+                can_wake = (lifecycle.get('can_wake', False) and value.get('has_sandbox') is False
+                            and not shutting_down)
                 return {**value, 'has_sandbox': value.get('has_sandbox', False), 'actor': actor,
+                        'shutting_down': shutting_down,
+                        'waking': lifecycle.get('waking', False), 'starting': lifecycle.get('starting', False),
+                        'wake_error': lifecycle.get('wake_error', ''), 'wake_notice': lifecycle.get('wake_notice', ''),
+                        'can_wake': can_wake,
+                        'wake_supported': hasattr(self.manager, 'wake_computer'),
                         'captures': captures.listing(self.settings, run_id)}
 
         @router.post('/api/runs/{run_id}/computer')
@@ -245,11 +265,21 @@ class Computer:
                     closing = body.action == 'close_tab' and bool(body.tab)
                     if not closing and self.shutting_down(run_id, run.get('sandbox_id')):
                         raise HTTPException(409, 'This workspace is shutting down. Saved captures remain available in Files.')
+                    if body.action == 'wake':
+                        if not hasattr(self.manager, 'wake_computer'):
+                            raise HTTPException(409, 'Waking a sleeping computer requires durable sessions to be enabled.')
+                        await self.manager.wake_computer(run_id)
+                        run = self.store.run(run_id)
+                        lifecycle = self.manager.state(run_id)
+                        if lifecycle.get('phase') != 'warm':
+                            return {'ok': True, 'available': False, 'has_sandbox': False, 'waking': True,
+                                    'wake_supported': True, 'actor': actor, 'tab': body.tab,
+                                    'captures': captures.listing(self.settings, run_id)}
                     async with self.connection(run) as connection:
                         if not connection:
                             if closing:
                                 return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
-                            raise HTTPException(409, 'This workspace is asleep. Send a message to Moyai to start it again.')
+                            raise HTTPException(409, 'This workspace is asleep. Wake it up to see it live.')
                         if body.tab:
                             probe = {'action': 'state', 'tab': body.tab, 'actor': actor}
                             try:
@@ -280,6 +310,7 @@ class Computer:
                         if body.action in {'screenshot', 'record_stop'}:
                             await self.sync(connection.sandbox, run_id)
                         return {**result, 'ok': True, 'actor': actor, 'tab': body.tab, 'has_sandbox': True,
+                                'shutting_down': self.shutting_down(run_id, run.get('sandbox_id')),
                                 'captures': captures.listing(self.settings, run_id)}
                 finally:
                     for key in list(self.cache):

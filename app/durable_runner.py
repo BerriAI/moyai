@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import time
+from uuid import uuid4
 
 import modal
 from fastapi import HTTPException
@@ -37,6 +38,16 @@ class DurableRunner(RunManager):
     def save(self, run_id, state):
         self.store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
 
+    def submit_in(self, conn, run):
+        if not run.get('deleted_at'):
+            conn.execute('''INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)
+                ON CONFLICT(run_id) DO UPDATE SET revision=revision+1''', (run['id'],))
+
+    def submit(self, run):
+        # The DB outbox owns dispatch, including a wake admitted with its state.
+        with self.store.connect() as conn:
+            self.submit_in(conn, run)
+
     def running_status(self, run_id, status, token_hash=None):
         # Never overwrite a stop that arrived during an awaited provider call.
         if self.store.run(run_id)['status'] == 'stopping':
@@ -59,6 +70,118 @@ class DurableRunner(RunManager):
             raise ValueError('Durable execution requires a stable encryption/session key')
         return hmac.new(secret.encode(), f'moyai-turn-v1:{run_id}:{message_id}'.encode(), hashlib.sha256).hexdigest()
 
+    def computer_wake_state(self, row, state, pending):
+        """One lifecycle policy for presentation, retries, and atomic admission."""
+        phase = state.get('phase', 'idle')
+        action, starting, shutting_down, notice = 'blocked', False, False, ''
+        if not row or row['deleted_at'] or row['mode'] != 'modal':
+            action, notice = 'missing', 'Cloud session not found.'
+            shutting_down = True
+        elif (self.closing or row['status'] == 'stopping' or phase in {'cleanup', 'warm_cleanup'}
+                or (phase == 'warm' and not state.get('computer_only')
+                    and row['status'] in {'cancelled', 'interrupted'})):
+            notice = 'This workspace is shutting down. Try again after it finishes.'
+            shutting_down = True
+        elif state.get('computer_only') and phase in {'provision', 'install', 'waiting_environment'}:
+            action, notice = 'pending', 'Waking your workspace. Your live computer will appear here.'
+        elif not state.get('computer_only') and phase in {'prepare', 'provision', 'install', 'launch', 'waiting_environment', 'startup_wait'}:
+            starting = True
+            notice = ('Preparing the workspace environment. The computer will appear when it is ready.'
+                      if phase == 'waiting_environment' else
+                      'Reconnecting workspace services. The computer will appear when they are ready.'
+                      if phase == 'startup_wait' else 'Starting your workspace. The computer will appear when it is ready.')
+        elif phase in {'waiting_children', 'waiting_credential'}:
+            notice = ('This session is waiting for its agents. The computer will return when work resumes.'
+                      if phase == 'waiting_children' else
+                      'This session is waiting for access. The computer will return when work resumes.')
+        elif phase in {'save', 'checkpointed', 'finish'}:
+            notice = 'This workspace is finishing and saving. Wait for it to finish before waking its computer.'
+        elif pending or row['status'] not in TERMINAL:
+            starting = row['status'] in {'queued', 'provisioning', 'reconnecting'} or (pending and phase in {'idle', 'warm'})
+            notice = ('Your response is starting. The computer will appear when it is ready.' if starting else
+                      'This session is active. Wait for it to finish before waking its computer.')
+        elif phase not in {'idle', 'warm'}:
+            notice = 'The workspace is busy. Wait for it to finish starting or stopping.'
+        elif self.settings.missing_sandbox(row.get('sandbox_provider')):
+            action, notice = 'unconfigured', 'Configure the session sandbox provider before waking its computer.'
+        else:
+            action = 'reuse' if phase == 'warm' else 'start'
+        return {'can_wake': action in {'start', 'reuse'}, 'waking': action == 'pending',
+                'starting': starting, 'shutting_down': shutting_down, 'wake_notice': notice, 'wake_action': action,
+                'wake_error': state.get('computer_error', '')}
+
+    def computer_state(self, run_id):
+        with self.store.connect() as conn:
+            conn.execute('BEGIN')
+            row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+            state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
+            pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected')", (run_id,)).fetchone()
+            return self.computer_wake_state(dict(row) if row else None,
+                json.loads(state['state']) if state else {}, bool(pending))
+
+    async def wake_computer(self, run_id):
+        async with self.locks.setdefault(run_id, asyncio.Lock()):
+            policy = self.computer_state(run_id)
+            if policy['waking']:
+                return  # A retry observes the already persisted wake operation.
+            if not policy['can_wake']:
+                raise HTTPException({'missing': 404, 'unconfigured': 503}.get(policy['wake_action'], 409), policy['wake_notice'])
+            if policy['wake_action'] == 'reuse':
+                try:
+                    await self.sandbox(self.state(run_id))
+                    return
+                except LostExecution:
+                    await self.release_warm(run_id, self.state(run_id), 'machine no longer available')
+            async with self.admission_lock:
+                if not await self.make_capacity(run_id):
+                    raise HTTPException(409, 'All workspaces are busy. Try waking this computer again shortly.')
+                # Delete and enqueue use the same write transaction boundary.
+                # Persist admission and its dispatch together before effects.
+                with self.store.connect() as conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+                    row = dict(row) if row else None
+                    current = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
+                    pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected')", (run_id,)).fetchone()
+                    policy = self.computer_wake_state(row, json.loads(current['state']) if current else {}, bool(pending))
+                    if policy['wake_action'] != 'start':
+                        raise HTTPException({'missing': 404, 'unconfigured': 503}.get(policy['wake_action'], 409),
+                                            policy['wake_notice'] or 'The workspace changed. Refresh before waking it again.')
+                    state = {'version': 1, 'phase': 'provision', 'computer_only': True,
+                             'message_id': 'computer-' + uuid4().hex, 'segment': 0,
+                             'snapshot_id': row['snapshot_id'], 'sandbox_id': ''}
+                    self.submit_in(conn, row)
+                    conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+            await self.persist()
+
+    async def advance_computer(self, run_id, state):
+        if self.store.run(run_id)['status'] == 'stopping' or state['phase'] == 'warm_cleanup':
+            await self.release_warm(run_id, state, 'computer stopped')
+            if self.store.run(run_id)['status'] == 'stopping':
+                self.store.update_run(run_id, status='cancelled')
+            return self.store.has_queued_messages(run_id)
+        try:
+            if state['phase'] in {'provision', 'waiting_environment'}:
+                result = await self.provision(run_id, state)
+                return 'capacity' if result == 'capacity' else True
+            sandbox = await self.sandbox(state)
+            await refresh_sandbox_files(sandbox)
+            result = await self.computer.wake(sandbox)
+            if result.get('error') or not result.get('available'):
+                raise HTTPException(503, 'Computer could not start.')
+            state.update(phase='warm', idle_until=time.time() + self.computer_idle_seconds(state))
+            self.save(run_id, state)
+            return True
+        except EnvironmentPending as pending:
+            state.update(phase='waiting_environment', environment_build=pending.build_id)
+            self.save(run_id, state)
+            return {'retry_seconds': 5}
+        except (LostExecution, ValueError, HTTPException, modal.exception.ImageBuildError):
+            # No synthetic message, answer, model invocation or chat failure.
+            state.update(phase='warm_cleanup', computer_error='The computer could not start. Try waking it again.')
+            self.save(run_id, state)
+            return True
+
     async def advance(self, run_id):
         async with self.locks.setdefault(run_id, asyncio.Lock()):
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
@@ -67,6 +190,8 @@ class DurableRunner(RunManager):
             if not row or row['deleted_at']:
                 return False
             state = self.state(run_id)
+            if state.get('computer_only') and state.get('phase') not in {'idle', 'warm'}:
+                return await self.advance_computer(run_id, state)
             if state.get('phase') in {'warm', 'warm_cleanup'}:
                 reuse = await self.warm(run_id, state)
                 if reuse is not True:
@@ -153,6 +278,9 @@ class DurableRunner(RunManager):
         return min(state.get('idle_until') or float('inf'),
                    state['machine_started'] + self.settings.sandbox_rotation_seconds)
 
+    def computer_idle_seconds(self, state):
+        return self.settings.sandbox_idle_seconds or (300 if state.get('computer_only') else 0)
+
     async def release_warm(self, run_id, state, reason):
         # Persist before the provider call: a lost termination ACK is retryable
         # and never publishes the previous answer a second time.
@@ -170,13 +298,13 @@ class DurableRunner(RunManager):
         if getattr(self, 'computer', None) and state.get('phase') == 'warm':
             touched = self.computer.touched(run_id)
             if touched and state.get('idle_until') is not None:
-                state['idle_until'] = max(state['idle_until'], touched + self.settings.sandbox_idle_seconds)
+                state['idle_until'] = max(state['idle_until'], touched + self.computer_idle_seconds(state))
                 self.save(run_id, state)
-        stopping = row['status'] in {'stopping', 'cancelled', 'interrupted'}
+        stopping = row['status'] == 'stopping' or (not state.get('computer_only') and row['status'] in {'cancelled', 'interrupted'})
         queued = self.store.has_queued_messages(run_id)
         expired = (time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds
                    or (not queued and time.time() >= self.idle_deadline(state)))
-        if (state['phase'] == 'warm_cleanup' or stopping or not self.settings.sandbox_idle_seconds
+        if (state['phase'] == 'warm_cleanup' or stopping or not self.computer_idle_seconds(state)
                 or expired):
             await self.release_warm(run_id, state, state.get('idle_reason', 'idle timeout' if not stopping else 'stop requested'))
             row = self.store.run(run_id)
@@ -186,7 +314,7 @@ class DurableRunner(RunManager):
             return False if stopping else self.store.has_queued_messages(run_id)
         if not queued:
             if state.get('idle_until') is None:
-                state['idle_until'] = time.time() + self.settings.sandbox_idle_seconds
+                state['idle_until'] = time.time() + self.computer_idle_seconds(state)
                 self.save(run_id, state)
             return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}
         state['idle_until'] = None
@@ -255,14 +383,15 @@ class DurableRunner(RunManager):
                 self.save(run_id, state)
         backend = self.provider(self.store.run(run_id))
         name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
+        token = '' if state.get('computer_only') else self.token(run_id, state['message_id'])
         try:
-            sandbox = await backend.find(name, initialize=True, token=self.token(run_id, state['message_id']))
+            sandbox = await backend.find(name, initialize=True, token=token)
         except modal.exception.NotFoundError:
             try:
                 sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
-                                               token=self.token(run_id, state['message_id']))
+                                               token=token)
             except modal.exception.AlreadyExistsError:
-                sandbox = await backend.find(name, initialize=True, token=self.token(run_id, state['message_id']))
+                sandbox = await backend.find(name, initialize=True, token=token)
         state.update(sandbox_id=sandbox.object_id, machine_started=time.time(), phase='install')
         self.save(run_id, state)
         self.store.update_run(run_id, sandbox_id=sandbox.object_id)
@@ -615,6 +744,15 @@ class DurableRunner(RunManager):
             state.pop('wait_credential', None)
 
     async def cleanup(self, state, run_id):
+        if state.get('computer_only') and not state.get('sandbox_id'):
+            # Recover a create whose acknowledgement was lost before Stop.
+            try:
+                sandbox = await self.provider(self.store.run(run_id)).find(
+                    f"moyai-{run_id}-{state['message_id']}-{state['segment']}")
+                state['sandbox_id'] = sandbox.object_id
+                self.save(run_id, state)
+            except modal.exception.NotFoundError:
+                return
         if not state.get('sandbox_id'):
             return
         try:

@@ -283,6 +283,39 @@ async def test_private_desktop_pipe_reuses_process_and_never_replays_a_lost_repl
     assert ended == [True]
 
 
+@pytest.mark.parametrize('native', [False, True])
+async def test_wake_shares_startup_budget_and_closes_its_own_transport(workspace, monkeypatch, native):
+    import asyncio
+    app, _, _, _ = cloud(workspace)
+    hub = app.state.computer
+    deadlines, sent, ended = [], [], []
+    timeout = asyncio.timeout
+    def timed(seconds):
+        deadlines.append(seconds)
+        return timeout(seconds)
+    monkeypatch.setattr('app.computer.asyncio.timeout', timed)
+    async def responses():
+        yield '{"available":true,"frame":"live"}\n'
+    stdin = SimpleNamespace(write=lambda value: sent.append(json.loads(value)),
+                            write_eof=lambda: ended.append(True), drain=SimpleNamespace(aio=AsyncMock()))
+    launch = AsyncMock(return_value=SimpleNamespace(stdin=stdin, stdout=responses()))
+    rpc = AsyncMock(return_value={'available': True, 'frame': 'live'})
+    sandbox = SimpleNamespace(object_id='startup', exec=SimpleNamespace(aio=launch))
+    if native:
+        sandbox.computer_request = rpc
+    assert (await hub.wake(sandbox))['frame'] == 'live'
+    # apt update + install + Pillow can take 420 seconds on old checkpoints.
+    assert deadlines and min(deadlines) > 420
+    assert hub.connections == {}  # UI polling never shares this startup pipe.
+    if native:
+        rpc.assert_awaited_once_with({'action': 'wake'})
+        launch.assert_not_awaited()
+    else:
+        assert sent == [{'action': 'wake'}] and ended == [True]
+        assert launch.call_args.args[-1] == 'bridge'
+        assert launch.call_args.kwargs['timeout'] > 420
+
+
 @pytest.mark.asyncio
 async def test_desktop_connections_follow_sandbox_identity_idle_expiry_and_shutdown(workspace, monkeypatch):
     app, _, rid, _ = cloud(workspace)
@@ -1088,3 +1121,111 @@ def test_named_close_legacy_bridge_fallback_requires_healthy_unscoped_state(work
     assert response.status_code == expected
     assert native.await_count == 1 and native.call_args.args[0]['action'] == 'state'
     assert hub.execute.await_count == 1 and json.loads(hub.execute.call_args.args[2])['action'] == 'state'
+
+
+def test_wake_uses_existing_authorization_and_preserves_conversation(workspace, monkeypatch):
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    hub.manager.wake_computer = AsyncMock()
+    hub.manager.state = lambda _: {'computer_only': True, 'phase': 'provision'}
+    hub.manager.computer_state = lambda _: {'waking': True, 'can_wake': False}
+    messages = app.state.store.messages(rid)
+    hub.sandbox = AsyncMock(return_value=None)
+    monkeypatch.setattr(app.state.security, 'role', lambda _: 'member')
+    assert client.post(url, json={'action': 'wake'}).status_code == 403
+    monkeypatch.setattr(app.state.store, 'identity', lambda _: 'google:owner')
+    assert client.post(url, json={'action': 'wake'}, headers={'X-CSRF-Token': 'wrong'}).status_code == 403
+    hub.manager.wake_computer.assert_not_awaited()
+    result = client.post(url, json={'action': 'wake'})
+    assert result.status_code == 200 and result.json()['waking'] is True
+    hub.manager.wake_computer.assert_awaited_once_with(rid)
+    assert app.state.store.messages(rid) == messages
+    assert client.get(url).json()['waking'] is True
+    assert not client.get(url).json()['can_wake']
+    app.state.store.update_run(rid, status='stopping')
+    assert client.post(url, json={'action': 'wake'}).status_code == 409
+    app.state.store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (rid,))
+    assert client.post(url, json={'action': 'wake'}).status_code == 404
+
+
+def test_wake_distinguishes_sleep_transport_failure_and_legacy_runtime(workspace):
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    hub.sandbox = AsyncMock(return_value=None)
+    assert client.get(url).json()['wake_supported'] is False
+    assert client.post(url, json={'action': 'wake'}).status_code == 409
+    hub.manager.wake_computer = AsyncMock()
+    hub.manager.state = lambda _: {'phase': 'idle'}
+    hub.manager.computer_state = lambda _: {'waking': False, 'can_wake': True}
+    hub.cache.clear()
+    assert client.get(url).json()['can_wake'] is True
+    hub.cache.clear()
+    hub.sandbox = AsyncMock(side_effect=ConnectionError('private provider error'))
+    state = client.get(url).json()
+    assert state['can_wake'] is False
+    assert 'private provider error' not in str(state)
+
+
+@pytest.mark.parametrize('phase', ['prepare', 'provision', 'waiting_environment', 'waiting_children'])
+def test_computer_panel_uses_durable_admission_during_an_agent_turn(workspace, phase):
+    from app.temporal_runtime import TemporalRunManager
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    hub.manager = TemporalRunManager(app.state.store, app.state.settings)
+    hub.manager.submit(app.state.store.run(rid))
+    hub.manager.save(rid, {'phase': phase})
+    app.state.store.update_run(rid, status='running')
+    hub.sandbox = AsyncMock(return_value=None)
+    state = client.get(url).json()
+    assert not state['can_wake'] and not state['waking']
+    assert state['starting'] == (phase != 'waiting_children')
+    assert state['wake_notice'] and 'asleep' not in state['wake_notice'].lower()
+    hub.cache.clear()
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=AsyncMock(
+        return_value={'available': True, 'surface': 'desktop', 'frame': 'live'})))
+    live = client.get(url).json()
+    assert live['available'] and live['has_sandbox'] and live['frame'] == 'live'
+    assert not live['can_wake']
+
+
+@pytest.mark.parametrize('phase', ['cleanup', 'warm_cleanup'])
+@pytest.mark.parametrize('late', [False, True])
+def test_cleanup_fences_live_commands_even_after_connection_lookup(workspace, phase, late):
+    from app.temporal_runtime import TemporalRunManager
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    hub.manager = TemporalRunManager(app.state.store, app.state.settings)
+    hub.manager.submit(app.state.store.run(rid))
+    app.state.store.update_run(rid, status='idle', sandbox_id='live-machine')
+    cleanup = {'phase': phase, 'computer_only': True, 'computer_error': 'Desktop startup failed.'}
+    transport = AsyncMock(return_value={'available': True, 'surface': 'desktop', 'frame': 'live'})
+    async def lookup(run):
+        if late:
+            hub.manager.save(rid, cleanup)
+        return SimpleNamespace(computer_request=transport)
+    hub.sandbox = lookup
+    for action in ['claim', 'open', 'input', 'record_start', 'wake']:
+        hub.connections.clear()
+        hub.manager.save(rid, {'phase': 'install', 'computer_only': True} if late and action != 'wake' else cleanup)
+        assert client.post(url, json={'action': action}).status_code == 409
+    transport.assert_not_awaited()
+    state = client.get(url).json()
+    assert state['shutting_down'] and state['available'] and state['frame'] == 'live'
+    assert not state['can_wake']
+    # Verified remote absence still permits dismissal while cleanup is pending.
+    transport.return_value = {'available': False, 'recording': False, 'tab': PR_TAB}
+    assert client.post(url, json={'action': 'close_tab', 'tab': PR_TAB}).status_code == 200
+    assert all(call.args[0]['action'] == 'state' for call in transport.await_args_list)
+
+
+async def test_native_wake_starts_display_without_claim_or_browser_navigation(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    desktop = computer.Computer()
+    desktop.ensure_desktop = AsyncMock()
+    desktop.refresh_frame = AsyncMock()
+    desktop.open = AsyncMock()
+    result = await desktop.command({'action': 'wake'})
+    desktop.ensure_desktop.assert_awaited_once()
+    desktop.refresh_frame.assert_awaited_once()
+    desktop.open.assert_not_awaited()
+    assert result['controller'] == ''

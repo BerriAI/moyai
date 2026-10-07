@@ -24,16 +24,10 @@ class TemporalRunManager(DurableRunner):
         self.dispatch_task = None
         self.ready = asyncio.Event()
 
-    def submit(self, run):
-        if run.get('deleted_at'):
-            return
-        # DB inbox is authoritative. Network errors leave the wake request
-        # pending, rather than accepting a message and losing its dispatch.
-        self.store.execute('''INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)
-            ON CONFLICT(run_id) DO UPDATE SET revision=revision+1''', (run['id'],))
-
     async def cancel(self, run_id):
-        if not self.is_active(run_id) and self.state(run_id).get('phase') not in {'warm', 'warm_cleanup'}:
+        state = self.state(run_id)
+        if (not self.is_active(run_id) and state.get('phase') not in {'warm', 'warm_cleanup'}
+                and not (state.get('computer_only') and state.get('phase') != 'idle')):
             if self.coordinator:
                 await self.coordinator.cancel_children(run_id)
             return
@@ -58,7 +52,9 @@ class TemporalRunManager(DurableRunner):
         for row in self.store.rows("SELECT id FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status='queued')"):
             self.submit(self.store.run(row['id']))
         for row in self.store.rows('SELECT run_id,state FROM durable_sessions'):
-            if json.loads(row['state']).get('phase') in {'warm', 'warm_cleanup'}:
+            state = json.loads(row['state'])
+            if (state.get('phase') in {'warm', 'warm_cleanup'}
+                    or (state.get('computer_only') and state.get('phase') != 'idle')):
                 self.submit(self.store.run(row['run_id']))
         # An external write interrupted during Render shutdown is ambiguous;
         # preserve it for review instead of treating it as an unexecuted action.

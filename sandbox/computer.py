@@ -644,6 +644,10 @@ class Computer:
             if released:
                 await self.release_buttons()
             await self.settle_foreground()
+            if action == 'wake':
+                await self.ensure_desktop()
+                await self.refresh_frame()
+                return await self.state(tab)
             if action == 'release':
                 if self.controls() == actor and self.controller_tab == tab:
                     await self.release_buttons()

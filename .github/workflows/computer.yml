@@ -3,12 +3,15 @@ on:
   pull_request:
     paths:
       - 'app/computer.py'
+      - 'app/durable_runner.py'
+      - 'app/temporal_runtime.py'
       - 'app/static/computer.*'
       - 'app/workspace_image.py'
       - 'sandbox/computer.py'
       - 'sandbox/mcp_bridge.py'
       - 'Dockerfile.sandbox'
       - 'tests/test_computer*'
+      - 'tests/test_idle_window.py'
       - 'scripts/computer_desktop_smoke.py'
       - '.github/workflows/computer.yml'
 permissions:
@@ -25,13 +28,14 @@ jobs:
           node-version: '22'
       - name: Control, lifecycle and authorization regressions
         run: |
-          uv run --python 3.13 pytest -q --tb=line tests/test_computer.py tests/test_mcp_bridge.py
+          uv run --python 3.13 pytest -q --tb=line tests/test_computer.py tests/test_idle_window.py tests/test_mcp_bridge.py
           node --test tests/test_computer_lifecycle.cjs
       - name: Build production desktop dependencies
         run: docker build --target transport -f Dockerfile.sandbox -t moyai-desktop .
       - name: Exercise real Chromium address bar, input and agent handoff
         run: |
           mkdir -p desktop-proof
+          docker run --rm --shm-size=1g -v "$PWD:/app:ro" -v "$PWD/desktop-proof:/proof" moyai-desktop python /app/scripts/computer_desktop_smoke.py --wake-only --output /proof
           docker run --rm --shm-size=1g -v "$PWD:/app:ro" -v "$PWD/desktop-proof:/proof" moyai-desktop python /app/scripts/computer_desktop_smoke.py --output /proof
       - name: Save desktop screenshot and real recording
         if: always()
