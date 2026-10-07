@@ -292,8 +292,10 @@ async def test_desktop_connections_follow_sandbox_identity_idle_expiry_and_shutd
         first.close = AsyncMock()
     async with hub.connection(run) as same:
         assert same is first
+        await same.request({'action':'state'})
+        # Copying captures after a reply must not make an idle pipe look fresh.
+        clock[0] += 21
     assert hub.sandbox.await_count == 1
-    clock[0] += 21
     async with hub.connection(run) as expired:
         assert expired is not first
         expired.close = AsyncMock()

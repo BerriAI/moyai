@@ -62,6 +62,8 @@ class DesktopConnection:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             raise HTTPException(503, 'Computer connection interrupted. Check the desktop before resuming control. Restart the workspace if it is running an older version.') from None
+        finally:
+            self.used = time.monotonic()
 
 
 class Computer:
@@ -125,7 +127,6 @@ class Computer:
         finally:
             if connection:
                 connection.active = False
-                connection.used = time.monotonic()
 
     async def close(self):
         connections, self.connections = list(self.connections.values()), {}
