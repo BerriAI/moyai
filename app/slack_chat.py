@@ -14,6 +14,7 @@ from .db import now
 from .progress import active_turn
 from .pr_delivery import link_captures, select_captures, select_prs
 from .security import digest
+from .session_metadata import is_session_id_request, session_id_response
 from .slack_activity import SlackActivity
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'idle'}
@@ -86,7 +87,7 @@ class SlackChat:
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {})))
 
-    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False):
+    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False):
         """Save a verified web input and its mirror in the same transaction.
 
         Only new inputs in an enabled, awake binding are eligible. Retrying a
@@ -96,14 +97,16 @@ class SlackChat:
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
             binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
-            if created and binding:
+            if binding:
                 allowed = enabled and binding['team_id'] == team
                 # Preserve chronology when the previous answer has been saved
-                # but the background collector has not seen it yet.
+                # but the background collector has not seen it yet. Collect
+                # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request)
+            if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
                     name = user['name'] if user else 'Web user'
@@ -122,7 +125,7 @@ class SlackChat:
                             'message_id': key, 'sender_id': user_id,
                             'sender_name': self.scrub(name),
                         })
-        if created:
+        if created and not metadata_request:
             self.store.event(run_id, 'chat', 'Message queued', {'message_id': message['id']})
         self.wake.set()
         return message, created
@@ -181,6 +184,10 @@ class SlackChat:
             prompt = (directive[2] or '').strip()
             if not prompt or model_error:
                 command = 'model'
+        # Directives and attachments carry additional intent; only an otherwise
+        # standalone question is answered by the control plane.
+        if not directive and not harness_directive and not file_ids and is_session_id_request(prompt):
+            command = 'session-id'
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if conn.execute('SELECT 1 FROM slack_receipts WHERE event_id=? OR (team_id=? AND channel=? AND message_ts=?)',
@@ -205,7 +212,7 @@ class SlackChat:
                 # messages are never backfilled into Slack on deployment.
                 old = conn.execute('SELECT r.id,r.sandbox_provider FROM slack_events s JOIN runs r ON r.id=s.run_id WHERE s.channel=? AND s.thread_ts=? AND r.chat_enabled=1 ORDER BY s.created_at DESC LIMIT 1',
                                    (channel, root)).fetchone()
-                if command and command not in {'model', 'harness'} and not old:
+                if command and command not in {'model', 'harness', 'session-id'} and not old:
                     return None
                 readiness = self.cloud_missing(missing_cloud, old['sandbox_provider']) if old else missing_cloud
                 if readiness and not command:
@@ -217,7 +224,7 @@ class SlackChat:
                         return None
                 else:
                     pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
-                    if pending >= self.settings.max_pending_runs:
+                    if pending >= self.settings.max_pending_runs and command != 'session-id':
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
@@ -233,6 +240,8 @@ class SlackChat:
                     conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",
                                  (event_id, run_id, channel, root, user, stamp, ts))
                     conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (self.settings.sandbox_provider, run_id))
+                    if command == 'session-id':
+                        conn.execute("UPDATE runs SET display_title='Session ID',title_attempted_at=? WHERE id=?", (stamp, run_id))
                     fresh = True
                 cursor = conn.execute('SELECT COALESCE(MAX(id),0) FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
                 conn.execute('INSERT INTO slack_threads(team_id,channel,thread_ts,run_id,started_ts,last_message_id,last_progress) VALUES(?,?,?,?,?,?,?)',
@@ -245,7 +254,7 @@ class SlackChat:
                 return None  # Retain the binding and receipts; never restart a deleted thread.
             if Decimal(ts) < Decimal(binding['started_ts']):
                 return None
-            if binding['paused'] and not mentioned and command not in {'wake', 'status'}:
+            if binding['paused'] and not mentioned and command not in {'wake', 'status', 'session-id'}:
                 return None
             if binding['paused'] and (command == 'wake' or (mentioned and not command)):
                 # Replies completed while asleep must not be backfilled even
@@ -287,6 +296,7 @@ class SlackChat:
                             'stop': 'Stopping the current response and clearing queued follow-ups. You can send another message once it has stopped.',
                             'wake': 'I’m listening again. Send your next message here.',
                             'status': 'This thread is paused.' if binding['paused'] else self.status_text(status),
+                            'session-id': session_id_response(run_id),
                             'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.',
                             'harness': harness_error or f"This session uses *{current['harness']}*. Send your task here; the harness stays fixed for this session."}[command]
                 if fresh and direct_message:

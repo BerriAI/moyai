@@ -6,6 +6,13 @@
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
+Ask **“What is this session’s ID?”** or send **`/session-id`** in web chat or Slack
+thread chat to get the current Moyai session ID directly. These standalone requests
+use no model calls, tool searches, or sandbox startup, and leave active work alone.
+Web replies are saved in the conversation; Slack replies use the same durable
+control-message delivery as `status`. Requests with attachments or additional work
+continue through the agent normally.
+
 ## Harnesses
 
 <p align="center">

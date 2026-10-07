@@ -261,7 +261,7 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False):
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
         run_id = uuid4().hex
         stamp = now()
@@ -296,7 +296,7 @@ class Store:
                         context_data[field] = context_data[field][:len(context_data[field]) // 2]
                 context = json.dumps(context_data, ensure_ascii=False)
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
-            if pending >= self.max_pending_runs:
+            if pending >= self.max_pending_runs and not metadata_request:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
             conn.execute(
                 "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness,github_repository_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -308,9 +308,13 @@ class Store:
             if chat_enabled:
                 message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).lastrowid
                 self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
+                if metadata_request:
+                    from .session_metadata import complete_in
+                    complete_in(conn, run_id, message_id, stamp, initial=True)
             elif attachment_ids:
                 raise ValueError('Attachments require a chat session.')
-        self.event(run_id, "status", "Task queued")
+        if not metadata_request:
+            self.event(run_id, "status", "Task queued")
         return self.run(run_id)
 
     def create_slack_run(self, event_id, prompt, plugins, channel, thread_ts, user_id, mention_ts=None, team_id='', file_ids=(), *, harness='hermes', model=None):
@@ -405,7 +409,7 @@ class Store:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row and row['deleted_at']:
@@ -418,6 +422,17 @@ class Store:
                     or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
+        if metadata_request:
+            from .session_metadata import complete_in
+            count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
+            if count >= 100:
+                raise ValueError('This session allows 100 turns. Start a new session.')
+            stamp = now()
+            model = model if model is not None else row['model'] or self.default_model
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?)",
+                                     (run_id, content, client_id, stamp, model, user_id)).lastrowid
+            complete_in(conn, run_id, message_id, stamp)
+            return {'id': message_id, 'status': 'completed', 'model': model}, True
         if row["status"] == "stopping":
             raise ValueError("Wait for the current response to stop before sending another message.")
         if send_now and not send_immediately and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():

@@ -39,6 +39,7 @@ from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from .session_lifecycle import SessionLifecycle
+from .session_metadata import is_session_id_request
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
@@ -445,6 +446,8 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         security.require(request, mutation=True)
+        metadata_request = ((body.chat_enabled or settings.temporal_enabled)
+                            and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
             parent = store.run(body.side_chat_of)
             if not parent or parent['deleted_at']:
@@ -456,13 +459,13 @@ def create_app(settings: Settings | None = None):
             model = settings.harness_model(harness, body.model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
-        if body.mode == "modal":
+        if body.mode == "modal" and not metadata_request:
             if missing_cloud():
                 raise HTTPException(503, "Cloud setup is incomplete. See Runtime for the missing settings.")
             connected = {item["id"] for item in connectors.list() if item["connected"] and item["enabled"]}
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
-        if body.mode == 'modal' and (body.repo_url or body.github_repository_id):
+        if body.mode == 'modal' and not metadata_request and (body.repo_url or body.github_repository_id):
             if 'github' in body.plugins:
                 identity = await connectors.github.selected_target({}, body.repo_url.removeprefix('https://github.com/').removesuffix('.git'), body.github_repository_id)
                 body.repo_url = 'https://github.com/' + connectors.github.repository_name(identity)
@@ -470,17 +473,18 @@ def create_app(settings: Settings | None = None):
                 repo = await connectors.github.public_repository(body.repo_url.removeprefix('https://github.com/').removesuffix('.git'), body.github_repository_id)
                 identity, body.repo_url = repo['id'], 'https://github.com/' + repo['full_name']
             body.github_repository_id = identity
-        if body.mode == "modal":
+        if body.mode == "modal" and not metadata_request:
             environments.choose(body.environment_id, body.repo_url, body.github_repository_id)
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
-        manager.submit(run)
-        session_titles.schedule(run['id'])
+        if not metadata_request:
+            manager.submit(run)
+            session_titles.schedule(run['id'])
         return public_run(run)
 
     @app.get('/api/runs/{run_id}/side-chats')
@@ -519,7 +523,8 @@ def create_app(settings: Settings | None = None):
         run = store.run(run_id)
         if not run:
             raise HTTPException(404, "Session not found")
-        if run["mode"] == "modal" and missing_cloud(run.get("sandbox_provider")):
+        metadata_request = not body.attachment_ids and is_session_id_request(body.content)
+        if run["mode"] == "modal" and not metadata_request and missing_cloud(run.get("sandbox_provider")):
             raise HTTPException(503, "Cloud setup is incomplete. See Runtime.")
         try:
             # Omitted models use the session preference inside the enqueue
@@ -533,19 +538,21 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(422, str(exc))
         try:
             user_id = store.identity(security.session_info(request))
-            enqueue = coordinator.enqueue_child if run['parent_run_id'] else slack.chat.enqueue_web
+            enqueue = coordinator.enqueue_child if run['parent_run_id'] and not metadata_request else slack.chat.enqueue_web
             # Resolve on every send so the saved choice also applies to other
             # tabs and older clients. Explicit Send now remains available.
             send_immediately = user_preferences.get(user_id)['send_immediately']
             message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id,
-                                       body.attachment_ids, body.send_now, send_immediately=send_immediately)
+                                       body.attachment_ids, body.send_now, send_immediately=send_immediately,
+                                       **({'metadata_request': True} if metadata_request else {}))
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
-        session_titles.schedule(run_id)
-        if store.has_queued_messages(run_id):
-            manager.submit(store.run(run_id))
+        if not metadata_request:
+            session_titles.schedule(run_id)
+            if store.has_queued_messages(run_id):
+                manager.submit(store.run(run_id))
         return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
 
     @app.post("/api/runs/{run_id}/cancel")
