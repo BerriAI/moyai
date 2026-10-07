@@ -12,7 +12,7 @@ except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
 
 
-NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']
+NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
 
 
 class ClaudeAgent(HarnessAgent):
@@ -69,17 +69,19 @@ class ClaudeAgent(HarnessAgent):
         ctx = self.context
         # The only inference credential in the child is this run's capability.
         # SDK prompt caching is on by default; override inherited disable flags.
+        # The loopback gateway needs an explicit opt-in to deferred tool loading.
+        # ToolSearch must also be in tools/allowed_tools for discovery to work.
         env = {'ANTHROPIC_BASE_URL': ctx.relay.url,
                'ANTHROPIC_API_KEY': os.environ['WORKSPACE_RUN_TOKEN'],
                'ANTHROPIC_AUTH_TOKEN': '', 'CLAUDE_CODE_OAUTH_TOKEN': '',
                'CLAUDE_CODE_USE_BEDROCK': '0', 'CLAUDE_CODE_USE_VERTEX': '0',
                'CLAUDE_CODE_USE_FOUNDRY': '0', 'CLAUDE_CODE_MAX_RETRIES': '0',
-               'ENABLE_TOOL_SEARCH': 'false', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
+               'ENABLE_TOOL_SEARCH': 'true', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                'DISABLE_PROMPT_CACHING': '0', 'DISABLE_PROMPT_CACHING_HAIKU': '0',
                'DISABLE_PROMPT_CACHING_SONNET': '0', 'DISABLE_PROMPT_CACHING_OPUS': '0'}
         return ClaudeAgentOptions(
             model=ctx.spec['model'], cwd=ctx.cwd,
-            system_prompt=system_message + '\nUse the advertised Moyai MCP tools directly. Do not start detached work.',
+            system_prompt=system_message + '\nUse ToolSearch to discover Moyai MCP tools before calling them. Do not start detached work.',
             tools=NATIVE_TOOLS, allowed_tools=[*NATIVE_TOOLS, 'mcp__moyai__*'],
             permission_mode='dontAsk', setting_sources=[], strict_mcp_config=True,
             mcp_servers={'moyai': ctx.config['mcp_servers']['workspace']}, env=env,

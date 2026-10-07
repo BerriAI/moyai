@@ -17,7 +17,8 @@ from sandbox.context_store import ContextStore
 
 
 @pytest.mark.parametrize('resumed', [False, True, 'durable'], ids=['new-session', 'large-checkpoint', 'durable-checkpoint'])
-def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed):
+@pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3'])
+def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed, model):
     calls, requests, events = [], [], []
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -31,7 +32,10 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         def do_GET(self):
             assert self.path == '/tools'
             self.reply([{'name': 'echo', 'description': 'Echo synthetic test data',
-                         'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}, 'required': ['text']}}])
+                         'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}}, 'required': ['text']}},
+                        *[{'name': f'unused_{i}', 'description': f'Unrelated catalog operation {i}.',
+                           'inputSchema': {'type': 'object', 'properties': {'query': {'type': 'string'}}}}
+                          for i in range(80)]])
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             if self.path == '/tools/call':
@@ -60,6 +64,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     assert 'Continue the searchable dropdown task' in json.dumps(receipt)
                 block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
                          {'type': 'tool_use', 'id': 'tool_echo', 'name': 'mcp__moyai__echo', 'input': {'text': 'sdk-transport-ok'}})
+                if not done and not any(tool['name'] == 'mcp__moyai__echo' for tool in data['tools']):
+                    block = {'type': 'tool_use', 'id': 'search_echo', 'name': 'ToolSearch',
+                             'input': {'query': 'select:mcp__moyai__echo', 'max_results': 1}}
             message = {'id': 'msg_' + str(len(requests)), 'type': 'message', 'role': 'assistant',
                        'model': 'claude-sonnet-4-5', 'content': [block], 'stop_reason': 'end_turn' if done else 'tool_use',
                        'stop_sequence': None, 'usage': {'input_tokens': 50, 'output_tokens': 10}}
@@ -91,7 +98,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
     workspace.mkdir()
     session.mkdir()
     def create_agent(context_store=None):
-        return ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 3,
+        return ClaudeAgent(spec={'model': model, 'timeout': 30, 'max_iterations': 4,
                              'history_reference_dir': str(session)},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
@@ -123,7 +130,17 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         assert result['completed'], result['final_response']
         assert result['final_response'] == 'sdk-transport-ok'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
-        assert [kind for kind, _ in events] == ['start', 'complete'] * (2 if resumed is True else 1)
+        expected = (['Read'] if resumed is True else []) + ['ToolSearch', 'mcp__moyai__echo']
+        assert [args[1] for kind, args in events if kind == 'start'] == expected
+        assert [kind for kind, _ in events] == ['start', 'complete'] * len(expected)
+        first_tools = {tool['name'] for tool in requests[0]['tools']}
+        assert {'Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch'} <= first_tools
+        assert not any(name.startswith('mcp__') for name in first_tools)
+        assert not any('unused_' in tool['name'] for body in requests for tool in body['tools'])
+        last_tools = {tool['name']: tool for tool in requests[-1]['tools']}
+        assert last_tools['mcp__moyai__echo']['input_schema']['properties'] == {'text': {'type': 'string'}}
+        assert last_tools['mcp__moyai__echo']['defer_loading'] is True
+        assert 'tool_reference' in json.dumps(requests[-1]['messages'])
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)

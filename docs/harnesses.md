@@ -28,6 +28,15 @@ and no user/project settings sources. Connected-app authorization remains in the
 broker. Private memory, credential tool payloads and reasoning do not enter
 public activity or traces.
 
+MCP tool definitions load on demand through the SDK's native `ToolSearch` tool.
+Moyai explicitly enables it for the loopback gateway and includes it in both
+the native tool list and the permission allowlist; the environment flag alone
+does not enable discovery with a restricted tool list. Core file/shell tools
+remain available immediately. Search loads selected MCP schemas, and calls
+still pass through the same broker authorization and activity hooks.
+The gateway must preserve `defer_loading` and `tool_reference` blocks for the
+selected model. See [SDK tool search](https://code.claude.com/docs/en/agent-sdk/tool-search).
+
 SDK `PreToolUse`, `PostToolUse` and `PostToolUseFailure` hooks save tool receipts
 and publish activity. Before the next inference, the relay lets Moyai checkpoint,
 wait for credentials/delegated work, or apply a correction at a complete tool
@@ -156,6 +165,20 @@ node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
 filesystem restores and summary-failure recovery using synthetic data and a
 deterministic summarizer. It makes no provider calls. The real SDK/MCP continuation
 test above separately verifies that the completed echo action is not repeated.
+
+For a **live read-only tool-search probe**, securely provide `GATEWAY_BASE_URL`
+and `GATEWAY_API_KEY`, optionally `SMOKE_MODEL` (default GPT-6 Astra), then run:
+
+```sh
+uv run python -m scripts.claude_tool_search_smoke
+```
+
+This exercises the real SDK, MCP bridge, authenticated relay, and gateway with
+native shell/file tools disabled. A disposable broker has no connected accounts;
+only discovery and its read-only `model_list` tool may execute. It asserts that
+the first request contains no MCP definitions, discovery precedes execution,
+and the selected tool runs once. Requests are billed. `SMOKE_EAGER=1` measures
+the previous eager configuration; `SMOKE_REPORT` saves sanitized request metrics.
 
 For a **live, tool-free caching probe**, securely provide `GATEWAY_BASE_URL` and
 `GATEWAY_API_KEY`, optionally `SMOKE_MODEL` and `SMOKE_ROOT`, then run:

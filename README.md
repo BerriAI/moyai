@@ -22,6 +22,10 @@ New sessions default to the native **Claude Agent SDK** with prompt caching enab
 
 Moyai uses [LiteLLM](https://github.com/BerriAI/litellm) for inference, so it can run on any of the 100+ providers LiteLLM supports. Point it at your [LiteLLM gateway](https://docs.litellm.ai/), switch models between messages, and spend is tracked per teammate. Provider keys stay on the server, and the sandbox never sees them.
 
+## See it in action
+
+<img width="1196" height="720" alt="moyai" src="https://github.com/user-attachments/assets/2de74e6a-c37c-48d6-8a99-de2166c88626" />
+
 ## Before vs after: 79% cheaper
 
 We moved our internal coding agent from Devin to Moyai. Same work, same 31 days: $101,872 on Devin vs about $21,700 on Moyai

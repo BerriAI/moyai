@@ -73,7 +73,7 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 /* Composer toolbar and sidebar account row.
    One type size (13px), one control height (28px), two spacing steps:
    4px between related controls, 12px between groups. Left: input actions.
-   Right: what runs the message (harness, model), then mic and send. */
+   Right: engine (new sessions only) and model, then mic and send. */
 .composer-toolbar, .reply-composer .composer-toolbar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
   min-height: 0; padding: 4px 10px 10px;
@@ -110,12 +110,11 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 .composer-model { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 0 8px; color: #3f3a47; }
 .composer-model .harness-logo { width: 14px; height: 14px; flex: none; }
 
-/* Right group: harness and model sit together, separated from input actions. */
-.composer-toolbar .harness-picker, .reply-composer .harness-fixed { margin-left: auto; }
-.composer-toolbar .model-picker:not(.harness-picker), .reply-composer .composer-model:not(.harness-fixed) { margin-left: 0; }
-.composer-toolbar .harness-picker + .model-picker::before,
-.reply-composer .harness-fixed + .model-picker::before,
-.reply-composer .harness-fixed + .composer-model::before {
+/* Keep engine and model selection together beside the message actions. */
+.composer-toolbar .model-picker, .reply-composer .composer-model { margin-left: auto; margin-right: 0; }
+.composer-pickers { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0; margin-left: auto; }
+.composer-pickers .model-picker { margin: 0; }
+.composer-toolbar .harness-picker + .model-picker::before {
   content: ""; position: absolute; left: -3px; width: 1px; height: 14px; background: var(--line);
 }
 .composer-toolbar .record-button.is-idle { order: 5; margin-left: 8px; }
@@ -130,6 +129,11 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
   .composer-toolbar .attach-button, .task-options summary { width: 28px; padding: 0 !important; justify-content: center; }
   .model-picker select { max-width: 104px; }
   .composer-toolbar .record-button.is-idle { margin-left: 0; }
+}
+
+@media (max-width: 600px) {
+  #task-form .composer-pickers { order: -1; flex-basis: 100%; justify-content: flex-end; }
+  #task-form .record-button.is-idle { margin-left: auto; }
 }
 
 /* Sidebar account row: identity left, icon actions right, one line. */
