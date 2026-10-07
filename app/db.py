@@ -297,10 +297,13 @@ class Store:
         self.event(run_id, "status", "Task queued")
         return self.run(run_id)
 
-    def create_slack_run(self, event_id, prompt, plugins, channel, thread_ts, user_id, mention_ts=None, team_id='', file_ids=()):
+    def create_slack_run(self, event_id, prompt, plugins, channel, thread_ts, user_id, mention_ts=None, team_id='', file_ids=(), *, harness='hermes', model=None):
         # Slack retries deliveries. Reserve the event and its run in the same
         # transaction so parallel deliveries cannot create multiple sandboxes.
         run_id, stamp = uuid4().hex, now()
+        model = model or self.default_model
+        from .harnesses import validate_harness
+        validate_harness(harness, model)
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM slack_events WHERE event_id=?", (event_id,)).fetchone():
@@ -309,9 +312,9 @@ class Store:
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= self.max_pending_runs:
                 raise ValueError("The session queue is full.")
-            conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id) VALUES(?,?,'','modal','queued',?,?,?,1,?,?)",
-                         (run_id, prompt, json.dumps(plugins), stamp, stamp, self.default_model, actor_id))
-            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, self.default_model, actor_id)).lastrowid
+            conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id,harness) VALUES(?,?,'','modal','queued',?,?,?,1,?,?,?)",
+                         (run_id, prompt, json.dumps(plugins), stamp, stamp, model, actor_id, harness))
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, actor_id)).lastrowid
             self.slack_mentions.queue_in(conn, message_id, team_id, prompt)
             if file_ids:
                 message_id = conn.execute('SELECT id FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]

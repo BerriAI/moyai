@@ -388,7 +388,8 @@ class RunManager:
             await refresh_sandbox_files(sandbox)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
-        self.store.event(run_id, "status", "Sandbox ready. Starting Hermes Agent.")
+        from .harnesses import resolve
+        self.store.event(run_id, "status", f"Sandbox ready. Starting {resolve(run['harness']).name}.")
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
         process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",

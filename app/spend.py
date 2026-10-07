@@ -144,6 +144,9 @@ class Spend:
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
             if 'cost_source' not in columns:
                 conn.execute("ALTER TABLE model_requests ADD COLUMN cost_source TEXT NOT NULL DEFAULT ''")
+            for name in ('cache_read_input_tokens', 'cache_creation_input_tokens'):
+                if name not in columns:
+                    conn.execute(f'ALTER TABLE model_requests ADD COLUMN {name} INTEGER')
 
     @property
     def key_hash(self):
@@ -170,8 +173,9 @@ class Spend:
             value = usage.get(field)
             return value if type(value) is int and value >= 0 else None
         cost = capture.cost if capture else None
-        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=? WHERE id=?',
-                           (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'), request_id))
+        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
+                           (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
+                            tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
 
     def report(self, start=None, end=None):
         start, end, lower, upper = period(start, end)
@@ -183,7 +187,7 @@ class Spend:
         rows = self.store.rows('SELECT * FROM model_requests WHERE created_at>=? AND created_at<?', (lower, upper))
         tracked_since = self.store.rows('SELECT MIN(created_at) AS value FROM model_requests')[0]['value']
         def empty():
-            return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'sessions': set()}
+            return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0, 'sessions': set()}
         groups = {user['id']: empty() for user in users.values() if user['kind'] == 'google'}
         sessions, models = {}, {}
         def add(bucket, row):
@@ -191,7 +195,7 @@ class Spend:
             bucket['pending_costs'] += row['cost'] is None and row['status'] == 'pending'
             bucket['missing_costs'] += row['cost'] is None and row['status'] != 'pending'
             bucket['spend'] += Decimal(row['cost'] or '0')
-            for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
+            for key in ('prompt_tokens', 'completion_tokens', 'total_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'):
                 bucket[key] += row[key] or 0
             if row['run_id']:
                 bucket['sessions'].add(row['run_id'])
@@ -215,7 +219,7 @@ class Spend:
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
-                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_source','prompt_tokens','completion_tokens','total_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
+                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_source','prompt_tokens','completion_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
                 'identities': list(users.values()), 'tracked_since': tracked_since}
 
         infrastructure = self.infrastructure.report(start, end)

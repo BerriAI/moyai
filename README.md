@@ -2,11 +2,11 @@
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
-Bring your own model and choose a harness: **Hermes, Claude Code, Codex, OpenCode, Deep Agents, or Tool Loop**. See [supported combinations and custom harnesses](docs/harnesses.md).
+New sessions default to the native **Claude Agent SDK** with prompt caching enabled. Bring your own model and choose a harness: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, or Tool Loop**. See [supported combinations and custom harnesses](docs/harnesses.md).
 
 ## Getting started
 
-This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Code harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
+This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Agent SDK harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
 
 You'll need Git, Python 3.12+, [uv](https://docs.astral.sh/uv/getting-started/installation/), a [Modal account](https://modal.com/docs/guide), and a [LiteLLM gateway](docs/getting-started.md#3-configure-a-model-endpoint) with GPT-6 Astra enabled. Commands use a macOS/Linux shell; Windows users can use WSL.
 
@@ -53,7 +53,7 @@ Open the printed **Workspace URL**. Sign in with `WORKSPACE_PASSWORD` from `.env
 
 ### 4. Run your first task
 
-Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **Claude Code** in the harness picker and **GPT-6 Astra** in the model picker, then send:
+Start a new session. Under **Context & tools**, choose **Cloud session** and leave the repository empty. Select **Claude Agent SDK** in the harness picker and **GPT-6 Astra** in the model picker, then send:
 
 > Create `/workspace/hello.py` that prints `Hello from Moyai`, run it, and show me the output.
 

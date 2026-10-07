@@ -54,7 +54,7 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    harness: str = Field(default='hermes', min_length=1, max_length=80)
+    harness: str | None = Field(default=None, min_length=1, max_length=80)
     prompt: str = Field(default="", max_length=16000)
     repo_url: str = Field(default="", max_length=500)
     mode: Literal["demo", "modal"] = "demo"
@@ -366,7 +366,7 @@ def create_app(settings: Settings | None = None):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
-        return {"harnesses": choices(), "harness": "hermes", "cloud_ready": not missing, "missing": missing, "model": settings.resolve_model(), "models": settings.model_choices(),
+        return {"harnesses": choices(), "harness": settings.agent_harness, "cloud_ready": not missing, "missing": missing, "model": settings.harness_model(settings.agent_harness), "models": settings.model_choices(),
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
@@ -422,9 +422,8 @@ def create_app(settings: Settings | None = None):
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
-            model = settings.resolve_model(body.model)
-            from .harnesses import validate_harness
-            validate_harness(body.harness, model)
+            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.agent_harness)
+            model = settings.harness_model(harness, body.model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if body.mode == "modal":
@@ -438,7 +437,7 @@ def create_app(settings: Settings | None = None):
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=body.harness)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()

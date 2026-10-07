@@ -68,6 +68,7 @@ def main():
         assert not any('SAVED CONVERSATION REFERENCE:' in str(m.get('content')) for m in followup['messages'])
         report = {'harness': harness, 'model': settings.agent_model, 'completed': result['completed'], 'answer': result['final_response'],
                   'followup_completed': followup['completed'], 'followup_answer': followup['final_response'],
+                  'cache_usage': app.state.store.rows('SELECT cache_read_input_tokens,cache_creation_input_tokens FROM model_requests WHERE run_id=? ORDER BY created_at', (run['id'],)),
                   'first_model_calls': first_calls, 'total_model_calls': app.state.store.run(run['id'])['model_calls'],
                   'tool_events': events, 'file_content': (root / proof).read_text(), 'execution_stdout': executed.stdout}
         (root / 'verification.json').write_text(json.dumps(report, indent=2))

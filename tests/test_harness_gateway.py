@@ -71,3 +71,37 @@ def test_native_nonstream_response_bytes_unchanged(workspace, monkeypatch, route
     response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer cap'},
                            json={'messages': [], 'input': [], 'stream': False})
     assert response.content == wire
+
+
+def test_prompt_cache_policy_and_usage_survive_gateway(workspace, monkeypatch):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    policy = {'type': 'ephemeral', 'ttl': '5m'}
+    system = [{'type': 'text', 'text': 'Stable system prompt', 'cache_control': policy}]
+    wire = (b'event: message_start\ndata: {"type":"message_start","message":{"id":"cached",'
+            b'"usage":{"input_tokens":5,"output_tokens":0,"cache_creation_input_tokens":20,"cache_read_input_tokens":100}}}\n\n'
+            b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":3}}\n\n'
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n')
+    def upstream(request):
+        payload = json.loads(request.content)
+        assert payload['cache_control'] == policy
+        assert payload['system'][-1] == system[0]
+        return httpx.Response(200, content=wire, headers={'Content-Type': 'text/event-stream'})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('cache test', '', 'modal', [], model='anthropic/claude-opus-5-5', harness='claude-agent-sdk')
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    response = client.post(f"/broker/{run['id']}/v1/messages", headers={'Authorization': 'Bearer cap'},
+                           json={'messages': [{'role': 'user', 'content': 'Hello'}], 'system': system,
+                                 'stream': True, 'cache_control': policy})
+    assert response.content == wire
+    row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
+    assert row['cache_read_input_tokens'] == 100 and row['cache_creation_input_tokens'] == 20
+    assert (row['prompt_tokens'], row['completion_tokens'], row['total_tokens']) == (125, 3, 128)
+
+
+def test_response_cache_tokens_are_not_double_counted():
+    capture = NativeUsageCapture(False)
+    capture.feed(b'{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":80},"output_tokens":5}}')
+    capture.finish()
+    assert capture.usage['prompt_tokens'] == 100 and capture.usage['total_tokens'] == 105

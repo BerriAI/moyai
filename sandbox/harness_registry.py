@@ -34,9 +34,8 @@ class HarnessDefinition:
 # Keep the persisted Claude ID stable for sessions created before this refactor.
 HARNESSES = {
     'hermes': HarnessDefinition('hermes', 'Hermes', 'hermes_harness', 'HermesAgent', live_steering=True),
-    'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Code',
-        'litellm_harness', 'LiteLLMAgent', litellm_harness='CLAUDE_CODE',
-        runtime_binding='claude'),
+    'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Agent SDK',
+        'claude_harness', 'ClaudeAgent'),
     'codex': HarnessDefinition('codex', 'Codex', 'litellm_harness', 'LiteLLMAgent',
         litellm_harness='CODEX', runtime_binding='codex'),
     'opencode': HarnessDefinition('opencode', 'OpenCode', 'litellm_harness', 'LiteLLMAgent',

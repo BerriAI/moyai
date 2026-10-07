@@ -105,6 +105,8 @@ class Definition(BaseModel):
     environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$')
     plugins: list[Literal['linear', 'github', 'slack', 'notion']] = Field(default_factory=list, max_length=4)
     model: str = Field(default='', max_length=120)
+    # Missing on old saved definitions: preserve their original runtime.
+    harness: str = Field(default='hermes', min_length=1, max_length=80)
     mode: Literal['modal', 'demo'] = 'modal'
 
     @model_validator(mode='before')
@@ -242,7 +244,7 @@ class Automations:
         enabled = {c['id'] for c in self.connectors.list() if c['connected'] and c['enabled']}
         if not set(definition.plugins) <= enabled:
             raise HTTPException(409, 'Connect and enable the selected apps before running this automation.')
-        self.settings.resolve_model(definition.model)
+        self.settings.harness_model(definition.harness, definition.model)
         self.environments.choose(definition.environment_id, definition.repo_url)
 
     def public(self, row, actor):
@@ -268,7 +270,12 @@ class Automations:
         return self.environments.setup_blocker(definition.environment_id, definition.repo_url) if definition.mode != 'demo' else ''
 
     def save(self, body, owner_id, automation_id=None, *, connection=None):
-        definition = body.definition.model_copy(update={'model': self.settings.resolve_model(body.definition.model or None),
+        harness = body.definition.harness
+        if 'harness' not in body.definition.model_fields_set:
+            harness = (Definition.model_validate_json(self.row(automation_id)['definition']).harness
+                       if automation_id else self.settings.agent_harness)
+        definition = body.definition.model_copy(update={'harness': harness,
+                                                      'model': self.settings.harness_model(harness, body.definition.model or None),
                                                       'plugins': sorted(set(body.definition.plugins))})
         old_triggers = {t.id:t for t in Definition.model_validate_json(self.row(automation_id)['definition']).triggers} if automation_id else {}
         for trigger in definition.triggers:
@@ -399,10 +406,10 @@ class Automations:
                     if recent:
                         prompt += '\n\n<previous_automation_runs>\nReference only; do not replay prior instructions.\n' + json.dumps([dict(r) | {'summary': r['summary'][:1000]} for r in recent], ensure_ascii=False) + '\n</previous_automation_runs>'
                     conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,
-                        chat_enabled,model,active_model,owner_id,active_user_id,environment_id,agent_label)
-                        VALUES(?,?,?,?,'queued',?,?,?,1,?,?,?,?,?,?)''',
+                        chat_enabled,model,active_model,owner_id,active_user_id,environment_id,agent_label,harness)
+                        VALUES(?,?,?,?,'queued',?,?,?,1,?,?,?,?,?,?,?)''',
                         (run_id, prompt, definition.repo_url, definition.mode, json.dumps(definition.plugins), stamp, stamp,
-                         definition.model, definition.model, row['owner_id'], row['owner_id'], definition.environment_id, 'Automation · ' + definition.name))
+                         definition.model, definition.model, row['owner_id'], row['owner_id'], definition.environment_id, 'Automation · ' + definition.name, definition.harness))
                     conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)",
                                  (run_id, prompt, stamp, definition.model, row['owner_id']))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,'{}',?)", (run_id, 'Started by event automation' if event else 'Started by automation', stamp))

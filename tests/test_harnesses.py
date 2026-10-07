@@ -152,7 +152,7 @@ def test_native_images_are_not_translated():
 
 def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from sandbox import agent, litellm_harness
+    from sandbox import agent, claude_harness
     events = []
     relay = SimpleNamespace(url='http://test', control=lambda body=None: {}, last_error='',
                             wait_group='', wait_credential='', before_model=None)
@@ -164,9 +164,9 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
                     'messages': [{'role': 'user', 'content': prompt}, {'role': 'assistant', 'content': 'SDK result'}]}
         def close(self): pass
         def validate(self): pass
-    monkeypatch.setattr(litellm_harness, 'LiteLLMAgent', FakeClaude)
+    monkeypatch.setattr(claude_harness, 'ClaudeAgent', FakeClaude)
     monkeypatch.setattr(agent, 'prepare_attachments', lambda *a, **k: None)
-    monkeypatch.setattr(agent, 'apply_hermes_patches', lambda: None)
+    monkeypatch.setattr(agent, 'apply_hermes_patches', lambda: pytest.fail('Claude must not patch Hermes'))
     monkeypatch.setattr(agent, 'prepare_project', lambda *a, **k: None)
     monkeypatch.setattr(agent, 'collect_archive', lambda *a: None)
     monkeypatch.setattr(agent, 'computer_request', lambda *a, **k: {})
@@ -229,7 +229,7 @@ def test_all_litellm_harnesses_can_be_selected(workspace, monkeypatch, harness, 
 def test_catalog_covers_upstream_harness_enum():
     litellm = pytest.importorskip('litellm.harness')
     from sandbox.harness_registry import HARNESSES
-    assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} == {h.name for h in litellm.Harness}
+    assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE'} == {h.name for h in litellm.Harness}
 
 
 def test_responses_input_is_not_translated():

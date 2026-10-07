@@ -1,152 +1,123 @@
-# Swappable agent harnesses
+# Agent harnesses
 
-Moyai uses [LiteLLM's harness API](https://docs.litellm.ai/docs/harness) for
-all five supported runtimes, with a separate native Hermes adapter. LiteLLM does not currently
-include Hermes in its `Harness` enum.
+New web sessions, Slack threads and saved automations default to **Claude Agent
+SDK** (`claude-agent-sdk`). `AGENT_HARNESS` overrides the default. Explicitly
+selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents and
+Tool Loop. All configured models remain selectable with every harness. The configured
+`AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
+selected model and tool calls through the runtime's native API (Messages for
+Claude Agent SDK); selecting it does not establish provider compatibility.
 
-## Architecture
+## Claude Agent SDK
 
-- `sandbox/harness_registry.py` is the single catalog used by the sandbox,
-  API validation, UI choices and Slack selection.
-- `sandbox/agent.py` owns shared workspace preparation, prompts, activity,
-  steering, waits, checkpointing and final delivery. It calls a registry factory,
-  not a Hermes/Claude conditional.
-- `sandbox/harness_agent.py` defines the **HarnessAgent** abstract base class and
-  typed **HarnessContext**. Both HermesAgent and LiteLLMAgent implement it.
-  Each adapter implements `validate()`, `run_conversation(...)`, `interrupt()`
-  and `close()`. Results carry completion/failure/interruption flags and saved
-  transcript messages. Live-steering adapters additionally expose the Hermes
-  redirect/steer contract; boundary-only adapters declare that capability false.
-- `sandbox/hermes_harness.py` encapsulates Hermes imports, discovery and callbacks.
-- `sandbox/litellm_harness.py` calls **`litellm.aagent_session()`**, selects the
-  registered **`Harness` enum**, and consumes typed
-  `Text`, `ToolCall`, `ToolResult`, `Approval` and final result events. Private
-  `Reasoning` events never enter public activity.
-- `sandbox/harness_bindings.py` contains named, typed runtime bindings rather than
-  anonymous factory tuples and dynamic `__import__` lambdas.
-  Runtime launch/MCP configuration is separate from the shared LiteLLM
-  event loop. The Claude binding uses a `LocalSandbox` subclass inside the
-  existing isolated Modal sandbox. LiteLLM owns CLI execution and event parsing.
+`sandbox/claude_harness.py` calls the pinned Python **`ClaudeSDKClient`** directly.
+It does not use LiteLLM's harness wrapper or import/patch Hermes. The shared
+sandbox image retains Hermes and other runtimes for existing sessions and
+explicit selections. Claude runs inside that same isolated Modal machine.
+Older project snapshots install the pinned SDK on first use if it is missing
+or outdated; this does not initialize Hermes or the LiteLLM harness wrapper.
 
-To add another runtime, register its `HarnessDefinition` and verified runtime
-binding (binary, options, workspace tools and model protocol). No edits to
-`agent.py`, API schema or model picker are needed. The beta LiteLLM API does not
-provide a common MCP configuration argument, so each CLI's MCP setup still needs
-a small binding. All five current enum members now have bindings and live
-verification. A coverage test detects additions to the pinned upstream enum.
+The SDK receives only the run capability for inference and calls Moyai's loopback
+relay. The relay forwards native Messages requests to the configured LiteLLM AI
+Gateway. Provider keys remain on the web worker. Moyai pins the selected model,
+enforces run authorization and limits, and streams native response bytes unchanged.
 
-## UI and Slack
+Claude uses a finite native file/shell tool allowlist and `dontAsk` permissions.
+Only the broker-authorized `moyai` MCP server is loaded, with strict MCP config
+and no user/project settings sources. Connected-app authorization remains in the
+broker. Private memory, credential tool payloads and reasoning do not enter
+public activity or traces.
 
-New sessions have an **Agent harness** picker beside the model picker:
+SDK `PreToolUse`, `PostToolUse` and `PostToolUseFailure` hooks save tool receipts
+and publish activity. Before the next inference, the relay lets Moyai checkpoint,
+wait for credentials/delegated work, or apply a correction at a complete tool
+boundary. In-flight redirect is a Hermes capability; Claude uses boundary
+steering. Stop revokes the capability and terminates the isolated machine.
 
-- **Hermes** (default): existing runtime and all configured model choices.
-- **Claude Code**: `Harness.CLAUDE_CODE`, Claude's native file/shell tools
-  and Moyai MCP tools; supports configured models through the gateway's Messages API,
-  including `openai/gpt-6-astra`. The gateway must support the model and tool calls
-  on that API; selecting a model does not verify provider compatibility.
-- **Codex**: `Harness.CODEX`, uses configured models through the gateway's Responses API.
-  This is the Codex runtime, not the separate OpenAI Agents SDK.
-- **OpenCode**: `Harness.OPENCODE`, native tools and configured Moyai MCP server.
-- **Deep Agents**: `Harness.DEEPAGENTS`, LangChain runtime with LiteLLM's sandbox
-  backend and `workspace_tools`/`workspace_call` access to the authorized MCP catalog.
-- **Tool Loop**: `Harness.TOOL_LOOP`, explicit workspace file/shell tools
-  plus the same authorized MCP catalog wrappers.
+Each app turn uses the saved, scrubbed conversation and tool receipts. It creates
+a fresh SDK session rather than resuming an unfiltered native transcript that
+could retain private tool payloads from an earlier requester. Completed external
+actions are recorded and must not be replayed after a checkpoint or failure.
 
-The persisted ID `claude-agent-sdk` remains stable for compatibility. New Slack
-threads can begin with:
+## Prompt caching and accounting
+
+[The SDK enables prompt caching automatically](https://code.claude.com/docs/en/agent-sdk/cost-tracking#track-cache-tokens).
+Moyai explicitly overrides inherited `DISABLE_PROMPT_CACHING` and family-specific
+disable flags. It keeps the normal five-minute Anthropic cache policy; this change does
+not opt into the higher write cost of a one-hour cache.
+
+The authenticated Messages gateway preserves both block-level and top-level
+`cache_control`. SDK-managed system/tool prefixes and conversation prefixes can
+be reused within the provider's TTL and minimum token threshold. A setting being
+enabled does not guarantee a hit on a short or changing prompt. Other providers
+use their own cache policy through the gateway; this change does not enable
+response caching or reuse a prior answer.
+
+`model_requests`, the spend API and traces retain `cache_read_input_tokens` and
+`cache_creation_input_tokens`. Messages `input_tokens` excludes those tokens;
+Moyai adds them exactly once to its total prompt count. Responses accounting
+continues to treat cached tokens as included in `input_tokens`. Dollar amounts
+still come from the gateway; missing cost is never guessed from local SDK prices.
+
+## Existing sessions and automations
+
+Existing sessions retain their persisted harness, including old Hermes sessions.
+Start a new thread/session to use the new default; native histories are not
+hot-switched. Follow-ups, side chats and delegated workers retain the selected
+harness. Existing automation definitions without a harness retain Hermes, while
+new automations save the configured default. The automation editor can explicitly
+switch a saved workflow to Claude Agent SDK and a configured model; saving pauses it for
+review through the existing workflow.
+
+New Slack threads can explicitly choose a runtime:
 
 ```text
 @Moyai Devin harness claude-agent-sdk
-Your task here
+Read the repository
 ```
 
-Other IDs are `codex`, `opencode`, `deepagents`, `tool-loop`, and `hermes`.
+The task line is optional. A harness-only command starts no compute. Other IDs
+are `hermes`, `codex`, `opencode`, `deepagents` and `tool-loop`.
 
-The task line is optional; a harness-only command starts no compute. Follow-ups,
-mirrored Slack conversations, delegated workers and UI side chats retain the
-selection. Existing sessions migrate to Hermes. Harnesses are replaceable in
-code and selectable for new sessions, **not hot-switched inside existing native
-histories**. Start a new session to choose another runtime. Automations remain
-Hermes-only in this v0.
+## Other runtimes and extension
 
-## Dependencies and gateway boundary
+`sandbox/harness_registry.py` is the single catalog for API validation, UI model
+choices, Slack selection and adapter creation. Each adapter implements
+`HarnessAgent`: `validate`, `run_conversation`, `interrupt` and `close`.
+`sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
+checkpointing and delivery.
 
-The tested PyPI wheel `litellm==1.104.0` does not expose the documented beta API.
-The runtime therefore uses the complete upstream Python package at immutable
-revision `2cee61626d9581bc22bbdeefb1924f854f50d427`, with the wheel's dependencies.
-This avoids compiling the upstream Rust extension solely to use the Python
-harness API. `harness_dependencies.py` prepares it at image build time and for
-older prepared snapshots. No upstream source is vendored into Moyai. The pinned
-`claude-agent-sdk==0.2.163` supplies the Claude binary; Moyai no longer directly
-uses `ClaudeSDKClient`. MCP stays on 1.x for Hermes compatibility.
-Additional pins: `@openai/codex@0.160.1`, `opencode-ai@1.18.35`,
-`deepagents==0.7.22`, `langchain-litellm==0.11.0`. The image installs all runtimes;
-older snapshots install missing dependencies before starting the selected harness.
-
-LiteLLM receives `model='litellm_proxy/' + selected_model`, the loopback broker
-URL and only the short-lived run capability. Its local endpoint forwards to
-Moyai's authenticated relay. The relay seals and forwards each native route:
-`/v1/messages` stays Messages, `/v1/responses` stays Responses. **LiteLLM AI Gateway
-owns protocol unification**. No local Messages/Responses conversion or synthetic
-SSE generation remains. OpenCode and the in-process harnesses use Chat Completions.
-`app/harness_gateway.py` handles only run authorization, model pinning, context,
-attachments, limits and accounting; native response bytes stream unchanged.
-Native model trace spans record usage/status only, avoiding reasoning or tool
-payload capture; public tool traces remain separate. Provider keys stay server-side.
-There is no silent fallback to Hermes.
-
-Only the explicitly authorized MCP configuration is loaded. The server is named
-`moyai` because Claude reserves `workspace`. The Claude launch binding applies a
-finite native-tool allowlist and noninteractive `dontAsk` permissions; connected
-app authorization remains enforced by the broker. Private memory and credential
-tool payloads remain scrubbed from public activity and traces.
-
-## Continuation and limitations
-
-Each app turn creates a fresh LiteLLM session using saved transcript/tool receipts.
-**TurnJournal** records typed runtime tool events and final text; it no longer
-extracts history from inference requests. This keeps lifecycle code independent
-of Messages, Responses and Chat Completions schemas. It does not reuse
-another runtime's native resume ID. Steering, credential/delegation waits
-and machine renewal are handled at complete tool-round boundaries. Claude does
-not redirect an in-flight inference like Hermes. Stop still revokes the capability
-and terminates the sandbox. Native content blocks pass through to the gateway;
-provider feature support belongs to the gateway/runtime, not a Moyai translator.
-Codex nested OS sandboxing is disabled only because it runs within Moyai's
-isolated Modal machine, not on the web host. Python harness tools execute in that
-same isolated machine. Tool Loop file tools reject paths outside the workspace;
-shell subprocesses filter provider secret environment variables. Provider-native
-server-side `previous_response_id` is rejected; saved full input is used instead.
+Codex, OpenCode, Deep Agents and Tool Loop continue using `litellm.aagent_session`
+and the named bindings in `sandbox/harness_bindings.py`. The pinned beta source
+is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
+contain that API. Claude Agent SDK stays pinned at `0.2.163`. No upstream source
+is vendored. Add a new registry definition and lifecycle adapter to extend Moyai.
 
 ## Verification
 
-`python -m pytest tests/test_harnesses.py` covers selection, registry extension,
-cross-provider models, configured-model authorization, idempotency, Slack routing, entrypoint dispatch, checkpoint
-receipts and privacy. `node --test tests/test_harness_picker.cjs` covers the picker.
-`tests/test_harness_gateway.py` asserts native request schemas and byte-identical
-stream/nonstream responses, model pinning, revocation, and native usage accounting.
+```sh
+uv run pytest -q tests/test_claude_sdk.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py
+node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
+```
 
-Opt-in real inference: make the pinned source importable (for example through
-`PYTHONPATH` pointing to a checkout at the exact revision), install the pinned
-runtime dependencies and run `python -m scripts.harness_smoke` with
-`GATEWAY_BASE_URL` and securely injected `GATEWAY_API_KEY`. `SMOKE_HARNESS` selects
-the runtime and `SMOKE_MODEL` selects a compatible model. This makes billed calls
-against an isolated local database: create Python code, read and execute it,
-call a read-only workspace MCP tool, and complete a follow-up using saved context.
-Never put keys in checked-in files.
+For a **live, tool-free caching probe**, securely provide `GATEWAY_BASE_URL` and
+`GATEWAY_API_KEY`, optionally `SMOKE_MODEL` and `SMOKE_ROOT`, then run:
 
-Verified locally with real gateway inference:
+```sh
+uv run python -m scripts.claude_cache_smoke
+```
 
-| Harness | Model | Code execution | Workspace tool | Follow-up |
-| --- | --- | --- | --- | --- |
-| Claude Code | anthropic/claude-sonnet-4-5 | PASS | PASS | PASS |
-| Codex | openai/gpt-5.4 | PASS | PASS | PASS |
-| OpenCode | anthropic/claude-sonnet-4-5 | PASS | PASS | PASS |
-| Deep Agents | anthropic/claude-sonnet-4-5 | PASS | PASS | PASS |
-| Tool Loop | anthropic/claude-sonnet-4-5 | PASS | PASS | PASS |
+This runs the actual SDK adapter, authenticated relay, gateway and accounting
+against three synthetic requests. It disables all tools, makes billed inference
+calls, prints provider cache counts, writes `verification.json`, and fails unless
+a cache read is reported. It does not exercise coding tools or production Slack.
 
-Each created program printed `harness-live-ok`. These smoke tests do not prove
-every provider/model combination or all long-running recovery scenarios.
+For full coding-tool verification, run `python -m scripts.harness_smoke` **inside
+an isolated container or Modal sandbox**, with the same gateway credentials.
+It creates, reads and executes a test program, calls a read-only workspace tool
+and follows up from saved receipts. `SMOKE_HARNESS` selects the runtime. Do not
+run agent-generated shell commands on the web host or a developer's computer.
 
-Production Modal image builds and hosted Slack delivery require a subsequent
-deployment. This change neither deploys nor alters the active agent.
+A PR and local checks do not update the hosted agent. Production rollout requires
+deploying the web worker and rebuilding/preparing the sandbox image. Existing
+sessions and saved automations remain on their stored runtime.

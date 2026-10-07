@@ -15,7 +15,7 @@ from app.security import digest
 
 @pytest.fixture
 def workspace(tmp_path):
-    settings = Settings(_env_file=None, data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
+    settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
                         modal_token_id="", modal_token_secret="", demo_step_seconds=0.01)
     app = create_app(settings)
     with TestClient(app, base_url=settings.public_url, client=("127.0.0.1", 50000)) as client:

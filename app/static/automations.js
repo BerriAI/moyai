@@ -54,7 +54,7 @@ async function editAutomation(existing,template) {
   try{[connections,environments]=await Promise.all([api('/api/connections'),api('/api/environments')]);}
   catch(e){toast(e.message);return;}
   if(state.pageVersion!==version)return;
-  const d=existing?.definition||{name:template?.name||'',prompt:template?.prompt||'',repo_url:template?'https://github.com/BerriAI/litellm':'',mode:state.config.cloud_ready?'modal':'demo',model:state.config.model,plugins:template?.plugins||[],environment_id:'auto',triggers:[{id:crypto.randomUUID(),schedule:automationDefaultSchedule()}]};
+  const d=existing?.definition||{name:template?.name||'',prompt:template?.prompt||'',repo_url:template?'https://github.com/BerriAI/litellm':'',mode:state.config.cloud_ready?'modal':'demo',model:state.config.model,harness:state.config.harness,plugins:template?.plugins||[],environment_id:'auto',triggers:[{id:crypto.randomUUID(),schedule:automationDefaultSchedule()}]};
   const dialog=$('#automation-dialog');
   dialog.onclose=()=>{dialog.innerHTML='';};
   dialog.innerHTML=`<form class="automation-form"><header><div><h2>${existing?'Edit automation':'New automation'}</h2><p>Runs as you, with your selected organization connections.</p></div><button type="button" class="icon-button" data-close aria-label="Close automation editor">×</button></header>
@@ -62,7 +62,7 @@ async function editAutomation(existing,template) {
     ${automationTriggerFields(d)}
     <label>Workflow<textarea name="prompt" required minlength="3" maxlength="14000" rows="8" placeholder="Tell Moyai what to do each time…">${esc(d.prompt)}</textarea></label>
     <label>Maximum runs per hour (shared by all triggers)<input name="max_runs_per_hour" type="number" min="1" placeholder="No limit" value="${d.max_runs_per_hour===null?'':d.max_runs_per_hour??50}"></label><p class="automation-policy">Default: 50 runs/hour, or 150 for Slack message watching. Clear the field for no per-automation cap. This limits new runs, not how long work can continue.</p>
-    <div class="automation-fields"><label>Repository<input name="repo_url" type="url" placeholder="https://github.com/owner/repository" value="${esc(d.repo_url)}"></label><label>Model<select name="model">${(state.config.models||[]).map(m=>`<option value="${esc(m.id)}" ${m.id===d.model?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label></div>
+    <div class="automation-fields"><label>Repository<input name="repo_url" type="url" placeholder="https://github.com/owner/repository" value="${esc(d.repo_url)}"></label><label>Agent harness<select name="harness">${(state.config.harnesses||[]).map(h=>`<option value="${esc(h.id)}" ${h.id===(d.harness||'hermes')?'selected':''}>${esc(h.name)}</option>`).join('')}</select></label><label>Model<select name="model">${harnessModels(d.harness||'hermes').map(m=>`<option value="${esc(m.id)}" ${m.id===d.model?'selected':''}>${esc(m.name)}</option>`).join('')}</select></label></div>
     <label>Project environment<select name="environment_id">${environmentOptions(environments,d.environment_id)}</select></label>
     <fieldset><legend>Organization connections</legend>${connections.map(c=>`<label class="automation-check"><input type="checkbox" name="plugin" value="${esc(c.id)}" ${d.plugins.includes(c.id)?'checked':''}>${esc(providerNames[c.id])}${!c.connected||!c.enabled?' · not connected':''}</label>`).join('')}</fieldset>
     <p class="automation-policy">Runs follow the same connection permissions and tool approval requirements as interactive sessions. Runs never approve or merge PRs. Scheduled runs skip overlap. Events queue until the previous run finishes, for up to 24 hours. Pausing stops future runs; stop an active run from its session.</p>
@@ -71,10 +71,14 @@ async function editAutomation(existing,template) {
   dialog.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>dialog.close());
   const form=dialog.querySelector('form');
   bindAutomationTrigger(form,d);
+  form.elements.harness.onchange=()=>{
+    const picker=form.elements.model,selected=picker.value;
+    picker.innerHTML=harnessModels(form.elements.harness.value).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('');
+  };
   form.onsubmit=async event=>{
     event.preventDefault();const button=form.querySelector('[type="submit"]');button.disabled=true;
     try {
-      const f=new FormData(form),body={revision:existing?.revision||0,definition:{name:f.get('name'),prompt:f.get('prompt'),repo_url:f.get('repo_url'),model:f.get('model'),mode:d.mode,plugins:f.getAll('plugin'),environment_id:f.get('environment_id'),triggers:[...form.querySelector('[data-triggers]').children].map(readAutomationTrigger),max_runs_per_hour:f.get('max_runs_per_hour')===''?null:Number(f.get('max_runs_per_hour'))}};
+      const f=new FormData(form),body={revision:existing?.revision||0,definition:{name:f.get('name'),prompt:f.get('prompt'),repo_url:f.get('repo_url'),model:f.get('model'),harness:f.get('harness'),mode:d.mode,plugins:f.getAll('plugin'),environment_id:f.get('environment_id'),triggers:[...form.querySelector('[data-triggers]').children].map(readAutomationTrigger),max_runs_per_hour:f.get('max_runs_per_hour')===''?null:Number(f.get('max_runs_per_hour'))}};
       await api('/api/automations'+(existing?'/'+existing.id:''),{method:existing?'PUT':'POST',body:JSON.stringify(body)});dialog.close();if(state.pageVersion===version)await renderAutomations();toast('Saved paused. Review connections and test before enabling.');
     }
     catch(e){form.querySelector('[data-error]').textContent=e.message;button.disabled=false;}

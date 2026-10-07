@@ -26,7 +26,7 @@ def authorized_payload(body, route, model, context):
         raise HTTPException(422, f'{field} is required.')
     # Only provider API fields, never LiteLLM routing/key overrides from a sandbox.
     common = {'model', 'stream', 'tools', 'tool_choice', 'temperature', 'top_p'}
-    native = ({'messages', 'system', 'max_tokens', 'stop_sequences', 'thinking', 'output_config'}
+    native = ({'messages', 'system', 'max_tokens', 'stop_sequences', 'thinking', 'output_config', 'cache_control'}
               if route == '/v1/messages' else
               {'input', 'instructions', 'max_output_tokens', 'parallel_tool_calls', 'reasoning',
                'text', 'truncation', 'include', 'store'})
@@ -79,6 +79,11 @@ class NativeUsageCapture(UsageCapture):
         for native, canonical in [('input_tokens', 'prompt_tokens'), ('output_tokens', 'completion_tokens')]:
             if native in self.usage:
                 self.usage[canonical] = self.usage[native]
+        # Messages reports uncached input separately; Responses includes cached
+        # input in input_tokens already. Keep the native cache fields as well.
+        if 'input_tokens' in self.usage and any(key in self.usage for key in ('cache_read_input_tokens', 'cache_creation_input_tokens')):
+            self.usage['prompt_tokens'] = sum(self.usage.get(key, 0) for key in
+                ('input_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'))
         if 'prompt_tokens' in self.usage and 'completion_tokens' in self.usage:
             self.usage['total_tokens'] = self.usage['prompt_tokens'] + self.usage['completion_tokens']
 

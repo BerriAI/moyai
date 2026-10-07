@@ -93,7 +93,9 @@ def hermes_config(spec, broker_url, workspace):
 
 
 def run_agent(spec, relay):
-    apply_hermes_patches()
+    harness = spec.get('harness', 'hermes')
+    if harness == 'hermes':
+        apply_hermes_patches()
     workspace = Path("/workspace")
     workspace.mkdir(exist_ok=True)
     prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting)
@@ -123,13 +125,13 @@ def run_agent(spec, relay):
              'Ask an administrator to check the environment startup command before continuing.', completed=False)
         return 1
     os.chdir(workspace)
-    home = Path(os.environ["HERMES_HOME"])
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = hermes_config(spec, relay.url, workspace)
-    (home / "config.yaml").write_text(json.dumps(config))  # JSON is valid YAML.
-    os.environ["OPENAI_API_KEY"] = os.environ["WORKSPACE_RUN_TOKEN"]
-    os.environ["OPENAI_BASE_URL"] = relay.url + "/v1"
-    harness = spec.get('harness', 'hermes')
+    if harness == 'hermes':
+        home = Path(os.environ["HERMES_HOME"])
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (home / "config.yaml").write_text(json.dumps(config))  # JSON is valid YAML.
+        os.environ["OPENAI_API_KEY"] = os.environ["WORKSPACE_RUN_TOKEN"]
+        os.environ["OPENAI_BASE_URL"] = relay.url + "/v1"
     try:
         from .harness_registry import resolve, create_agent
         from .continuation import AgentSteer

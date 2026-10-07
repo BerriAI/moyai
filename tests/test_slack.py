@@ -27,7 +27,7 @@ def event(event_id="EvTest1", **overrides):
 
 @pytest.fixture
 def slack_app(tmp_path, monkeypatch):
-    settings = Settings(_env_file=None, data_dir=tmp_path, public_url="https://workspace.example",
+    settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="https://workspace.example",
                         workspace_password="admin-test-password", modal_token_id="modal-test-id",
                         modal_token_secret="modal-test-secret", litellm_api_key="model-test-key",
                         auto_prepare_repositories=False, session_titles_enabled=False,

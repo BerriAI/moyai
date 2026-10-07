@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     braintrust_api_key: str = ""
     braintrust_parent: str = "project_name:moyai-devin"
     agent_model: str = ""
+    agent_harness: str = 'claude-agent-sdk'
     modal_token_id: str = ""
     modal_token_secret: str = ""
     modal_app_name: str = "hermes-workspace"
@@ -219,6 +220,18 @@ class Settings(BaseSettings):
     def allowed_models(self) -> list[str]:
         # Preserve custom gateway defaults without replacing the shared catalog.
         return list(dict.fromkeys(x.strip() for x in [self.agent_model, *MODEL_CATALOG] if x.strip()))
+
+    @field_validator('agent_harness')
+    @classmethod
+    def valid_harness(cls, value):
+        from .harnesses import resolve
+        return resolve(value).id
+
+    def harness_model(self, harness: str, value: str | None = None) -> str:
+        from .harnesses import validate_harness
+        model = self.resolve_model(value)
+        validate_harness(harness, model)
+        return model
 
     def resolve_model(self, value: str | None = None, fallback: str = '') -> str:
         aliases = {

@@ -32,27 +32,6 @@ def local_sandbox(cwd, config):
     return LocalSandbox(cwd)
 
 
-def claude_sandbox(cwd, config):
-    import claude_agent_sdk
-    from litellm.harness.sandbox.local import LocalSandbox
-    binary = str(Path(claude_agent_sdk.__file__).parent / '_bundled' / 'claude')
-
-    class ClaudeSandbox(LocalSandbox):
-        async def which(self, name):
-            return binary if name == 'claude' else await super().which(name)
-
-        async def exec(self, cmd, *, env=None, cwd=None):
-            cmd = list(cmd)
-            if cmd[0] == 'claude':
-                cmd[0] = binary
-                cmd[cmd.index('--permission-mode') + 1] = 'dontAsk'
-                cmd += ['--tools', 'Bash,Read,Write,Edit,Glob,Grep', '--allowedTools',
-                        'Bash,Read,Write,Edit,Glob,Grep,mcp__moyai__*', '--strict-mcp-config',
-                        '--mcp-config', json.dumps({'mcpServers': {'moyai': config['mcp_servers']['workspace']}})]
-            return await super().exec(cmd, env=env, cwd=cwd)
-    return ClaudeSandbox(cwd)
-
-
 def codex_sandbox(cwd, config):
     from litellm.harness.sandbox.local import LocalSandbox
 
@@ -72,11 +51,6 @@ def codex_sandbox(cwd, config):
                 cmd[-1:-1] = [part for entry in overrides for part in ('-c', entry)]
             return await super().exec(cmd, env=env, cwd=cwd)
     return CodexSandbox(cwd)
-
-
-def claude_options(config):
-    from litellm import ClaudeCodeOptions
-    return ClaudeCodeOptions(env={'CLAUDE_CODE_MAX_RETRIES': '0', 'ENABLE_TOOL_SEARCH': 'false'})
 
 
 def codex_options(config):
@@ -103,7 +77,6 @@ def tool_loop_options(config):
 
 
 RUNTIME_BINDINGS = {
-    'claude': RuntimeBinding(claude_sandbox, claude_options),
     'codex': RuntimeBinding(codex_sandbox, codex_options),
     'opencode': RuntimeBinding(local_sandbox, opencode_options),
     'deepagents': RuntimeBinding(local_sandbox, deepagents_options, in_process=True),

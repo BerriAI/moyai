@@ -56,6 +56,8 @@ services:
         value: "false"
       - key: BOOTSTRAP_MODAL_VOLUME
         value: ""
+      - key: AGENT_HARNESS
+        value: claude-agent-sdk
       - key: RUN_TIMEOUT_SECONDS
         value: "0"
       - key: MAX_CONCURRENT_RUNS

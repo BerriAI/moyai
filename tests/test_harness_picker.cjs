@@ -5,13 +5,13 @@ const vm=require('node:vm');
 const source=fs.readFileSync('app/static/app.js','utf8');
 const functions=source.slice(source.indexOf('function harnessLogo('),source.indexOf('\nfunction setSidebar('));
 function setup(){
-  const context={state:{config:{harnesses:[{id:'hermes',name:'Hermes'},{id:'claude-agent-sdk',name:'Claude Code',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra'},{id:'anthropic/claude-opus-5-5',name:'Opus'}]}},esc:s=>String(s),MoyaiProviderLogos:require('../app/static/provider-logos.js')};
+  const context={state:{config:{harness:'claude-agent-sdk',harnesses:[{id:'hermes',name:'Hermes'},{id:'claude-agent-sdk',name:'Claude Code',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra'},{id:'anthropic/claude-opus-5-5',name:'Opus'}]}},esc:s=>String(s),MoyaiProviderLogos:require('../app/static/provider-logos.js')};
   vm.createContext(context);vm.runInContext(functions,context);return context;
 }
-test('harness picker defaults to Hermes and retains an explicit Claude choice',()=>{
-  const c=setup();assert.match(c.harnessPicker(),/value="hermes" selected/);
+test('harness picker uses the configured Claude default and retains explicit Hermes',()=>{
+  const c=setup();assert.match(c.harnessPicker('hermes'),/value="hermes" selected/);
   assert.match(c.harnessPicker('claude-agent-sdk'),/value="claude-agent-sdk" selected/);
-  assert.match(c.harnessPicker(),/aria-label="Agent harness"/);
+  assert.match(c.harnessPicker(),/value="claude-agent-sdk" selected/);
 });
 test('every harness offers all configured models even with stale provider metadata',()=>{
   const c=setup();assert.equal(c.harnessModels('hermes').length,2);
