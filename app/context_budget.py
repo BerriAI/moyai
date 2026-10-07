@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import math
 import time
 
@@ -50,7 +51,7 @@ def positive(value):
     return value if type(value) is int and value > 0 else None
 
 
-def counting_input(payload):
+def counting_input(payload, *, anthropic_images=False):
     """Count a conservative serialization, including all tools and opaque items.
 
     Keep images as images for the gateway counter. Never count a URL as its
@@ -76,7 +77,18 @@ def counting_input(payload):
                     item = {'url': item, 'detail': value.get('detail', 'auto')}
             if not isinstance(item, dict) or not isinstance(item.get('url'), str):
                 raise HTTPException(422, 'Cannot count the image in this request.')
-            images.append({'type': 'image_url', 'image_url': item})
+            if anthropic_images:
+                url = item['url']
+                if url.startswith('data:'):
+                    header, separator, data = url.partition(';base64,')
+                    if not separator or not header[5:] or not data:
+                        raise HTTPException(422, 'Cannot count the image in this request.')
+                    source = {'type': 'base64', 'media_type': header[5:], 'data': data}
+                else:
+                    source = {'type': 'url', 'url': url}
+                images.append({'type': 'image', 'source': source})
+            else:
+                images.append({'type': 'image_url', 'image_url': item})
             return '[image counted separately]'
         if content_block and kind in {'input_audio', 'audio', 'input_file', 'file', 'video', 'video_url'}:
             raise HTTPException(422, 'This media type needs a supported token counter before inference.')
@@ -212,28 +224,46 @@ class ContextBudget:
         if not images and tokens < input_budget * .8:
             return tokens, method
         conservative = tokens
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.post(self.base + '/utils/token_counter', params={'call_endpoint': 'true'},
-                    headers=self.headers, json={'model': payload['model'], 'messages': messages})
-                response.raise_for_status()
-                value = response.json()
-                count = positive(value.get('total_tokens'))
-                if count is None or value.get('error'):
-                    raise ValueError('Invalid token count')
-                kind = value.get('tokenizer_type', '')
-                provider_counter = kind in {'openai_api', 'anthropic_api', 'google_api', 'gemini_api'}
-                if images and not provider_counter:
-                    raise ValueError('No verified provider image counter')
-                # A generic tokenizer may be for a different model family (for
-                # example an OpenAI fallback for GLM). Do not trust a smaller
-                # count than the text byte bound in that case.
-                tokens = count if provider_counter else max(count, conservative)
-                method = 'provider_serialization_estimate' if provider_counter else 'conservative_gateway_estimate'
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError):
-            if images:
-                raise HTTPException(503, 'Image token counting is unavailable. The request was not sent to the model.') from None
-        return tokens, method
+        reasons = []
+        for anthropic_images in ((False, True) if images else (False,)):
+            # LiteLLM's Anthropic counter expects native image/source blocks.
+            # Negotiate by verified counter provenance, not gateway alias names
+            # or the harness protocol. Never change the actual inference wire.
+            counted = counting_input(payload, anthropic_images=True)[0] if anthropic_images else messages
+            reason = 'invalid_response'
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.post(self.base + '/utils/token_counter', params={'call_endpoint': 'true'},
+                        headers=self.headers, json={'model': payload['model'], 'messages': counted})
+                    response.raise_for_status()
+                    value = response.json()
+                    count = positive(value.get('total_tokens'))
+                    if count is None or value.get('error'):
+                        raise ValueError('Invalid token count')
+                    kind = value.get('tokenizer_type', '')
+                    providers = {'anthropic_api'} if anthropic_images else {
+                        'openai_api', 'anthropic_api', 'google_api', 'gemini_api'}
+                    provider_counter = kind in providers
+                    if images and not provider_counter:
+                        # OpenAI's counter can silently omit native image blocks;
+                        # a positive count alone does not prove it saw the image.
+                        reason = 'unverified_image_counter'
+                        raise ValueError('No verified provider image counter')
+                    tokens = count if provider_counter else max(count, conservative)
+                    method = 'provider_serialization_estimate' if provider_counter else 'conservative_gateway_estimate'
+                    return tokens, method
+            except httpx.HTTPStatusError as exc:
+                reason = f'http_{exc.response.status_code}'
+            except httpx.HTTPError:
+                reason = 'transport_error'
+            except (ValueError, TypeError, AttributeError):
+                pass
+            reasons.append(reason)
+        if images:
+            # Upstream bodies can contain private prompts, image data or keys.
+            logging.getLogger(__name__).warning('Image token counting unavailable: %s', ', '.join(reasons))
+            raise HTTPException(503, 'Image token counting is unavailable. The request was not sent to the model.') from None
+        return conservative, method
 
     async def measure(self, payload, *, scope=''):
         limits = await self.limits(payload['model'])

@@ -125,6 +125,11 @@ does not rewrite the inference payload. Generic tokenizer counts cannot reduce
 the conservative local estimate for text; provider API counters can. If
 counting is unavailable, text uses that byte estimate; images require a working
 provider API counter rather than a guessed cost for their URL or base64 text.
+Image counting first uses OpenAI image blocks. If that does not yield a verified
+count, it retries once with Anthropic image/source blocks and accepts that retry
+only from the Anthropic API counter. This accommodates opaque gateway aliases
+without changing the inference payload or accepting counts that omit images.
+Counter failures log only safe failure categories, never upstream response bodies.
 Unsupported audio/file/video blocks fail explicitly. Provider-injected content
 and tokenizer approximations can still differ: a structured pre-generation
 context rejection also requests reduction; arbitrary errors/timeouts do not.

@@ -105,6 +105,131 @@ async def test_counter_outage_uses_conservative_text_bound_but_never_guesses_ima
     assert exc.value.status_code == 503
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('model', ['opaque-screenshot-alias', 'anthropic/claude-opus-5-5'])
+@pytest.mark.parametrize('source', [
+    {'type': 'base64', 'media_type': 'image/png', 'data': 'fixture'},
+    {'type': 'url', 'url': 'https://example.test/screenshot.png'},
+])
+async def test_nested_screenshot_retries_native_counter_without_changing_input(monkeypatch, model, source):
+    seen = []
+    def upstream(request):
+        assert request.url.path == '/utils/token_counter'
+        assert request.url.params['call_endpoint'] == 'true'
+        assert request.headers['authorization'] == 'Bearer fixture'
+        body = json.loads(request.content)
+        assert body['model'] == model
+        seen.append(body['messages'][0]['content'])
+        if len(seen) == 1:
+            assert seen[0][-1]['type'] == 'image_url'
+            return httpx.Response(200, json={'total_tokens': 100, 'tokenizer_type': 'openai_tokenizer'})
+        assert seen[1][-1] == {'type': 'image', 'source': source}
+        assert seen[0][0] == seen[1][0]
+        assert all(marker in seen[1][0]['text'] for marker in ['private-memory', 'Read', 'screenshot-receipt'])
+        return httpx.Response(200, json={'total_tokens': 2500, 'tokenizer_type': 'anthropic_api'})
+    budget = service(monkeypatch, upstream, {model: limits()})
+    payload = {'model': model, 'system': 'private-memory', 'max_tokens': 3000,
+        'tools': [{'name': 'Read', 'input_schema': {'type': 'object'}}], 'messages': [
+        {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'read-screenshot', 'content': [
+            {'type': 'text', 'text': 'screenshot-receipt'}, {'type': 'image', 'source': source}]}]}]}
+    original = json.dumps(payload)
+    result = await budget.check(payload)
+    assert (result.input_tokens, result.output_tokens, result.method) == (2500, 3000, 'provider_serialization_estimate')
+    assert len(seen) == 2 and json.dumps(payload) == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['openai_api', 'openai_tokenizer', 'provider_error', 'http_error', 'timeout'])
+async def test_native_retry_requires_matching_provider_and_never_leaks_counter_error(monkeypatch, caplog, failure):
+    seen = []
+    def upstream(request):
+        seen.append(json.loads(request.content)['messages'][0]['content'][-1]['type'])
+        if len(seen) == 1:
+            return httpx.Response(200, json={'total_tokens': 100, 'tokenizer_type': 'openai_tokenizer'})
+        if failure == 'timeout':
+            raise httpx.ReadTimeout('PRIVATE upstream image or credential', request=request)
+        if failure == 'http_error':
+            return httpx.Response(401, text='PRIVATE upstream image or credential')
+        return httpx.Response(200, json={'total_tokens': 100, 'tokenizer_type': 'anthropic_api' if failure == 'provider_error' else failure,
+            'error': failure == 'provider_error', 'error_message': 'PRIVATE upstream image or credential'})
+    budget = service(monkeypatch, upstream, {'alias': limits()})
+    with pytest.raises(HTTPException) as exc:
+        await budget.check({'model': 'alias', 'messages': [{'role': 'user', 'content': [
+            {'type': 'image_url', 'image_url': {'url': 'https://example.test/PRIVATE.png'}}]}]})
+    assert seen == ['image_url', 'image'] and exc.value.status_code == 503
+    assert 'PRIVATE' not in str(exc.value.detail) + caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('image', [{'type': 'image', 'source': {}},
+    {'type': 'input_image', 'image_url': {}}, {'type': 'image_url', 'image_url': None}])
+async def test_malformed_images_are_rejected_before_any_counter_call(monkeypatch, image):
+    budget = service(monkeypatch, lambda req: pytest.fail('Malformed image reached counter'), {'alias': limits()})
+    with pytest.raises(HTTPException) as exc:
+        await budget.check({'model': 'alias', 'messages': [{'role': 'user', 'content': [image]}]})
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('url', ['data:image/png,fixture', 'data:;base64,fixture', 'data:image/png;base64,'])
+async def test_native_retry_rejects_malformed_data_url(monkeypatch, url):
+    seen = []
+    def upstream(request):
+        seen.append(request)
+        return httpx.Response(200, json={'total_tokens': 100, 'tokenizer_type': 'openai_tokenizer'})
+    budget = service(monkeypatch, upstream, {'alias': limits()})
+    with pytest.raises(HTTPException) as exc:
+        await budget.check({'model': 'alias', 'messages': [{'role': 'user', 'content': [
+            {'type': 'image_url', 'image_url': {'url': url}}]}]})
+    assert exc.value.status_code == 422 and len(seen) == 1
+
+
+@pytest.mark.parametrize('route,field,output_field', [
+    ('messages', 'messages', 'max_tokens'), ('responses', 'input', 'max_output_tokens'),
+    ('chat/completions', 'messages', 'max_completion_tokens')])
+@pytest.mark.parametrize('outcome,status', [('counted', 200), ('too_large', 409), ('unverified', 503)])
+def test_all_routes_count_images_before_admission_and_preserve_wire(workspace, monkeypatch, route, field, output_field, outcome, status):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    app.state.settings.litellm_api_key = 'server-only-key'
+    async def small_limits(model): return limits(16000, 8000)
+    monkeypatch.setattr(app.state.context_budget, 'limits', small_limits)
+    monkeypatch.setattr(app.state.context_budget, 'count', ContextBudget.count.__get__(app.state.context_budget))
+    image = ({'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'fixture'}}
+             if route == 'messages' else {'type': 'input_image', 'image_url': 'data:image/png;base64,fixture'}
+             if route == 'responses' else {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,fixture'}})
+    messages = [{'role': 'user', 'content': [image]}]
+    counts, inferences = [], []
+    def upstream(request):
+        payload = json.loads(request.content)
+        assert payload['model'] == 'anthropic/claude-opus-5-5'
+        assert request.headers['authorization'] == 'Bearer server-only-key'
+        if request.url.path == '/utils/token_counter':
+            counts.append(payload['messages'][0]['content'][-1]['type'])
+            kind = 'anthropic_api' if counts[-1] == 'image' and outcome != 'unverified' else 'openai_tokenizer'
+            return httpx.Response(200, json={'total_tokens': 7300 if outcome == 'too_large' else 6000,
+                                            'tokenizer_type': kind})
+        inferences.append(payload)
+        assert request.url.path == '/v1/' + route
+        assert payload[field] == messages and payload[output_field] == 8000
+        return httpx.Response(200, json={'id': 'fixture', 'status': 'completed',
+            'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Screenshot received.'}}],
+            'usage': {'prompt_tokens': 6000, 'completion_tokens': 1, 'total_tokens': 6001}})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.context_budget.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('screenshot count', '', 'modal', [], model='anthropic/claude-opus-5-5')
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer cap'},
+                           json={field: messages, output_field: 8000, 'stream': False})
+    assert response.status_code == status and counts == ['image_url', 'image']
+    assert len(inferences) == (status == 200)
+    assert app.state.store.run(run['id'])['model_calls'] == (status == 200)
+    assert len(app.state.store.rows('SELECT * FROM model_requests')) == (status == 200)
+    if status == 409:
+        assert response.json()['detail']['output_tokens'] == 8000
+        assert response.json()['detail']['input_budget'] == 7200
+
+
 @pytest.mark.parametrize('route,field,output_field', [
     ('messages', 'messages', 'max_tokens'), ('responses', 'input', 'max_output_tokens'),
     ('chat/completions', 'messages', 'max_completion_tokens')])
