@@ -103,23 +103,62 @@ def test_crash_during_summary_commit_rolls_back_both_summary_and_cursor(tmp_path
     store.close()
 
 
-def test_parallel_tools_and_crash_with_unknown_outcome_never_authorize_resume(tmp_path):
+def test_interrupted_tools_allow_investigation_without_settling_or_replaying(tmp_path):
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([])
     journal = TurnJournal([], 'Task', store)
     for call in ['a', 'b']: journal.tool_started(call, 'publish', {})
     journal.tool_finished('a', 'receipt')
+    unresolved = store.pending
+    assert len(unresolved) == 1
     deadline = RotationDeadline(1)
     deadline.requested = True
     assert not deadline.can_continue({'interrupted': True, 'messages': journal.messages})
     store.close()
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
-    assert store.pending == {'b'}
-    with pytest.raises(ContextUnavailable, match='unfinished tools'):
-        store.compact(lambda *_: pytest.fail('Must not call inference'))
+    assert store.pending == unresolved
+    for i in range(50): store.append({'role': 'assistant', 'content': f'Later record {i}'})
+    store.compact(lambda *_: 'Summary deliberately omits the interrupted tool.')
+    assert store.state()['cursor'] > 3
+    history = store.history()[0]['content']
+    assert 'UNRESOLVED TOOL OUTCOMES' in history and next(iter(unresolved)) in history
+    assert 'unknown' in history and 'before repeating' in history
+    assert store.pending == unresolved
+    assert store.db.execute('SELECT count(*) FROM journal').fetchone()[0] == 54
+    assert 'publish' in read_records(store.path, after=2, limit=1)[0]['text']
     # Only an actual receipt settles the pending operation.
-    store.append({'role': 'tool', 'tool_call_id': 'b', 'content': 'verified receipt'})
+    store.append({'role': 'tool', 'tool_call_id': next(iter(unresolved)), 'content': 'verified receipt'})
     assert not store.pending
+    assert 'UNRESOLVED TOOL OUTCOMES' not in store.history()[0]['content']
+    store.close()
+
+
+@pytest.mark.parametrize('legacy', [False, True])
+def test_fresh_runtime_reusing_tool_id_cannot_settle_interrupted_call(tmp_path, legacy):
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([])
+    if legacy:
+        store.append({'role': 'assistant', 'tool_calls': [{'id': 'item_0', 'function': {'name': 'Edit'}}]})
+    else:
+        TurnJournal([], 'Edit the file', store).tool_started('item_0', 'Edit', {})
+    unresolved = store.pending
+    recovered = TurnJournal(store.history(), 'Inspect the file', store)
+    recovered.tool_started('item_0', 'Read', {})
+    assert len(store.pending) == 2
+    recovered.tool_finished('item_0', 'file contents')
+    assert store.pending == unresolved and not recovered.pending
+    assert recovered.messages[-1]['tool_call_id'] == 'item_0'
+    store.close()
+
+
+def test_unresolved_notice_stays_bounded_with_many_large_ids(tmp_path):
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'user', 'content': 'Investigate'}])
+    with store.db:
+        store.db.executemany('INSERT INTO pending VALUES(?)', [(f'{i}-' + '界' * 1000,) for i in range(100)])
+    history = store.history()[0]['content']
+    assert '100' in history and 'UNRESOLVED TOOL OUTCOMES' in history
+    assert len(history.encode()) < 5_000
     store.close()
 
 

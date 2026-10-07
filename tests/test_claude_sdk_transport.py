@@ -16,7 +16,8 @@ from sandbox.claude_harness import ClaudeAgent
 from sandbox.context_store import ContextStore
 
 
-@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure'], ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure'])
+@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending'],
+                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool'])
 @pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3'])
 def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed, model):
     calls, requests, events = [], [], []
@@ -56,18 +57,23 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             done = bool(calls)
             receipt = next((block for message in data['messages'] for block in message.get('content', [])
                             if isinstance(block, dict) and block.get('tool_use_id') == 'history_read'), None)
-            if resumed in {'durable', 'pressure'}:
+            if resumed in {'durable', 'pressure', 'pending'}:
                 text = json.dumps(data['messages'])
                 assert 'Keep Escape support' in text and 'Do not deploy' in text
+                if resumed == 'pending':
+                    assert 'UNRESOLVED TOOL OUTCOMES' in text
                 if calls:
                     assert 'sdk-transport-ok' in text
-            if resumed is True and receipt is None:
+            inspect_file = resumed is True or (resumed == 'pending' and not done)
+            if inspect_file and receipt is None:
                 block = {'type': 'tool_use', 'id': 'history_read', 'name': 'Read', 'input': {
-                    'file_path': str(session / '.moyai-history.jsonl'), 'offset': 1, 'limit': 1}}
+                    'file_path': str(workspace / 'note.txt' if resumed == 'pending' else session / '.moyai-history.jsonl'),
+                    'offset': 1, 'limit': 1}}
             else:
-                if resumed is True:
+                if inspect_file:
                     assert not receipt.get('is_error'), receipt
-                    assert 'Continue the searchable dropdown task' in json.dumps(receipt)
+                    expected_read = 'already edited' if resumed == 'pending' else 'Continue the searchable dropdown task'
+                    assert expected_read in json.dumps(receipt)
                 block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
                          {'type': 'tool_use', 'id': 'tool_echo', 'name': 'mcp__moyai__echo', 'input': {'text': 'sdk-transport-ok'}})
                 if not done and not any(tool['name'] == 'mcp__moyai__echo' for tool in data['tools']):
@@ -120,8 +126,12 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     f'Build output {i}: completed operation with verbose diagnostic details.' for i in range(5000))}]
                if resumed else [])
     store = None
-    if resumed in {'durable', 'pressure'}:
+    if resumed in {'durable', 'pressure', 'pending'}:
         store = ContextStore(session / 'context.sqlite3', 'transport-run')
+        if resumed == 'pending':
+            (workspace / 'note.txt').write_text('already edited\n')
+            history = [{'role': 'assistant', 'tool_calls': [{'id': 'history_read', 'function': {
+                'name': 'Edit', 'arguments': json.dumps({'file_path': str(workspace / 'note.txt')})}}]}]
         store.initialize([{'role': 'user', 'content': 'Keep Escape support. Do not deploy.'}, *history,
             *[{'role': 'assistant', 'content': 'Older completed step ' + str(i)} for i in range(80)]])
         def compact(previous, entries, **kwargs):
@@ -136,7 +146,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         assert result['completed'], result['final_response']
         assert result['final_response'] == 'sdk-transport-ok'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
-        expected = (['Read'] if resumed is True else []) + ['ToolSearch', 'mcp__moyai__echo']
+        expected = (['Read'] if resumed is True or resumed == 'pending' else []) + ['ToolSearch', 'mcp__moyai__echo']
         assert [args[1] for kind, args in events if kind == 'start'] == expected
         assert [kind for kind, _ in events] == ['start', 'complete'] * len(expected)
         first_tools = {tool['name'] for tool in requests[0]['tools']}
@@ -154,7 +164,10 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)
-        if resumed in {'durable', 'pressure'}:
+        if resumed in {'durable', 'pressure', 'pending'}:
+            if resumed == 'pending':
+                assert store.pending == {'history_read'}
+                assert (workspace / 'note.txt').read_text() == 'already edited\n'
             store.compact(relay.compact)
             cursor = store.state()['cursor']
             assert cursor > 0
@@ -169,6 +182,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             result = agent.run_conversation('Continue using the saved receipts.', conversation_history=[], system_message='Transport fixture.')
             assert result['completed'], result['final_response']
             assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
+            assert [args[1] for kind, args in events if kind == 'start'] == expected
+            if resumed == 'pending':
+                assert store.pending == {'history_read'}
             assert not (session / '.moyai-history.jsonl').exists()
             if resumed == 'pressure':
                 assert rejected == [True]
