@@ -20,6 +20,7 @@ try:
     from .startup import StartupUnavailable
     from .project_environment import prepare_project
     from .memory_history import scrub_memory_history
+    from .context_store import open_context, ContextUnavailable
     from .goals import GoalLoop, run_goal_conversation
     from .hermes_compat import apply_hermes_patches
 except ImportError:
@@ -33,6 +34,7 @@ except ImportError:
     from startup import StartupUnavailable
     from project_environment import prepare_project
     from memory_history import scrub_memory_history
+    from context_store import open_context, ContextUnavailable
     from goals import GoalLoop, run_goal_conversation
     from hermes_compat import apply_hermes_patches
 LOCK = threading.Lock()
@@ -68,6 +70,9 @@ def run(spec):
         emit('final', str(exc), completed=False,
              startup_retry={'version': 1, 'stage': exc.stage, 'reason': exc.reason})
         return 75
+    except ContextUnavailable as exc:
+        emit('final', str(exc), completed=False)
+        return 1
     finally:
         relay.close()
 
@@ -172,19 +177,22 @@ def run_agent(spec, relay):
     # Otherwise an agent's `git add -A` could commit the private conversation.
     history_path = Path("/session/conversation.json")
     history_path.parent.mkdir(exist_ok=True, mode=0o700)
+    context_store = open_context(history_path.parent, spec) if definition.durable_context and spec.get('chat_enabled') else None
     agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
                          relay=relay, config=config, activity=harness_activity, step=step,
-                         cwd=str(workspace))
+                         cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))
     result = {}
     history = spec.get("history_fallback", [])
-    if spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning") and not spec.get('fresh_child'):
+    if context_store is not None:
+        history = context_store.history()
+    elif spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning") and not spec.get('fresh_child'):
         history = json.loads(history_path.read_text())
     history = scrub_memory_history(history)
     try:
         agent.validate()
         prompt = conversation_prompt(spec, has_history=bool(history))
         if spec.get("continuation"):
-            if not history_path.exists() or not history:
+            if not history or (context_store is None and not history_path.exists()):
                 raise RuntimeError("Machine renewal requires the saved conversation history")
             prompt = ("SAVED TASK RESUMED: Continue the unfinished user request from the saved conversation and files. "
                       "The previous execution saved between tool rounds. Completed tool results are "
@@ -346,11 +354,18 @@ def run_agent(spec, relay):
         if spec.get("project_environment"):
             project = spec["project_environment"]
             system_message += "\nPrepared project environment (admin configuration):\n" + project.get("instructions", "")
-        result = run_goal_conversation(agent, prompt, history, system_message, goal,
-            suspended=lambda: bool(waiting.requested or rotation.requested or steering.requested or
-                                   relay.last_error or relay.wait_group or getattr(relay, 'wait_credential', '')),
-            notify=lambda: emit('status', 'Continuing toward the goal',
-                                {'activity_version': 1, 'phase': 'processing'}))
+        try:
+            if context_store is not None and goal.control_reply:
+                # Goal controls answer without entering a runtime/TurnJournal.
+                context_store.append({'role': 'user', 'content': prompt})
+                context_store.append({'role': 'assistant', 'content': goal.control_reply})
+            result = run_goal_conversation(agent, prompt, history, system_message, goal,
+                suspended=lambda: bool(waiting.requested or rotation.requested or steering.requested or
+                                       relay.last_error or relay.wait_group or getattr(relay, 'wait_credential', '')),
+                notify=lambda: emit('status', 'Continuing toward the goal',
+                                    {'activity_version': 1, 'phase': 'processing'}))
+        except ContextUnavailable as exc:
+            result = {'completed': False, 'failed': True, 'messages': [], 'final_response': str(exc)}
         steering.close()
         completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
         wait_group = waiting.group if waiting.can_continue(result) else ''
@@ -368,7 +383,15 @@ def run_agent(spec, relay):
              steering_applied=steering.receipts() if hasattr(steering, 'receipts') else [])
         (artifacts / "result.md").write_text(summary)
         goal.save()
-        if spec.get("chat_enabled"):
+        if context_store is not None and not context_store.pending and not result.get('failed'):
+            try:
+                context_store.compact(relay.compact)
+            except ContextUnavailable:
+                # Publish the answer receipt before maintenance. Save the last
+                # good summary during an outage; next invocation must catch up.
+                emit('status', 'Saved context needs a summary update before the next resume.',
+                     {'activity_version': 1, 'phase': 'processing'})
+        if spec.get("chat_enabled") and context_store is None:
             if not isinstance(result.get("messages"), list):
                 raise RuntimeError("Hermes did not return conversation history")
             history_path.parent.mkdir(exist_ok=True, mode=0o700)
@@ -379,6 +402,8 @@ def run_agent(spec, relay):
     finally:
         steering.close()
         agent.close()
+        if context_store is not None:
+            context_store.close()
         try:
             capture = computer_request({'action': 'finish'}, start=False)
             if capture.get('error'):

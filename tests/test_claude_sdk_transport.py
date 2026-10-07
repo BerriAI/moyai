@@ -6,15 +6,17 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
+import shutil
 import threading
 from types import SimpleNamespace
 
 import pytest
 
 from sandbox.claude_harness import ClaudeAgent
+from sandbox.context_store import ContextStore
 
 
-@pytest.mark.parametrize('resumed', [False, True], ids=['new-session', 'large-checkpoint'])
+@pytest.mark.parametrize('resumed', [False, True, 'durable'], ids=['new-session', 'large-checkpoint', 'durable-checkpoint'])
 def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed):
     calls, requests, events = [], [], []
     class Handler(BaseHTTPRequestHandler):
@@ -44,11 +46,16 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             done = bool(calls)
             receipt = next((block for message in data['messages'] for block in message.get('content', [])
                             if isinstance(block, dict) and block.get('tool_use_id') == 'history_read'), None)
-            if resumed and receipt is None:
+            if resumed == 'durable':
+                text = json.dumps(data['messages'])
+                assert 'Keep Escape support' in text and 'Do not deploy' in text
+                if calls:
+                    assert 'sdk-transport-ok' in text
+            if resumed is True and receipt is None:
                 block = {'type': 'tool_use', 'id': 'history_read', 'name': 'Read', 'input': {
                     'file_path': str(session / '.moyai-history.jsonl'), 'offset': 1, 'limit': 1}}
             else:
-                if resumed:
+                if resumed is True:
                     assert not receipt.get('is_error'), receipt
                     assert 'Continue the searchable dropdown task' in json.dumps(receipt)
                 block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
@@ -83,35 +90,68 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
     workspace, session = tmp_path / 'workspace', tmp_path / 'session'
     workspace.mkdir()
     session.mkdir()
-    agent = ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 3,
+    def create_agent(context_store=None):
+        return ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 3,
                              'history_reference_dir': str(session)},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': url, 'WORKSPACE_RUN_TOKEN': 'fixture-capability'}}}},
         activity=SimpleNamespace(start=lambda *a: events.append(('start', a)),
             complete=lambda *a: events.append(('complete', a)), commentary=lambda text: None),
-        step=lambda: None, cwd=str(workspace), definition=None)
+        step=lambda: None, cwd=str(workspace), definition=None, context_store=context_store)
+    agent = create_agent()
     history = ([{'role': 'user', 'content': 'Continue the searchable dropdown task; do not repeat completed writes.'},
                 {'role': 'assistant', 'tool_calls': [{'id': 'read1', 'type': 'function', 'function': {
                     'name': 'Read', 'arguments': '{"file_path":"build.log"}'}}]},
                 {'role': 'tool', 'tool_call_id': 'read1', 'content': '\n'.join(
                     f'Build output {i}: completed operation with verbose diagnostic details.' for i in range(5000))}]
                if resumed else [])
+    store = None
+    if resumed == 'durable':
+        store = ContextStore(session / 'context.sqlite3', 'transport-run')
+        store.initialize([{'role': 'user', 'content': 'Keep Escape support. Do not deploy.'}, *history,
+            *[{'role': 'assistant', 'content': 'Older completed step ' + str(i)} for i in range(80)]])
+        def compact(previous, entries):
+            # Deterministic tool-free inference fixture, separately exercised
+            # through the authenticated endpoint in test_context_gateway.py.
+            source = previous + json.dumps(entries)
+            return '\n'.join(fact for fact in ['Keep Escape support', 'Do not deploy', 'sdk-transport-ok'] if fact in source)
+        relay.compact = compact
+        agent = create_agent(store)
     try:
         result = agent.run_conversation('Call the echo tool.', conversation_history=history, system_message='Transport fixture.')
         assert result['completed'], result['final_response']
         assert result['final_response'] == 'sdk-transport-ok'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
-        assert [kind for kind, _ in events] == ['start', 'complete'] * (2 if resumed else 1)
+        assert [kind for kind, _ in events] == ['start', 'complete'] * (2 if resumed is True else 1)
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)
-        assert result['messages'][:len(history)] == history
-        if resumed:
+        if resumed == 'durable':
+            store.compact(relay.compact)
+            cursor = store.state()['cursor']
+            assert cursor > 0
+            agent.close()
+            store.close()
+            cold = tmp_path / 'cold-session'
+            cold.mkdir()
+            shutil.copy2(session / 'context.sqlite3', cold / 'context.sqlite3')
+            store = ContextStore(cold / 'context.sqlite3', 'transport-run')
+            assert store.state()['cursor'] == cursor
+            agent = create_agent(store)
+            result = agent.run_conversation('Continue using the saved receipts.', conversation_history=[], system_message='Transport fixture.')
+            assert result['completed'], result['final_response']
+            assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
+            assert not (session / '.moyai-history.jsonl').exists()
+        else:
+            assert result['messages'][:len(history)] == history
+        if resumed is True:
             saved = [json.loads(line) for line in (session / '.moyai-history.jsonl').read_text().splitlines()]
             assert saved == history
             assert not (workspace / '.moyai-history.jsonl').exists()
     finally:
         agent.close()
+        if store is not None:
+            store.close()
         server.shutdown()
         server.server_close()

@@ -40,18 +40,55 @@ could retain private tool payloads from an earlier requester. Completed external
 actions are recorded and must not be replayed after a checkpoint or failure.
 
 The SDK supports automatic compaction within a session, but cannot compact an
-oversized first message containing an entire restored journal. Moyai therefore
-bounds the saved-history reference to 48,000 UTF-8 bytes when starting a fresh
-session. Small histories remain verbatim. Larger histories keep the original
-request, latest user correction and recent message/tool excerpts; the complete
-scrubbed journal remains in `/session/.moyai-history.jsonl` for targeted reads,
-outside repositories and downloadable artifacts. The current request and durable
-conversation are never shortened. Omitted
-history is explicitly marked, and the agent must check relevant instructions and
-receipts before repeating external actions. The same bound applies to the other
-fresh-session LiteLLM harnesses; Hermes retains its native history handling.
-This bound reserves space for other input; it is not a model-specific token
-limit or a guarantee that arbitrary attachments and tool catalogs will fit.
+oversized first message containing an entire restored journal. Chat sessions now
+keep an append-only, scrubbed public journal in `/session/context.sqlite3`, outside
+repositories and downloadable artifacts. A bounded working summary, its coverage
+cursor, and recent journal excerpts form the next runtime's history. The current
+request remains verbatim. The database travels with the existing Modal filesystem
+checkpoint; Temporal still carries only session IDs and small lifecycle flags.
+
+Before starting a runtime and after it finishes at a complete tool boundary,
+Moyai updates the summary using only entries after its saved cursor. Each request
+contains at most 24,000 bytes of new excerpts and a 12,000-byte prior summary.
+It retains goals, constraints, decisions, completed-action receipts and unfinished
+work. Summary and cursor commit atomically after a complete, bounded response.
+Raw receipts remain available through bounded reads, for example:
+
+```sh
+python /opt/workspace-runner/context_store.py --after 40 --limit 5
+# For the next 4,000-character slice of record 41:
+python /opt/workspace-runner/context_store.py --after 40 --limit 1 --offset 4000
+```
+
+The authenticated `/context/compact` broker route uses the run's currently
+selected model through LiteLLM Chat Completions. It has no tools and does not
+inject personal memory, skills, attachments or native transcripts. Authorization,
+concurrency, model-request limits and spend accounting apply as usual. Summaries
+are model-generated reference data, not higher-priority instructions or proof
+that an action succeeded. Check original records before repeating external writes.
+
+A failed summary leaves the last good summary, cursor and all receipts intact.
+Before the next task invocation, compaction must catch up; failure pauses work
+with a retry message instead of silently dropping older context. Unfinished tool
+calls block automatic continuation. Missing, corrupt, mismatched or invalid
+checkpoint state is not silently treated as an empty conversation. A fresh child
+or an explicit stale-filesystem recovery starts from its own canonical fallback.
+Same-session requester/model changes keep only the public context; private memory
+is resolved separately for the active requester on each normal inference.
+
+Existing `conversation.json` files migrate once. Subsequent invocations read
+indexed previews and append new rows rather than loading/rewriting the complete
+journal. Healthy saved sessions also omit the redundant full chat fallback from
+their launch specification. Goal continuations use the same store. The other
+fresh-session LiteLLM adapters use this path too; Hermes retains its native
+history handling. Non-chat adapter calls retain the 48,000-byte excerpt fallback.
+
+This bounds restored history input and steady-state journal processing, not total
+disk usage, snapshot storage or inference cost. Large requests, system prompts,
+attachments and tool catalogs still need to fit the chosen model. GPT-6 Astra and
+GLM 5.3 routing are covered with fixtures; live provider compatibility and summary
+quality require provider verification. The gateway must support both the runtime's
+native API and Chat Completions for the chosen model.
 
 ## Prompt caching and accounting
 
@@ -111,8 +148,14 @@ is vendored. Add a new registry definition and lifecycle adapter to extend Moyai
 
 ```sh
 uv run pytest -q tests/test_claude_sdk.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py
+uv run pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py
 node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
 ```
+
+`uv run python -m scripts.context_checkpoint_demo` demonstrates repeated cold
+filesystem restores and summary-failure recovery using synthetic data and a
+deterministic summarizer. It makes no provider calls. The real SDK/MCP continuation
+test above separately verifies that the completed echo action is not repeated.
 
 For a **live, tool-free caching probe**, securely provide `GATEWAY_BASE_URL` and
 `GATEWAY_API_KEY`, optionally `SMOKE_MODEL` and `SMOKE_ROOT`, then run:

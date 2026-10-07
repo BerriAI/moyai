@@ -155,13 +155,17 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     from sandbox import agent, claude_harness
     events = []
     relay = SimpleNamespace(url='http://test', control=lambda body=None: {}, last_error='',
-                            wait_group='', wait_credential='', before_model=None)
+                            wait_group='', wait_credential='', before_model=None, compact=lambda *a: 'Summary')
     class FakeClaude:
         def __init__(self, **kwargs):
             assert kwargs['spec']['harness'] == 'claude-agent-sdk'
+            self.context_store = kwargs['context_store']
         def run_conversation(self, prompt, **kwargs):
+            from sandbox.harness_agent import TurnJournal
+            journal = TurnJournal([], prompt, self.context_store)
+            journal.finish('SDK result')
             return {'completed': True, 'final_response': 'SDK result',
-                    'messages': [{'role': 'user', 'content': prompt}, {'role': 'assistant', 'content': 'SDK result'}]}
+                    'messages': journal.messages}
         def close(self): pass
         def validate(self): pass
     monkeypatch.setattr(claude_harness, 'ClaudeAgent', FakeClaude)
@@ -181,7 +185,8 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     assert next(e for e in events if e[0] == 'final')[1:] == ('SDK result', {
         'completed': True, 'continuation': False, 'wait_group': '', 'wait_credential': '',
         'steer_message_id': None, 'steering_applied': []})
-    assert json.loads((tmp_path / 'session/conversation.json').read_text())[-1]['content'] == 'SDK result'
+    from sandbox.context_store import read_records
+    assert json.loads(read_records(tmp_path / 'session/context.sqlite3')[-1]['text'])['content'] == 'SDK result'
 
 
 def test_registry_extension_reaches_api_without_changing_entrypoint(workspace, monkeypatch):

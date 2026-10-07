@@ -158,6 +158,17 @@ answer is persisted before archive/snapshot operations. Three failed snapshot
 attempts retain that answer with a warning, retain the prior snapshot, and stop
 queued messages. Intermediate checkpoints are not posted as Slack answers.
 
+Fresh-session adapters (Claude Agent SDK and the LiteLLM harnesses) save their
+public working context in `/session/context.sqlite3`. This checkpoint contains
+an append-only scrubbed journal, a bounded model-generated summary with an atomic
+coverage cursor, and an independent pending-tool ledger. Resume reads the summary
+and recent indexed previews; compaction consumes only new entries. Full receipts
+remain available through bounded archive reads. The existing Modal snapshot saves
+this database with the workspace; neither the transcript nor the summary enters
+Temporal history. Temporal's `continue_as_new` bounds workflow history separately
+from this model-context compaction. See [Agent harnesses](harnesses.md) for privacy,
+migration, failure behavior and model-routing requirements.
+
 **Durability limits:** Activities are at-least-once, not an exactly-once guarantee
 for external effects. A missing machine or an abandoned launch marker with no
 confirmed result stops with an explicit interruption rather than automatically

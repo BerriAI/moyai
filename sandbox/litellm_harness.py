@@ -14,8 +14,9 @@ except ImportError:
 
 
 class LiteLLMAgent(HarnessAgent):
-    def __init__(self, *, spec, relay, config, activity, step, cwd, definition):
+    def __init__(self, *, spec, relay, config, activity, step, cwd, definition, context_store=None):
         self.context = HarnessContext(spec, relay, config, activity, step, cwd)
+        self.context_store = context_store
         self.definition = definition
         self.stopped = threading.Event()
         self.journal = None
@@ -41,7 +42,10 @@ class LiteLLMAgent(HarnessAgent):
     def run_conversation(self, prompt, *, conversation_history, system_message):
         self.validate()
         self.stopped.clear()
-        self.journal = TurnJournal(conversation_history, prompt)
+        if self.context_store is not None:
+            self.context_store.compact(self.context.relay.compact)
+            conversation_history = self.context_store.history()
+        self.journal = TurnJournal(conversation_history, prompt, self.context_store)
         reference_dir = self.context.spec.get('history_reference_dir', self.context.cwd)
         return asyncio.run(self._run(self.journal.prompt(prompt, conversation_history, cwd=reference_dir), system_message))
 
@@ -72,6 +76,7 @@ class LiteLLMAgent(HarnessAgent):
                     elif isinstance(event, ToolCall):
                         if pending_text:
                             ctx.activity.commentary(''.join(pending_text))
+                            self.journal.finish(''.join(pending_text))
                             pending_text.clear()
                         name, args = event.native_name, dict(event.input)
                         self.calls[event.id] = (name, args)

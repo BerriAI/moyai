@@ -284,7 +284,12 @@ class RunManager:
 
     def spec(self, run):
         from .attachments import attachment_context
+        from sandbox.harness_registry import resolve
         run_id = run["id"]
+        fresh_child = bool(run.get('parent_run_id')) and not run.get('continuation') and not self.store.rows(
+            "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
+        context_checkpoint = bool(resolve(run.get('harness', 'hermes')).durable_context
+            and run.get('chat_enabled') and run.get('snapshot_id') and not run.get('checkpoint_error') and not fresh_child)
         uploads = self.store.attachments.for_run(run_id, run.get('message_id') or 0)
         by_message = {}
         for upload in uploads:
@@ -305,13 +310,14 @@ class RunManager:
                 "activity_input_id": activity_input_id,
                 "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
                 "is_child_agent": bool(run.get('parent_run_id')),
-                "fresh_child": bool(run.get('parent_run_id')) and not run.get('continuation') and not any(m['role'] == 'assistant' for m in self.store.messages(run_id)),
+                "fresh_child": fresh_child,
+                "context_checkpoint": context_checkpoint,
                 "chat_enabled": bool(run.get("chat_enabled")),
                 "workspace_warning": run.get("checkpoint_error", ""),
                 "side_chat_context": run.get('side_chat_context', ''),
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
-                "history_fallback": [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
+                "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
                                      if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "deleted"}]}
         if self.environments:
             spec["project_environment"] = self.environments.context(run)

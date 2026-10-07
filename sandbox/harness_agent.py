@@ -37,26 +37,35 @@ class HarnessAgent(ABC):
 
 class TurnJournal:
     """Save public runtime events, not intercepted inference request payloads."""
-    def __init__(self, history, prompt):
-        self.messages = [*history, {'role': 'user', 'content': prompt}]
+    def __init__(self, history, prompt, context_store=None):
+        self.context_store = context_store
+        self.messages = [*history]
         self.pending = set()
         self.lock = threading.RLock()
+        self.append({'role': 'user', 'content': prompt})
+
+    def append(self, message):
+        if self.context_store is not None:
+            self.context_store.append(message)
+        self.messages.append(message)
 
     def tool_started(self, call_id, name, arguments):
         with self.lock:
             self.pending.add(call_id)
-            self.messages.append({'role': 'assistant', 'content': None, 'tool_calls': [{
+            self.append({'role': 'assistant', 'content': None, 'tool_calls': [{
                 'id': call_id, 'type': 'function', 'function': {
                     'name': name, 'arguments': json.dumps(arguments)}}]})
 
     def tool_finished(self, call_id, output):
         with self.lock:
+            self.append({'role': 'tool', 'tool_call_id': call_id, 'content': output})
             self.pending.discard(call_id)
-            self.messages.append({'role': 'tool', 'tool_call_id': call_id, 'content': output})
 
     def finish(self, text):
         with self.lock:
-            self.messages.append({'role': 'assistant', 'content': text})
+            self.append({'role': 'assistant', 'content': text})
 
     def prompt(self, current, history, *, cwd):
+        if self.context_store is not None:
+            return '\n'.join(m['content'] for m in history) + '\n\nCURRENT REQUEST:\n' + current
         return history_prompt(current, history, cwd=cwd)

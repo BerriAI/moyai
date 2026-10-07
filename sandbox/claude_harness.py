@@ -16,8 +16,9 @@ NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep']
 
 
 class ClaudeAgent(HarnessAgent):
-    def __init__(self, *, spec, relay, config, activity, step, cwd, definition):
+    def __init__(self, *, spec, relay, config, activity, step, cwd, definition, context_store=None):
         self.context = HarnessContext(spec, relay, config, activity, step, cwd)
+        self.context_store = context_store
         self.stopped = threading.Event()
         self.journal = None
         self.pending_text = []
@@ -50,6 +51,7 @@ class ClaudeAgent(HarnessAgent):
         if event['hook_event_name'] == 'PreToolUse':
             if self.pending_text:
                 self.context.activity.commentary(''.join(self.pending_text))
+                self.journal.finish(''.join(self.pending_text))
                 self.pending_text.clear()
             self.journal.tool_started(call_id, name, args)
             self.context.activity.start(call_id, name, args)
@@ -89,7 +91,10 @@ class ClaudeAgent(HarnessAgent):
         self.validate()
         self.stopped.clear()
         self.pending_text.clear()
-        self.journal = TurnJournal(conversation_history, prompt)
+        if self.context_store is not None:
+            self.context_store.compact(self.context.relay.compact)
+            conversation_history = self.context_store.history()
+        self.journal = TurnJournal(conversation_history, prompt, self.context_store)
         reference_dir = self.context.spec.get('history_reference_dir', self.context.cwd)
         return asyncio.run(self._run(self.journal.prompt(prompt, conversation_history, cwd=reference_dir), system_message))
 

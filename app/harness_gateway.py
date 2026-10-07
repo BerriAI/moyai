@@ -9,9 +9,10 @@ import time
 
 import httpx
 from fastapi import HTTPException
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 from .spend import UsageCapture
+from .context_compaction import compaction_payload, compaction_result
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -97,7 +98,8 @@ class HarnessGateway:
         self.tracing = tracing
 
     async def forward(self, run_id, request, route):
-        if route not in NATIVE_ROUTES:
+        compact = route == '/context/compact'
+        if route not in NATIVE_ROUTES and not compact:
             raise HTTPException(404, 'Unsupported model endpoint.')
         run = self.require_run(run_id, request)
         if self.model_slots.locked():
@@ -137,13 +139,18 @@ class HarnessGateway:
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
             body = await self.read_body(request, route)
-            context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
-            payload = authorized_payload(body, route, model, context)
-            field = 'messages' if route == '/v1/messages' else 'input'
-            items = payload[field]
-            if isinstance(items, str):
-                items = [{'role': 'user', 'content': items}]
-            payload[field] = self.store.attachments.with_images(run, items, protocol=route)
+            if compact:
+                # Persistable summaries must never receive requester-private
+                # memory, skills, attachments or the native SDK transcript.
+                payload = compaction_payload(body, model)
+            else:
+                context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+                payload = authorized_payload(body, route, model, context)
+                field = 'messages' if route == '/v1/messages' else 'input'
+                items = payload[field]
+                if isinstance(items, str):
+                    items = [{'role': 'user', 'content': items}]
+                payload[field] = self.store.attachments.with_images(run, items, protocol=route)
             admitted = self.store.execute(
                 "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
                 "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
@@ -163,7 +170,8 @@ class HarnessGateway:
             await self.checkpoints.flush()
             client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
             base = self.settings.litellm_api_base.rstrip('/')
-            url = base + route.removeprefix('/v1') if base.endswith('/v1') else base + route
+            upstream_route = '/v1/chat/completions' if compact else route
+            url = base + upstream_route.removeprefix('/v1') if base.endswith('/v1') else base + upstream_route
             upstream = await client.send(client.build_request('POST', url, json=payload, headers=headers), stream=True)
             self.spend.headers(request_id, upstream, capture.streaming)
             if upstream.status_code >= 400:
@@ -176,8 +184,8 @@ class HarnessGateway:
                         raise HTTPException(502, 'Model response exceeded the size limit.')
                 capture.feed(bytes(raw))
                 capture.finish()
+                result = JSONResponse(compaction_result(raw)) if compact else Response(bytes(raw), media_type='application/json')
                 status = 'completed' if capture.done and not capture.failed else 'failed'
-                result = Response(bytes(raw), media_type='application/json')
                 await finish()
                 return result
         except httpx.HTTPError:
