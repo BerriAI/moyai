@@ -343,7 +343,7 @@ class Store:
 
     def messages(self, run_id):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
-            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,
+            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,
             COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id

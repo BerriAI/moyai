@@ -76,6 +76,13 @@ def test_opt_in_injects_rapid_followups_in_order_without_promoting_old_queue(per
     assert client.put(ROUTE, json={'send_immediately': True}).status_code == 200
     first = send(client, run_id, 'immediate-first', send_now=False)
     second = send(client, run_id, 'immediate-second')
+    # The browser must know the delivery mode before a worker consumes it;
+    # otherwise it briefly renders automatic follow-ups as queue cards.
+    pending = {m['id']: m for m in client.get(f'/api/runs/{run_id}').json()['messages']}
+    assert pending[old['id']]['send_immediately'] == 0
+    for message in (first, second):
+        assert pending[message['id']]['status'] == 'queued'
+        assert pending[message['id']]['send_immediately'] == 1
     assert queue.live_control(run_id, turn_id, [])['input']['id'] == first['id']
     # Another message can arrive during the first message's locked handoff.
     third = send(client, run_id, 'immediate-third', send_now=True)
