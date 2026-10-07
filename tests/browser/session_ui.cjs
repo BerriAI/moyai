@@ -14,7 +14,8 @@ async function setup(t){
   return page;
 }
 async function home(page){
-  await page.locator('#new-task').click();
+  if(await page.locator('.settings-back').isVisible())await page.locator('.settings-back').click();
+  else await page.locator('#new-task').click();
   await page.locator('#prompt').waitFor();
 }
 async function send(page,text,method='Enter'){
@@ -61,6 +62,7 @@ test('unsent drafts and rejected submissions retain text; retry clears only on s
   const page=await setup(t);
   await page.locator('#prompt').fill('Keep this draft until accepted');
   await page.locator('.nav-button[data-view="settings"]').click();
+  await page.locator('.settings-back').waitFor();
   await home(page);
   assert.equal(await page.locator('#prompt').inputValue(),'Keep this draft until accepted');
   const reject=route=>route.request().method()==='POST'?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test rejection: retry safely'})}):route.continue();
@@ -98,4 +100,108 @@ test('accepted creation clears text even if subsequent sidebar refresh fails',as
   assert.equal(await page.locator('#prompt').inputValue(),'');
   await page.unroute('**/api/runs?*');
   await home(page);assert.equal(await page.locator('#prompt').inputValue(),'');
+});
+
+async function renameDialog(page){
+  const id=await page.evaluate(()=>state.selected);
+  await page.locator(`[data-session-actions="${id}"]`).click();
+  await page.locator('#session-actions').getByRole('button',{name:'Rename',exact:true}).click();
+  await page.getByLabel('Session name',{exact:true}).waitFor();
+  return page.locator('#session-folder-dialog');
+}
+
+test('rename persists after reload, preserves messages and drafts, and rejects stale reads',async t=>{
+  const page=await setup(t);
+  await send(page,'Original rename request');
+  await page.locator('#followup').fill('Unsent follow-up');
+  let release,arrived;let count=0;
+  const gate=new Promise(resolve=>release=resolve),ready=new Promise(resolve=>arrived=resolve);
+  const stale=async route=>{
+    const response=await route.fetch();
+    if(++count===2)arrived();await gate;await route.fulfill({response});
+  };
+  const id=await page.evaluate(()=>state.selected);
+  await page.route('**/api/runs?*',stale);
+  await page.route(`**/api/runs/${id}`,stale);
+  await page.evaluate(()=>{refreshRuns();refreshChat(state.selected);});await ready;
+  const dialog=await renameDialog(page);
+  await page.getByLabel('Session name',{exact:true}).fill('Navigation follow-up');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();
+  await page.locator('#toast').filter({hasText:'Session renamed.'}).waitFor();
+  release();await page.unrouteAll({behavior:'wait'});
+  assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
+  assert.equal(await page.title(),'Navigation follow-up · Moyai');
+  assert.equal(await page.locator(`[data-run="${id}"] .session-link-title`).textContent(),'Navigation follow-up');
+  assert.equal(await page.locator('#followup').inputValue(),'Unsent follow-up');
+  await page.reload();await page.locator('#followup').waitFor();
+  assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
+  assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Original rename request');
+  let resume,loaded;
+  const opening=new Promise(resolve=>loaded=resolve),hold=new Promise(resolve=>resume=resolve);
+  await page.route(`**/api/runs/${id}`,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});});
+  await page.evaluate(id=>{openRun(id);},id);await opening;
+  const duringOpen=await renameDialog(page);
+  await page.getByLabel('Session name',{exact:true}).fill('Renamed while opening');
+  await duringOpen.getByRole('button',{name:'Save',exact:true}).click();
+  await duringOpen.waitFor({state:'hidden'});resume();await page.unrouteAll({behavior:'wait'});
+  await page.waitForFunction(()=>state.chatRun?.display_title==='Renamed while opening');
+  assert.equal(await page.locator('#page-title').textContent(),'Renamed while opening');
+  await page.locator(`[data-session-actions="${id}"]`).click();
+  await page.locator('#session-actions').getByRole('button',{name:'Move to folder'}).click();
+  assert.equal(await page.getByRole('heading',{name:'Move session',exact:true}).isVisible(),true);
+});
+
+test('rename supports cancel, Escape, blank validation, failure retry and literal text',async t=>{
+  const page=await setup(t);await send(page,'Rename error recovery');
+  let dialog=await renameDialog(page);
+  await page.getByLabel('Session name',{exact:true}).fill('Cancelled name');
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  assert.equal(await page.locator('#page-title').textContent(),'Rename error recovery');
+  dialog=await renameDialog(page);await page.getByLabel('Session name',{exact:true}).press('Escape');
+  assert.equal(await dialog.isVisible(),false);
+  dialog=await renameDialog(page);
+  await page.getByLabel('Session name',{exact:true}).fill('   ');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();
+  assert.equal(await dialog.getByRole('alert').textContent(),'Enter a session name.');
+  await page.route('**/api/runs/*/title',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Temporary save failure'})}));
+  await page.getByLabel('Session name',{exact:true}).fill('<b>Literal name</b>');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();
+  await dialog.getByRole('alert').filter({hasText:'Temporary save failure'}).waitFor();
+  assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'<b>Literal name</b>');
+  assert.equal(await page.locator('#page-title').textContent(),'Rename error recovery');
+  await page.unroute('**/api/runs/*/title');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();
+  await page.locator('#toast').filter({hasText:'Session renamed.'}).waitFor();
+  assert.equal(await page.locator('#page-title').textContent(),'<b>Literal name</b>');
+  assert.equal(await page.locator('#page-title b').count(),0);
+  dialog=await renameDialog(page);
+  await page.evaluate(()=>api('/api/runs/'+state.selected+'/title',{method:'PUT',body:JSON.stringify({title:'Changed in another tab',expected_title:state.chatRun.display_title})}));
+  await page.getByLabel('Session name',{exact:true}).fill('My stale draft');
+  await dialog.getByRole('button',{name:'Save',exact:true}).click();
+  await dialog.getByRole('alert').filter({hasText:'This session name changed'}).waitFor();
+  await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
+  dialog=await renameDialog(page);
+  assert.equal(await page.getByLabel('Session name',{exact:true}).inputValue(),'Changed in another tab');
+});
+
+test('session actions and rename remain usable at desktop, tablet and narrow mobile sizes',async t=>{
+  const page=await setup(t);await send(page,'Responsive session rename');
+  for(const width of [1440,768,320]){
+    await page.setViewportSize({width,height:900});
+    if(width<850)await page.locator('#open-sidebar').click();
+    const id=await page.evaluate(()=>state.selected),trigger=page.locator(`[data-session-actions="${id}"]`);
+    await trigger.focus();await trigger.press('Enter');
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Move to folder');
+    await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
+    const dialog=page.locator('#session-folder-dialog'),box=await dialog.boundingBox();
+    assert.ok(box.x>=0&&box.x+box.width<=width);
+    assert.equal(await page.getByLabel('Session name',{exact:true}).evaluate(el=>el===document.activeElement),true);
+    await page.getByLabel('Session name',{exact:true}).fill('Renamed at '+width);
+    await dialog.getByRole('button',{name:'Save',exact:true}).click();
+    await dialog.waitFor({state:'hidden'});
+    assert.equal(await page.locator('#page-title').textContent(),'Renamed at '+width);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    if(width<850)await page.locator('#close-sidebar').click();
+  }
 });

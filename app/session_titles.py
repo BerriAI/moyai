@@ -7,8 +7,8 @@ import unicodedata
 from agents import Agent, ModelSettings, OpenAIChatCompletionsModel, RunConfig, Runner
 from agents.retry import ModelRetrySettings
 from openai import AsyncOpenAI
-from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .db import now
 
@@ -46,6 +46,24 @@ class TitleSettings(BaseModel):
     model: str = Field(min_length=1, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9_./:@+~-]*$')
 
 
+class SessionTitleEdit(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    title: str = Field(min_length=1, max_length=TITLE_LIMIT)
+    expected_title: str = Field(max_length=TITLE_LIMIT)
+
+    @field_validator('title', mode='before')
+    @classmethod
+    def trim_title(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator('title')
+    @classmethod
+    def single_line(cls, value: str) -> str:
+        if any(unicodedata.category(c) in {'Cc', 'Cs', 'Zl', 'Zp'} for c in value):
+            raise ValueError('Use a single line for the session name.')
+        return value
+
+
 class SessionTitles:
     def __init__(self, store, settings, checkpoints):
         self.store, self.settings, self.checkpoints = store, settings, checkpoints
@@ -63,6 +81,23 @@ class SessionTitles:
 
     def routes(self, security):
         router = APIRouter()
+
+        @router.put('/api/runs/{run_id}/title')
+        async def rename(run_id: str, body: SessionTitleEdit, request: Request) -> dict[str, str]:
+            security.require(request, mutation=True)
+            with self.store.connect() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                run = conn.execute('SELECT parent_run_id FROM runs WHERE id=?', (run_id,)).fetchone()
+                if not run:
+                    raise HTTPException(404, 'Session not found.')
+                if run['parent_run_id']:
+                    raise HTTPException(422, 'Rename the parent session; agent names follow their assignments.')
+                changed = conn.execute('UPDATE runs SET display_title=? WHERE id=? AND display_title=?',
+                                       (body.title, run_id, body.expected_title)).rowcount
+                if not changed:
+                    raise HTTPException(409, 'This session name changed. Close this dialog and try again.')
+            await self.checkpoints.flush()
+            return {'id': run_id, 'display_title': body.title}
 
         @router.get('/api/settings/session-titles')
         async def get_settings(request: Request):
