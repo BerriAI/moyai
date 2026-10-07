@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.db import Store
 from app.model_tools import TOOL_NAMES
 from app.security import digest
-from test_models import ASTRA, GLM, OPUS
+from test_models import ASTRA, GLM, OPUS, SONNET
 from test_slack import slack_app, event, signed
 from test_spend import active
 from test_workspace import workspace
@@ -63,6 +63,22 @@ def test_tools_switch_next_inference_preserving_history_files_and_admission_rece
     reopened = Store(app.state.settings.data_dir, default_model=ASTRA)
     assert reopened.run(run['id'])['active_model'] == GLM
     assert reopened.run(run['id'])['model'] == GLM
+
+
+def test_broker_lists_and_switches_to_sonnet(workspace, monkeypatch):
+    app, client = workspace
+    run = active(app)
+    captured = gateway(app, monkeypatch)
+    models = call(client, run, 'model_list').json()['models']
+    assert {'id': SONNET, 'name': 'Claude Sonnet 5.5'} in models
+    response = call(client, run, model='Sonnet 5.5', request_key='switch-to-sonnet')
+    assert response.status_code == 200
+    assert response.json()['active_model'] == SONNET
+    response = client.post(f"/broker/{run['id']}/v1/chat/completions",
+                           headers={'Authorization': 'Bearer capability'},
+                           json={'model': ASTRA, 'messages': [{'role': 'user', 'content': 'Continue'}]})
+    assert response.status_code == 200
+    assert captured[-1]['model'] == SONNET
 
 
 def test_natural_slack_request_reaches_tools_with_task_intact(slack_app):
