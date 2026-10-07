@@ -73,7 +73,7 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 /* Composer toolbar and sidebar account row.
    One type size (13px), one control height (28px), two spacing steps:
    4px between related controls, 12px between groups. Left: input actions.
-   Right: what runs the message (harness, model), then mic and send. */
+   Right: model, then mic and send. Engine controls live in the header. */
 .composer-toolbar, .reply-composer .composer-toolbar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
   min-height: 0; padding: 4px 10px 10px;
@@ -110,14 +110,8 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 .composer-model { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 0 8px; color: #3f3a47; }
 .composer-model .harness-logo { width: 14px; height: 14px; flex: none; }
 
-/* Right group: harness and model sit together, separated from input actions. */
-.composer-toolbar .harness-picker, .reply-composer .harness-fixed { margin-left: auto; }
-.composer-toolbar .model-picker:not(.harness-picker), .reply-composer .composer-model:not(.harness-fixed) { margin-left: 0; }
-.composer-toolbar .harness-picker + .model-picker::before,
-.reply-composer .harness-fixed + .model-picker::before,
-.reply-composer .harness-fixed + .composer-model::before {
-  content: ""; position: absolute; left: -3px; width: 1px; height: 14px; background: var(--line);
-}
+/* Keep model selection beside the message actions. */
+.composer-toolbar .model-picker, .reply-composer .composer-model { margin-left: auto; margin-right: 0; }
 .composer-toolbar .record-button.is-idle { order: 5; margin-left: 8px; }
 .composer-toolbar .send-button, .composer-toolbar .stop-button { order: 6; }
 .send-button, .stop-button { width: 28px; height: 28px; flex: 0 0 28px; margin-left: 4px; border-radius: 50%; }
@@ -150,3 +144,22 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 }
 .rail-foot .rail-settings:hover, .rail-foot .rail-settings.active, .rail-foot #logout:hover { background: var(--soft); color: #654a8d; }
 .rail-foot #logout[hidden] { display: none; }
+
+/* Engine selection belongs to the session header, outside the composer. */
+.topbar { container-type: inline-size; }
+.header-right .harness-picker { margin: 0 4px; }
+.header-right .harness-picker select { max-width: 160px; }
+.session-engine {
+  display: inline-flex; align-items: center; gap: 6px; flex: none;
+  height: 28px; max-width: 170px; margin-right: 6px; padding: 0 8px;
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--muted); font-size: 12px; font-weight: 400;
+}
+.session-engine:hover { background: var(--soft); color: #654a8d; }
+.session-engine .harness-logo { width: 14px; height: 14px; flex: none; }
+.session-engine .engine-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-engine-note { margin: 8px 0 18px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+@container (max-width: 620px) {
+  .session-engine { width: 28px; padding: 0; justify-content: center; margin-right: 2px; }
+  .session-engine .engine-name { display: none; }
+}
