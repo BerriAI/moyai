@@ -21,6 +21,29 @@ SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not 
                 "they may be incomplete. Queued follow-ups were stopped, and no actions were replayed.")
 
 
+def completed_response(run: dict[str, object], result: object) -> bool:
+    """Identify a final answer receipt without claiming its workspace is saved."""
+    message_id = run.get('active_message_id')
+    return (type(message_id) is int and isinstance(result, dict)
+            and type(result.get('message_id')) is int and result['message_id'] == message_id
+            and result.get('completed') is True
+            and not any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential'))
+            and isinstance(result.get('message'), str) and bool(result['message'].strip()))
+
+
+def response_status(run: dict[str, object]) -> str:
+    """Present a finished answer as saving without settling durable execution."""
+    status = str(run.get('status') or '')
+    raw = run.get('pending_result')
+    if status != 'running' or not isinstance(raw, str) or not raw:
+        return status
+    try:
+        result = json.loads(raw)
+    except ValueError:
+        return status
+    return 'saving' if completed_response(run, result) else status
+
+
 async def refresh_sandbox_files(sandbox):
     """Refresh our adapter and runtime patches, preserving workspace/history."""
     for path in sorted([*SANDBOX_FILES.glob('*.py'), *SANDBOX_FILES.glob('hermes-*.patch')]):
@@ -61,10 +84,12 @@ class RunManager:
     def receive_result(self, run_id: str, result: dict[str, object]) -> None:
         """Persist the answer and wake browser readers without settling its turn."""
         serialized = json.dumps(result)
-        if self.store.run(run_id)['pending_result'] == serialized:
+        run = self.store.run(run_id)
+        if run['pending_result'] == serialized:
             return
         self.store.update_run(run_id, summary=str(result.get('message', '')), pending_result=serialized)
-        self.store.event(run_id, 'chat', 'Response received', {'message_id': result.get('message_id')})
+        self.store.event(run_id, 'chat', 'Response received',
+                         {'message_id': result.get('message_id'), 'response_complete': completed_response(run, result)})
 
     def preserve_answer(self, run_id, reason=SAVE_WARNING):
         """Called on failure/restart; never turn an unsaved workspace into success."""

@@ -1,9 +1,12 @@
+import asyncio
+import inspect
 import json
 
 import httpx
 import pytest
 
 from app.harness_gateway import NativeUsageCapture, authorized_payload
+from app.model_slots import ModelSlots
 from app.security import digest
 from test_workspace import workspace
 
@@ -144,3 +147,129 @@ def test_native_generation_budget_is_owned_by_the_model_and_runtime(route, field
     for value in [True, 0, -1, '65536']:
         with pytest.raises(HTTPException):
             authorized_payload({**body, limit: value}, route, 'selected', '')
+
+
+@pytest.mark.parametrize('capacity', [1, 3])
+async def test_model_slots_preempt_maintenance_without_exceeding_shared_capacity(capacity: int) -> None:
+    slots = ModelSlots(capacity)
+    background_count = 1 if capacity == 1 else 2
+    occupied = capacity - background_count
+    for _ in range(occupied):
+        await slots.acquire()
+    active, peak = occupied, occupied
+    cleaning, cleanup, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    background_started = [asyncio.Event() for _ in range(background_count)]
+    foreground_started = [asyncio.Event() for _ in range(background_count + 1)]
+
+    async def maintenance(index: int) -> None:
+        nonlocal active, peak
+        async with slots:
+            active += 1
+            peak = max(peak, active)
+            background_started[index].set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await cleanup.wait()
+                active -= 1
+
+    async def foreground(index: int) -> None:
+        nonlocal active, peak
+        assert not slots.locked()
+        async with slots:
+            active += 1
+            peak = max(peak, active)
+            foreground_started[index].set()
+            try:
+                await release.wait()
+            finally:
+                active -= 1
+
+    background = [slots.run_maintenance(maintenance(i)) for i in range(background_count)]
+    await asyncio.wait_for(asyncio.gather(*(event.wait() for event in background_started)), 2)
+    ordinary = [asyncio.create_task(foreground(i)) for i in range(background_count + 1)]
+    try:
+        await asyncio.wait_for(cleaning.wait(), 2)
+        # No caller may use a cancelling holder's slot before its cleanup completes.
+        assert not any(event.is_set() for event in foreground_started)
+        cleanup.set()
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in foreground_started[:-1])), 2)
+        assert slots.locked() and not foreground_started[-1].is_set()
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*ordinary), 2)
+        outcomes = await asyncio.gather(*background, return_exceptions=True)
+        assert all(isinstance(value, asyncio.CancelledError) for value in outcomes)
+        assert peak == capacity and active == occupied
+    finally:
+        cleanup.set()
+        release.set()
+        for task in background + ordinary:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*background, *ordinary, return_exceptions=True)
+    for _ in range(occupied):
+        slots.release()
+    assert not slots.locked()
+
+
+async def test_model_slot_cancelled_foreground_preserves_background_cleanup() -> None:
+    slots = ModelSlots(1)
+    started, cleaning, cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def maintenance() -> None:
+        async with slots:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await cleanup.wait()
+
+    background = slots.run_maintenance(maintenance())
+    await asyncio.wait_for(started.wait(), 2)
+    foreground = asyncio.create_task(slots.acquire())
+    await asyncio.wait_for(cleaning.wait(), 2)
+    foreground.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await foreground
+    assert not background.done()
+    cleanup.set()
+    with pytest.raises(asyncio.CancelledError):
+        await background
+    async with slots:
+        assert slots.locked()
+
+
+async def test_model_slots_keep_foreground_contention_and_maintenance_outcomes() -> None:
+    slots = ModelSlots(1)
+    async with slots:
+        assert slots.locked()
+
+        async def rejected() -> str:
+            assert slots.locked()
+            return 'queued'
+
+        assert await slots.run_maintenance(rejected()) == 'queued'
+        waiting = asyncio.create_task(slots.acquire())
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    assert not slots.locked()
+
+    async def failed() -> None:
+        async with slots:
+            raise ValueError('fixture failure')
+
+    with pytest.raises(ValueError, match='fixture failure'):
+        await slots.run_maintenance(failed())
+    assert not slots.locked()
+    unstarted = failed()
+    task = slots.run_maintenance(unstarted)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert inspect.getcoroutinestate(unstarted) == inspect.CORO_CLOSED
+    assert not slots.locked()

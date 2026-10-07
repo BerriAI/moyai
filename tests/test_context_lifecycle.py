@@ -65,16 +65,20 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     monkeypatch.setattr('sandbox.continuation.AgentSteer', Steering)
     events, prompts, actions = [], [], []
     monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, *a, **kw: events.append((kind, message, kw)))
-    def summary(previous, entries):
+    maintenance = []
+    def maintain(snapshot, ack):
+        maintenance.append(snapshot)
         if summary_failure: raise TimeoutError('untrusted provider error')
-        return 'Keep Escape support; do not deploy. Prior writes have receipts.'
-    relay = SimpleNamespace(url='http://relay.test', compact=summary, last_error='', wait_group='', wait_credential='')
+        return None
+    relay = SimpleNamespace(url='http://relay.test', maintain=maintain,
+        compact=lambda *a: pytest.fail('Reply must not wait for compaction'), last_error='', wait_group='', wait_credential='')
     class Adapter:
+        compaction_window = 128_000
         def __init__(self, context_store): self.store = context_store
         def validate(self): pass
         def close(self): pass
         def run_conversation(self, prompt, *, conversation_history, system_message):
-            self.store.compact(relay.compact)
+            self.store.maintain(relay, input_budget=self.compaction_window)
             history = self.store.history()
             journal = TurnJournal(history, prompt, self.store)
             prompts.append(journal.prompt(prompt, history, cwd=tmp_path))
@@ -95,25 +99,53 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     original = legacy_path.read_bytes()
     spec = {'run_id': 'run', 'prompt': 'Continue', 'repo_url': '', 'model': 'configured-model', 'broker_url': 'http://relay.test',
             'harness': 'claude-agent-sdk', 'chat_enabled': True}
-    assert lifecycle.run_agent(spec, relay) == (1 if summary_failure else 0)
+    assert lifecycle.run_agent(spec, relay) == 0
+    assert len(maintenance) == 2 and all(snapshot for snapshot in maintenance)
     assert legacy_path.read_bytes() == original
     store = ContextStore(session / 'context.sqlite3', 'run')
     count = store.db.execute('SELECT count(*) FROM journal').fetchone()[0]
-    assert count == len(legacy) + (0 if summary_failure else 4)
+    assert count == len(legacy) + 4
     store.close()
-    if summary_failure:
-        assert not actions
-        assert any('summary could not be updated' in message for _, message, _ in events)
-        return
     # Corrupt the obsolete legacy file: the resumed production path must ignore it.
     legacy_path.write_text('must never be read again')
     assert lifecycle.run_agent({**spec, 'continuation': True, 'context_checkpoint': True}, relay) == 0
     assert actions == [0, 1]
     assert 'receipt-0' in prompts[1]
-    assert all('Keep Escape support' in prompt and len(prompt.encode()) < 48_000 for prompt in prompts)
+    assert all('Keep Escape support' in prompt and 'old log' in prompt for prompt in prompts)
     assert all('UNRESOLVED TOOL OUTCOMES' in prompt for prompt in prompts)
     store = ContextStore(session / 'context.sqlite3', 'run')
     assert store.pending == {'call0'}
     assert store.db.execute('SELECT count(*) FROM journal').fetchone()[0] == count + 4
     assert 'SAVED WORKING CONTEXT' not in ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
     store.close()
+
+
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('outage', [False, True])
+def test_every_durable_harness_answers_with_full_tail_while_maintenance_pending(tmp_path, monkeypatch, harness, outage):
+    from sandbox.harness_registry import create_agent
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'assistant', 'content': f'receipt-{i:03d} ' + 'log ' * 500} for i in range(60)])
+    submitted = []
+    def maintain(snapshot, ack):
+        submitted.append(snapshot)
+        if outage:
+            raise TimeoutError('summary service unavailable')
+        return {'id': 'pending', 'snapshot': snapshot, 'status': 'running'}
+    relay = SimpleNamespace(maintain=maintain, context_window=lambda: {'input_budget': 100_000},
+                            compact=lambda *a, **k: pytest.fail('Summary inference blocked the reply'))
+    agent = create_agent(harness, spec={}, relay=relay, config={}, activity=None,
+                         step=lambda: None, cwd=str(tmp_path), context_store=store)
+    monkeypatch.setattr(agent, 'validate', lambda: None)
+    async def respond(prompt, system_message):
+        assert 'receipt-000' in prompt and 'receipt-059' in prompt
+        agent.journal.finish('Quick TLDR')
+        return {'completed': True, 'final_response': 'Quick TLDR'}
+    monkeypatch.setattr(agent, '_run', respond)
+    try:
+        result = agent.run_conversation('tldr', conversation_history=[], system_message='Answer')
+        assert result['completed'] and len(submitted) == 1 and submitted[0]
+        assert store.state()['cursor'] == 0 and 'Quick TLDR' in store.history()[0]['content']
+    finally:
+        agent.close()
+        store.close()

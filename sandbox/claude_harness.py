@@ -8,10 +8,10 @@ import threading
 
 try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
-    from .context_recovery import run_with_context_recovery
+    from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
-    from context_recovery import run_with_context_recovery
+    from context_recovery import run_with_context_recovery, prepare_context, maintain_context
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
@@ -48,6 +48,8 @@ class ClaudeAgent(HarnessAgent):
     def before_model(self):
         if self.journal and not self.journal.pending:
             self.context.step()
+            if not self.stopped.is_set():
+                maintain_context(self)
         return not self.stopped.is_set()
 
     async def tool_hook(self, event, call_id, context):
@@ -106,11 +108,7 @@ class ClaudeAgent(HarnessAgent):
         self.stopped.clear()
         self.pending_text.clear()
         self.native_compactions = 0
-        if hasattr(self.context.relay, 'context_window'):
-            self.compaction_window = self.context.relay.context_window()['input_budget']
-        if self.context_store is not None:
-            self.context_store.compact(self.context.relay.compact)
-            conversation_history = self.context_store.history()
+        conversation_history = prepare_context(self, conversation_history)
         self.journal = TurnJournal(conversation_history, prompt, self.context_store)
         return run_with_context_recovery(self, prompt, conversation_history,
             lambda current: asyncio.run(self._run(current, system_message)))

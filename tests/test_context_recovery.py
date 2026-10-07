@@ -143,3 +143,42 @@ def test_relay_preserves_context_signal_and_never_replays_rejected_request(manag
         relay.close()
         edge.shutdown()
         edge.server_close()
+
+
+@pytest.mark.parametrize('route', ['/v1/messages', '/v1/responses', '/v1/chat/completions'])
+def test_full_history_at_transport_ceiling_requests_recovery_before_inference(route):
+    import http.client
+    from sandbox.broker_transport import MAX_BODY
+    relay = BrokerRelay('http://127.0.0.1:1/unreachable', 'cap').start()
+    relay.context_recovery = True
+    connection = http.client.HTTPConnection('127.0.0.1', relay.server.server_port)
+    try:
+        # The declared length is rejected before reading or forwarding a body.
+        connection.request('POST', route, headers={'Authorization': 'Bearer cap', 'Content-Length': str(MAX_BODY + 1)})
+        response = connection.getresponse()
+        assert response.status == 400 and json.loads(response.read())['error']['code'] == 'context_length_exceeded'
+        assert relay.context_required == {'input_tokens': MAX_BODY + 1, 'input_budget': MAX_BODY}
+        assert not relay.last_error
+    finally:
+        connection.close()
+        relay.close()
+
+
+def test_old_unknown_outcome_does_not_block_new_question_recovery(tmp_path):
+    agent, summaries = runtime(tmp_path)
+    store = agent.context_store
+    store.append({'role': 'assistant', 'tool_calls': [{'id': 'old-runtime:write', 'function': {'name': 'publish'}}]})
+    calls = []
+    def invoke(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            agent.context.relay.context_required = {'input_tokens': 20000, 'input_budget': 10000}
+            return {'failed': True}
+        assert 'UNRESOLVED TOOL OUTCOMES' in prompt and 'old-runtime:write' in prompt
+        return {'completed': True, 'final_response': 'That earlier publish has an unknown outcome.'}
+    try:
+        result = run_with_context_recovery(agent, 'What happened earlier?', store.history(), invoke)
+        assert result['completed'] and len(summaries) == 1
+        assert store.pending == {'old-runtime:write'} and not agent.journal.pending
+    finally:
+        store.close()

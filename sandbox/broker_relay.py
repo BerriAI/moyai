@@ -66,6 +66,13 @@ class BrokerRelay:
                 try:
                     size = int(self.headers.get('Content-Length', '0'))
                     if size < 0 or size > body_limit(self.path):
+                        if (size > body_limit(self.path) and relay.context_recovery
+                                and self.path in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}):
+                            # Full uncovered history can reach the transport
+                            # ceiling before the provider's token check runs.
+                            relay.context_required = {'input_tokens': size, 'input_budget': body_limit(self.path)}
+                            return self.error(400, 'Saved context exceeds transport capacity. Compact before retrying.',
+                                              'context_length_exceeded')
                         return self.error(413, 'Broker request is too large.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
@@ -231,6 +238,18 @@ class BrokerRelay:
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
             raise ValueError('The broker did not return a usable compaction window.')
         return value
+
+    def maintain(self, snapshot, ack=''):
+        route = '/context/maintenance'
+        request = urllib.request.Request(self.remote.rstrip('/') + route,
+            data=seal(self.token, route, json.dumps({'snapshot': snapshot, 'ack': ack}).encode()),
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+        # This waits for durable job admission, never for summary inference.
+        with urllib.request.urlopen(request, timeout=2) as response:
+            raw = response.read(64_001)
+            if len(raw) > 64_000:
+                raise ValueError('Context maintenance response exceeded its limit.')
+            return json.loads(raw)
 
     def compact(self, summary, entries, *, summary_bytes=None):
         """Tool-free maintenance outside the runtime's next-model checkpoint hook.

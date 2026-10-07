@@ -383,14 +383,10 @@ def run_agent(spec, relay):
              steering_applied=steering.receipts() if hasattr(steering, 'receipts') else [])
         (artifacts / "result.md").write_text(summary)
         goal.save()
-        if context_store is not None and not context_store.pending and not result.get('failed'):
-            try:
-                context_store.compact(relay.compact)
-            except ContextUnavailable:
-                # Publish the answer receipt before maintenance. Save the last
-                # good summary during an outage; next invocation must catch up.
-                emit('status', 'Saved context needs a summary update before the next resume.',
-                     {'activity_version': 1, 'phase': 'processing'})
+        if context_store is not None:
+            # Admit optional server-owned maintenance, never wait for inference.
+            # The complete journal is safe to checkpoint even when it fails.
+            context_store.maintain(relay, input_budget=getattr(agent, 'compaction_window', None))
         if spec.get("chat_enabled") and context_store is None:
             if not isinstance(result.get("messages"), list):
                 raise RuntimeError("Hermes did not return conversation history")

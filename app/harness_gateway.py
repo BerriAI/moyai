@@ -104,6 +104,8 @@ class HarnessGateway:
         self.model_slots, self.memory, self.skills = model_slots, memory, skills
         self.tracing = tracing
         self.context_budget = context_budget
+        from .context_maintenance import ContextMaintenance
+        self.maintenance = ContextMaintenance(self)
 
     async def context_window(self, run_id, request):
         run = self.require_run(run_id, request)
@@ -127,11 +129,14 @@ class HarnessGateway:
         # can outlive its five-minute envelope TTL; authorization is still
         # rechecked for every inference attempt below.
         body = await self.read_body(request, route)
+        return await self.summarize(run_id, request, body)
+
+    async def summarize(self, run_id, request, body, *, expected_run=None):
         # Only tool-free maintenance is retried. Each attempt goes through run
         # authorization, admission, usage accounting and cleanup independently.
         for attempt in range(SUMMARY_ATTEMPTS):
             try:
-                return await self._forward_once(run_id, request, route, attempt, body)
+                return await self._forward_once(run_id, request, '/context/compact', attempt, body, expected_run=expected_run)
             except SummaryFailure as exc:
                 retry = exc.retryable and attempt + 1 < SUMMARY_ATTEMPTS
                 labels = {
@@ -152,11 +157,14 @@ class HarnessGateway:
                 if exc.transient:
                     await asyncio.sleep(attempt + 1)
 
-    async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None):
+    async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None, *, expected_run=None):
         compact = route == '/context/compact'
         if route not in NATIVE_ROUTES and not compact:
             raise HTTPException(404, 'Unsupported model endpoint.')
         run = self.require_run(run_id, request)
+        if expected_run and any(run[key] != expected_run[key] for key in
+                                ('token_hash', 'active_message_id', 'active_user_id', 'active_model')):
+            raise HTTPException(409, 'The originating response has ended.')
         if self.model_slots.locked():
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
@@ -232,8 +240,9 @@ class HarnessGateway:
             admitted = self.store.execute(
                 "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
                 "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-                "AND status IN ('running','reconnecting','awaiting_approval')",
-                (run_id, self.settings.max_agent_iterations, self.settings.max_agent_iterations * 3))
+                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ?",
+                (run_id, self.settings.max_agent_iterations, self.settings.max_agent_iterations * 3,
+                 run['token_hash'], run['active_message_id']))
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
@@ -296,7 +305,9 @@ class HarnessGateway:
             exc.request_id = request_id
             await finish()
             raise
-        except BaseException:
+        except BaseException as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                status = 'interrupted'
             await finish()
             raise
 

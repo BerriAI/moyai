@@ -8,6 +8,7 @@ import logging
 import time
 
 from .progress import current_focus
+from .runner import response_status
 
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,11 @@ class SlackActivity:
         self.store = owner.store
 
     def status_for(self, row):
-        state = 'queued' if row['queued'] and row['run_status'] in {'idle', 'completed'} else row['run_status']
         if row['paused']:
             return ''
+        state = response_status({**row, 'status': row['run_status']})
+        if row['queued'] and state in {'idle', 'completed'}:
+            state = 'queued'
         if state == 'running':
             with self.store.connect() as conn:
                 focus = current_focus(conn, row['run_id'])
@@ -41,7 +44,7 @@ class SlackActivity:
         return STATUSES.get(state, '')
 
     def desired_status(self, run_id):
-        rows = self.store.rows('''SELECT t.*,r.status AS run_status,
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
             FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?''', (run_id,))
         return self.status_for(rows[0]) if rows else ''
@@ -53,7 +56,7 @@ class SlackActivity:
         team = self.owner.connectors.slack_installation().get('team_id')
         stamp = time.time()
         pending = []
-        rows = self.store.rows('''SELECT t.*,r.status AS run_status,a.status AS last_status,
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,a.status AS last_status,
             a.refreshed_at,a.retry_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
             FROM slack_threads t JOIN runs r ON r.id=t.run_id

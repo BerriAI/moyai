@@ -228,3 +228,69 @@ def test_invalid_coverage_cursor_cannot_silently_hide_history(tmp_path):
     with pytest.raises(ContextUnavailable, match='invalid summary position'):
         ContextStore(path, 'run')
     assert 'Do not deploy' in read_records(path)[0]['text']
+
+
+def test_full_tail_and_budget_trigger_ignore_receipt_count(tmp_path):
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'assistant', 'content': f'receipt-{i:03d}'} for i in range(90)])
+    assert all(f'receipt-{i:03d}' in store.history()[0]['content'] for i in range(90))
+    assert store.maintenance_snapshot(100_000) is None
+    snapshot = store.maintenance_snapshot(8_000)
+    assert snapshot and snapshot['cursor'] == 0
+    store.append({'role': 'user', 'content': 'New correction: never deploy'})
+    assert store.apply_summary(snapshot, {'summary': 'Original receipts retained', 'through_seq': snapshot['entries'][-1]['seq']})
+    assert 'never deploy' in store.history()[0]['content'] and 'receipt-089' in store.history()[0]['content']
+    assert not store.apply_summary(snapshot, 'stale summary')
+    # Resetting the same run may reproduce exactly the same prefix. Its epoch
+    # must still prevent a late summary from the discarded checkpoint applying.
+    old_epoch = store.state()['epoch']
+    store.close()
+    reset = open_context(tmp_path, {'run_id': 'run', 'workspace_warning': True,
+        'history_fallback': [{'role': 'assistant', 'content': f'receipt-{i:03d}'} for i in range(90)]})
+    assert reset.state()['epoch'] != old_epoch and not reset.apply_summary(snapshot, 'wrong generation')
+    reset.close()
+
+
+def test_summary_network_call_does_not_lock_append_and_stale_result_loses(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'assistant', 'content': f'receipt-{i}'} for i in range(60)])
+    entered, release = threading.Event(), threading.Event()
+    def summarize(previous, entries):
+        entered.set()
+        assert release.wait(3)
+        return 'slow stale summary'
+    with ThreadPoolExecutor(2) as pool:
+        work = pool.submit(store.compact, summarize)
+        try:
+            assert entered.wait(2)
+            pool.submit(store.append, {'role': 'user', 'content': 'New correction'}).result(timeout=1)
+            assert 'New correction' in store.history()[0]['content']
+            # A mandatory recovery wins while optional work is still in flight.
+            store.compact(lambda *a, **k: 'Newer forced summary', force=True)
+        finally:
+            release.set()
+        work.result(timeout=2)
+    assert store.state()['summary'] == 'Newer forced summary'
+    store.close()
+
+
+def test_database_cas_rejects_another_connections_newer_summary(tmp_path, monkeypatch):
+    path = tmp_path / 'context.sqlite3'
+    first = ContextStore(path, 'run')
+    first.initialize([{'role': 'assistant', 'content': f'receipt-{i}'} for i in range(40)])
+    second = ContextStore(path, 'run')
+    snapshot = first.snapshot()
+    read = first.snapshot
+    def concurrent_commit(through):
+        observed = read(through)
+        assert second.apply_summary(snapshot, 'Newer committed result')
+        return observed
+    monkeypatch.setattr(first, 'snapshot', concurrent_commit)
+    try:
+        assert not first.apply_summary(snapshot, 'Stale competing result')
+        assert first.state()['summary'] == 'Newer committed result'
+    finally:
+        first.close()
+        second.close()

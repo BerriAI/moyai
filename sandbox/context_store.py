@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import sqlite3
 import threading
+from uuid import uuid4
 
 try:
     from .history_reference import encoded, excerpt
@@ -37,6 +38,7 @@ class ContextStore:
         if self.path.is_symlink():
             raise ContextUnavailable('Saved context must not be a symbolic link.')
         self.lock = threading.RLock()
+        self.maintenance_ack = ''
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
@@ -54,6 +56,10 @@ class ContextStore:
                 CREATE TABLE IF NOT EXISTS pending (call_id TEXT PRIMARY KEY);
             ''')
             self.db.execute('INSERT OR IGNORE INTO state(id,version,run_id) VALUES(1,?,?)', (VERSION, run_id))
+        with self.db:
+            if 'epoch' not in {row[1] for row in self.db.execute('PRAGMA table_info(state)')}:
+                self.db.execute("ALTER TABLE state ADD COLUMN epoch TEXT NOT NULL DEFAULT ''")
+            self.db.execute("UPDATE state SET epoch=? WHERE epoch=''", (uuid4().hex,))
         state = self.state()
         if state['version'] != VERSION or state['run_id'] != run_id:
             self.close()
@@ -117,54 +123,134 @@ class ContextStore:
             size += cost
         return result
 
-    def compact(self, summarize, *, force=False, summary_bytes=SUMMARY_BYTES):
-        """Process only new entries, with bounded model input and durable progress.
-
-        Called between runtime invocations, with no tools in flight. Batches can
-        divide a parallel tool group; they are reference text, never executable
-        tool-call messages. Historical pending calls have unknown outcomes, not
-        live processes; preserve them for investigation without blocking a turn.
-        """
+    def snapshot(self, through=None):
+        """Immutable public prefix; appending a tail does not change its identity."""
         with self.lock:
-            if type(summary_bytes) is not int or not 512 <= summary_bytes <= SUMMARY_BYTES:
-                raise ValueError('Invalid summary budget')
-            latest = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
-            if not latest:
+            state = self.state()
+            if through is None:
+                latest = self.db.execute('SELECT max(seq) FROM journal').fetchone()[0] or 0
+                through = max(state['cursor'], latest - RECENT_ROWS)
+            return {'epoch': state['epoch'], 'cursor': state['cursor'], 'summary': state['summary'],
+                    'entries': self.batch(state['cursor'], through)}
+
+    def apply_summary(self, snapshot, value, summary_bytes=SUMMARY_BYTES):
+        entries = snapshot['entries']
+        summary = value.get('summary') if isinstance(value, dict) else value
+        through = value.get('through_seq') if isinstance(value, dict) else entries[-1]['seq']
+        if type(through) is not int or through not in {entry['seq'] for entry in entries}:
+            raise ValueError('Invalid summary cursor')
+        if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > summary_bytes:
+            raise ValueError('Invalid summary')
+        with self.lock, self.db:
+            if self.snapshot(entries[-1]['seq']) != snapshot:
+                return False
+            changed = self.db.execute('UPDATE state SET summary=?,cursor=? WHERE id=1 AND epoch=? AND cursor=? AND summary=?',
+                (summary, through, snapshot['epoch'], snapshot['cursor'], snapshot['summary']))
+            return changed.rowcount == 1
+
+    def maintenance_snapshot(self, input_budget):
+        """Use the model's input room, never receipt count, to schedule work.
+
+        One UTF-8 byte per token is the same conservative text upper bound used
+        by ContextBudget. Exact full-request rejection remains the broker's job.
+        Keep headroom for the request, instructions, tools and arriving results.
+        """
+        if type(input_budget) is not int or input_budget < 1:
+            return None
+        with self.lock:
+            state = self.state()
+            latest = self.db.execute('SELECT total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
+            covered = self.db.execute('SELECT total_bytes FROM journal WHERE seq=?', (state['cursor'],)).fetchone()
+            size = len(state['summary'].encode()) + (latest[0] if latest else 0) - (covered[0] if covered else 0)
+            if size < input_budget * 0.6:
+                return None
+            snapshot = self.snapshot()
+            return snapshot if snapshot['entries'] else None
+
+    def maintain(self, relay, *, input_budget):
+        """Submit/poll only; model inference is owned by the server lifespan.
+
+        An outage never prevents an answer from using the full saved tail. A
+        completed job is retained on the server until acknowledged, so a lost
+        sandbox checkpoint can fetch it again on the next resume.
+        """
+        if not hasattr(relay, 'maintain'):
+            return
+        try:
+            job = relay.maintain(self.maintenance_snapshot(input_budget), self.maintenance_ack)
+            if not job:
                 return
-            while True:
+            if job['status'] == 'completed':
+                self.apply_summary(job['snapshot'], job['result'])
+                self.maintenance_ack = job['id']
+            elif job['snapshot']['epoch'] != self.state()['epoch'] or job['status'] in {'failed', 'interrupted'}:
+                self.maintenance_ack = job['id']
+        except Exception:
+            # Receipts remain authoritative; only confirmed context pressure
+            # invokes the blocking recovery path. Never expose provider errors.
+            return
+
+    def compact(self, summarize, *, force=False, summary_bytes=SUMMARY_BYTES):
+        """Explicit synchronous recovery; never hold SQLite across inference.
+
+        Normal turns use maintain(). This bounded-batch operation is retained
+        for confirmed context rejection and explicit offline maintenance.
+        """
+        if type(summary_bytes) is not int or not 512 <= summary_bytes <= SUMMARY_BYTES:
+            raise ValueError('Invalid summary budget')
+        with self.lock:
+            latest = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
+        if not latest:
+            return
+        while True:
+            with self.lock:
                 state = self.state()
                 covered = self.db.execute('SELECT total_bytes FROM journal WHERE seq=?', (state['cursor'],)).fetchone()
                 remaining = latest['total_bytes'] - (covered[0] if covered else 0)
                 if not force and remaining <= BATCH_BYTES and latest['seq'] - state['cursor'] <= BATCH_ROWS:
                     return
-                if force and state['cursor'] == latest['seq'] and len(state['summary'].encode()) <= summary_bytes:
+                if force and state['cursor'] >= latest['seq'] and len(state['summary'].encode()) <= summary_bytes:
                     return
-                entries = self.batch(state['cursor'], latest['seq'] if force else max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS))
+                snapshot = self.snapshot(latest['seq'] if force else max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS))
+                entries = snapshot['entries']
                 if not entries:
-                    # Re-summarize the already-covered prefix without changing
-                    # its cursor, e.g. after switching to a smaller model.
                     entries = [{'seq': state['cursor'], 'excerpt': 'Rewrite the previous summary more concisely; it covers this sequence.'}]
-                try:
-                    value = (summarize(state['summary'], entries, summary_bytes=summary_bytes) if force
-                             else summarize(state['summary'], entries))
+            try:
+                value = (summarize(state['summary'], entries, summary_bytes=summary_bytes) if force
+                         else summarize(state['summary'], entries))
+                if snapshot['entries']:
+                    applied = self.apply_summary(snapshot, value, summary_bytes)
+                else:
+                    # A smaller model may require shortening an already fully
+                    # summarized prefix. Its epoch/cursor/summary still CAS.
                     summary = value.get('summary') if isinstance(value, dict) else value
-                    through = value.get('through_seq') if isinstance(value, dict) else entries[-1]['seq']
-                    if type(through) is not int or through not in {entry['seq'] for entry in entries}:
-                        raise ValueError('Invalid summary cursor')
-                    if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > summary_bytes:
+                    through = value.get('through_seq') if isinstance(value, dict) else state['cursor']
+                    if (through != state['cursor'] or not isinstance(summary, str) or not summary.strip()
+                            or len(summary.encode()) > summary_bytes):
                         raise ValueError('Invalid summary')
-                except Exception as exc:
-                    raise ContextUnavailable('Context summary could not be updated. Saved receipts are preserved; retry to resume.') from exc
-                # A failed request or crash before commit leaves the old cursor
-                # intact. Retrying inference cannot repeat any external action.
-                with self.db:
-                    self.db.execute('UPDATE state SET summary=?,cursor=? WHERE id=1', (summary, through))
+                    with self.lock, self.db:
+                        applied = self.snapshot(latest['seq']) == snapshot
+                        if applied:
+                            changed = self.db.execute('UPDATE state SET summary=? WHERE id=1 AND epoch=? AND cursor=? AND summary=?',
+                                (summary, snapshot['epoch'], snapshot['cursor'], snapshot['summary']))
+                            applied = changed.rowcount == 1
+            except (sqlite3.Error,):
+                raise
+            except Exception as exc:
+                raise ContextUnavailable('Context summary could not be updated. Saved receipts are preserved; retry to resume.') from exc
+            if not applied:
+                return  # A newer summary won; never overwrite it with stale work.
 
     def history(self):
+        with self.lock:
+            return self._history()
+
+    def _history(self):
         if not self.has_history:
             return []
         state = self.state()
-        entries = self.batch(state['cursor'])
+        entries = [{'seq': row['seq'], 'excerpt': row['preview']} for row in self.db.execute(
+            'SELECT seq,preview FROM journal WHERE seq>? ORDER BY seq', (state['cursor'],))]
         pending_count = self.db.execute('SELECT count(*) FROM pending').fetchone()[0]
         recovery = ''
         if pending_count:
@@ -187,7 +273,8 @@ class ContextStore:
         return [{'role': 'user', 'content': text}]
 
     def close(self):
-        self.db.close()
+        with self.lock:
+            self.db.close()
 
 
 def open_context(directory, spec):

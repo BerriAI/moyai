@@ -19,7 +19,8 @@
       if(event.kind==='chat'){
         const turn=turns.get(String(data.message_id));
         if(event.message==='Response started'&&turn){current=turn;turn.start||=Date.parse(event.created_at);}
-        if(event.message==='Response saved'&&turn){turn.end=Date.parse(event.created_at);if(current===turn)current=null;}
+        if(event.message==='Response received'&&turn&&data.response_complete===true){turn.responseComplete=true;turn.end||=Date.parse(event.created_at);}
+        if(event.message==='Response saved'&&turn){turn.saved=true;turn.end||=Date.parse(event.created_at);if(current===turn)current=null;}
         continue;
       }
       const turn=data.turn_id?turns.get(String(data.turn_id)):current;
@@ -28,9 +29,10 @@
     for(const turn of turns.values()){
       // active_message_id remains on the previous response until the next claim.
       // A new request's dispatch status must never reopen completed work.
-      const isCurrent=!turn.end&&turn.message.status==='running'&&(String(run.active_message_id)===turn.id||!run.active_message_id);
+      const isCurrent=!turn.saved&&turn.message.status==='running'&&(String(run.active_message_id)===turn.id||!run.active_message_id);
       turn.status=isCurrent?(run.status||turn.message.status):turn.message.status;
-      if(turn.end&&turn.status==='running')turn.status='completed';
+      if(turn.responseComplete&&isCurrent&&turn.status==='running')turn.status='saving';
+      if(turn.saved&&turn.status==='running')turn.status=String(run.active_message_id)===turn.id&&['failed','cancelled','interrupted','save_failed'].includes(run.status)?run.status:'completed';
       turn.live=!settled.has(turn.status)&&turn.status!=='save_failed'&&!!turn.start&&!turn.end;
       turn.start||=Date.parse(turn.events[0]?.created_at)||0;
       turn.end||=turn.live?0:Date.parse(turn.events.at(-1)?.created_at)||turn.start;
@@ -112,7 +114,7 @@
         }
       }
       const latest=input(delivered);
-      if(turn.live&&!latest.block)work(latest,delivered,Date.parse(run.messages?.find(m=>String(m.id)===delivered)?.started_at)||turn.start,'pending');
+      if((turn.live||turn.responseComplete&&!latest.entries.length)&&!latest.block)work(latest,delivered,Date.parse(run.messages?.find(m=>String(m.id)===delivered)?.started_at)||turn.start,'pending');
       for(const [id,bucket] of inputs){
         for(const item of bucket.entries){
           if(item.type!=='work')continue;
@@ -125,6 +127,7 @@
           block.summary=isLast?turn.summary:'';
           block.count=block.rows.filter(row=>row.kind==='tool').length;
           block.end=block.live?0:Math.max(block.end||turn.end||block.start,...block.rows.map(row=>Date.parse(row.finishedAt)||0));
+          if(turn.responseComplete&&!block.live)block.end=Math.min(block.end,turn.end);
         }
       }
     }
@@ -180,7 +183,7 @@
     const rows=turn.rows.filter(row=>row.kind!=='message');
     const older=rows.slice(0,-7),recent=rows.slice(-7);
     return `<details class="turn-work ${turn.pulse?'is-live':''}" data-work-key="${esc(key)}" data-turn="${esc(turn.id)}">
-      <summary class="work-heading"><span class="work-chevron" aria-hidden="true">›</span><span class="work-indicator" aria-hidden="true">${turn.live?'':turn.status==='completed'||turn.status==='idle'?'✓':['failed','cancelled','interrupted','save_failed'].includes(turn.status)?'!':''}</span><span class="work-title">${!turn.live&&['completed','idle'].includes(turn.status)&&turn.start?`<span class="sr-only">${esc(turn.headline)} · </span>Worked for ${duration(turn.start,turn.end||Date.now())}`:esc(turn.headline)}</span><span class="work-count">${turn.count?`${turn.count} action${turn.count===1?'':'s'}`:''}</span><time class="work-elapsed" ${turn.live?`data-work-timer="${turn.start}"`:''}>${duration(turn.start,turn.end||Date.now())}</time></summary>
+      <summary class="work-heading"><span class="work-chevron" aria-hidden="true">›</span><span class="work-indicator" aria-hidden="true">${turn.live?'':turn.status==='completed'||turn.status==='idle'?'✓':['failed','cancelled','interrupted','save_failed'].includes(turn.status)?'!':''}</span><span class="work-title">${!turn.live&&(['completed','idle'].includes(turn.status)||turn.responseComplete&&turn.status==='saving')&&turn.start?`<span class="sr-only">${esc(turn.headline)} · </span>Worked for ${duration(turn.start,turn.end||Date.now())}`:esc(turn.headline)}</span><span class="work-count">${turn.count?`${turn.count} action${turn.count===1?'':'s'}`:''}</span><time class="work-elapsed" ${turn.live?`data-work-timer="${turn.start}"`:''}>${duration(turn.start,turn.end||Date.now())}</time></summary>
       <div class="work-body">${older.length?`<details class="work-earlier" data-work-key="earlier:${esc(turn.id)}"><summary>Show ${older.length} earlier updates</summary><ol class="work-list">${older.map(row=>rowHTML(row,turn)).join('')}</ol></details>`:''}
       <ol class="work-list">${recent.map(row=>rowHTML(row,turn)).join('')}</ol>
       ${turn.live?`<div class="work-current" role="status"><span class="work-live-dot" aria-hidden="true"></span><span>${esc(waiting.has(turn.status)?turn.headline:turn.summary||turn.headline)}</span></div>`:''}</div></details>`;

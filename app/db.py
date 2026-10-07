@@ -33,6 +33,11 @@ class Store:
                     sandbox_id TEXT NOT NULL DEFAULT '', snapshot_id TEXT NOT NULL DEFAULT '',
                     token_hash TEXT NOT NULL DEFAULT '', model_calls INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS context_jobs (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+                    operation_id TEXT NOT NULL, snapshot TEXT NOT NULL,
+                    result TEXT NOT NULL DEFAULT 'null', status TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id),
                     kind TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL,

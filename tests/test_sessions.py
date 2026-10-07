@@ -11,7 +11,7 @@ from app.config import Settings
 from app.db import Store
 from app.main import create_app, public_messages
 from app.persistence import Checkpoints, restore_checkpoint
-from app.runner import RunManager
+from app.runner import RunManager, completed_response
 from test_runner import FakeSandbox, Lines, aio, runner
 from test_workspace import wait_for, workspace
 
@@ -220,7 +220,10 @@ async def test_answer_notification_precedes_artifacts_without_releasing_followup
         row = runner.store.run(run['id'])
         result = json.loads(row['pending_result'])
         runner.receive_result(run['id'], result)  # Replayed receipt is idempotent.
-        assert len([e for e in runner.store.events(run['id']) if e['message'] == 'Response received']) == 1
+        receipts = [e for e in runner.store.events(run['id']) if e['message'] == 'Response received']
+        assert len(receipts) == 1 and receipts[0]['data']['response_complete'] is True
+        assert row['status'] == 'running'
+        assert runner.store.messages(run['id'])[0]['status'] == 'running'
         runner.store.enqueue_message(run['id'], 'Next question', 'queued-next')
         assert runner.store.claim_message(run['id']) is None
         visible = public_messages(row, runner.store.messages(run['id']))
@@ -236,8 +239,37 @@ async def test_answer_notification_precedes_artifacts_without_releasing_followup
     assert len(answers) == 1 and answers[0]['id'] > 0 and answers[0]['status'] == 'completed'
 
 
+@pytest.mark.parametrize('control', [None, 'continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential', 'incomplete', 'wrong_turn', 'missing_turn', 'empty', 'non_text'])
+def test_response_receipt_marks_only_a_final_answer_for_the_active_turn(runner, control):
+    run = runner.store.create_run('Say hello', '', 'modal', [], chat_enabled=True)
+    message = runner.store.claim_message(run['id'])
+    result = {'message_id': message['id'], 'completed': True, 'message': 'Hello!'}
+    if control == 'incomplete':
+        result['completed'] = False
+    elif control == 'wrong_turn':
+        result['message_id'] += 1
+    elif control == 'missing_turn':
+        result.pop('message_id')
+    elif control == 'empty':
+        result['message'] = ' '
+    elif control == 'non_text':
+        result['message'] = ['Hello!']
+    elif control:
+        result[control] = True
+    runner.receive_result(run['id'], result)
+    row = runner.store.run(run['id'])
+    receipt = runner.store.events(run['id'])[-1]
+    assert receipt['message'] == 'Response received'
+    assert receipt['data']['response_complete'] is (control is None)
+    assert row['status'] == 'queued'  # Receiving a result does not settle a turn.
+    assert runner.store.messages(run['id'])[0]['status'] == 'running'
+    assert not [m for m in runner.store.messages(run['id']) if m['role'] == 'assistant']
+    assert completed_response(row, []) is False
+    assert completed_response(row, None) is False
+
+
 @pytest.mark.parametrize('control', [None, 'continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential', 'incomplete', 'wrong_turn', 'empty', 'malformed', 'non_object'])
-def test_run_api_exposes_only_current_completed_answer_receipts(workspace: tuple[FastAPI, TestClient], control: str | None) -> None:
+async def test_run_api_exposes_only_current_completed_answer_receipts(workspace: tuple[FastAPI, TestClient], control: str | None) -> None:
     app, client = workspace
     store = app.state.store
     run = store.create_run('Say hello', '', 'demo', [], chat_enabled=True)
@@ -252,10 +284,50 @@ def test_run_api_exposes_only_current_completed_answer_receipts(workspace: tuple
     elif control:
         result[control] = True
     raw = '{' if control == 'malformed' else '[]' if control == 'non_object' else json.dumps(result)
-    store.update_run(run['id'], status='saving', summary='Hello!', pending_result=raw)
+    store.update_run(run['id'], status='running', summary='Hello!', pending_result=raw)
     response = client.get('/api/runs/' + run['id'])
     assert response.status_code == 200 and 'must-stay-private' not in response.text
     assert 'pending_result' not in response.json()
+    expected_status = 'running' if control else 'saving'
+    assert response.json()['status'] == expected_status
+    listed = next(row for row in client.get('/api/runs?scope=all').json() if row['id'] == run['id'])
+    assert listed['status'] == expected_status and 'pending_result' not in listed
+    # Compact sidebar/side-chat queries must project the same state and keep the
+    # newly selected private result out of their public response.
+    for relation in ('child', 'side'):
+        related = store.create_run('Related answer', '', 'demo', [], chat_enabled=True,
+                                   side_chat_of=run['id'] if relation == 'side' else '')
+        if relation == 'child':
+            store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (run['id'], related['id']))
+        related_message = store.claim_message(related['id'])
+        related_result = {**result, 'message_id': related_message['id'] + (control == 'wrong_turn')}
+        related_raw = raw if control in {'malformed', 'non_object'} else json.dumps(related_result)
+        store.update_run(related['id'], status='running', pending_result=related_raw)
+        if relation == 'child':
+            parent = next(row for row in client.get('/api/runs?scope=all').json() if row['id'] == run['id'])
+            projected = next(row for row in parent['children'] if row['id'] == related['id'])
+        else:
+            projected = client.get('/api/runs/' + run['id'] + '/side-chats').json()[0]
+        assert projected['status'] == expected_status
+        assert 'pending_result' not in projected and 'must-stay-private' not in json.dumps(projected)
+        assert store.run(related['id'])['status'] == 'running'
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, 'path', '') == '/api/runs/{run_id}/events')
+    async def connected():
+        return False
+    async def streamed_status():
+        request = SimpleNamespace(headers={}, cookies=dict(client.cookies), is_disconnected=connected)
+        response = await endpoint(run['id'], request, after=store.events(run['id'])[-1]['id'])
+        stream = response.body_iterator
+        try:
+            item = await anext(stream)
+            assert item.startswith('event: run-status\n')
+            assert 'must-stay-private' not in item and 'pending_result' not in item
+            return json.loads(item.split('data: ', 1)[1])['status']
+        finally:
+            await stream.aclose()
+    assert await streamed_status() == expected_status
+    assert store.run(run['id'])['status'] == 'running'
+    assert store.messages(run['id'])[0]['status'] == 'running'
     answers = [m for m in response.json()['messages'] if m['role'] == 'assistant']
     assert len(answers) == (0 if control else 1)
     if control:
@@ -266,6 +338,11 @@ def test_run_api_exposes_only_current_completed_answer_receipts(workspace: tuple
     store.enqueue_message(run['id'], 'Use a different model next', 'next-model', model='next-model')
     reply = next(m for m in client.get('/api/runs/' + run['id']).json()['messages'] if m['role'] == 'assistant')
     assert reply['model'] == message['model'] and reply['model'] != 'next-model'
+    # A final answer receipt cannot mask a stopped/failed run or claim settlement.
+    for status in ('failed', 'cancelled', 'interrupted', 'stopping'):
+        store.update_run(run['id'], status=status)
+        assert client.get('/api/runs/' + run['id']).json()['status'] == status
+        assert await streamed_status() == status
     # Legacy cleanup may await termination after setting the run completed.
     store.update_run(run['id'], status='completed')
     assert len([m for m in client.get('/api/runs/' + run['id']).json()['messages'] if m['role'] == 'assistant']) == 1

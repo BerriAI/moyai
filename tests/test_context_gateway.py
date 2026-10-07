@@ -255,3 +255,142 @@ def test_recovery_does_not_reopen_expired_transport_envelope(workspace, monkeypa
         content=seal('cap', route, json.dumps({'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}]}).encode()),
         headers={'Authorization': 'Bearer cap', 'Content-Type': CONTENT_TYPE})
     assert response.status_code == 200 and len(calls) == 2 and len(reads) == 1
+
+
+def test_background_summary_survives_answer_and_cold_restore_without_losing_tail(workspace, monkeypatch, tmp_path):
+    import asyncio
+    import threading
+    from sandbox.context_store import ContextStore
+    from test_workspace import wait_for
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    entered, release = threading.Event(), threading.Event()
+    async def upstream(request):
+        payload = json.loads(request.content)
+        assert 'tools' not in payload and 'private-marker' not in request.content.decode()
+        entered.set()
+        while not release.is_set():
+            await asyncio.sleep(.01)
+        return summary_response('Saved public receipts; do not deploy.')
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    db = app.state.store
+    run = db.create_run('task', '', 'modal', [], model='openai/gpt-6-astra', chat_enabled=True)
+    message = db.claim_message(run['id'])
+    db.update_run(run['id'], status='running', token_hash=digest('cap'))
+    store = ContextStore(tmp_path / 'public.sqlite3', run['id'])
+    store.initialize([{'role': 'assistant', 'content': 'receipt-' + str(i) + ' log' * 500} for i in range(60)])
+    snapshot = store.maintenance_snapshot(100_000)
+    route = '/context/maintenance'
+    url = f"/broker/{run['id']}" + route
+    def exchange(snapshot=None, ack=''):
+        return client.post(url, content=seal('cap', route, json.dumps({'snapshot': snapshot, 'ack': ack}).encode()),
+            headers={'Authorization': 'Bearer cap', 'Content-Type': CONTENT_TYPE})
+    assert client.post(url, json={'snapshot': snapshot}).status_code == 401
+    try:
+        job = exchange(snapshot).json()
+        assert job['status'] == 'running' and entered.wait(2)
+        assert exchange(snapshot).json()['id'] == job['id']
+        # Answer/snapshot completion retires the capability. Already admitted
+        # tool-free work is independent of the sandbox and may finish safely.
+        db.update_run(run['id'], status='idle', token_hash='')
+        assert exchange().status_code == 401
+        store.append({'role': 'user', 'content': 'Newer correction: preserve the latest reply'})
+        store.close()
+        release.set()
+        wait_for(lambda: db.rows('SELECT status FROM context_jobs WHERE run_id=?', (run['id'],))[0]['status'] == 'completed')
+        # A new app owner treats completed jobs as durable, never replaying them.
+        from app.context_maintenance import ContextMaintenance
+        owner = ContextMaintenance(SimpleNamespace(store=db))
+        owner.recover()
+        db.update_run(run['id'], status='running', token_hash=digest('cap'))
+        saved = exchange().json()
+        store = ContextStore(tmp_path / 'public.sqlite3', run['id'])
+        assert store.apply_summary(saved['snapshot'], saved['result'])
+        history = store.history()[0]['content']
+        assert 'Newer correction' in history and 'receipt-59' in history
+        requests = db.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))
+        assert len(requests) == 1 and requests[0]['status'] == 'completed'
+        assert requests[0]['message_id'] == message['id']
+        assert len(db.messages(run['id'])) == 1  # Maintenance cannot publish an answer.
+    finally:
+        release.set()
+        store.close()
+
+
+def test_foreground_preempts_background_gateway_and_interrupted_job_retries(workspace, monkeypatch, tmp_path):
+    import asyncio
+    import threading
+    from sandbox.context_store import ContextStore
+    from test_workspace import wait_for
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    entered = threading.Event()
+    attempts = []
+    async def upstream(request):
+        payload = json.loads(request.content)
+        attempts.append(payload)
+        if len(attempts) == 1:
+            entered.set()
+            await asyncio.Event().wait()
+        return summary_response('Summary complete')
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    # Reach the real gateway through its production route; set capacity on the
+    # shared owner captured by create_app, not a separate test-only pool.
+    from app.harness_gateway import HarnessGateway
+    original = HarnessGateway._forward_once
+    async def forward(self, *args, **kwargs):
+        if not getattr(self, 'fixture_slots', False):
+            self.model_slots._slots = asyncio.Semaphore(1)
+            self.fixture_slots = True
+        return await original(self, *args, **kwargs)
+    monkeypatch.setattr(HarnessGateway, '_forward_once', forward)
+    run = app.state.store.create_run('task', '', 'modal', [])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    store = ContextStore(tmp_path / 'context.sqlite3', run['id'])
+    store.initialize([{'role': 'assistant', 'content': 'log' * 1000} for _ in range(60)])
+    snapshot = store.maintenance_snapshot(100_000)
+    url = f"/broker/{run['id']}"
+    headers = {'Authorization': 'Bearer cap'}
+    job = client.post(url + '/context/maintenance', headers=headers, json={'snapshot': snapshot}).json()
+    assert entered.wait(2)
+    foreground = client.post(url + '/v1/responses', headers=headers, json={'input': 'Answer now'})
+    assert foreground.status_code == 200
+    wait_for(lambda: app.state.store.rows('SELECT status FROM context_jobs')[0]['status'] == 'interrupted')
+    assert store.state()['cursor'] == 0 and len(store.history()[0]['content']) > 24_000
+    assert client.post(url + '/context/maintenance', headers=headers, json={'snapshot': snapshot, 'ack': job['id']}).status_code == 200
+    wait_for(lambda: app.state.store.rows('SELECT status FROM context_jobs')[0]['status'] == 'completed')
+    rows = app.state.store.rows('SELECT status FROM model_requests ORDER BY created_at')
+    assert [row['status'] for row in rows] == ['interrupted', 'completed', 'completed']
+    store.close()
+
+
+def test_late_maintenance_admission_cannot_charge_a_new_turn(workspace, monkeypatch, tmp_path):
+    from app.context_budget import Budget
+    from sandbox.context_store import ContextStore
+    from test_workspace import wait_for
+    app, client = workspace
+    db = app.state.store
+    run = db.create_run('task', '', 'modal', [], chat_enabled=True)
+    original = db.claim_message(run['id'])
+    db.update_run(run['id'], status='running', token_hash=digest('cap'))
+    next_message, _ = db.enqueue_message(run['id'], 'Next question', 'next', send_now=False)
+    async def switch_turn(payload, **kwargs):
+        # Model metadata/token counting can await while the response finishes.
+        db.finish_message(run['id'], original['id'], 'Done')
+        db.claim_message(run['id'])
+        db.update_run(run['id'], status='running')
+        return Budget(100, 100_000, 1000, 128_000, 'fixture')
+    monkeypatch.setattr(app.state.context_budget, 'check', switch_turn)
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: pytest.fail('Old turn inferred after new claim'))
+    store = ContextStore(tmp_path / 'context.sqlite3', run['id'])
+    store.initialize([{'role': 'assistant', 'content': 'log ' * 500} for _ in range(60)])
+    response = client.post(f"/broker/{run['id']}/context/maintenance", headers={'Authorization': 'Bearer cap'},
+                           json={'snapshot': store.maintenance_snapshot(100_000)})
+    assert response.status_code == 200
+    wait_for(lambda: db.rows('SELECT status FROM context_jobs')[0]['status'] == 'failed')
+    current = db.run(run['id'])
+    assert current['active_message_id'] == next_message['id'] and current['turn_model_calls'] == 0
+    assert not db.rows('SELECT * FROM model_requests')
+    store.close()

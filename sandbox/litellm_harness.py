@@ -7,12 +7,12 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from .harness_bindings import RUNTIME_BINDINGS
     from .harness_dependencies import prepare_runtime, prepare_binary
-    from .context_recovery import run_with_context_recovery
+    from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from harness_bindings import RUNTIME_BINDINGS
     from harness_dependencies import prepare_runtime, prepare_binary
-    from context_recovery import run_with_context_recovery
+    from context_recovery import run_with_context_recovery, prepare_context, maintain_context
 
 
 class LiteLLMAgent(HarnessAgent):
@@ -41,14 +41,14 @@ class LiteLLMAgent(HarnessAgent):
         # If tool result delivery is still catching up, defer the checkpoint.
         if self.journal and not self.journal.pending:
             self.context.step()
+            if not self.stopped.is_set():
+                maintain_context(self)
         return not self.stopped.is_set()
 
     def run_conversation(self, prompt, *, conversation_history, system_message):
         self.validate()
         self.stopped.clear()
-        if self.context_store is not None:
-            self.context_store.compact(self.context.relay.compact)
-            conversation_history = self.context_store.history()
+        conversation_history = prepare_context(self, conversation_history)
         self.journal = TurnJournal(conversation_history, prompt, self.context_store)
         self.pending_text.clear()
         return run_with_context_recovery(self, prompt, conversation_history,

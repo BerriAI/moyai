@@ -22,7 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import Settings
 from .connectors import Connectors, ConnectorError, TOOLS
 from .db import Store, now
-from .runner import RunManager, TERMINAL
+from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
 from .google_sso import GoogleSignIn
@@ -179,7 +179,8 @@ def create_app(settings: Settings | None = None):
     manager.credentials = credentials
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
-    model_slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
+    from .model_slots import ModelSlots
+    model_slots = ModelSlots(settings.max_concurrent_model_requests)
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     credentials.slots = model_slots
@@ -205,6 +206,7 @@ def create_app(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(app):
+        harness_gateway.maintenance.recover()
         await manager.recover()
         await checkpoints.flush()
         slack.recover()
@@ -219,6 +221,7 @@ def create_app(settings: Settings | None = None):
         try:
             yield
         finally:
+            await harness_gateway.maintenance.close()
             await computer.close()
             await session_pull_requests.close()
             await session_titles.close()
@@ -451,9 +454,9 @@ def create_app(settings: Settings | None = None):
         visible_ids = list(runs)
         for offset in range(0, len(visible_ids), 500):
             batch = visible_ids[offset:offset + 500]
-            children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in batch) + ') ORDER BY created_at,id', batch)
+            children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at,active_message_id,pending_result FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in batch) + ') ORDER BY created_at,id', batch)
             for child in children:
-                runs[child['parent_run_id']]['children'].append({**child, 'archived': archived, 'can_delete': False})
+                runs[child['parent_run_id']]['children'].append({**public_run(child), 'archived': archived, 'can_delete': False})
         return list(runs.values())
 
     @app.post("/api/runs", status_code=201)
@@ -507,8 +510,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, 'Session not found.')
         actor = store.identity(security.session_info(request))
         archives = session_lifecycle.archives(actor)
-        rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
-        return [{**row, **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
+        rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at,active_message_id,pending_result FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
+        return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request):
@@ -617,7 +620,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': row['status'], 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': response_status(row), 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -929,6 +932,10 @@ def create_app(settings: Settings | None = None):
     async def compact_context(run_id: str, request: Request):
         return await harness_gateway.forward(run_id, request, '/context/compact')
 
+    @app.post('/broker/{run_id}/context/maintenance')
+    async def maintain_context(run_id: str, request: Request):
+        return await harness_gateway.maintenance.exchange(run_id, request)
+
     @app.get('/broker/{run_id}/context/window')
     async def native_context_window(run_id: str, request: Request):
         return await harness_gateway.context_window(run_id, request)
@@ -1081,10 +1088,7 @@ def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -
         return messages
     message_id = run.get('active_message_id')
     active = next((m for m in messages if m['id'] == message_id and m['role'] == 'user' and m['status'] == 'running'), None)
-    if (not active or not isinstance(message_id, int) or not isinstance(result, dict)
-            or result.get('message_id') != message_id or result.get('completed') is not True
-            or any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential'))
-            or not isinstance(result.get('message'), str) or not result['message'].strip()):
+    if not active or not completed_response(run, result):
         return messages
     # Keep settlement, model history and Slack delivery owned by finish_message.
     # Its user-status update removes this projection, even across a stale run read.
@@ -1097,7 +1101,8 @@ def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -
 
 
 def public_run(run):
-    return {key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context", "title_attempted_at"}}
+    return {**{key: value for key, value in run.items() if key not in {"token_hash", "pending_result", "side_chat_context", "title_attempted_at"}},
+            "status": response_status(run)}
 
 
 app = create_app()

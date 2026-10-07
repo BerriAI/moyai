@@ -32,6 +32,49 @@ test('dispatching a follow-up cannot reopen the previous completed work or start
   turns=groups(data);assert.equal(turns.get('1').status,'completed');assert.equal(turns.get('1').live,false);
 });
 
+test('a completed answer stops the work timer while workspace saving stays separate',()=>{
+  const data=run();data.events.push(tool(2,'a','started'),tool(3,'a','completed'),focus(4,'Checking the answer'),
+    event(9,'chat','Response received',{message_id:1,response_complete:true}));
+  let turn=current(data);
+  assert.equal(turn.end,Date.parse(stamp(9)));assert.equal(turn.status,'saving');
+  assert.equal(turn.headline,'Saving workspace');assert.equal(turn.live,false);assert.equal(turn.pulse,false);
+  assert.equal(data.status,'running');assert.equal(data.messages[0].status,'running');
+  assert.match(html(turn),/Worked for 8s/);assert.doesNotMatch(html(turn),/data-work-timer|is-live|✓/);
+  const block=timeline(data).get('1')[0].block;
+  assert.equal(block.end,turn.end);assert.equal(block.live,false);
+  // Later maintenance and even delayed tool receipts cannot extend answer latency.
+  data.events.push(tool(11,'a','completed'),event(12,'status','Saving workspace'));
+  assert.equal(timeline(data).get('1')[0].block.end,Date.parse(stamp(9)));
+  data.status='saving';assert.equal(current(data).pulse,false);
+  data.events.push(event(42,'chat','Response saved',{message_id:1}));data.messages[0].status='completed';data.status='idle';
+  turn=current(data);assert.equal(turn.end,Date.parse(stamp(9)));assert.equal(turn.status,'completed');
+  assert.match(html(turn),/Worked for 8s/);
+  assert.deepEqual(current(JSON.parse(JSON.stringify(data))),turn,'reload retains the answer receipt timestamp');
+});
+
+test('continuation, legacy and wrong-turn receipts cannot finish live work',()=>{
+  for(const extra of [{message_id:1},{message_id:1,response_complete:false},{message_id:2,response_complete:true},{message_id:1,response_complete:'true'}]){
+    const data=run();data.events.push(event(9,'chat','Response received',extra));
+    const turn=current(data);assert.equal(turn.live,true);assert.equal(turn.pulse,true);assert.equal(turn.end,0);
+    assert.equal(turn.status,'running');
+  }
+});
+
+test('receipt-only answers keep a frozen work block and later failures remain visible',()=>{
+  const data=run();data.events.push(event(9,'chat','Response received',{message_id:1,response_complete:true}));
+  let block=timeline(data).get('1')[0].block;
+  assert.equal(block.end,Date.parse(stamp(9)));assert.match(html(block),/Worked for 8s/);
+  data.status='failed';data.checkpoint_error='Workspace save failed';
+  assert.equal(current(data).headline,'Response failed');assert.equal(current(data).pulse,false);
+  assert.doesNotMatch(html(current(data)),/Worked for|✓/);
+  // A save event ahead of a fresh message list must not mask the failure.
+  data.events.push(event(42,'chat','Response saved',{message_id:1}));
+  assert.equal(current(data).status,'failed');
+  data.messages[0].status='save_failed';block=timeline(data).get('1')[0].block;
+  assert.equal(block.headline,'Workspace save failed');assert.equal(block.end,Date.parse(stamp(9)));
+  assert.match(html(block),/Workspace save failed/);assert.doesNotMatch(html(block),/data-work-timer|✓/);
+});
+
 test('parallel tools and journal replay pair once, even after rotation or reconnect',()=>{
   const data=run();data.events.push(tool(2,'segment1:a','started'),tool(3,'segment1:b','started'),tool(4,'segment1:b','completed'),tool(5,'segment1:a','error',{exit_code:1}),tool(6,'segment1:b','started'),tool(7,'segment2:a','started'),event(8,'message','Update',{activity_id:'same'}),event(9,'message','Update',{activity_id:'same'}));
   const turn=groups(data).get('1');assert.equal(turn.count,3);assert.deepEqual(turn.rows.filter(row=>row.kind==='tool').map(row=>row.state),['error','completed','running']);
@@ -281,6 +324,9 @@ test('the composer follows live SSE focus, reconnects and lifecycle state withou
   assert.equal(refreshes.length,2,'an offered input ahead of the local snapshot fetches authoritative scope');
   source.handlers['run-status']({data:JSON.stringify({status:'waiting_credential'})});
   assert.match(node('#chat-working').textContent,/Waiting for access/);assert.equal(node('#chat-working').classList.busy,false);
+  source.handlers['run-status']({data:JSON.stringify({status:'running'})});
+  source.onmessage({data:JSON.stringify(event(9,'chat','Response received',{message_id:1,response_complete:true}))});
+  assert.equal(node('#chat-working').textContent,'Saving workspace');assert.equal(node('#chat-working').classList.busy,false);
   source.handlers['run-status']({data:JSON.stringify({status:'idle'})});assert.equal(node('#chat-working').textContent,'');
 });
 
@@ -300,6 +346,9 @@ test('side-chat polls replace focus while retaining expanded activity through st
   assert.equal(writes,1);assert.equal(syncs,2);assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);
   data.events.push(focus(3,'Verifying the side-chat answer'));context.drawChat(data);
   assert.equal(context.status.textContent,'Verifying the side-chat answer');assert.equal(writes,1);
+  data.events.push(event(9,'chat','Response received',{message_id:1,response_complete:true}));context.drawChat(data);
+  assert.equal(context.status.textContent,'Saving workspace');assert.equal(slot.headline,context.status.textContent);
+  assert.equal(writes,1);assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);
   data.status='reconnecting';context.drawChat(data);assert.equal(context.status.textContent,'Reconnecting…');assert.equal(log.slots[0],slot);
   data.messages.push({id:3,role:'assistant',status:'completed',content:'A useful finding'});context.drawChat(data);
   assert.equal(writes,2);assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);assert.equal(log.scrollTop,50);

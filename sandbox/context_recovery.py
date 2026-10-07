@@ -6,6 +6,24 @@ except ImportError:
     from context_store import ContextUnavailable
 
 
+def maintain_context(agent, *, refresh=False):
+    store, relay = agent.context_store, agent.context.relay
+    if store is None:
+        return
+    now = time.monotonic()
+    if refresh or now >= getattr(agent, 'next_maintenance', 0):
+        agent.next_maintenance = now + 5
+        store.maintain(relay, input_budget=getattr(agent, 'compaction_window', None))
+
+
+def prepare_context(agent, history):
+    relay = agent.context.relay
+    if hasattr(relay, 'context_window'):
+        agent.compaction_window = relay.context_window()['input_budget']
+    maintain_context(agent, refresh=True)
+    return agent.context_store.history() if agent.context_store is not None else history
+
+
 def run_with_context_recovery(agent, prompt, history, invoke):
     ctx, store = agent.context, agent.context_store
     directory = ctx.spec.get('history_reference_dir', ctx.cwd)
@@ -34,7 +52,9 @@ def run_with_context_recovery(agent, prompt, history, invoke):
                              'messages': agent.journal.messages, 'final_response': ''}
         if store is None:
             raise ContextUnavailable('This runtime needs a saved context journal before it can compact. No task actions were retried.')
-        if store.pending or agent.journal.pending:
+        # Historical unknown outcomes are reference data, not live tools.
+        # Their warning survives compaction and permits read-only investigation.
+        if agent.journal.pending:
             raise ContextUnavailable('Context needs compaction, but tool outcomes are pending. Verify their receipts before resuming.')
         progress = agent.journal.completed_tools
         size = pressure['input_tokens']
