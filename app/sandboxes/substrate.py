@@ -172,6 +172,10 @@ class Sandbox:
         async with self.lock:
             return await self._request(path, data)
 
+    async def computer_request(self, body):
+        """One signed desktop call, without an exec journal or mutation retry."""
+        return await self.request('/computer', body)
+
     async def _request(self, path, data):
         if path != '/activate':
             return await self._request_once(path, data)
@@ -196,8 +200,12 @@ class Sandbox:
                    'X-Moyai-Signature': base64.b64encode(signature).decode(), 'Content-Type': 'application/json'}
         settings = self.provider.settings
         verify = tls_context(settings)
-        async with httpx.AsyncClient(timeout=60, verify=verify, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=530 if path == '/computer' else 60,
+                                     verify=verify, follow_redirects=False) as client:
             async with client.stream('POST', settings.substrate_router_url.rstrip('/') + path, content=body, headers=headers) as response:
+                if path == '/computer' and response.status_code in {404, 409}:
+                    raise RuntimeError('Computer could not confirm the request. Restart this workspace to update or '
+                                       'reconnect it, and check the desktop before repeating input.')
                 if response.status_code == 404:
                     raise FileNotFoundError('Sandbox file or execution not found')
                 if response.status_code in {502, 503, 504}:

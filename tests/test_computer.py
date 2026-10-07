@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app import captures
+from app.computer import DesktopConnection
 from sandbox import computer
 from test_workspace import workspace
 
@@ -93,6 +94,7 @@ async def test_human_control_lease_blocks_agent_and_expires(monkeypatch,tmp_path
     monkeypatch.setattr(computer,'CAPTURES',tmp_path/'captures')
     c = computer.Computer()
     c.open=AsyncMock()
+    c.desktop_image=lambda image_format='JPEG': PNG
     c.page=SimpleNamespace(is_closed=lambda:False,url='about:blank',screenshot=AsyncMock(return_value=PNG))
     clock=[100]
     monkeypatch.setattr(computer.time,'monotonic',lambda:clock[0])
@@ -178,3 +180,144 @@ async def test_restored_display_removes_stale_files_but_preserves_live_server(mo
             assert len(servers)==1 and endpoint.exists()
         finally:
             for server in servers:server.close()
+
+
+@pytest.mark.asyncio
+async def test_desktop_batches_validate_before_execution_and_preserve_native_order(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    c.ensure_desktop = AsyncMock()
+    c.open = AsyncMock()
+    c.refresh_frame = AsyncMock()
+    sent = []
+    async def launch(*args, **kwargs):
+        assert args[0] == 'xdotool' and kwargs['env']['DISPLAY'] == ':99'
+        assert kwargs['stdin'] == computer.asyncio.subprocess.PIPE
+        async def communicate(text):
+            sent.append((list(args[1:]), text))
+        return SimpleNamespace(communicate=communicate, returncode=0)
+    monkeypatch.setattr(computer.asyncio, 'create_subprocess_exec', launch)
+    events = [{'type': 'key', 'key': 'Control+l'}, {'type': 'text', 'text': 'person@example.com'},
+              {'type': 'key', 'key': 'Enter'}, {'type': 'pointer', 'phase': 'down', 'button': 0, 'x': 22, 'y': 88},
+              {'type': 'pointer', 'phase': 'move', 'x': 45, 'y': 90}, {'type': 'pointer', 'phase': 'up', 'button': 0}]
+    with pytest.raises(ValueError, match='Take control'):
+        await c.command({'actor': 'owner', 'action': 'input', 'args': {'events': events}})
+    await c.command({'actor': 'owner', 'action': 'claim'})
+    with pytest.raises(ValueError, match='person has control'):
+        await c.command({'action': 'input', 'args': {'events': events}})
+    for invalid in [{'type': 'key', 'key': 'exec+curl'}, {'type': 'pointer', 'phase': 'move', 'x': float('nan'), 'y': 3},
+                    {'type': 'text', 'text': 'x'*10001}, {'type': 'scroll', 'dy': '1'}, {'type': 'unknown'}]:
+        with pytest.raises(ValueError):
+            await c.command({'actor': 'owner', 'action': 'input', 'args': {'events': [events[0], invalid]}})
+    assert sent == [] and c.ensure_desktop.await_count == 0
+    result = await c.command({'actor': 'owner', 'action': 'input', 'args': {'events': events}})
+    assert result['surface'] == 'desktop'
+    assert sent == [(['key', '--clearmodifiers', 'ctrl+l'], None),
+                    (['type', '--clearmodifiers', '--delay', '0', '--file', '-'], b'person@example.com'),
+                    (['key', '--clearmodifiers', 'Return'], None),
+                    (['mousemove', '22', '88', 'mousedown', '1'], None),
+                    (['mousemove', '45', '90'], None), (['mouseup', '1'], None)]
+    # Lost/expired control must release an in-flight drag before another actor acts.
+    c.desktop = SimpleNamespace(poll=lambda: None)
+    c.lease_until = 0
+    await c.command({'actor': 'next-owner', 'action': 'claim'})
+    assert sent[-3:] == [(['mouseup', str(button)], None) for button in [1, 2, 3]]
+
+
+@pytest.mark.asyncio
+async def test_agent_follows_human_selected_tab_and_closed_tabs():
+    c = computer.Computer()
+    def page(visible, focused, closed=False):
+        return SimpleNamespace(is_closed=lambda: closed, evaluate=AsyncMock(return_value={'visible': visible, 'focused': focused}))
+    first, second = page(True, True), page(False, False)
+    c.page, c.context = second, SimpleNamespace(pages=[first, second])
+    await c.active_page()
+    assert c.page is first
+    c.context.pages = [page(False, False, True), second]
+    await c.active_page()
+    assert c.page is second
+    c.context.pages = []
+    await c.active_page()
+    assert c.page is None
+
+
+def test_desktop_input_proxy_preserves_server_identity_and_csrf(workspace):
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    transport = AsyncMock(return_value={'surface': 'desktop', 'available': True, 'controller': 'owner', 'frame': 'live'})
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    body = {'action': 'input', 'args': {'events': [{'type': 'text', 'text': 'test@example.com'}]}}
+    assert client.post(url, json=body, headers={'X-CSRF-Token': 'wrong'}).status_code == 403
+    assert transport.await_count == 0
+    response = client.post(url, json=body)
+    assert response.status_code == 200 and response.json()['surface'] == 'desktop'
+    forwarded = transport.call_args.args[0]
+    assert forwarded['actor'] == response.json()['actor']
+    assert forwarded['args'] == body['args']
+    assert client.post(url, json={**body, 'actor': 'victim'}).status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_private_desktop_pipe_reuses_process_and_never_replays_a_lost_reply():
+    sent, ended = [], []
+    async def responses():
+        yield '{"available":true}\n'
+        yield '{"controller":"owner"}\n'
+        raise OSError('reply lost after input was delivered')
+    stdin = SimpleNamespace(write=lambda data: sent.append(json.loads(data)),
+                            write_eof=lambda: ended.append(True), drain=SimpleNamespace(aio=AsyncMock()))
+    launch = AsyncMock(return_value=SimpleNamespace(stdin=stdin, stdout=responses()))
+    connection = DesktopConnection(SimpleNamespace(exec=SimpleNamespace(aio=launch)), 'sandbox-one')
+    assert (await connection.request({'action':'state'}))['available']
+    assert (await connection.request({'action':'claim','actor':'owner'}))['controller'] == 'owner'
+    assert launch.await_count == 1
+    assert launch.call_args.args[-1] == 'bridge'
+    with pytest.raises(Exception, match='interrupted'):
+        await connection.request({'action':'input','args':{'events':[{'type':'text','text':'once'}]}})
+    assert [body['action'] for body in sent] == ['state','claim','input']
+    assert connection.failed and connection.process is None and ended == [True]
+    await connection.close()
+    assert ended == [True]
+
+
+@pytest.mark.asyncio
+async def test_desktop_connections_follow_sandbox_identity_idle_expiry_and_shutdown(workspace, monkeypatch):
+    app, _, rid, _ = cloud(workspace)
+    hub = app.state.computer
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=AsyncMock(return_value={})))
+    clock = [100]
+    monkeypatch.setattr('app.computer.time', SimpleNamespace(monotonic=lambda: clock[0]))
+    run = {**app.state.store.run(rid), 'sandbox_id':'first'}
+    async with hub.connection(run) as first:
+        first.close = AsyncMock()
+    async with hub.connection(run) as same:
+        assert same is first
+        await same.request({'action':'state'})
+        # Copying captures after a reply must not make an idle pipe look fresh.
+        clock[0] += 21
+    assert hub.sandbox.await_count == 1
+    async with hub.connection(run) as expired:
+        assert expired is not first
+        expired.close = AsyncMock()
+    first.close.assert_awaited_once()
+    async with hub.connection({**run,'sandbox_id':'replacement'}) as replaced:
+        assert replaced is not expired
+        replaced.close = AsyncMock()
+    expired.close.assert_awaited_once()
+    await hub.close()
+    replaced.close.assert_awaited_once()
+    assert not hub.connections
+
+
+def test_loopback_request_does_not_retry_unknown_input_delivery(monkeypatch):
+    attempts = []
+    def lost_reply(*args, **kwargs):
+        attempts.append(True)
+        raise computer.urllib.error.URLError(ConnectionResetError('reply lost'))
+    monkeypatch.setattr(computer.urllib.request, 'urlopen', lost_reply)
+    def unexpected_restart(*args, **kwargs):
+        raise AssertionError('Unknown delivery must not restart or replay the command')
+    monkeypatch.setattr(computer.subprocess, 'Popen', unexpected_restart)
+    with pytest.raises(computer.urllib.error.URLError):
+        computer.request({'action':'input','args':{'events':[{'type':'text','text':'once'}]}})
+    assert attempts == [True]

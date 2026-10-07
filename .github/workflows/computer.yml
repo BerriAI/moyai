@@ -1,0 +1,41 @@
+name: Interactive desktop
+on:
+  pull_request:
+    paths:
+      - 'app/computer.py'
+      - 'app/static/computer.*'
+      - 'app/workspace_image.py'
+      - 'sandbox/computer.py'
+      - 'sandbox/mcp_bridge.py'
+      - 'Dockerfile.sandbox'
+      - 'tests/test_computer*'
+      - 'scripts/computer_desktop_smoke.py'
+      - '.github/workflows/computer.yml'
+permissions:
+  contents: read
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Control, lifecycle and authorization regressions
+        run: |
+          uv run --python 3.13 pytest -q --tb=line tests/test_computer.py tests/test_mcp_bridge.py
+          node --test tests/test_computer_lifecycle.cjs
+      - name: Build production desktop dependencies
+        run: docker build --target transport -f Dockerfile.sandbox -t moyai-desktop .
+      - name: Exercise real Chromium address bar, input and agent handoff
+        run: |
+          mkdir -p desktop-proof
+          docker run --rm --shm-size=1g -v "$PWD:/app:ro" -v "$PWD/desktop-proof:/proof" moyai-desktop python /app/scripts/computer_desktop_smoke.py --output /proof
+      - name: Save desktop screenshot and real recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interactive-desktop-proof
+          path: desktop-proof

@@ -14,8 +14,8 @@ def workspace_image(settings: Settings) -> modal.Image:
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise ValueError("HERMES_REVISION must be a full commit SHA")
     return (modal.Image.debian_slim(python_version="3.14")
-            .apt_install("git", "chromium", "xvfb", "ffmpeg", "ca-certificates", "build-essential", "libffi-dev", "ripgrep", "nodejs", "npm")
-            .pip_install("playwright==1.58.0")
+            .apt_install("git", "chromium", "xvfb", "ffmpeg", "openbox", "tint2", "xterm", "xdotool", "xclip", "x11-xserver-utils", "ca-certificates", "build-essential", "libffi-dev", "ripgrep", "nodejs", "npm")
+            .pip_install("playwright==1.58.0", "pillow==12.3.0")
             .env({"HERMES_RUNTIME_DIR": "/opt/hermes-tools", "PYTHONPATH": "/opt/hermes"})
             .run_commands(f"git init /opt/hermes && cd /opt/hermes && git remote add origin https://github.com/NousResearch/hermes-agent.git && git fetch --depth 1 origin {revision} && git checkout --detach FETCH_HEAD",
                           "cd /opt/hermes && python -m pm.build_env --source /opt/hermes --out /opt/hermes-env --no-install-project --extra mcp",

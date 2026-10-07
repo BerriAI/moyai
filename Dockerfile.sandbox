@@ -1,7 +1,7 @@
 FROM python:3.14-slim AS transport
-RUN apt-get update && apt-get install -y --no-install-recommends git chromium xvfb ffmpeg ca-certificates build-essential libffi-dev ripgrep nodejs npm \
+RUN apt-get update && apt-get install -y --no-install-recommends git chromium xvfb ffmpeg openbox tint2 xterm xdotool xclip x11-xserver-utils ca-certificates build-essential libffi-dev ripgrep nodejs npm \
     && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir cryptography playwright==1.58.0
+RUN pip install --no-cache-dir cryptography playwright==1.58.0 pillow==12.3.0
 COPY sandbox /opt/workspace-runner
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt/hermes HERMES_RUNTIME_DIR=/opt/hermes-tools \
     HERMES_PYTHON=/opt/hermes-env/bin/python HERMES_HOME=/tmp/hermes-home GIT_TERMINAL_PROMPT=0
