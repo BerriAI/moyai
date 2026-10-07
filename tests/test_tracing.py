@@ -170,9 +170,11 @@ def test_broker_exports_cost_inputs_and_distinct_provider_gateway_ids(
               'cache_creation_input_tokens': 20, 'service_tier': 'standard',
               'cache_creation': {'ephemeral_5m_input_tokens': 15, 'ephemeral_1h_input_tokens': 5}}
              if native else {'input_tokens': 125, 'output_tokens': 3,
-                             'input_tokens_details': {'cached_tokens': 100}})
+                             'input_tokens_details': {'cached_tokens': 100},
+                             'output_tokens_details': {'reasoning_tokens': 2}})
     if route == 'chat/completions':
-        usage = {'prompt_tokens': 125, 'completion_tokens': 3, 'prompt_tokens_details': {'cached_tokens': 100}}
+        usage = {'prompt_tokens': 125, 'completion_tokens': 3, 'prompt_tokens_details': {'cached_tokens': 100},
+                 'completion_tokens_details': {'reasoning_tokens': 2}}
         if anthropic:
             usage['prompt_tokens_details'].update(cache_write_tokens=20,
                 cache_creation_token_details={'ephemeral_5m_input_tokens': 15, 'ephemeral_1h_input_tokens': 5})
@@ -205,6 +207,10 @@ def test_broker_exports_cost_inputs_and_distinct_provider_gateway_ids(
     assert attrs['gen_ai.usage.output_tokens'] == 3
     assert attrs['gen_ai.usage.cache_read.input_tokens'] == 100
     assert attrs['gen_ai.usage.total_tokens'] == 128
+    if native:
+        assert 'gen_ai.usage.reasoning.output_tokens' not in attrs
+    else:
+        assert attrs['gen_ai.usage.reasoning.output_tokens'] == 2
     assert 'private-system' not in str(attrs) and 'private-thought' not in str(attrs)
     if anthropic:
         assert attrs['gen_ai.usage.cache_write.input_tokens'] == 20
@@ -216,6 +222,20 @@ def test_broker_exports_cost_inputs_and_distinct_provider_gateway_ids(
         assert attrs['openai.response.service_tier'] == 'flex'
     row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
     assert row['cache_read_input_tokens'] == 100
+
+
+@pytest.mark.parametrize('reasoning', [None, True, -1, '2', 4, 0, 2])
+def test_reasoning_usage_exports_only_reported_output_subsets(tmp_path: Path, reasoning: object) -> None:
+    _, tracing, processor, run, _ = setup(tmp_path)
+    tracing.model(run, 'local-request-id', time.time_ns(), [],
+                  {'usage': {'prompt_tokens': 5, 'completion_tokens': 3, 'reasoning_tokens': reasoning}}, 'completed')
+    attrs = processor.spans[0].attributes
+    assert attrs['gen_ai.usage.output_tokens'] == 3
+    assert attrs['gen_ai.usage.total_tokens'] == 8
+    if type(reasoning) is int and 0 <= reasoning <= 3:
+        assert attrs['gen_ai.usage.reasoning.output_tokens'] == reasoning
+    else:
+        assert 'gen_ai.usage.reasoning.output_tokens' not in attrs
 
 
 @pytest.mark.parametrize('value', [True, -1, '10', None])

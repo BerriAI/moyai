@@ -322,3 +322,13 @@ def test_usage_capture_normalizes_cache_aliases_without_overwriting_zero() -> No
     assert capture.usage['cache_creation'] == {'ephemeral_5m_input_tokens': 20}
     capture.consume({'usage': {'prompt_tokens_details': 'malformed'}})
     assert 'cache_read_input_tokens' not in capture.usage
+
+
+def test_usage_capture_preserves_reported_reasoning_zero_and_omits_missing_breakdown() -> None:
+    capture = UsageCapture(False)
+    capture.consume({'usage': {'reasoning_tokens': 0, 'completion_tokens_details': {'reasoning_tokens': 2}}})
+    assert capture.usage['reasoning_tokens'] == 0
+    capture.consume({'usage': {'output_tokens_details': {'reasoning_tokens': 0}}})
+    assert capture.usage['reasoning_tokens'] == 0
+    capture.consume({'usage': {'completion_tokens_details': 'malformed'}})
+    assert 'reasoning_tokens' not in capture.usage

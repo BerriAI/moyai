@@ -301,6 +301,10 @@ class AgentTracing:
             value = usage.get(source)
             if type(value) is int and value >= 0:
                 attrs['gen_ai.usage.' + target] = value
+        reasoning = usage.get('reasoning_tokens')
+        output = attrs.get('gen_ai.usage.output_tokens')
+        if type(reasoning) is int and type(output) is int and 0 <= reasoning <= output:
+            attrs['gen_ai.usage.reasoning.output_tokens'] = reasoning
         tier = response.get('service_tier') or usage.get('service_tier')
         if provider in {'openai', 'anthropic'} and isinstance(tier, str) and tier:
             attrs[provider + '.response.service_tier'] = self.content(tier)[:100]

@@ -64,6 +64,10 @@ class UsageCapture:
                                            ('cache_creation_token_details', 'cache_creation')]:
                         if details.get(source) is not None and self.usage.get(target) is None:
                             self.usage[target] = details[source]
+            for key in ('completion_tokens_details', 'output_tokens_details'):
+                details = self.usage.get(key)
+                if isinstance(details, dict) and details.get('reasoning_tokens') is not None and self.usage.get('reasoning_tokens') is None:
+                    self.usage['reasoning_tokens'] = details['reasoning_tokens']
         # LiteLLM's optional final streaming cost extension. Token prices are
         # never guessed when the gateway does not expose a final cost.
         for source in (value, value.get('usage', {})):
