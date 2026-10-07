@@ -97,6 +97,20 @@ class HarnessGateway:
         self.tracing = tracing
         self.context_budget = context_budget
 
+    async def context_window(self, run_id, request):
+        run = self.require_run(run_id, request)
+        try:
+            model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from None
+        budget = await self.context_budget.measure({'model': model, 'messages': []})
+        context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+        # The SDK cannot see broker-injected context. Reserve its byte bound as
+        # well as room for a new tool result before the next native compact.
+        window = max(1, budget.input_budget - len(context.encode()) - 4096)
+        self.require_run(run_id, request)
+        return {'model': model, 'input_budget': window}
+
     async def forward(self, run_id, request, route):
         if route != '/context/compact':
             return await self._forward_once(run_id, request, route)
@@ -159,6 +173,8 @@ class HarnessGateway:
                     await client.aclose()
                 if request_id:
                     self.spend.finish(request_id, capture, status)
+                    if status == 'completed' and capture and not compact:
+                        self.context_budget.remember(payload, capture.usage, run_id + route)
                     # Only usage/status: native output can contain private reasoning.
                     self.tracing.model(run, request_id, started, [],
                         {'model': model, 'usage': capture.usage if capture else {}}, status)
@@ -187,7 +203,7 @@ class HarnessGateway:
                 payload[field] = self.store.attachments.with_images(run, items, protocol=route)
             while True:
                 try:
-                    checked_budget = await self.context_budget.check(payload)
+                    checked_budget = await self.context_budget.check(payload, scope='' if compact else run_id + route)
                     break
                 except ContextPressure as exc:
                     if not compact:

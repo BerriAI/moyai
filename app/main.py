@@ -864,6 +864,10 @@ def create_app(settings: Settings | None = None):
     async def compact_context(run_id: str, request: Request):
         return await harness_gateway.forward(run_id, request, '/context/compact')
 
+    @app.get('/broker/{run_id}/context/window')
+    async def native_context_window(run_id: str, request: Request):
+        return await harness_gateway.context_window(run_id, request)
+
     @app.post('/broker/{run_id}/v1/messages')
     async def messages_proxy(run_id: str, request: Request):
         return await harness_gateway.forward(run_id, request, '/v1/messages')
@@ -915,7 +919,7 @@ def create_app(settings: Settings | None = None):
                 if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
         try:
-            checked_budget = await context_budget.check(payload)
+            checked_budget = await context_budget.check(payload, scope=run_id + '/v1/chat/completions')
         except ContextPressure as exc:
             store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
             await checkpoints.flush()
@@ -977,6 +981,8 @@ def create_app(settings: Settings | None = None):
                 # Account before returning any data, including if the sandbox
                 # stopped while the already-submitted inference was completing.
                 spend.finish(request_id, capture, status)
+                if status == 'completed':
+                    context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
                 tracing.model(run, request_id, trace_started, body['messages'], trace_response, status)
                 await checkpoints.flush()
         value = json.loads(raw_response)

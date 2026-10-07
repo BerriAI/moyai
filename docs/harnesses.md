@@ -99,18 +99,37 @@ reserved inside that limit. Missing/invalid limits pause inference with a
 configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
-The gateway's `/utils/token_counter?call_endpoint=true` estimates a serialization
+Claude Agent SDK owns proactive compaction within a task. At session startup the
+authenticated `/context/window` endpoint supplies the selected model's input
+budget, reserving output, injected context and tool-result headroom. The harness
+sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and an 80% compaction threshold (scaled for
+windows below the SDK's 100k setting minimum). The SDK may impose a smaller
+window for an unfamiliar model. Both inherited compaction-disable flags are
+cleared. Native `compact_boundary` events appear in activity, while the native
+summary remains private to the SDK. The durable journal still preserves original
+public receipts for restart recovery. No generation limit is added or lowered.
+
+Ordinary text requests use a local UTF-8 estimate, or the previous response's
+input usage plus a conservative byte estimate of appended messages. Reuse is
+scoped to the run, protocol and model, expires after five minutes, and requires
+unchanged instructions, schemas and message prefix. Cache read/write tokens count
+as input; cache-control placement alone does not invalidate reuse. Only hashes
+and byte lengths are retained. Changed context, missing usage and cold workers
+fall back to estimating the full request. Provider-truncated input is not reused.
+
+When the estimate reaches 80% of the input budget, or new images need counting,
+the gateway's `/utils/token_counter?call_endpoint=true` estimates a serialization
 of the complete request content, schemas and opaque native items, with images
 passed separately as images. This intentionally adds JSON/protocol headroom and
 does not rewrite the inference payload. Generic tokenizer counts cannot reduce
-the conservative UTF-8 byte estimate for text; provider API counters can. If
+the conservative local estimate for text; provider API counters can. If
 counting is unavailable, text uses that byte estimate; images require a working
 provider API counter rather than a guessed cost for their URL or base64 text.
 Unsupported audio/file/video blocks fail explicitly. Provider-injected content
 and tokenizer approximations can still differ: a structured pre-generation
 context rejection also requests reduction; arbitrary errors/timeouts do not.
 
-For Claude and the fresh-session LiteLLM adapters, the relay returns a typed
+As a fallback for Claude, and for the fresh-session LiteLLM adapters, the relay returns a typed
 context signal and blocks further calls from that native session. After the SDK
 closes and all tool receipts settle, the adapter forces journal compaction and
 starts a fresh session with a bounded reference and the original current request.
@@ -121,6 +140,19 @@ repairs. New completed work can trigger further compactions for long tasks.
 Hermes receives the standard `context_length_exceeded` error and retains its
 native bounded overflow-compression path; its native transcript is not rewritten
 by Moyai. Temporal continues to checkpoint lifecycle references, not prompts.
+
+To verify native SDK compaction against a live gateway with only synthetic local
+files and the Read tool, set `GATEWAY_BASE_URL` and `GATEWAY_API_KEY`, then run:
+
+```sh
+uv run python -m scripts.claude_compaction_smoke --model openai/gpt-6-astra --output report.json
+```
+
+This uses a disposable local broker/database and makes billed provider calls.
+It lowers the compaction window only for the probe, verifies at least two native
+compactions, the original codeword, and exactly-once reads, and requires zero
+remote count calls and zero custom-recovery calls. Output allowances remain the
+SDK's own values. Deterministic real-SDK tests also cover Claude and GLM aliases.
 
 Summary generation uses the same budget check. Oversized batches are split into
 prefixes; each response returns `through_seq`, so the store advances only over

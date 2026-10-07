@@ -24,7 +24,7 @@ def workspace(tmp_path, monkeypatch):
     async def limits(model):
         return ModelContextLimits(context_window=2_000_000, max_input_tokens=2_000_000,
                                   max_output_tokens=1_000_000)
-    async def count(payload):
+    async def count(payload, **kwargs):
         return counting_input(payload)[1], 'fixture_bytes'
     monkeypatch.setattr(app.state.context_budget, 'limits', limits)
     monkeypatch.setattr(app.state.context_budget, 'count', count)

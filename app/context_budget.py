@@ -109,6 +109,7 @@ class ContextBudget:
     def __init__(self, settings):
         self.settings = settings
         self.cache = {}
+        self.usage = {}
         self.lock = asyncio.Lock()
 
     @property
@@ -158,9 +159,59 @@ class ContextBudget:
             self.cache[key] = (time.monotonic() + 300, limits)
             return limits
 
-    async def count(self, payload):
+    @staticmethod
+    def fingerprint(payload):
+        # Cache directives move between turns without changing model input.
+        # Keep only hashes and sizes, never a second copy of private context.
+        def clean(value, wire=True):
+            if isinstance(value, list):
+                return [clean(item, wire) for item in value]
+            if isinstance(value, dict):
+                return {key: clean(item, wire and key in {'content', 'system', 'tools'})
+                        for key, item in value.items() if not (wire and key == 'cache_control')}
+            return value
+        def part(value):
+            raw = json.dumps(clean(value), ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+            return hashlib.sha256(raw).digest(), len(raw)
+        field = 'messages' if 'messages' in payload else 'input'
+        items = payload.get(field, [])
+        static = {key: payload[key] for key in ('model', 'system', 'instructions', 'tools',
+                  'tool_choice', 'response_format', 'text') if key in payload}
+        return part(static), tuple(part(item) for item in (items if isinstance(items, list) else [items]))
+
+    def usage_key(self, scope, model):
+        return self.base, hashlib.sha256(self.settings.litellm_api_key.encode()).digest(), scope, model
+
+    def remember(self, payload, usage, scope):
+        tokens = positive(usage.get('prompt_tokens'))
+        if not scope or tokens is None or payload.get('truncation') == 'auto':
+            return
+        if len(self.usage) >= 128:
+            self.usage.clear()
+        self.usage[self.usage_key(scope, payload['model'])] = (time.monotonic() + 300, self.fingerprint(payload), tokens)
+
+    async def count(self, payload, *, input_budget=0, scope=''):
         messages, byte_count, images = counting_input(payload)
         tokens, method = byte_count, 'utf8_upper_estimate'
+        anchor = self.usage.get(self.usage_key(scope, payload['model'])) if scope else None
+        if anchor and anchor[0] > time.monotonic():
+            static, parts = self.fingerprint(payload)
+            old_static, old_parts = anchor[1]
+            if static == old_static and parts[:len(old_parts)] == old_parts:
+                delta = parts[len(old_parts):]
+                # Newly added images still require the provider counter. An
+                # unchanged image prefix is already included in response usage.
+                field = 'messages' if 'messages' in payload else 'input'
+                items = payload.get(field, [])
+                if isinstance(items, list):
+                    images = counting_input({field: items[len(old_parts):]})[2]
+                tokens = anchor[2] + sum(size + 16 for _, size in delta)
+                method = 'usage_plus_utf8_delta'
+        # Ordinary turns have no counting round trip. Exact counting is a
+        # fallback for uncertain/large inputs, not the native compaction loop.
+        if not images and tokens < input_budget * .8:
+            return tokens, method
+        conservative = tokens
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(self.base + '/utils/token_counter', params={'call_endpoint': 'true'},
@@ -177,14 +228,14 @@ class ContextBudget:
                 # A generic tokenizer may be for a different model family (for
                 # example an OpenAI fallback for GLM). Do not trust a smaller
                 # count than the text byte bound in that case.
-                tokens = count if provider_counter else max(count, byte_count)
+                tokens = count if provider_counter else max(count, conservative)
                 method = 'provider_serialization_estimate' if provider_counter else 'conservative_gateway_estimate'
         except (httpx.HTTPError, ValueError, TypeError, AttributeError):
             if images:
                 raise HTTPException(503, 'Image token counting is unavailable. The request was not sent to the model.') from None
         return tokens, method
 
-    async def measure(self, payload):
+    async def measure(self, payload, *, scope=''):
         limits = await self.limits(payload['model'])
         supplied = [payload[key] for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens') if key in payload]
         if any(positive(value) is None for value in supplied):
@@ -202,11 +253,11 @@ class ContextBudget:
         if available <= 0:
             raise HTTPException(422, 'The selected model has no input room with this output allowance. '
                 'Choose compatible model limits or an explicit output allowance.')
-        tokens, method = await self.count(payload)
+        tokens, method = await self.count(payload, input_budget=available, scope=scope)
         return Budget(tokens, available, output, limits.context_window, method)
 
-    async def check(self, payload):
-        budget = await self.measure(payload)
+    async def check(self, payload, *, scope=''):
+        budget = await self.measure(payload, scope=scope)
         if budget.input_tokens > budget.input_budget:
             raise ContextPressure(budget.public())
         return budget

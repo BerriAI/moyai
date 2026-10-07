@@ -24,6 +24,8 @@ class ClaudeAgent(HarnessAgent):
         self.stopped = threading.Event()
         self.journal = None
         self.pending_text = []
+        self.native_compactions = 0
+        self.compaction_window = None
         relay.before_model = self.before_model
         relay.context_recovery = True
 
@@ -82,6 +84,13 @@ class ClaudeAgent(HarnessAgent):
                'ENABLE_TOOL_SEARCH': 'true', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1',
                'DISABLE_PROMPT_CACHING': '0', 'DISABLE_PROMPT_CACHING_HAIKU': '0',
                'DISABLE_PROMPT_CACHING_SONNET': '0', 'DISABLE_PROMPT_CACHING_OPUS': '0'}
+        if self.compaction_window:
+            # The SDK accepts a minimum 100k window. A percentage also covers
+            # smaller deployments. Neither setting caps generated output.
+            window = max(100_000, self.compaction_window)
+            env.update(DISABLE_COMPACT='0', DISABLE_AUTO_COMPACT='0',
+                CLAUDE_CODE_AUTO_COMPACT_WINDOW=str(window),
+                CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=str(max(1, min(80, self.compaction_window * 80 // window))))
         return ClaudeAgentOptions(
             model=ctx.spec['model'], cwd=ctx.cwd,
             system_prompt=system_message + '\nUse ToolSearch to discover Moyai MCP tools before calling them. Do not start detached work.',
@@ -96,6 +105,9 @@ class ClaudeAgent(HarnessAgent):
         self.validate()
         self.stopped.clear()
         self.pending_text.clear()
+        self.native_compactions = 0
+        if hasattr(self.context.relay, 'context_window'):
+            self.compaction_window = self.context.relay.context_window()['input_budget']
         if self.context_store is not None:
             self.context_store.compact(self.context.relay.compact)
             conversation_history = self.context_store.history()
@@ -104,7 +116,7 @@ class ClaudeAgent(HarnessAgent):
             lambda current: asyncio.run(self._run(current, system_message)))
 
     async def _run(self, prompt, system_message):
-        from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage
+        from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage, SystemMessage
         result = None
         try:
             async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
@@ -113,6 +125,12 @@ class ClaudeAgent(HarnessAgent):
                     async for message in client.receive_response():
                         if isinstance(message, AssistantMessage):
                             self.pending_text.extend(block.text for block in message.content if isinstance(block, TextBlock))
+                        elif isinstance(message, SystemMessage) and message.subtype == 'compact_boundary':
+                            self.native_compactions += 1
+                            self.pending_text.clear()
+                            # Native summaries may contain requester-private
+                            # context. Persist only public tool receipts.
+                            self.context.activity.commentary('The agent compacted its context and is continuing. Completed tool receipts remain saved.')
                         elif isinstance(message, ResultMessage):
                             result = message
         except Exception:

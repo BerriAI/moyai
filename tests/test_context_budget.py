@@ -57,7 +57,7 @@ async def test_unknown_or_ambiguous_limits_never_allow_inference(monkeypatch, in
 async def test_output_room_is_reserved_without_changing_generation_fields(monkeypatch):
     budget = service(monkeypatch, lambda req: httpx.Response(200, json={'total_tokens': 10000}),
                      {'astra': limits(16000, 8000), 'glm': limits(32000, 8000)})
-    payload = {'model': 'astra', 'messages': [{'role': 'user', 'content': 'hello'}]}
+    payload = {'model': 'astra', 'messages': [{'role': 'user', 'content': 'x' * 9000}]}
     with pytest.raises(ContextPressure):
         await budget.check(payload)
     assert set(payload) == {'model', 'messages'}
@@ -111,7 +111,7 @@ async def test_counter_outage_uses_conservative_text_bound_but_never_guesses_ima
 def test_all_routes_check_injected_input_before_admission(workspace, monkeypatch, route, field, output_field):
     app, client = workspace
     async def small_limits(model): return limits(16000, 8000)
-    async def count(payload):
+    async def count(payload, **kwargs):
         assert payload[output_field] == 8000
         assert payload['model'] == 'openai/gpt-6-astra'
         assert 'injected-private-memory' in json.dumps(payload)
@@ -169,7 +169,7 @@ def test_revocation_during_count_cannot_admit_model(workspace, monkeypatch):
     app, client = workspace
     run = app.state.store.create_run('count', '', 'modal', [])
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
-    async def count(payload):
+    async def count(payload, **kwargs):
         app.state.store.update_run(run['id'], status='cancelled', token_hash='')
         return 1, 'fixture'
     monkeypatch.setattr(app.state.context_budget, 'count', count)
@@ -204,8 +204,8 @@ def test_only_confirmed_provider_context_rejection_can_request_recovery(workspac
 async def test_generic_tokenizer_cannot_undercount_other_model_family(monkeypatch):
     budget = service(monkeypatch, lambda req: httpx.Response(200, json={
         'total_tokens': 1, 'tokenizer_type': 'openai_tokenizer'}), {'glm': limits()})
-    result = await budget.check({'model': 'glm', 'messages': [{'role': 'user', 'content': '界' * 1000}]})
-    assert result.input_tokens > 3000
+    result = await budget.check({'model': 'glm', 'messages': [{'role': 'user', 'content': '界' * 3500}]})
+    assert result.input_tokens > 10500
     assert result.method == 'conservative_gateway_estimate'
 
 
@@ -240,4 +240,98 @@ def test_legacy_compactor_cannot_skip_records_during_rolling_deployment(workspac
     response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
         json={'summary': '', 'entries': [{'seq': i, 'excerpt': 'large receipt ' * 80} for i in range(1, 9)]})
     assert response.status_code == 422 and 'Reconnect' in response.json()['detail']
+    assert not app.state.store.rows('SELECT * FROM model_requests')
+
+
+@pytest.mark.asyncio
+async def test_usage_anchor_avoids_counter_and_invalidates_on_context_changes(monkeypatch):
+    calls = []
+    def upstream(request):
+        calls.append(request)
+        return httpx.Response(200, json={'total_tokens': 3000, 'tokenizer_type': 'openai_api'})
+    budget = service(monkeypatch, upstream, {'astra': limits(), 'glm': limits()})
+    original = {'model': 'astra', 'system': 'private A', 'messages': [
+        {'role': 'user', 'content': [{'type': 'text', 'text': 'history ' * 1500,
+                                    'cache_control': {'type': 'ephemeral'}}]}]}
+    budget.remember(original, {'prompt_tokens': 3000}, 'run-a')
+    followup = json.loads(json.dumps(original))
+    followup['messages'][0]['content'][0].pop('cache_control')
+    followup['messages'].append({'role': 'assistant', 'content': 'next step'})
+    result = await budget.check(followup, scope='run-a')
+    assert result.method == 'usage_plus_utf8_delta'
+    assert 3000 < result.input_tokens < 3200
+    assert not calls
+    # Another run, model, new injected memory, or changed old history cannot
+    # reuse a cheaper input count from an unrelated prompt.
+    for payload, scope in [(followup, 'run-b'), ({**followup, 'model': 'glm'}, 'run-a'),
+                           ({**followup, 'system': 'private B'}, 'run-a')]:
+        await budget.check(payload, scope=scope)
+    changed = json.loads(json.dumps(followup))
+    changed['messages'][0]['content'][0]['text'] += 'changed old history'
+    await budget.check(changed, scope='run-a')
+    assert len(calls) == 4
+    budget.settings.litellm_api_key = 'rotated'
+    await budget.check(followup, scope='run-a')
+    budget.settings.litellm_api_key = 'fixture'
+    budget.settings.litellm_api_base = 'https://another-gateway.example/v1'
+    await budget.check(followup, scope='run-a')
+    assert len(calls) == 6
+    budget.settings.litellm_api_base = 'https://gateway.example/v1'
+    monkeypatch.setattr('app.context_budget.time.monotonic', lambda: 10**12)
+    await budget.check(followup, scope='run-a')
+    assert len(calls) == 7
+
+
+@pytest.mark.asyncio
+async def test_ordinary_turns_never_request_remote_count(monkeypatch):
+    budget = service(monkeypatch, lambda req: pytest.fail('Unexpected counting network call'), {'astra': limits()})
+    payload = {'model': 'astra', 'messages': []}
+    for i in range(20):
+        payload['messages'].append({'role': 'user', 'content': f'Continue step {i}.'})
+        result = await budget.check(payload, scope='run')
+        budget.remember(payload, {'prompt_tokens': 100 + i * 10}, 'run')
+    assert result.method == 'usage_plus_utf8_delta'
+
+
+@pytest.mark.asyncio
+async def test_new_images_require_count_even_with_usage_anchor(monkeypatch):
+    calls = []
+    def upstream(request):
+        calls.append(request)
+        return httpx.Response(200, json={'total_tokens': 2500, 'tokenizer_type': 'openai_api'})
+    budget = service(monkeypatch, upstream, {'astra': limits()})
+    image = {'role': 'user', 'content': [{'type': 'image', 'source': {'type': 'url', 'url': 'https://example.test/image.png'}}]}
+    payload = {'model': 'astra', 'messages': [image]}
+    await budget.check(payload, scope='run')
+    budget.remember(payload, {'prompt_tokens': 2500}, 'run')
+    followup = {**payload, 'messages': [image, {'role': 'user', 'content': 'Explain it.'}]}
+    assert (await budget.check(followup, scope='run')).method == 'usage_plus_utf8_delta'
+    assert len(calls) == 1
+    await budget.check({**followup, 'messages': [*followup['messages'], image]}, scope='run')
+    assert len(calls) == 2
+
+
+def test_usage_fingerprint_preserves_tool_arguments_and_ignores_truncated_usage():
+    budget = ContextBudget(SimpleNamespace())
+    payload = {'model': 'astra', 'input': [{'type': 'tool_use', 'input': {'cache_control': 'first'}}]}
+    changed = {'model': 'astra', 'input': [{'type': 'tool_use', 'input': {'cache_control': 'second'}}]}
+    assert budget.fingerprint(payload) != budget.fingerprint(changed)
+    budget.remember({**payload, 'truncation': 'auto'}, {'prompt_tokens': 100}, 'run')
+    assert not budget.usage
+
+
+def test_native_window_is_authenticated_and_reserves_injected_context(workspace, monkeypatch):
+    app, client = workspace
+    async def small_limits(model): return limits(100000, 20000)
+    monkeypatch.setattr(app.state.context_budget, 'limits', small_limits)
+    monkeypatch.setattr(app.state.memory, 'context', lambda run: 'private-marker' * 100)
+    monkeypatch.setattr(app.state.skills, 'context', lambda run: '')
+    run = app.state.store.create_run('native window', '', 'modal', [], model='openai/gpt-6-astra')
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    path = f"/broker/{run['id']}/context/window"
+    assert client.get(path).status_code == 401
+    response = client.get(path, headers={'Authorization': 'Bearer cap'})
+    assert response.status_code == 200
+    assert response.json() == {'model': 'openai/gpt-6-astra', 'input_budget': 72000 - 1400 - 4096}
+    assert 'private' not in response.text
     assert not app.state.store.rows('SELECT * FROM model_requests')

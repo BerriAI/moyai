@@ -223,6 +223,15 @@ class BrokerRelay:
             # Control-plane failure cannot authorize interrupting or replaying work.
             return {}
 
+    def context_window(self):
+        request = urllib.request.Request(self.remote.rstrip('/') + '/context/window',
+            headers={'Authorization': 'Bearer ' + self.token})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            value = json.loads(response.read(8192))
+        if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
+            raise ValueError('The broker did not return a usable compaction window.')
+        return value
+
     def compact(self, summary, entries, *, summary_bytes=None):
         """Tool-free maintenance outside the runtime's next-model checkpoint hook.
 
