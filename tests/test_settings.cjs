@@ -56,7 +56,9 @@ test('Settings refreshes access and hides administrative sections for members', 
   const html = elements.get('#content').innerHTML;
   assert.equal(context.state.role, 'member');
   assert.match(html, /href="#connections"/);
-  assert.doesNotMatch(html, /href="#(?:users|spend|adoption|environments)"|settings-administration/);
+  assert.match(html, /href="#spend"/);
+  assert.match(html, /See your own LLM usage and costs/);
+  assert.doesNotMatch(html, /href="#(?:users|adoption|environments)"|settings-administration/);
 });
 
 test('a delayed Settings access check cannot overwrite a different page', async () => {

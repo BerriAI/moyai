@@ -140,6 +140,7 @@ class Spend:
                 CREATE INDEX IF NOT EXISTS idx_model_requests_run ON model_requests(key_hash,run_id);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_org_time ON model_requests(created_at);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_org_run ON model_requests(run_id);
+                CREATE INDEX IF NOT EXISTS idx_model_requests_user_time ON model_requests(user_id,created_at);
             ''')
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
             if 'cost_source' not in columns:
@@ -177,15 +178,29 @@ class Spend:
                            (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
                             tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
 
-    def report(self, start=None, end=None):
+    def report(self, start=None, end=None, *, user_id=None):
         start, end, lower, upper = period(start, end)
-        users = {u['id']: u for u in self.store.rows('''SELECT id,kind,email,name,linked_user_id,link_method,link_status,profile_checked_at
-            FROM users u WHERE kind!='slack' OR linked_user_id IS NOT NULL
+        user_filter, user_params = '', ()
+        if user_id is not None:
+            user_filter = " WHERE id=? OR (kind='slack' AND linked_user_id=?)"
+            user_params = (user_id, user_id)
+        else:
+            user_filter = ''' WHERE kind!='slack' OR linked_user_id IS NOT NULL
             OR EXISTS(SELECT 1 FROM messages WHERE user_id=u.id)
             OR EXISTS(SELECT 1 FROM runs WHERE owner_id=u.id)
-            OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id)''')}
-        rows = self.store.rows('SELECT * FROM model_requests WHERE created_at>=? AND created_at<?', (lower, upper))
-        tracked_since = self.store.rows('SELECT MIN(created_at) AS value FROM model_requests')[0]['value']
+            OR EXISTS(SELECT 1 FROM model_requests WHERE user_id=u.id)'''
+        users = {u['id']: u for u in self.store.rows('''SELECT id,kind,email,name,linked_user_id,link_method,link_status,profile_checked_at
+            FROM users u''' + user_filter, user_params)}
+        # Scope the source rows before totals, metadata and the request-detail limit.
+        # Only the authenticated identity and its established Slack accounting links apply.
+        scope, scope_params = '', ()
+        if user_id is not None:
+            scope = " AND (user_id=? OR user_id IN (SELECT id FROM users WHERE kind='slack' AND linked_user_id=?))"
+            scope_params = (user_id, user_id)
+        predicate = 'created_at>=? AND created_at<?' + scope
+        params = (lower, upper, *scope_params)
+        rows = self.store.rows('SELECT * FROM model_requests WHERE ' + predicate, params)
+        tracked_since = self.store.rows('SELECT MIN(created_at) AS value FROM model_requests WHERE 1=1' + scope, scope_params)[0]['value']
         def empty():
             return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0, 'sessions': set()}
         groups = {user['id']: empty() for user in users.values() if user['kind'] == 'google'}
@@ -202,25 +217,30 @@ class Spend:
         total = empty()
         for row in rows:
             actor = users.get(row['user_id'], {})
-            user_id = actor.get('linked_user_id') or actor.get('id') or 'unattributed'
-            row['user_id'] = user_id
+            attributed_user = actor.get('linked_user_id') or actor.get('id') or 'unattributed'
+            row['user_id'] = attributed_user
             add(total, row)
-            add(groups.setdefault(user_id, empty()), row)
+            add(groups.setdefault(attributed_user, empty()), row)
             add(models.setdefault(row['model'], empty()), row)
             if row['run_id']:
-                add(sessions.setdefault((user_id, row['run_id']), empty()), row)
+                add(sessions.setdefault((attributed_user, row['run_id']), empty()), row)
         def clean(bucket):
             return {**bucket, 'spend': str(bucket['spend']), 'sessions': len(bucket['sessions'])}
         def identity(user_id):
             return users.get(user_id, {'id': 'unattributed', 'name': 'Unattributed / earlier usage', 'email': '', 'kind': 'unattributed'})
-        titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows('SELECT id,prompt FROM runs')}
-        result = {'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
+        titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows(
+            'SELECT id,prompt FROM runs WHERE id IN (SELECT run_id FROM model_requests WHERE ' + predicate + ')', params)}
+        result = {'scope': 'personal' if user_id is not None else 'organization',
+                'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
                 'priced_requests': sum(row['cost'] is not None for row in rows),
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
                 'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_source','prompt_tokens','completion_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
                 'identities': list(users.values()), 'tracked_since': tracked_since}
+
+        if user_id is not None:
+            return result
 
         infrastructure = self.infrastructure.report(start, end)
         result['infrastructure'] = infrastructure
@@ -234,6 +254,17 @@ class Spend:
 
     def routes(self):
         router = APIRouter()
+
+        @router.get('/api/spend')
+        async def accessible_report(request: Request, start: date | None = None, end: date | None = None):
+            self.security.require(request)
+            info = self.security.session_info(request)
+            if info['role'] == 'admin':
+                return self.report(start, end)
+            if info['method'] != 'google':
+                raise HTTPException(403, 'Sign in with your Google account to view your personal LLM spend. Shared passwords do not identify an individual.')
+            user_id = self.store.identity(info)
+            return self.report(start, end, user_id=user_id)
 
         @router.get('/api/admin/spend')
         async def report(request: Request, start: date | None = None, end: date | None = None):

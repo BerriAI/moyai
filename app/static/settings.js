@@ -9,12 +9,12 @@ const settingsGroups = [
     {view:'secrets', title:'Secrets', description:'Manage personal and shared service access.'},
   ]},
   {id:'workspace', title:'Workspace', items:[
+    {view:'spend', title:'Spend', description:'See your own LLM usage and costs.', adminDescription:'See model usage and costs across your team.'},
     {view:'runtime', title:'Runtime', description:'Check cloud setup and session limits.'},
     {view:'environments', title:'Environments', description:'Prepare repositories and workspace tools.', admin:true},
   ]},
   {id:'administration', title:'Administration', admin:true, items:[
     {view:'users', title:'Users', description:'Manage workspace members and roles.', admin:true},
-    {view:'spend', title:'Spend', description:'See model usage and costs across your team.', admin:true},
     {view:'adoption', title:'Adoption', description:'Track human requests and active teammates over time.', admin:true},
   ]},
 ];
@@ -52,7 +52,7 @@ async function renderSettings() {
         <div class="settings-links">${group.items.filter(item => !item.admin || admin).map(item => `
           <a class="settings-link" href="#${item.view}">
             <span class="settings-icon">${settingsIcon(item.view)}</span>
-            <span class="settings-copy"><strong>${item.title}</strong><span>${item.description}</span></span>
+            <span class="settings-copy"><strong>${item.title}</strong><span>${admin && item.adminDescription || item.description}</span></span>
             <span class="settings-arrow" aria-hidden="true">›</span>
           </a>`).join('')}</div>
       </section>`).join('')}</div>
