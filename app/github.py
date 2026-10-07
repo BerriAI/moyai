@@ -21,6 +21,7 @@ from sandbox.github_limits import MAX_FILE, MAX_TOTAL
 from .connector_errors import ConnectorError
 from .db import now
 from .github_repositories import GitHubRepositories
+from .slack_prs import track_publication
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
@@ -554,7 +555,9 @@ class GitHub(GitHubRepositories):
             raise ConnectorError(f'Publication unconfirmed for {target}, branch {branch}: {error} '
                                  'No creation retry was sent. Inspect this destination; use the same request_key '
                                  'and unchanged arguments for read-only recovery after an attempted creation.') from None
-        self.store.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
+        with self.store.connect() as conn:
+            conn.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
+            track_publication(conn, identity, self.connectors.slack_installation())
         return result
 
     async def create_change_commit(self, run, args, token, target, version, tool):

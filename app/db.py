@@ -113,6 +113,14 @@ class Store:
                     run_id TEXT PRIMARY KEY REFERENCES runs(id), status TEXT NOT NULL DEFAULT '',
                     refreshed_at REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS slack_pr_reactions (
+                    publication_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                    team_id TEXT NOT NULL, channel TEXT NOT NULL, thread_ts TEXT NOT NULL,
+                    bot_user_id TEXT NOT NULL, opened_reaction TEXT NOT NULL DEFAULT '',
+                    finished INTEGER NOT NULL DEFAULT 0, next_check REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_slack_pr_reactions_pending
+                    ON slack_pr_reactions(finished,next_check);
                 PRAGMA optimize;
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',

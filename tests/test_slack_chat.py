@@ -781,7 +781,7 @@ def test_media_rechecks_destination_after_awaits(media_delivery, monkeypatch, bo
     assert media[0]['status'] == 'uncertain'
 
 
-def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_delivery, monkeypatch):
+def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_delivery, slack_app, monkeypatch):
     app, prepare, calls, uploaded = media_delivery
     run_id, answer = prepare()
     finish(app, run_id, answer)
@@ -801,7 +801,9 @@ def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_del
     async def restart() -> None:
         app.state.slack.recover()
         await app.state.slack.chat.shutdown()
-    asyncio.run(restart())
+    # Recover managed workers on the application's loop, not a temporary loop
+    # that is closed before the TestClient's lifespan shuts those workers down.
+    slack_app[1].portal.call(restart)
     app.state.slack.chat.collect()
     drain_answers(app)
     assert sum(method == 'files.completeUploadExternal' for method, _ in calls) == 1
