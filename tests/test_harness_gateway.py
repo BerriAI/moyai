@@ -8,6 +8,32 @@ from app.security import digest
 from test_workspace import workspace
 
 
+def test_native_gateway_preserves_discovered_tool_references(workspace, monkeypatch):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    tools = [{'name': 'mcp__moyai__echo', 'defer_loading': True,
+              'input_schema': {'type': 'object', 'properties': {'text': {'type': 'string'}}}}]
+    messages = [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'search',
+                  'name': 'ToolSearch', 'input': {'query': 'echo', 'max_results': 1}}]},
+                {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'search',
+                  'content': [{'type': 'tool_reference', 'tool_name': 'mcp__moyai__echo'}]}]}]
+    beta = 'advanced-tool-use-2025-11-20'
+    def upstream(request):
+        body = json.loads(request.content)
+        assert body['tools'] == tools and body['messages'] == messages
+        assert request.headers['anthropic-beta'] == beta
+        return httpx.Response(200, json={'id': 'fixture', 'usage': {'input_tokens': 10, 'output_tokens': 1}})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('tool search', '', 'modal', [], harness='claude-agent-sdk')
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    response = client.post(f"/broker/{run['id']}/v1/messages",
+        headers={'Authorization': 'Bearer cap', 'anthropic-beta': beta},
+        json={'messages': messages, 'tools': tools, 'stream': False})
+    assert response.status_code == 200
+
+
 @pytest.mark.parametrize('route,body,wire', [
     ('messages', {'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': 'hello'}]}],
                   'tools': [{'name': 'Read', 'input_schema': {'type': 'object'}}]},

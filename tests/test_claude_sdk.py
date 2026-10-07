@@ -63,12 +63,15 @@ def test_slack_defaults_to_sdk(slack_app):
 
 def test_sdk_options_force_prompt_caching_and_broker_only(monkeypatch, tmp_path):
     monkeypatch.setenv('DISABLE_PROMPT_CACHING', '1')
+    monkeypatch.setenv('ENABLE_TOOL_SEARCH', 'false')
     agent, _ = make_agent(monkeypatch, tmp_path)
     options = agent.options('stable system prompt')
     assert options.env['DISABLE_PROMPT_CACHING'] == '0'
     assert all(options.env['DISABLE_PROMPT_CACHING_' + family] == '0' for family in ('OPUS', 'SONNET', 'HAIKU'))
     assert options.env['ANTHROPIC_API_KEY'] == 'run-capability'
     assert options.env['ANTHROPIC_BASE_URL'] == agent.context.relay.url
+    assert options.env['ENABLE_TOOL_SEARCH'] == 'true'
+    assert 'ToolSearch' in options.tools and 'ToolSearch' in options.allowed_tools
     assert options.permission_mode == 'dontAsk'
     assert options.setting_sources == [] and options.strict_mcp_config
     assert set(options.mcp_servers) == {'moyai'}
