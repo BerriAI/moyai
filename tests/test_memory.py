@@ -103,6 +103,7 @@ def test_pause_and_manual_mode_apply_to_running_agents(workspace):
     assert client.put('/api/memory/preferences',json={'enabled':True,'auto_save':True,'revision':0}).status_code == 409
     assert client.put('/api/memory/preferences',json={'enabled':True,'auto_save':True,'revision':2}).status_code == 200
     assert MARKER not in app.state.memory.context(run)  # Must recall again after resume.
+    assert app.state.store.rows('SELECT tainted FROM native_sessions WHERE run_id=?', (run['id'],))[0]['tainted'] == 1
 
 
 def test_delete_removes_context_and_retries_cannot_resurrect(workspace):

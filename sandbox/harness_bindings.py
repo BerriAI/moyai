@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import tempfile
 
 
 @dataclass(frozen=True)
@@ -27,15 +28,41 @@ class RuntimeBinding:
                 else 'Use the advertised Moyai MCP tools directly.')
 
 
-def local_sandbox(cwd, config):
+def sandbox_class(native=None):
     from litellm.harness.sandbox.local import LocalSandbox
-    return LocalSandbox(cwd)
+    if native is None:
+        return LocalSandbox
+
+    class ScopedSandbox(LocalSandbox):
+        def child_env(self, env=None):
+            merged = {**native.env, **(env or {})}
+            # Persistence setup and runtime launches must use the same home.
+            # Keep runtime-specific CODEX_HOME/XDG paths inside our owned root.
+            merged.update({key: native.env[key] for key in ('HOME', 'TMPDIR', 'TMP', 'TEMP') if key in native.env})
+            root = native.root.resolve()
+            for key in ('HOME', 'TMPDIR', 'TMP', 'TEMP', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME',
+                        'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME'):
+                if key in merged and not Path(merged[key]).resolve().is_relative_to(root):
+                    raise ValueError('Native runtime storage escaped its session directory')
+            return super().child_env(merged)
+
+        async def tempdir(self):
+            self._check_open()
+            directory = Path(native.env['TMPDIR'])
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path = str(Path(tempfile.mkdtemp(prefix='litellm-harness-', dir=directory)).resolve())
+            self._tempdirs.append(path)
+            return path
+
+    return ScopedSandbox
 
 
-def codex_sandbox(cwd, config):
-    from litellm.harness.sandbox.local import LocalSandbox
+def local_sandbox(cwd, config, native=None):
+    return sandbox_class(native)(cwd)
 
-    class CodexSandbox(LocalSandbox):
+
+def codex_sandbox(cwd, config, native=None):
+    class CodexSandbox(sandbox_class(native)):
         is_container = True  # The enclosing Modal machine provides isolation.
 
         async def exec(self, cmd, *, env=None, cwd=None):

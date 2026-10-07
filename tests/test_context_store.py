@@ -1,13 +1,156 @@
 import json
+import base64
 from pathlib import Path
 import shutil
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
 from sandbox.context_store import ContextStore, ContextUnavailable, open_context, read_records, BATCH_BYTES, SUMMARY_BYTES
 from sandbox.harness_agent import TurnJournal
 from sandbox.continuation import RotationDeadline
+
+
+@pytest.fixture
+def native_checkpoint(tmp_path):
+    from app.native_sessions import NativeSessions
+    from sandbox.native_session import NativeSession
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'assistant', 'content': 'Public completed receipt'}])
+    requests = []
+    def exchange(body):
+        # Exercise the production server contract, not a permissive fake that
+        # would accept a commit the real encrypted endpoint rejects.
+        NativeSessions.validate(None, body)
+        requests.append(body)
+        return {'lease': body['lease'], 'state': None, 'reason': 'missing'}
+    context = SimpleNamespace(cwd=str(tmp_path), spec={}, relay=SimpleNamespace(native=exchange))
+    native = NativeSession(context, store, 'codex', {'adapter': 1})
+    native.begin()
+    try:
+        yield native, store, requests
+    finally:
+        native.close()
+        store.close()
+
+
+@pytest.mark.parametrize('change', [None, 'journal_append', 'journal_reset', 'unresolved_tool'])
+def test_native_commit_requires_the_exact_completed_public_checkpoint(native_checkpoint, change):
+    native, store, requests = native_checkpoint
+    payload = {'opaque': ['PRIVATE NATIVE MARKER']}
+    native.finish(payload)
+    payload['opaque'].append('Changed after staging')
+    marker = native.root / 'claude/private.jsonl'
+    marker.write_text('PRIVATE NATIVE MARKER')
+    if change == 'journal_append':
+        store.append({'role': 'user', 'content': 'Later message'})
+    elif change == 'journal_reset':
+        with store.db:
+            store.db.execute("UPDATE state SET epoch=?", ('b' * 32,))
+    elif change == 'unresolved_tool':
+        TurnJournal([], 'Inspect', store).tool_started('unknown', 'Edit', {})
+    native.close()
+    commits = [request for request in requests if request['action'] == 'commit']
+    assert len(commits) == (0 if change else 1)
+    if commits:
+        assert commits[0]['compatibility'] == native.compatibility
+        assert commits[0]['state'] == {'opaque': ['PRIVATE NATIVE MARKER']}
+        assert commits[0]['checkpoint'] == native.checkpoint()
+    assert not marker.exists() and not native.root.exists()
+    assert 'PRIVATE NATIVE MARKER' not in json.dumps(read_records(store.path))
+
+
+@pytest.mark.parametrize('failure', ['missing', 'corrupt', 'oversize', 'wrong_lease', 'unavailable',
+                                     'restart_unavailable', 'restart_wrong_lease'])
+def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_checkpoint, failure):
+    from sandbox.native_session import MAX_BYTES
+    native, store, requests = native_checkpoint
+    private = native.root / 'claude/previous.jsonl'
+    private.write_text('OLD PRIVATE STATE')
+    def load(body):
+        if failure == 'unavailable' or (failure == 'restart_unavailable' and body['action'] == 'restart'):
+            raise OSError('Native service unavailable')
+        state = {'private': 'OLD PRIVATE STATE'}
+        if failure == 'missing': state = None
+        if failure == 'corrupt' or failure.startswith('restart_'): state = ['bad state']
+        if failure == 'oversize': state = {'large': 'x' * (MAX_BYTES + 1)}
+        wrong_lease = failure == 'wrong_lease' or (failure == 'restart_wrong_lease' and body['action'] == 'restart')
+        return {'lease': 'different-lease' if wrong_lease else body['lease'], 'state': state}
+    native.context.relay.native = load
+    assert native.begin() is None and not native.resumed
+    if failure in {'wrong_lease', 'unavailable', 'restart_unavailable', 'restart_wrong_lease'}:
+        assert not native.enabled
+        native.finish({'opaque': 'Unacknowledged replacement'})
+        assert native.staged is None and not any(body['action'] == 'commit' for body in requests)
+    assert not private.exists()
+    assert 'Public completed receipt' in store.history()[0]['content']
+    assert 'OLD PRIVATE STATE' not in json.dumps(read_records(store.path))
+
+
+@pytest.mark.parametrize('reason', ['pending', 'fresh_child', 'workspace_warning'])
+def test_unconfirmed_or_inherited_native_state_is_invalidated(native_checkpoint, reason):
+    native, store, requests = native_checkpoint
+    exchange = native.context.relay.native
+    def load(body):
+        reply = exchange(body)
+        if body['action'] == 'begin': reply['state'] = {'private': 'PARENT STATE'}
+        return reply
+    native.context.relay.native = load
+    if reason == 'pending':
+        TurnJournal([], 'Check earlier work', store).tool_started('uncertain', 'Edit', {})
+    else:
+        native.context.spec[reason] = True
+    assert native.begin() is None and not native.resumed
+    assert requests[-1]['action'] == 'invalidate'
+    assert 'PARENT STATE' not in json.dumps(read_records(store.path))
+
+
+@pytest.mark.parametrize('bad_name', ['../escape', '/absolute', 'nested/../../escape', 'windows\\escape', 'nul\x00name'])
+def test_native_file_restore_rejects_bad_names_before_writing(native_checkpoint, bad_name):
+    native, _, _ = native_checkpoint
+    data = base64.b64encode(b'private').decode()
+    with pytest.raises(ValueError):
+        native.restore_files(native.cache, {'valid.json': data, bad_name: data})
+    assert not (native.cache / 'valid.json').exists()
+
+
+def test_native_file_roundtrip_is_private_and_size_count_bounded(native_checkpoint, monkeypatch):
+    from sandbox import native_session
+    native, _, _ = native_checkpoint
+    data = base64.b64encode(b'private').decode()
+    native.restore_files(native.cache, {'nested/session.json': data})
+    target = native.cache / 'nested/session.json'
+    assert target.read_bytes() == b'private' and target.stat().st_mode & 0o777 == 0o600
+    assert native.files(native.cache) == {'nested/session.json': data}
+    for snapshot in ({'valid': data, 'bad': 'not base64!'}, {'valid': data, 'large': base64.b64encode(b'x' * 33).decode()}):
+        monkeypatch.setattr(native_session, 'MAX_BYTES', 32)
+        with pytest.raises(ValueError):
+            native.restore_files(native.root / 'restore', snapshot)
+        assert not (native.root / 'restore/valid').exists()
+    monkeypatch.setattr(native_session, 'MAX_FILES', 1)
+    with pytest.raises(ValueError):
+        native.restore_files(native.root / 'restore', {'one': data, 'two': data})
+    (target.parent / 'second').write_text('second')
+    with pytest.raises(ValueError):
+        native.files(native.cache)
+
+
+@pytest.mark.parametrize('destination', ['outside', 'inside'])
+def test_native_file_restore_and_snapshot_reject_ancestor_symlinks(native_checkpoint, tmp_path, destination):
+    native, _, _ = native_checkpoint
+    target = tmp_path / 'outside' if destination == 'outside' else native.root / 'owned'
+    (target / 'nested').mkdir(parents=True)
+    secret = target / 'nested/private.json'
+    secret.write_text('PRIVATE DO NOT COPY')
+    (native.root / 'link').symlink_to(target, target_is_directory=True)
+    with pytest.raises(ValueError):
+        native.files(native.root / 'link/nested')
+    encoded = base64.b64encode(b'overwrite').decode()
+    with pytest.raises(ValueError):
+        native.restore_files(native.root, {'valid.json': encoded, 'link/nested/private.json': encoded})
+    assert not (native.root / 'valid.json').exists()
+    assert secret.read_text() == 'PRIVATE DO NOT COPY'
 
 
 def add_round(store, number, output='completed'):

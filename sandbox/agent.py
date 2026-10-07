@@ -23,6 +23,7 @@ try:
     from .context_store import open_context, ContextUnavailable
     from .goals import GoalLoop, run_goal_conversation
     from .hermes_compat import apply_hermes_patches
+    from .native_session import native_storage
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -37,6 +38,7 @@ except ImportError:
     from context_store import open_context, ContextUnavailable
     from goals import GoalLoop, run_goal_conversation
     from hermes_compat import apply_hermes_patches
+    from native_session import native_storage
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -98,6 +100,11 @@ def hermes_config(spec, broker_url, workspace):
 
 
 def run_agent(spec, relay):
+    with native_storage(Path('/session/.native-sdk'), Path('/root'), Path('/tmp')):
+        return _run_agent(spec, relay)
+
+
+def _run_agent(spec, relay):
     harness = spec.get('harness', 'hermes')
     if harness == 'hermes':
         apply_hermes_patches()

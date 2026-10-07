@@ -455,3 +455,242 @@ async def test_maintenance_startup_failure_can_retry_without_restart(tmp_path, c
             pending.cancel()
         await asyncio.gather(pending, return_exceptions=True)
         await owner.close()
+
+
+def native_exchange(client, run_id, action, lease='a' * 32, *, token='capability', **changes):
+    route = '/context/native'
+    body = {'action': action, 'lease': lease}
+    if action != 'invalidate':
+        body.update(compatibility='b' * 64, checkpoint={'epoch': 'c' * 32, 'seq': 7})
+    if action == 'commit':
+        body['state'] = {'session_id': 'native-session', 'transcript': 'private-native-marker'}
+    body.update(changes)
+    return client.post('/broker/' + run_id + route,
+        content=seal(token, route, json.dumps(body).encode()),
+        headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE})
+
+
+def native_followup(app, run, *, user=None, model=None, before_finish=False):
+    db = app.state.store
+    def enqueue():
+        db.enqueue_message(run['id'], 'Follow-up', 'follow-up-' + str(run['active_message_id']),
+            user_id=user or run['active_user_id'], model=model or run['active_model'])
+    if before_finish:
+        enqueue()
+    db.finish_message(run['id'], run['active_message_id'], 'Done')
+    if not before_finish:
+        enqueue()
+    db.claim_message(run['id'])
+    db.update_run(run['id'], status='running', token_hash=digest('next-capability'))
+    return db.run(run['id'])
+
+
+def test_native_session_encrypted_resume_survives_store_restart_and_queued_followup(workspace):
+    from app.db import Store
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    assert native_exchange(client, run['id'], 'begin').json()['reason'] == 'missing'
+    assert native_exchange(client, run['id'], 'commit').json()['saved']
+    reopened = Store(app.state.settings.data_dir)
+    row = reopened.rows('SELECT * FROM native_sessions')[0]
+    assert 'private-native-marker' not in json.dumps(row)
+    assert 'private-native-marker' in app.state.security.decrypt(row['encrypted'])
+    current = native_followup(app, run, before_finish=True)
+    reply = native_exchange(client, current['id'], 'begin', 'd' * 32, token='next-capability').json()
+    assert reply['reason'] == 'resumed' and reply['state']['transcript'] == 'private-native-marker'
+    assert 'private-native-marker' not in json.dumps(app.state.store.events(run['id']))
+    assert 'private-native-marker' not in json.dumps(app.state.store.messages(run['id']))
+    assert len(reopened.rows('SELECT * FROM native_sessions')) == 1
+
+
+@pytest.mark.parametrize('change,reason', [
+    ('actor', 'incompatible'), ('model', 'incompatible'), ('gateway', 'incompatible'),
+    ('credential', 'incompatible'), ('compatibility', 'incompatible'), ('epoch', 'checkpoint_mismatch'),
+    ('seq', 'checkpoint_mismatch'), ('failed', 'turn_mismatch'), ('metadata', 'turn_mismatch'),
+    ('metadata_legacy', 'turn_mismatch'), ('failed_user', 'turn_mismatch'), ('harness', 'incompatible'),
+    ('corrupt', 'unreadable'), ('workspace', 'workspace_recovery'),
+])
+def test_native_resume_rejects_incompatible_private_or_unsaved_history(workspace, change, reason):
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    assert native_exchange(client, run['id'], 'begin').status_code == 200
+    assert native_exchange(client, run['id'], 'commit').json()['saved']
+    native_followup(app, run, user='google:bob' if change == 'actor' else None,
+                    model='fireworks_ai/glm-5p3' if change == 'model' else None)
+    changes = {}
+    if change == 'gateway': app.state.settings.litellm_api_base = 'https://changed.example/v1'
+    if change == 'credential': app.state.settings.litellm_api_key = 'rotated-key'
+    if change == 'compatibility': changes['compatibility'] = 'e' * 64
+    if change in {'epoch', 'seq'}:
+        changes['checkpoint'] = {'epoch': 'f' * 32 if change == 'epoch' else 'c' * 32,
+                                 'seq': 8 if change == 'seq' else 7}
+    if change == 'failed':
+        app.state.store.execute("UPDATE messages SET status='failed' WHERE run_id=? AND role='assistant'", (run['id'],))
+    if change in {'metadata', 'metadata_legacy'}:
+        assert client.post('/api/runs/' + run['id'] + '/messages',
+            json={'content': '/session-id', 'client_id': 'native-metadata'}).status_code == 202
+        if change == 'metadata_legacy':
+            app.state.store.execute("UPDATE messages SET started_at='' WHERE content='/session-id'")
+    if change == 'failed_user':
+        app.state.store.execute("UPDATE messages SET status='failed' WHERE id=?", (run['active_message_id'],))
+    if change == 'harness': app.state.store.execute("UPDATE runs SET harness='codex' WHERE id=?", (run['id'],))
+    if change == 'corrupt': app.state.store.execute("UPDATE native_sessions SET encrypted='invalid'")
+    if change == 'workspace': app.state.store.update_run(run['id'], checkpoint_error='Unsaved workspace')
+    reply = native_exchange(client, run['id'], 'begin', 'd' * 32, token='next-capability', **changes).json()
+    assert reply['state'] is None and reply['reason'] == reason
+
+
+def test_native_lease_fences_late_commit_invalidate_and_refreshed_capability(workspace):
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    assert native_exchange(client, run['id'], 'begin').status_code == 200
+    assert native_exchange(client, run['id'], 'begin', 'd' * 32).status_code == 200
+    assert native_exchange(client, run['id'], 'commit', 'd' * 32).json()['saved']
+    for action in ('commit', 'invalidate'):
+        assert native_exchange(client, run['id'], action).json()['reason'] == 'stale_lease'
+    assert app.state.store.rows('SELECT encrypted FROM native_sessions')[0]['encrypted']
+    # Replacement admission atomically discards even a still-present candidate.
+    reply = native_exchange(client, run['id'], 'restart', 'f' * 32).json()
+    assert reply['state'] is None
+    assert not app.state.store.rows('SELECT encrypted FROM native_sessions')[0]['encrypted']
+    assert native_exchange(client, run['id'], 'commit', 'f' * 32).json()['saved']
+    for action in ('commit', 'invalidate'):
+        assert native_exchange(client, run['id'], action, 'd' * 32).json()['reason'] == 'stale_lease'
+    assert app.state.store.rows('SELECT encrypted FROM native_sessions')[0]['encrypted']
+    app.state.store.update_run(run['id'], token_hash=digest('renewed-capability'))
+    assert native_exchange(client, run['id'], 'commit', 'd' * 32, token='renewed-capability').json()['reason'] == 'stale_lease'
+    assert native_exchange(client, run['id'], 'commit', 'd' * 32).status_code == 401
+    native_exchange(client, run['id'], 'begin', 'e' * 32, token='renewed-capability')
+    assert native_exchange(client, run['id'], 'invalidate', 'e' * 32, token='renewed-capability').json()['reason'] == 'invalidated'
+    assert native_exchange(client, run['id'], 'commit', 'e' * 32, token='renewed-capability').json()['reason'] == 'stale_lease'
+
+
+@pytest.mark.parametrize('timing', ['before_begin', 'after_begin', 'after_commit'])
+@pytest.mark.parametrize('action', ['begin', 'restart'])
+def test_native_private_taint_is_sticky_across_repeated_begin(workspace, timing, action):
+    from app.native_sessions import mark_private_context
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    if timing != 'before_begin':
+        native_exchange(client, run['id'], 'begin')
+    if timing == 'after_commit':
+        assert native_exchange(client, run['id'], 'commit').json()['saved']
+    mark_private_context(app.state.store, run)
+    assert native_exchange(client, run['id'], action, 'd' * 32).json()['reason'] == 'private_context'
+    assert native_exchange(client, run['id'], 'commit', 'd' * 32).json() == {
+        'lease': 'd' * 32, 'saved': False, 'reason': 'private_context'}
+    assert not app.state.store.rows('SELECT encrypted FROM native_sessions')[0]['encrypted']
+
+
+def test_native_metadata_during_invocation_and_oversized_state_cannot_commit(workspace):
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    native_exchange(client, run['id'], 'begin')
+    assert native_exchange(client, run['id'], 'commit', state={'data': 'x' * (2 * 1024 * 1024)}).status_code == 413
+    assert client.post('/api/runs/' + run['id'] + '/messages',
+        json={'content': '/session-id', 'client_id': 'native-metadata'}).status_code == 202
+    assert native_exchange(client, run['id'], 'commit').json()['reason'] == 'turn_mismatch'
+    for action, lease in [('begin', 'd' * 32), ('restart', 'e' * 32)]:
+        assert native_exchange(client, run['id'], action, lease).status_code == 200
+        assert native_exchange(client, run['id'], 'commit', lease).json()['reason'] == 'turn_mismatch'
+    assert client.post('/broker/' + run['id'] + '/context/native', headers={'Authorization': 'Bearer capability'},
+                       json={'action': 'begin', 'lease': 'a' * 32}).status_code == 415
+
+
+@pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
+@pytest.mark.parametrize('change', ['gateway', 'model'])
+def test_native_inference_scope_change_cannot_be_hidden_by_switching_back(workspace, monkeypatch, change, route):
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    native_exchange(client, run['id'], 'begin')
+    if change == 'gateway':
+        app.state.settings.litellm_api_base = 'https://changed.example/v1'
+    else:
+        app.state.store.execute("UPDATE runs SET active_model='fireworks_ai/glm-5p3' WHERE id=?", (run['id'],))
+    actual = httpx.AsyncClient
+    def upstream(request):
+        return httpx.Response(200, json={'id': 'test', 'usage': {},
+            'choices': [{'finish_reason': 'stop', 'message': {'role': 'assistant', 'content': 'Done'}}]})
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(upstream), **kw))
+    assert client.post('/broker/' + run['id'] + '/v1/' + route, headers={'Authorization': 'Bearer capability'},
+                       json={'input' if route == 'responses' else 'messages': []}).status_code == 200
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    app.state.store.execute('UPDATE runs SET active_model=? WHERE id=?', (run['active_model'], run['id']))
+    assert native_exchange(client, run['id'], 'commit').json()['reason'] == 'scope_changed'
+    assert native_exchange(client, run['id'], 'restart', 'd' * 32).status_code == 200
+    assert native_exchange(client, run['id'], 'commit', 'd' * 32).json()['reason'] == 'scope_changed'
+
+
+@pytest.mark.parametrize('change', ['epoch', 'seq', 'scope', 'instructions'])
+def test_native_replacement_preserves_turn_boundaries_and_refreshes_instructions(workspace, change):
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    native_exchange(client, run['id'], 'begin')
+    native_exchange(client, run['id'], 'invalidate')
+    fields = {}
+    if change in {'epoch', 'seq'}:
+        fields['checkpoint'] = {'epoch': 'e' * 32 if change == 'epoch' else 'c' * 32,
+                                'seq': 6 if change == 'seq' else 7}
+    elif change == 'scope':
+        app.state.settings.litellm_api_base = 'https://changed.example/v1'
+    else:
+        fields['compatibility'] = 'e' * 64
+    assert native_exchange(client, run['id'], 'restart', 'd' * 32, **fields).status_code == 200
+    reply = native_exchange(client, run['id'], 'commit', 'd' * 32, **fields).json()
+    assert reply['saved'] is (change == 'instructions')
+    assert reply['reason'] == ('saved' if change == 'instructions' else
+                               'scope_changed' if change == 'scope' else 'incompatible')
+
+
+
+def test_native_resume_uses_execution_order_for_prioritized_messages(workspace):
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    db = app.state.store
+    native_exchange(client, run['id'], 'begin')
+    assert native_exchange(client, run['id'], 'commit').json()['saved']
+    older, _ = db.enqueue_message(run['id'], 'Later', 'older', user_id=run['active_user_id'])
+    priority, _ = db.enqueue_message(run['id'], 'First', 'priority', user_id=run['active_user_id'], send_immediately=True)
+    db.finish_message(run['id'], run['active_message_id'], 'Initial answer')
+    assert db.claim_message(run['id'])['id'] == priority['id']
+    db.update_run(run['id'], status='running')
+    assert native_exchange(client, run['id'], 'begin', 'd' * 32).json()['reason'] == 'resumed'
+    assert native_exchange(client, run['id'], 'commit', 'd' * 32).json()['saved']
+    db.finish_message(run['id'], priority['id'], 'Priority answer')
+    assert db.claim_message(run['id'])['id'] == older['id']
+    db.update_run(run['id'], status='running')
+    assert native_exchange(client, run['id'], 'begin', 'e' * 32).json()['reason'] == 'resumed'
+
+
+
+@pytest.mark.parametrize('action', ['inject', 'delete'])
+def test_native_canonical_ledger_tracks_delivered_inputs_and_ignores_deleted_queue(workspace, action):
+    from app.message_queue import MessageQueue
+    from test_spend import active
+    app, client = workspace
+    run = active(app)
+    db = app.state.store
+    queue = MessageQueue(db)
+    native_exchange(client, run['id'], 'begin')
+    correction, _ = db.enqueue_message(run['id'], 'User correction', 'correction',
+        user_id=run['active_user_id'], send_immediately=True)
+    if action == 'inject':
+        control = queue.live_control(run['id'], run['active_message_id'], [])
+        assert control['input']['id'] == correction['id']
+        queue.acknowledge(run['id'], run['active_message_id'], [correction['id']])
+        assert native_exchange(client, run['id'], 'commit').json()['reason'] == 'turn_mismatch'
+    else:
+        queue.change(run['id'], correction['id'], run['active_user_id'], False, 0, 'delete')
+        assert native_exchange(client, run['id'], 'commit').json()['saved']
+        native_followup(app, run)
+        assert native_exchange(client, run['id'], 'begin', 'd' * 32, token='next-capability').json()['reason'] == 'resumed'

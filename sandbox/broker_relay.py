@@ -239,6 +239,17 @@ class BrokerRelay:
             raise ValueError('The broker did not return a usable compaction window.')
         return value
 
+    def native(self, body):
+        route = '/context/native'
+        request = urllib.request.Request(self.remote.rstrip('/') + route,
+            data=seal(self.token, route, json.dumps(body).encode()),
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+        with urllib.request.urlopen(request, timeout=3) as response:
+            raw = response.read(2_001_025)
+            if len(raw) > 2_001_024:
+                raise ValueError('Native state response exceeded its limit.')
+            return json.loads(raw)
+
     def maintain(self, snapshot, ack=''):
         route = '/context/maintenance'
         request = urllib.request.Request(self.remote.rstrip('/') + route,

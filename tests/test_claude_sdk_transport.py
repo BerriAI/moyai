@@ -14,14 +14,18 @@ import pytest
 
 from sandbox.claude_harness import ClaudeAgent
 from sandbox.context_store import ContextStore
+from test_workspace import workspace as broker_workspace
 
 
-@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending'],
-                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool'])
+@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending', 'native', 'native-pressure', 'native-corrupt'],
+                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool', 'native-resume', 'native-pressure', 'native-corrupt'])
 @pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3'])
-def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed, model):
+def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed, model, request):
     calls, requests, events = [], [], []
     rejected = []
+    native_case = resumed in {'native', 'native-pressure', 'native-corrupt'}
+    pressure_case = resumed in {'pressure', 'native-pressure'}
+    durable_case = resumed in {'durable', 'pressure', 'pending'} or native_case
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def reply(self, value, status=200):
@@ -45,7 +49,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                 return self.reply({'text': data['arguments']['text']})
             assert self.path.startswith('/v1/messages')
             requests.append(data)
-            if resumed == 'pressure' and calls and not rejected:
+            if pressure_case and calls and not rejected:
                 rejected.append(True)
                 relay.context_required = {'input_tokens': 50000, 'input_budget': 20000}
                 return self.reply({'type': 'error', 'error': {'type': 'invalid_request_error',
@@ -57,7 +61,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             done = bool(calls)
             receipt = next((block for message in data['messages'] for block in message.get('content', [])
                             if isinstance(block, dict) and block.get('tool_use_id') == 'history_read'), None)
-            if resumed in {'durable', 'pressure', 'pending'}:
+            if durable_case:
                 text = json.dumps(data['messages'])
                 assert 'Keep Escape support' in text and 'Do not deploy' in text
                 if resumed == 'pending':
@@ -106,6 +110,37 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-capability')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
     relay = SimpleNamespace(url=url)
+    native_sessions, native_prompts = [], []
+    if native_case:
+        from app.security import digest
+        from sandbox.broker_transport import CONTENT_TYPE, seal
+        from claude_agent_sdk import ClaudeSDKClient, ResultMessage
+        app, client = request.getfixturevalue('broker_workspace')
+        app.state.settings.agent_model = model
+        db = app.state.store
+        run = db.create_run('Call the echo tool.', '', 'modal', [], chat_enabled=True,
+            harness='claude-agent-sdk', model=model, user_id='google:native-fixture')
+        current_message = db.claim_message(run['id'])
+        db.update_run(run['id'], status='running', token_hash=digest('fixture-capability'))
+        def native(body):
+            route = '/context/native'
+            response = client.post('/broker/' + run['id'] + route,
+                content=seal('fixture-capability', route, json.dumps(body).encode()),
+                headers={'Authorization': 'Bearer fixture-capability', 'Content-Type': CONTENT_TYPE})
+            assert response.status_code == 200, response.text
+            return response.json()
+        relay.native = native
+        original_query, original_receive = ClaudeSDKClient.query, ClaudeSDKClient.receive_response
+        async def query(client, prompt, *args, **kwargs):
+            native_prompts.append(prompt)
+            return await original_query(client, prompt, *args, **kwargs)
+        async def receive(client, *args, **kwargs):
+            async for message in original_receive(client, *args, **kwargs):
+                if isinstance(message, ResultMessage):
+                    native_sessions.append(message.session_id)
+                yield message
+        monkeypatch.setattr(ClaudeSDKClient, 'query', query)
+        monkeypatch.setattr(ClaudeSDKClient, 'receive_response', receive)
     workspace, session = tmp_path / 'workspace', tmp_path / 'session'
     workspace.mkdir()
     session.mkdir()
@@ -126,7 +161,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     f'Build output {i}: completed operation with verbose diagnostic details.' for i in range(5000))}]
                if resumed else [])
     store = None
-    if resumed in {'durable', 'pressure', 'pending'}:
+    if durable_case:
         store = ContextStore(session / 'context.sqlite3', 'transport-run')
         if resumed == 'pending':
             (workspace / 'note.txt').write_text('already edited\n')
@@ -159,12 +194,12 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         assert last_tools['mcp__moyai__echo']['input_schema']['properties'] == {'text': {'type': 'string'}}
         assert last_tools['mcp__moyai__echo']['defer_loading'] is True
         assert 'tool_reference' in json.dumps(discovered['messages'])
-        if resumed == 'pressure':
+        if pressure_case:
             assert not any(t['name'] == 'mcp__moyai__echo' for t in requests[-1]['tools'])
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)
-        if resumed in {'durable', 'pressure', 'pending'}:
+        if durable_case:
             if resumed == 'pending':
                 assert store.pending == {'history_read'}
                 assert (workspace / 'note.txt').read_text() == 'already edited\n'
@@ -172,6 +207,22 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             cursor = store.state()['cursor']
             assert cursor > 0
             agent.close()
+            if native_case:
+                stored = db.rows('SELECT encrypted FROM native_sessions WHERE run_id=?', (run['id'],))[0]['encrypted']
+                assert stored, 'The successful recovery must save a new native checkpoint'
+                assert 'sdk-transport-ok' not in stored
+                completed_session = native_sessions[-1]
+                if resumed == 'native-corrupt':
+                    envelope = json.loads(app.state.security.decrypt(stored))
+                    envelope['state']['records'] = 'invalid transcript'
+                    db.execute('UPDATE native_sessions SET encrypted=? WHERE run_id=?',
+                               (app.state.security.encrypt(json.dumps(envelope)), run['id']))
+                db.finish_message(run['id'], current_message['id'], result['final_response'])
+                db.update_run(run['id'], status='idle')
+                db.enqueue_message(run['id'], 'Continue using the saved receipts.', 'native-follow-up',
+                                   user_id='google:native-fixture', model=model)
+                current_message = db.claim_message(run['id'])
+                db.update_run(run['id'], status='running')
             store.close()
             cold = tmp_path / 'cold-session'
             cold.mkdir()
@@ -182,11 +233,41 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             result = agent.run_conversation('Continue using the saved receipts.', conversation_history=[], system_message='Transport fixture.')
             assert result['completed'], result['final_response']
             assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
+            if native_case and resumed != 'native-corrupt':
+                assert native_sessions[-1] == completed_session
+                assert native_prompts[-1] == 'Continue using the saved receipts.'
+                assert agent.native.reason == 'resumed'
+                assert len(native_prompts) == (3 if pressure_case else 2)
+            if resumed == 'native-corrupt':
+                assert len(native_prompts) == 2  # Corrupt state was rejected before starting another SDK.
+                assert native_prompts[-1] != 'Continue using the saved receipts.'
+                assert native_sessions[-1] != completed_session
+                completed_session = native_sessions[-1]
+                agent.close()
+                rebuilt = db.rows('SELECT encrypted FROM native_sessions WHERE run_id=?', (run['id'],))[0]['encrypted']
+                assert rebuilt, 'The successful fresh fallback must replace the corrupt native checkpoint'
+                db.finish_message(run['id'], current_message['id'], result['final_response'])
+                db.update_run(run['id'], status='idle')
+                db.enqueue_message(run['id'], 'One more question.', 'native-third-turn',
+                                   user_id='google:native-fixture', model=model)
+                db.claim_message(run['id'])
+                db.update_run(run['id'], status='running')
+                store.close()
+                third = tmp_path / 'third-session'
+                third.mkdir()
+                shutil.copy2(cold / 'context.sqlite3', third / 'context.sqlite3')
+                store = ContextStore(third / 'context.sqlite3', 'transport-run')
+                agent = create_agent(store)
+                result = agent.run_conversation('One more question.', conversation_history=[], system_message='Transport fixture.')
+                assert result['completed'], result['final_response']
+                assert native_sessions[-1] == completed_session and agent.native.reason == 'resumed'
+                assert native_prompts[-1] == 'One more question.' and len(native_prompts) == 3
+                assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
             assert [args[1] for kind, args in events if kind == 'start'] == expected
             if resumed == 'pending':
                 assert store.pending == {'history_read'}
             assert not (session / '.moyai-history.jsonl').exists()
-            if resumed == 'pressure':
+            if pressure_case:
                 assert rejected == [True]
         else:
             assert result['messages'][:len(history)] == history

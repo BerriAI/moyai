@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -260,3 +261,288 @@ def test_all_harnesses_scrub_private_tool_aliases(name):
     reporter.start('one', name, {'content': 'private note'})
     reporter.complete('one', name, {'content': 'private note'}, 'private note')
     assert 'private note' not in json.dumps(events)
+
+
+@pytest.fixture
+def native_cli_runtime(tmp_path, monkeypatch):
+    """Exercise the real adapter/journal/storage with the public LiteLLM API boundary."""
+    import sys
+    from types import SimpleNamespace
+    from app.native_sessions import NativeSessions
+    from sandbox import litellm_harness
+    from sandbox.context_store import ContextStore
+    from sandbox.harness_registry import create_agent
+
+    calls, host, requests = [], {}, []
+    class State(SimpleNamespace):
+        @classmethod
+        def loads(cls, value):
+            return cls(**json.loads(value))
+        def dumps(self):
+            return json.dumps(vars(self)).encode()
+    class Sandbox:
+        def __init__(self, cwd, config, native=None):
+            self.native, self.cwd = native, cwd
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+    class Session:
+        def __init__(self, value, *, resumed, **options):
+            self.options, self.resumed = options, resumed
+            self.saved = value if resumed else State(harness=value, native_session_id=f'native-{len(calls) + 1}',
+                workdir=options['sandbox'].cwd, model=options['model'].removeprefix('litellm_proxy/'), version=1)
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        def state(self): return self.saved
+        def astream(self, prompt):
+            calls.append({'resumed': self.resumed, 'prompt': prompt, **self.options})
+            native = self.options['sandbox'].native
+            if native is not None:
+                path = native.cache / self.saved.harness / 'sessions' / 'native.jsonl'
+                if self.resumed:
+                    assert path.read_text() == 'native transcript'
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('native transcript')
+            if host.get('during_turn'):
+                host['during_turn']()
+            return Stream()
+    class Stream:
+        result = SimpleNamespace(stop_reason='done', text='Completed once')
+        def __aiter__(self): return self
+        async def __anext__(self): raise StopAsyncIteration
+    harness = SimpleNamespace(CODEX='codex', OPENCODE='opencode', DEEPAGENTS='deepagents', TOOL_LOOP='tool-loop')
+    api = SimpleNamespace(Harness=harness,
+        aagent_session=lambda value, **kwargs: Session(value, resumed=False, **kwargs),
+        aagent_resume=lambda value, **kwargs: Session(value, resumed=True, **kwargs))
+    events = {name: type(name, (), {}) for name in ('Text', 'Reasoning', 'ToolCall', 'ToolResult', 'Approval')}
+    monkeypatch.setitem(sys.modules, 'litellm', api)
+    monkeypatch.setitem(sys.modules, 'litellm.harness', SimpleNamespace(State=State, StateIncompatible=RuntimeError, **events))
+    for name, binding in litellm_harness.RUNTIME_BINDINGS.items():
+        monkeypatch.setitem(litellm_harness.RUNTIME_BINDINGS, name, SimpleNamespace(sandbox_factory=Sandbox,
+            options_factory=lambda config: None, tools=lambda cwd, config: [], in_process=binding.in_process,
+            instructions=binding.instructions))
+    monkeypatch.setattr(litellm_harness.LiteLLMAgent, 'validate', lambda agent: setattr(agent, 'runtime_version', 'fixture-cli 1.0'))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'first-capability')
+    store = ContextStore(tmp_path / 'context.sqlite3', 'native-run')
+    store.initialize([{'role': 'user', 'content': 'Original constraint: keep the red button.'}])
+    def exchange(body):
+        NativeSessions.validate(None, body)
+        requests.append(json.loads(json.dumps(body)))
+        if body['action'] in {'begin', 'restart'}:
+            host['begins'] = host.get('begins', 0) + 1
+            host['lease'] = body['lease']
+            if body['action'] == 'restart':
+                host.pop('state', None)
+            return {'lease': body['lease'], 'state': host.get('state')}
+        if body['lease'] != host.get('lease'):
+            return {'lease': body['lease'], 'saved': False, 'reason': 'stale_lease'}
+        if body['action'] == 'commit':
+            host['state'] = json.loads(json.dumps(body['state']))
+        if body['action'] == 'invalidate':
+            host.pop('state', None)
+            host['lease'] = ''
+        return {'lease': body['lease'], 'saved': body['action'] == 'commit'}
+    def create(kind):
+        relay = SimpleNamespace(url='http://fresh-relay', native=exchange)
+        return create_agent(kind, spec={'model': 'model-one', 'timeout': 10}, relay=relay,
+            config={}, activity=SimpleNamespace(commentary=lambda text: None), step=lambda: None,
+            cwd=str(tmp_path), context_store=store)
+    yield SimpleNamespace(create=create, store=store, calls=calls, host=host, stream=Stream, requests=requests)
+    store.close()
+
+
+@pytest.mark.parametrize('kind', ['codex', 'opencode'])
+def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_cli_runtime, monkeypatch, kind):
+    runtime = native_cli_runtime
+    first = runtime.create(kind)
+    assert first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')['completed']
+    assert 'Original constraint' in runtime.calls[0]['prompt']
+    assert 'state' not in runtime.host  # Native upload belongs after answer delivery.
+    first.close()
+    assert runtime.host['state']['files'] and not list(first.native.cache.rglob('*'))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'replacement-capability')
+    second = runtime.create(kind)
+    try:
+        assert second.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
+        assert runtime.calls[-1]['resumed'] is True
+        assert runtime.calls[-1]['prompt'] == 'TLDR?'
+        assert runtime.calls[-1]['api_key'] == 'replacement-capability'
+        assert runtime.calls[-1]['api_base'] == 'http://fresh-relay'
+        assert runtime.store.db.execute("SELECT count(*) FROM journal WHERE preview LIKE '%TLDR?%'").fetchone()[0] == 1
+    finally:
+        second.close()
+
+
+@pytest.mark.parametrize('compaction_fails', [False, True])
+def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtime, compaction_fails):
+    from sandbox.context_store import ContextUnavailable
+    runtime = native_cli_runtime
+    first = runtime.create('codex')
+    first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+    first.close()
+    agent = runtime.create('codex')
+    old_lease, completed_writes, compactions = [], [], []
+    def reject():
+        if len(runtime.calls) != 2:
+            return
+        assert runtime.calls[-1]['resumed']
+        old_lease.append(agent.native.lease)
+        agent.journal.tool_started('write-once', 'Write', {})
+        completed_writes.append('write-once')
+        agent.journal.tool_finished('write-once', 'Saved write receipt')
+        agent.context.relay.context_required = {'input_tokens': 50000, 'input_budget': 20000}
+        runtime.stream.result.stop_reason = 'runtime_error'
+    def compact(previous, entries, **kwargs):
+        assert not agent.native.enabled and agent.native.staged is None
+        assert not list(agent.native.cache.rglob('*'))
+        assert runtime.requests[-1]['action'] == 'invalidate'
+        compactions.append(1)
+        if compaction_fails:
+            raise RuntimeError('Compaction unavailable')
+        runtime.stream.result.stop_reason = 'done'
+        return 'Original constraint: keep the red button. Saved write receipt. Do not repeat the write.'
+    runtime.host['during_turn'] = reject
+    agent.context.relay.compact = compact
+    try:
+        if compaction_fails:
+            with pytest.raises(ContextUnavailable):
+                agent.run_conversation('Continue the edit.', conversation_history=[], system_message='Rules')
+        else:
+            assert agent.run_conversation('Continue the edit.', conversation_history=[], system_message='Rules')['completed']
+        assert 'state' not in runtime.host  # The replacement is uploaded only after the answer.
+    finally:
+        agent.close()
+    assert compactions == [1] and completed_writes == ['write-once']
+    if compaction_fails:
+        assert len(runtime.calls) == 2 and 'state' not in runtime.host
+        assert not any(body['action'] == 'restart' for body in runtime.requests)
+        return
+    assert runtime.host.get('state'), 'The recovered turn must save a new native checkpoint'
+    assert agent.native.lease != old_lease[0]
+    assert len(runtime.calls) == 3 and not runtime.calls[-1]['resumed']
+    assert 'Saved write receipt' in runtime.calls[-1]['prompt']
+    assert [body['action'] for body in runtime.requests] == ['begin', 'commit', 'begin', 'invalidate', 'restart', 'commit']
+    third = runtime.create('codex')
+    try:
+        assert third.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
+        assert runtime.calls[-1]['resumed'] and runtime.calls[-1]['prompt'] == 'TLDR?'
+        assert completed_writes == ['write-once']
+    finally:
+        third.close()
+
+
+@pytest.mark.parametrize('field,value', [('harness', 'opencode'), ('workdir', '/other-workspace'),
+    ('model', 'litellm_proxy/other-model'), ('native_session_id', None), ('native_session_id', '--last'),
+    ('files', {}), ('files', {'../escape': 'eA=='})])
+def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_runtime, field, value):
+    runtime = native_cli_runtime
+    first = runtime.create('codex')
+    first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+    first.close()
+    saved = runtime.host['state']
+    if field == 'files':
+        saved[field] = value
+    else:
+        state = json.loads(saved['state'])
+        state[field] = value
+        saved['state'] = json.dumps(state)
+    second = runtime.create('codex')
+    try:
+        assert second.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
+        assert runtime.calls[-1]['resumed'] is False
+        assert 'Original constraint' in runtime.calls[-1]['prompt'] and 'TLDR?' in runtime.calls[-1]['prompt']
+    finally:
+        second.close()
+    assert runtime.host.get('state'), 'The successful fresh fallback must replace the rejected checkpoint'
+    assert len(runtime.calls) == 2  # The rejected native state never started an SDK invocation.
+    third = runtime.create('codex')
+    try:
+        assert third.run_conversation('Next question', conversation_history=[], system_message='Rules')['completed']
+        assert runtime.calls[-1]['resumed'] and runtime.calls[-1]['prompt'] == 'Next question'
+    finally:
+        third.close()
+
+
+@pytest.mark.parametrize('failure', ['runtime_error', 'interrupted', 'pending_tool'])
+def test_unfinished_native_cli_turn_cannot_publish_resume_state(native_cli_runtime, failure):
+    runtime = native_cli_runtime
+    agent = runtime.create('codex')
+    if failure == 'runtime_error':
+        runtime.stream.result.stop_reason = 'runtime_error'
+    elif failure == 'interrupted':
+        runtime.host['during_turn'] = agent.interrupt
+    else:
+        runtime.host['during_turn'] = lambda: agent.journal.tool_started('pending', 'Write', {})
+    try:
+        agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+    finally:
+        agent.close()
+    assert 'state' not in runtime.host
+    assert len(runtime.calls) == 1 and not any(body['action'] == 'restart' for body in runtime.requests)
+
+
+def test_goal_iteration_renews_native_contract_and_discards_intermediate_result(native_cli_runtime):
+    runtime = native_cli_runtime
+    agent = runtime.create('codex')
+    agent.run_conversation('First step.', conversation_history=[], system_message='Original rules')
+    previous = agent.native
+    assert previous.staged is not None and 'state' not in runtime.host
+    runtime.stream.result.stop_reason = 'runtime_error'
+    try:
+        agent.run_conversation('Next step.', conversation_history=[], system_message='Updated rules')
+        assert agent.native.lease != previous.lease
+        assert agent.native.compatibility != previous.compatibility
+    finally:
+        agent.close()
+    assert 'state' not in runtime.host
+
+
+@pytest.mark.parametrize('kind', ['deepagents', 'tool-loop'])
+def test_process_only_harnesses_keep_public_journal_recovery(native_cli_runtime, kind):
+    runtime = native_cli_runtime
+    agent = runtime.create(kind)
+    try:
+        assert agent.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
+        assert 'Original constraint' in runtime.calls[-1]['prompt']
+        assert not runtime.calls[-1]['resumed'] and not runtime.host
+    finally:
+        agent.close()
+
+
+async def test_native_cli_storage_is_scoped_for_setup_launch_and_temporary_files(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from sandbox.harness_bindings import local_sandbox
+    class LocalSandbox:
+        def __init__(self, cwd): self._tempdirs = []
+        def _check_open(self): pass
+        def child_env(self, env=None): return {'upstream_filter_applied': 'yes', **(env or {})}
+    monkeypatch.setitem(sys.modules, 'litellm.harness.sandbox.local', SimpleNamespace(LocalSandbox=LocalSandbox))
+    root = tmp_path / 'native'
+    native = SimpleNamespace(root=root, env={'HOME': str(root / 'home'), 'TMPDIR': str(root / 'tmp'),
+        'CODEX_HOME': str(root / 'codex'), 'XDG_DATA_HOME': str(root / 'data')})
+    sandbox = local_sandbox(str(tmp_path), {}, native)
+    setup = sandbox.child_env()
+    assert setup['HOME'] == native.env['HOME'] and setup['upstream_filter_applied'] == 'yes'
+    temporary = await sandbox.tempdir()
+    assert Path(temporary).is_relative_to(root) and temporary in sandbox._tempdirs
+    launch = sandbox.child_env({'CODEX_HOME': temporary, 'HOME': '/foreign', 'TMPDIR': '/foreign'})
+    assert launch['CODEX_HOME'] == temporary and launch['HOME'] == native.env['HOME']
+    assert launch['TMPDIR'] == native.env['TMPDIR']
+    for key in ('CODEX_HOME', 'XDG_DATA_HOME', 'CLAUDE_CONFIG_DIR'):
+        with pytest.raises(ValueError, match='escaped'):
+            sandbox.child_env({key: '/foreign'})
+
+
+def test_native_cli_version_comes_from_installed_binary_and_failure_disables_resume(monkeypatch):
+    from types import SimpleNamespace
+    from sandbox import harness_dependencies
+    calls = []
+    def version(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout='codex-cli 0.159.0\n')
+    monkeypatch.setattr(harness_dependencies.subprocess, 'run', version)
+    assert harness_dependencies.runtime_version('codex') == 'codex-cli 0.159.0'
+    assert calls == [['codex', '--version']]
+    monkeypatch.setattr(harness_dependencies.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=1, stdout=''))
+    assert harness_dependencies.runtime_version('codex') == ''

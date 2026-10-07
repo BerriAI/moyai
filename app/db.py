@@ -57,6 +57,15 @@ class Store:
                     operation_id TEXT NOT NULL, snapshot TEXT NOT NULL,
                     result TEXT NOT NULL DEFAULT 'null', status TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS native_sessions (
+                    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+                    turn_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                    lease TEXT NOT NULL DEFAULT '', capability TEXT NOT NULL DEFAULT '',
+                    scope TEXT NOT NULL DEFAULT '', compatibility TEXT NOT NULL DEFAULT '',
+                    checkpoint TEXT NOT NULL DEFAULT '', ledger TEXT NOT NULL DEFAULT '',
+                    encrypted TEXT NOT NULL DEFAULT '',
+                    tainted INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id),
                     kind TEXT NOT NULL, message TEXT NOT NULL, data TEXT NOT NULL,

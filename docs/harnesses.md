@@ -43,10 +43,46 @@ wait for credentials/delegated work, or apply a correction at a complete tool
 boundary. In-flight redirect is a Hermes capability; Claude uses boundary
 steering. Stop revokes the capability and terminates the isolated machine.
 
-Each app turn uses the saved, scrubbed conversation and tool receipts. It creates
-a fresh SDK session rather than resuming an unfiltered native transcript that
-could retain private tool payloads from an earlier requester. Completed external
-actions are recorded and must not be replayed after a checkpoint or failure.
+Claude, Codex and OpenCode can resume a compatible, successfully completed native
+conversation on the next chat turn, including after the sandbox process exits.
+The SDK receives only the new request; it owns its existing conversation instead
+of receiving the public journal again inside a new user message. Completed
+external actions remain recorded and must not be replayed after a failure.
+
+Native reuse has three independent gates:
+
+- Compatibility: the harness, installed runtime version, adapter instructions,
+  working directory, effective model and gateway configuration must match
+- Privacy: the broker requires the exact current requester. A turn that injected
+  personal memory, loaded skills, skill excerpts or search descriptions cannot
+  publish reusable native state, even if those selections are later removed
+- Restart: the saved public journal epoch and append position must match the
+  restored filesystem. The preceding canonical turn must have completed, with no
+  intervening metadata reply, failed turn or changed delivered steering input
+
+The broker stores one encrypted, bounded native record per run, separately from
+public history, activity and downloadable artifacts. `/context/native` accepts
+only authenticated, encrypted broker requests. Invocation leases fence late
+uploads and invalidations; current capability and scope are checked again when
+saving. Upload happens after answer receipt and has a short timeout. Failure to
+save only loses reuse. Native state is limited to approximately 2 MB, with at
+most 256 regular files for CLI runtimes; oversized state uses the public journal.
+
+Native plaintext lives outside `/workspace` and is removed before attachments,
+project preparation or agent startup, including when starting a cloned child.
+Each SDK uses an isolated config/cache directory and fresh relay credentials.
+Claude uses the pinned SDK's public `SessionStore` protocol; Codex/OpenCode use
+LiteLLM's public resume API and their persisted native files. Missing, corrupt or
+incompatible state selects a fresh session before inference. An ambiguous SDK
+failure never automatically retries the task. Interrupted turns, intermediate
+goal iterations, Deep Agents and Tool Loop retain public-journal recovery;
+Hermes retains its existing separate history flow.
+
+Malformed native state and confirmed context recovery can publish a replacement
+after a fresh SDK attempt completes. Replacement admission atomically retires the
+old candidate and lease while retaining the turn's privacy, canonical-input and
+checkpoint checks. Compaction must succeed before context recovery admits that
+replacement; ordinary failures do not restart the task.
 
 The SDK supports automatic compaction within a session, but cannot compact an
 oversized first message containing an entire restored journal. Chat sessions now
@@ -129,10 +165,11 @@ Unsupported audio/file/video blocks fail explicitly. Provider-injected content
 and tokenizer approximations can still differ: a structured pre-generation
 context rejection also requests reduction; arbitrary errors/timeouts do not.
 
-As a fallback for Claude, and for the fresh-session LiteLLM adapters, the relay returns a typed
+As a fallback for the durable SDK adapters, the relay returns a typed
 context signal and blocks further calls from that native session. After the SDK
 closes and all tool receipts settle, the adapter forces journal compaction and
-starts a fresh session with a bounded reference and the original current request.
+invalidates native reuse and starts a fresh session with a bounded reference and
+the original current request.
 The journal is available for non-chat tasks too. User stop/steering wins over
 recovery, pending tools prevent it, and task deadlines are not reset. Repeated
 rejections without task progress must reduce input and stop after at most three
@@ -251,8 +288,9 @@ choices, Slack selection and adapter creation. Each adapter implements
 `sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
 checkpointing and delivery.
 
-Codex, OpenCode, Deep Agents and Tool Loop continue using `litellm.aagent_session`
-and the named bindings in `sandbox/harness_bindings.py`. The pinned beta source
+The LiteLLM adapters use `litellm.aagent_session`, or `litellm.aagent_resume` for
+eligible Codex/OpenCode conversations, with the named bindings in
+`sandbox/harness_bindings.py`. The pinned beta source
 is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
 contain that API. Claude Agent SDK stays pinned at `0.2.163`. No upstream source
 is vendored. Add a new registry definition and lifecycle adapter to extend Moyai.
@@ -264,6 +302,12 @@ uv run pytest -q tests/test_claude_sdk.py tests/test_harnesses.py tests/test_har
 uv run pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py
 node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
 ```
+
+The `native-resume` cases in `test_claude_sdk_transport.py` exercise the real
+pinned Claude SDK, MCP tool transport, encrypted broker endpoint and SQLite.
+They verify the same native session ID after cold restoration, a new-request-only
+SDK prompt, and one execution of a completed tool. Provider responses are local
+fixtures; these checks do not establish production response latency.
 
 `uv run python -m scripts.context_checkpoint_demo` demonstrates repeated cold
 filesystem restores and summary-failure recovery using synthetic data and a

@@ -941,6 +941,14 @@ def create_app(settings: Settings | None = None):
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
         model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
 
+    from .native_sessions import NativeSessions
+    native_sessions = NativeSessions(settings, store, security, checkpoints, require_run, broker_body)
+    harness_gateway.native_sessions = native_sessions
+
+    @app.post('/broker/{run_id}/context/native')
+    async def native_session(run_id: str, request: Request):
+        return await native_sessions.exchange(run_id, request)
+
     @app.post('/broker/{run_id}/context/compact')
     async def compact_context(run_id: str, request: Request):
         return await harness_gateway.forward(run_id, request, '/context/compact')
@@ -986,6 +994,7 @@ def create_app(settings: Settings | None = None):
             message_queue.acknowledge(run_id, run['active_message_id'], body['steering_applied'])
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
+        native_sessions.observe_scope(run)
         payload['messages'] = store.attachments.with_images(run, scrub_memory_history(payload['messages']))
         memory_context = memory.context(run)
         if memory_context:

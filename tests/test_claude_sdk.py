@@ -142,3 +142,43 @@ def test_checkpoint_waits_for_all_parallel_tool_receipts(monkeypatch, tmp_path):
     assert agent.before_model()
     agent.journal.tool_finished('b', 'second')
     assert not agent.before_model()
+
+
+@pytest.mark.parametrize('mirror', ['complete', 'dropped', 'missing'])
+def test_incomplete_native_mirror_never_becomes_a_new_checkpoint(monkeypatch, tmp_path, mirror):
+    from uuid import uuid4
+    from claude_agent_sdk import ResultMessage, SystemMessage
+    from sandbox.context_store import ContextStore
+    agent, _ = make_agent(monkeypatch, tmp_path)
+    agent.context_store = ContextStore(tmp_path / 'context.db', 'run')
+    agent.context_store.initialize([])
+    session_id, actions = str(uuid4()), []
+    key = {'session_id': session_id, 'project_key': 'fixture'}
+    saved = {'session_id': session_id, 'records': [{'key': key,
+        'entries': [{'type': 'assistant', 'uuid': 'older', 'message': {'role': 'assistant', 'content': 'Old native answer'}}]}]}
+    def native(body):
+        actions.append(body['action'])
+        return {'lease': body['lease'], 'state': saved}
+    agent.context.relay.native = native
+    class Client:
+        def __init__(self, *, options): self.options = options
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def query(self, prompt):
+            assert prompt == 'new question'
+        async def receive_response(self):
+            if mirror != 'missing':
+                await self.options.session_store.append(key, [{'type': 'user', 'uuid': 'new',
+                    'message': {'role': 'user', 'content': 'new question'}}])
+            if mirror == 'dropped':
+                yield SystemMessage(subtype='mirror_error', data={})
+            yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1, is_error=False,
+                num_turns=1, session_id=session_id, result='New answer still succeeds')
+    monkeypatch.setattr('claude_agent_sdk.ClaudeSDKClient', Client)
+    try:
+        result = agent.run_conversation('new question', conversation_history=[], system_message='stable')
+        assert result['completed'] and result['final_response'] == 'New answer still succeeds'
+        agent.close()
+        assert ('commit' in actions) == (mirror == 'complete')
+    finally:
+        agent.context_store.close()

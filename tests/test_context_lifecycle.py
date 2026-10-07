@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -8,6 +10,92 @@ from sandbox import agent as lifecycle
 from sandbox.context_store import ContextStore, ContextUnavailable, open_context
 from sandbox.harness_agent import TurnJournal
 from test_runner import runner
+
+
+@pytest.mark.parametrize('fresh_child', [False, True])
+def test_native_plaintext_is_removed_before_attachments_and_project_start(tmp_path, monkeypatch, fresh_child):
+    root, home, temporary = tmp_path / 'session/.native-sdk', tmp_path / 'root', tmp_path / 'tmp'
+    old_paths = [root / 'claude/projects/parent.jsonl', home / '.claude/projects/parent.jsonl',
+                 home / '.cache/litellm-harness/parent.json', temporary / 'claude-resume-parent/session.jsonl',
+                 temporary / 'litellm-harness-parent/state.json']
+    for path in old_paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('PRIVATE PARENT TRANSCRIPT')
+    unrelated = temporary / 'unrelated.txt'
+    unrelated.write_text('Preserve unrelated files')
+    old_temp = tmp_path / 'previous-temp'
+    old_temp.mkdir()
+    monkeypatch.setattr(tempfile, 'tempdir', str(old_temp))
+    monkeypatch.setenv('TMPDIR', str(old_temp))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-capability')
+    monkeypatch.setattr(lifecycle, 'Path', lambda p: Path(tmp_path / str(p).lstrip('/')) if str(p).startswith('/') else Path(p))
+    order, project_temporaries = [], []
+    def check(name):
+        order.append(name)
+        assert all(not path.exists() for path in old_paths)
+        assert unrelated.read_text() == 'Preserve unrelated files'
+        assert tempfile.gettempdir() == os.environ['TMPDIR'] == str(old_temp)
+        path = Path(tempfile.mkdtemp(prefix='project-service-')) / 'state'
+        path.write_text('PROJECT STARTUP DATA')
+        project_temporaries.append(path)
+    monkeypatch.setattr(lifecycle, 'prepare_attachments', lambda *a, **k: check('attachments'))
+    def project(*args):
+        check('project')
+        raise RuntimeError('Stop the fixture before running user code')
+    monkeypatch.setattr(lifecycle, 'prepare_project', project)
+    monkeypatch.setattr(lifecycle, 'emit', lambda *a, **k: None)
+    result = lifecycle.run_agent({'harness': 'codex', 'repo_url': '', 'fresh_child': fresh_child}, SimpleNamespace())
+    assert result == 1 and order == ['attachments', 'project']
+    assert not root.exists() and all(path.exists() for path in project_temporaries)
+    assert tempfile.tempdir == os.environ['TMPDIR'] == str(old_temp)
+    assert unrelated.exists()
+
+
+async def test_real_sdk_resume_temporary_is_owned_and_removed_on_lifecycle_failure(tmp_path, monkeypatch):
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk._internal.session_resume import materialize_resume_session
+    from sandbox.native_session import NativeSession, native_storage
+    from uuid import uuid4
+    root = tmp_path / 'session/.native-sdk'
+    session_id = str(uuid4())
+    class SavedTranscript:
+        async def load(self, key):
+            assert key['session_id'] == session_id
+            return [{'type': 'user', 'message': {'role': 'user', 'content': 'PRIVATE RESUME MARKER'}}]
+    old_temp = str(tmp_path / 'project-temp')
+    Path(old_temp).mkdir()
+    project_file = Path(old_temp) / 'project-service-state'
+    project_file.write_text('KEEP PROJECT SERVICE RUNNING')
+    monkeypatch.setattr(tempfile, 'tempdir', old_temp)
+    monkeypatch.delenv('TMPDIR', raising=False)
+    store = ContextStore(root.parent / 'context.sqlite3', 'run')
+    native = NativeSession(SimpleNamespace(cwd=str(tmp_path), spec={}, relay=SimpleNamespace()), store, 'claude-agent-sdk', {})
+    try:
+        with pytest.raises(RuntimeError, match='workspace interrupted'):
+            with native_storage(root, tmp_path / 'home', tmp_path / 'tmp'):
+                native.begin()
+                assert project_file.exists() and tempfile.tempdir == old_temp
+                try:
+                    with native.temporary_files():
+                        assert tempfile.gettempdir() == native.env['TMPDIR'] and 'TMPDIR' not in os.environ
+                        result = await materialize_resume_session(ClaudeAgentOptions(
+                            cwd=str(tmp_path), session_store=SavedTranscript(), resume=session_id,
+                            env={**native.env, 'ANTHROPIC_API_KEY': 'fixture-only'}))
+                        assert result is not None and result.config_dir.is_relative_to(root / 'tmp')
+                        transcript = next(result.config_dir.rglob('*.jsonl'))
+                        assert 'PRIVATE RESUME MARKER' in transcript.read_text()
+                        assert transcript.stat().st_mode & 0o777 == 0o600
+                        # Interrupt before SDK cleanup returns; owned plaintext
+                        # still goes away without breaking project services.
+                        raise RuntimeError('workspace interrupted')
+                finally:
+                    native.close()
+                    assert tempfile.tempdir == old_temp and project_file.exists()
+    finally:
+        store.close()
+    assert not root.exists() and not transcript.exists()
+    assert tempfile.tempdir == old_temp and 'TMPDIR' not in os.environ
+    assert project_file.read_text() == 'KEEP PROJECT SERVICE RUNNING'
 
 
 def test_runner_uses_checkpoint_without_serializing_all_chat_again(runner, monkeypatch):

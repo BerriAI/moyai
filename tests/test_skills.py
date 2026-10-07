@@ -209,12 +209,14 @@ def test_archive_revokes_loaded_skill_and_restore_is_available(workspace):
     run=active(app)
     assert search(client,run,'benchmark').json()['matches']
     app.state.skills.load(run,'benchmark-review')
+    assert MARKER in app.state.skills.context(run)
     url='/api/skills/'+skill+'/archive'
     assert client.post(url,json={'archived':True,'revision':1}).status_code==200
     assert not client.get('/api/skills').json()['skills']
     assert client.get('/api/skills?archived=true').json()['skills'][0]['archived']
     assert MARKER not in app.state.skills.context(run)
     assert skill_context(app,run)['matches']==[]
+    assert app.state.store.rows('SELECT tainted FROM native_sessions WHERE run_id=?', (run['id'],))[0]['tainted'] == 1
     assert client.post(url,json={'archived':False,'revision':1}).status_code==409
     assert client.post(url,json={'archived':False,'revision':2}).status_code==200
     assert len(client.get('/api/skills').json()['skills'])==1

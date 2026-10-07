@@ -27,7 +27,8 @@ def prepare_context(agent, history):
 def run_with_context_recovery(agent, prompt, history, invoke):
     ctx, store = agent.context, agent.context_store
     directory = ctx.spec.get('history_reference_dir', ctx.cwd)
-    current = agent.journal.prompt(prompt, history, cwd=directory)
+    native = getattr(agent, 'native', None)
+    current = prompt if native is not None and native.resumed else agent.journal.prompt(prompt, history, cwd=directory)
     previous = None
     attempts = 0
     timeout = ctx.spec.get('timeout')
@@ -56,6 +57,8 @@ def run_with_context_recovery(agent, prompt, history, invoke):
         # Their warning survives compaction and permits read-only investigation.
         if agent.journal.pending:
             raise ContextUnavailable('Context needs compaction, but tool outcomes are pending. Verify their receipts before resuming.')
+        if native is not None:
+            native.invalidate()
         progress = agent.journal.completed_tools
         size = pressure['input_tokens']
         attempts = attempts + 1 if previous and previous[0] == progress else 1
@@ -75,3 +78,5 @@ def run_with_context_recovery(agent, prompt, history, invoke):
             'Continue the unfinished task from the saved receipts. This is a context handoff, not a new request. '
             'Do not repeat completed actions.\n\nOriginal current request:\n' + prompt,
             history, cwd=directory)
+        if native is not None:
+            native.begin(resume=False)

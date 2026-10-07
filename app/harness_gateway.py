@@ -104,6 +104,7 @@ class HarnessGateway:
         self.model_slots, self.memory, self.skills = model_slots, memory, skills
         self.tracing = tracing
         self.context_budget = context_budget
+        self.native_sessions = None
         from .context_maintenance import ContextMaintenance
         self.maintenance = ContextMaintenance(self)
 
@@ -211,6 +212,8 @@ class HarnessGateway:
                 payload = compaction_payload(body, model, attempt)
                 partial_cursor = type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
             else:
+                if self.native_sessions is not None:
+                    self.native_sessions.observe_scope(run)
                 context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
                 payload = authorized_payload(body, route, model, context)
                 field = 'messages' if route == '/v1/messages' else 'input'

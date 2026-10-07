@@ -26,6 +26,18 @@ def prepare_binary(binding):
         subprocess.run(['npm', 'install', '-g', packages[binding]], check=True, timeout=300)
 
 
+def runtime_version(binding):
+    """Fingerprint the installed CLI, including binaries from older snapshots."""
+    if binding not in {'codex', 'opencode'}:
+        return ''
+    try:
+        result = subprocess.run([binding, '--version'], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    value = result.stdout.strip()
+    return value if result.returncode == 0 and value and len(value) <= 200 else ''
+
+
 def prepare_runtime():
     # An image build already fetched this revision: activate it before probing
     # the older wheel, without running pip on every turn.

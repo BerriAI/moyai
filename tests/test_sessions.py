@@ -536,6 +536,8 @@ def test_delete_hides_parent_and_agents_and_blocks_all_session_access(workspace)
     store = app.state.store
     sign_in(app, client, 'alice', 'alice@berri.ai')
     parent, child, _ = seeded_group(app)
+    for native_run in (parent, child):
+        store.execute("INSERT INTO native_sessions(run_id,turn_id,actor_id,encrypted) VALUES(?,1,'google:alice','opaque')", (native_run,))
     folder = client.post('/api/session-folders', json={'name': 'Keep folder'}).json()['id']
     assert client.put('/api/runs/' + parent + '/folder', json={'folder_id': folder}).status_code == 200
     assert client.post('/api/runs/' + parent + '/archive', json={'archived': True}).status_code == 200
@@ -546,6 +548,7 @@ def test_delete_hides_parent_and_agents_and_blocks_all_session_access(workspace)
     assert client.get('/api/runs/' + side + '/side-chats').json() == []
     assert client.delete('/api/runs/' + parent).status_code == 200
     assert store.run(child)['deleted_at'] == store.run(parent)['deleted_at']
+    assert not store.rows('SELECT * FROM native_sessions WHERE run_id IN (?,?)', (parent, child))
     for archived in (False, True):
         rows = client.get('/api/runs', params={'scope': 'all', 'archived': archived, 'focus': child}).json()
         assert not {parent, child, removed_side}.intersection(row['id'] for row in rows)
