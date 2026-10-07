@@ -158,14 +158,7 @@ class DurableRunner(RunManager):
         # and never publishes the previous answer a second time.
         state.update(phase='warm_cleanup', idle_reason=reason)
         self.save(run_id, state)
-        if getattr(self, 'computer', None):
-            try:
-                sandbox = await self.sandbox(state)
-                async with self.computer.locks.setdefault(run_id, asyncio.Lock()):
-                    await self.computer.save_before_release(sandbox, run_id)
-            except LostExecution:
-                pass
-        await self.cleanup(state)
+        await self.cleanup(state, run_id)
         state.update(phase='idle', sandbox_id='')
         state.pop('idle_until', None)
         self.save(run_id, state)
@@ -509,7 +502,7 @@ class DurableRunner(RunManager):
                 self.save(run_id, state)
             elif continuing and result.get('wait_credential') and self.credentials:
                 self.credentials.resolution(run_id,result['wait_credential'])
-                await self.cleanup(state)
+                await self.cleanup(state, run_id)
                 state.update(phase='waiting_credential',wait_credential=result['wait_credential'],sandbox_id='',
                              segment=state['segment']+1,cursor=0)
                 state.pop('result',None)
@@ -522,7 +515,7 @@ class DurableRunner(RunManager):
             elif continuing and result.get('wait_group') and self.coordinator:
                 # Validate the control message against persisted ownership.
                 self.coordinator.group(run_id, result['wait_group'])
-                await self.cleanup(state)
+                await self.cleanup(state, run_id)
                 state.update(phase='waiting_children', wait_group=result['wait_group'], sandbox_id='',
                              segment=state['segment'] + 1, cursor=0)
                 state.pop('result', None)
@@ -534,7 +527,7 @@ class DurableRunner(RunManager):
                 self.save(run_id, state)
             elif continuing:
                 if time.time() - state['machine_started'] >= self.settings.sandbox_rotation_seconds:
-                    await self.cleanup(state)
+                    await self.cleanup(state, run_id)
                     state.update(sandbox_id='', phase='provision')
                 else:
                     state['phase'] = 'install'
@@ -580,7 +573,7 @@ class DurableRunner(RunManager):
         elif phase == 'cleanup':
             if self.coordinator and state.get('outcome') not in {'completed', 'steered'}:
                 await self.coordinator.cancel_children(run_id)
-            await self.cleanup(state)
+            await self.cleanup(state, run_id)
             state.update(phase='finish', keep_warm=False, sandbox_id='')
             self.store.update_run(run_id, sandbox_id='')
             self.save(run_id, state)
@@ -621,12 +614,12 @@ class DurableRunner(RunManager):
             state.pop('resume_credential', None)
             state.pop('wait_credential', None)
 
-    async def cleanup(self, state):
+    async def cleanup(self, state, run_id):
         if not state.get('sandbox_id'):
             return
         try:
             sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
             if await sandbox.poll.aio() is None:
-                await self.terminate(sandbox)
+                await self.terminate(sandbox, run_id)
         except modal.exception.NotFoundError:
             pass  # A confirmed missing machine cannot still execute a tool.

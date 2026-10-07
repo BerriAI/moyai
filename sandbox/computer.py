@@ -78,6 +78,10 @@ def valid_url(url):
     return url
 
 
+def valid_tab(tab):
+    if not isinstance(tab, str) or len(tab) > 512 or not re.fullmatch(r'(?:https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*|)', tab):
+        raise ValueError('Use a canonical GitHub pull request URL for this browser tab.')
+    return tab
 def display_alive():
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
@@ -160,12 +164,21 @@ class Computer:
         self.panel = None
         self.clipboard = None
         self.lock = asyncio.Lock()
+        self.review_context = None
+        self.review_pages = {}
+        self.frame_cache = {}
+        self.foreground_tab = ''
+        self.return_window = self.foreground_window = None
+        self.review_window_states = {}
+        self.controller_tab = ''
+        self.release_tab = ''
         self.frame = ''
         self.frame_at = 0
         self.controller = ''
         self.lease_until = 0
         self.release_pending = False
         self.recording = None
+        self.stopping = False
         self.notice = ''
 
     async def ensure_desktop(self):
@@ -201,31 +214,34 @@ class Computer:
         self.notice = ''
 
     async def open(self):
-        await self.ensure_desktop()
-        if self.browser and not self.browser.is_connected():
-            self.page = self.context = self.browser = None
+        await self.start_browser()
         if self.context:
             await self.active_page()
             if self.page:
                 return
-            self.page = await self.context.new_page()
-            self.page.set_default_timeout(20000)
-            await self.page.goto('chrome://newtab/')
-            return
-        from playwright.async_api import async_playwright
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-        if not self.browser:
-            self.browser = await self.playwright.chromium.launch(executable_path='/usr/bin/chromium', headless=False,
-                env={**os.environ, 'DISPLAY': ':99'}, args=['--no-sandbox', '--start-maximized', '--window-position=0,0',
-                                                         f'--window-size={WIDTH},{HEIGHT}'])
-        self.context = await self.browser.new_context(no_viewport=True)
-        self.context.on('page', self.new_page)
-        self.context.on('close', self.context_closed)
+        else:
+            self.context = await self.browser.new_context(no_viewport=True)
+            self.context.on('page', self.new_page)
+            self.context.on('close', self.context_closed)
         self.page = await self.context.new_page()
         self.page.set_default_timeout(20000)
         await self.page.goto('chrome://newtab/')
         await self.refresh_frame()
+
+    async def start_browser(self):
+        await self.ensure_desktop()
+        if self.browser and not self.browser.is_connected():
+            self.page = self.context = self.browser = self.review_context = None
+            self.review_pages.clear()
+            self.frame_cache.clear()
+        if self.browser:
+            return
+        from playwright.async_api import async_playwright
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(executable_path='/usr/bin/chromium', headless=False,
+            env={**os.environ, 'DISPLAY': ':99'}, args=['--no-sandbox', '--start-maximized', '--window-position=0,0',
+                                                     f'--window-size={WIDTH},{HEIGHT}'])
 
     def context_closed(self, context):
         if self.context is context:
@@ -273,9 +289,138 @@ class Computer:
         self.page = page
         page.set_default_timeout(20000)
 
+    def page_for(self, tab=''):
+        if not tab:
+            return self.page if self.page and not self.page.is_closed() else None
+        pages = [p for p in self.review_pages.get(tab, []) if not p.is_closed()]
+        if tab in self.review_pages:
+            self.review_pages[tab] = pages
+        return pages[-1] if pages else None
+
+    def review_page_count(self):
+        return sum(not page.is_closed() for pages in self.review_pages.values() for page in pages)
+
+    def track_review_page(self, tab, page):
+        self.review_pages.setdefault(tab, []).append(page)
+        page.set_default_timeout(20000)
+        async def popup(child):
+            async with self.lock:
+                if self.stopping or self.review_page_count() >= 16 or page.is_closed():
+                    await child.close()
+                    return
+                self.track_review_page(tab, child)
+                self.frame_cache.pop(tab, None)
+                try:
+                    owner = self.page_for(self.foreground_tab) if self.owns_foreground() else None
+                    if owner:
+                        await self.show_review_page(owner)
+                    else:
+                        await self.review_windows(minimize=True, page=child)
+                        await self.settle_foreground()
+                except Exception:
+                    self.notice = 'Desktop handoff is reconnecting. Check the screen before continuing.'
+        page.on('popup', popup)
+
+    async def open_review_page(self, tab):
+        if self.review_page_count() >= 16:
+            raise ValueError('Close a pull request tab before opening another (16-tab limit).')
+        await self.start_browser()
+        await self.begin_review_foreground(tab)
+        if not self.review_context:
+            self.review_context = await self.browser.new_context(viewport={'width': WIDTH, 'height': HEIGHT})
+        page = await self.review_context.new_page()
+        self.track_review_page(tab, page)
+        try:
+            await page.goto(tab, wait_until='domcontentloaded')
+        except Exception:
+            await page.close()
+            raise
+        return page
+
+    async def window_command(self, *args):
+        if not self.desktop:
+            return None
+        proc = await asyncio.create_subprocess_exec('xdotool', *args, env={**os.environ, 'DISPLAY': ':99'},
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), 3)
+        except BaseException:
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            raise
+        return stdout.decode().strip() if proc.returncode == 0 else None
+
+    async def review_windows(self, *, minimize, page=None):
+        if not self.desktop or not self.review_context:
+            return
+        async with asyncio.timeout(5):
+            seen = set()
+            for target in [page] if page else list(self.review_context.pages):
+                if target.is_closed():
+                    continue
+                session = None
+                try:
+                    session = await self.review_context.new_cdp_session(target)
+                    window = await session.send('Browser.getWindowForTarget')
+                    identity, current = window['windowId'], window['bounds']['windowState']
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    if minimize and current != 'minimized':
+                        self.review_window_states.setdefault(identity, current)
+                    desired = 'minimized' if minimize else self.review_window_states.get(identity, 'normal')
+                    if (minimize or identity in self.review_window_states) and current != desired:
+                        if current != 'normal':
+                            await session.send('Browser.setWindowBounds', {'windowId': identity, 'bounds': {'windowState': 'normal'}})
+                        if desired != 'normal':
+                            await session.send('Browser.setWindowBounds', {'windowId': identity, 'bounds': {'windowState': desired}})
+                    if not minimize:
+                        self.review_window_states.pop(identity, None)
+                except Exception:
+                    if not target.is_closed():
+                        raise
+                finally:
+                    if session:
+                        try:
+                            await asyncio.wait_for(session.detach(), 1)
+                        except Exception:
+                            pass
+            if page is None:
+                for identity in set(self.review_window_states) - seen:
+                    self.review_window_states.pop(identity, None)
+
+    async def begin_review_foreground(self, tab):
+        if not self.foreground_tab:
+            self.return_window = await self.window_command('getactivewindow')
+        self.foreground_tab = tab
+
+    async def show_review_page(self, page):
+        await self.review_windows(minimize=False, page=page)
+        await page.bring_to_front()
+        self.foreground_window = await self.window_command('getactivewindow')
+
+    def owns_foreground(self):
+        tab = self.foreground_tab
+        return bool(tab and ((self.recording and self.recording.get('tab', '') == tab)
+                    or (self.controls() and self.controller_tab == tab and self.page_for(tab))))
+
+    async def settle_foreground(self):
+        if self.stopping or not self.foreground_tab or self.owns_foreground():
+            return
+        current = await self.window_command('getactivewindow')
+        await self.review_windows(minimize=True)
+        if self.return_window and current == self.foreground_window:
+            # A vanished native window is a safe fallback to the revealed desktop.
+            await self.window_command('windowactivate', '--sync', self.return_window)
+        self.foreground_tab = ''
+        self.return_window = self.foreground_window = None
+        await self.refresh_frame()
+
     def controls(self):
         if self.controller and self.lease_until < time.monotonic():
-            self.controller = ''
+            self.release_tab = self.controller_tab
+            self.controller = self.controller_tab = ''
             self.release_pending = True
         return self.controller
 
@@ -285,23 +430,41 @@ class Computer:
         ImageGrab.grab(xdisplay=':99').save(raw, format=image_format, **({'quality': 70} if image_format == 'JPEG' else {}))
         return raw.getvalue()
 
-    async def refresh_frame(self):
-        if not self.desktop:
+    async def refresh_frame(self, tab=''):
+        if not tab:
+            if not self.desktop:
+                return
+            try:
+                self.frame = base64.b64encode(await asyncio.to_thread(self.desktop_image)).decode()
+                self.frame_at = time.time()
+            except Exception:
+                self.notice = 'Desktop view is reconnecting…'
+            return
+        page = self.page_for(tab)
+        if not page:
+            self.frame_cache.pop(tab, None)
             return
         try:
-            self.frame = base64.b64encode(await asyncio.to_thread(self.desktop_image)).decode()
-            self.frame_at = time.time()
+            frame = base64.b64encode(await page.screenshot(type='jpeg', quality=65, timeout=3000)).decode()
+            if self.page_for(tab) is page:
+                self.frame_cache[tab] = (frame, time.time())
         except Exception:
-            self.notice = 'Desktop view is reconnecting…'
+            pass  # Keep the previous frame while a navigation is committing.
 
     async def frames(self):
         while True:
             async with self.lock:
-                self.controls()
-                if self.release_pending:
-                    await self.release_buttons()
+                try:
+                    self.controls()
+                    if self.release_pending:
+                        await self.release_buttons()
+                    await self.settle_foreground()
+                except Exception:
+                    self.notice = 'Desktop handoff is reconnecting. Check the screen before continuing.'
             if self.desktop:
                 await self.refresh_frame()
+            if self.foreground_tab:
+                await self.refresh_frame(self.foreground_tab)
             if self.recording and self.recording['process'].returncode is not None:
                 async with self.lock:
                     try:
@@ -322,38 +485,57 @@ class Computer:
             raise ValueError('This workspace has reached its 64 MB capture budget. Download and remove old captures first.')
         return available
 
+    def agent_recording(self):
+        return bool(self.recording and not self.recording.get('tab', '')
+                    and self.recording.get('actor', 'agent') == 'agent')
+
     async def stop_recording(self):
         if not self.recording:
             return {'recording': False}
         record, self.recording = self.recording, None
-        process = record['process']
-        if process.returncode is None:
-            try:
-                process.send_signal(signal.SIGINT)
-            except ProcessLookupError:
-                pass
         try:
-            await asyncio.wait_for(process.wait(), 12)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-        path = record['path']
-        if not path.exists() or path.stat().st_size < 100 or process.returncode not in {0, 255}:
-            if path.exists():
-                path.rename(path.with_suffix('.partial'))
-            raise RuntimeError('Recording did not finalize. Any partial capture is preserved in the workspace.')
-        if path.stat().st_size > MEDIA_LIMIT:
-            raise RuntimeError('Recording exceeded the file size limit.')
-        final = path.with_suffix('.webm')
-        path.replace(final)
-        return {'path': str(final), 'name': final.name, 'recording': False, 'duration_seconds': round(time.time()-record['started'], 1)}
+            process = record['process']
+            if process.returncode is None:
+                try:
+                    process.send_signal(signal.SIGINT)
+                except ProcessLookupError:
+                    pass
+            try:
+                await asyncio.wait_for(process.wait(), 12)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+            path = record['path']
+            if not path.exists() or path.stat().st_size < 100 or process.returncode not in {0, 255}:
+                if path.exists():
+                    path.rename(path.with_suffix('.partial'))
+                raise RuntimeError('Recording did not finalize. Any partial capture is preserved in the workspace.')
+            if path.stat().st_size > MEDIA_LIMIT:
+                raise RuntimeError('Recording exceeded the file size limit.')
+            final = path.with_suffix('.webm')
+            path.replace(final)
+            return {'path': str(final), 'name': final.name, 'recording': False, 'duration_seconds': round(time.time()-record['started'], 1)}
+        finally:
+            try:
+                await self.settle_foreground()
+            except Exception:
+                self.notice = 'Desktop handoff is reconnecting. Check the screen before continuing.'
 
-    async def state(self):
-        return {'available': bool(self.desktop and self.desktop.poll() is None), 'surface': 'desktop',
-                'width': WIDTH, 'height': HEIGHT, 'frame': self.frame, 'frame_at': self.frame_at,
-                'url': self.page.url if self.page and not self.page.is_closed() else '',
-                'controller': self.controls(), 'recording': bool(self.recording),
-                'recording_name': self.recording['path'].name if self.recording else '',
+    async def state(self, tab=''):
+        page = self.page_for(tab)
+        if page and tab:
+            await self.refresh_frame(tab)
+        frame, stamp = self.frame_cache.get(tab, ('', 0)) if page else ('', 0)
+        if not tab:
+            frame, stamp = self.frame, self.frame_at
+        available = bool(page) if tab else bool(self.desktop and self.desktop.poll() is None)
+        controller = self.controls()
+        recording = bool(self.recording and self.recording.get('tab', '') == tab)
+        return {'available': available, 'surface': 'browser' if tab else 'desktop', 'tab': tab, 'width': WIDTH, 'height': HEIGHT,
+                'frame': frame, 'frame_at': stamp, 'url': page.url if page else '',
+                'controller': controller, 'controller_tab': self.controller_tab, 'recording': recording,
+                'recording_elsewhere': bool(self.recording and not recording),
+                'recording_name': self.recording['path'].name if recording else '',
                 'media': self.media(), 'notice': self.notice}
 
     async def desktop_input(self, events):
@@ -405,83 +587,168 @@ class Computer:
             raise
 
     async def release_buttons(self):
+        tab = self.release_tab if self.release_pending else self.controller_tab
+        if tab:
+            page = self.page_for(tab)
+            if page:
+                for button in ('left', 'middle', 'right'):
+                    await page.mouse.up(button=button)
+        else:
+            await self.clear_clipboard()
+            if self.desktop:
+                await self.desktop_input([{'type': 'pointer', 'phase': 'up', 'button': button} for button in range(3)])
         self.release_pending = False
-        await self.clear_clipboard()
-        if self.desktop:
-            await self.desktop_input([{'type': 'pointer', 'phase': 'up', 'button': button} for button in range(3)])
+        self.release_tab = ''
+
+    async def browser_input(self, page, events):
+        # The same batch validator admits both surfaces before any event applies.
+        input_commands(events)
+        for event in events:
+            kind = event['type']
+            if kind in {'text', 'paste'}:
+                await page.keyboard.insert_text(event['text'])
+            elif kind == 'key':
+                await page.keyboard.press(event['key'].replace('Meta+', 'Control+'))
+            elif kind == 'pointer':
+                if event['phase'] != 'up' or 'x' in event or 'y' in event:
+                    await page.mouse.move(round(max(0, min(WIDTH-1, event['x']))), round(max(0, min(HEIGHT-1, event['y']))))
+                button = ('left', 'middle', 'right')[event.get('button', 0)]
+                if event['phase'] == 'down':
+                    await page.mouse.down(button=button)
+                elif event['phase'] == 'up':
+                    await page.mouse.up(button=button)
+            elif kind == 'scroll':
+                await page.mouse.wheel(max(-1200, min(1200, event.get('dx', 0))), max(-1200, min(1200, event.get('dy', 0))))
 
     async def command(self, body):
         action, actor = body.get('action'), body.get('actor', 'agent')
+        tab = valid_tab(body.get('tab', ''))
+        if tab and actor == 'agent':
+            raise ValueError('Only a signed-in person can use pull request tabs.')
+        if action == 'finish' and body.get('args', {}).get('all') is True:
+            self.stopping = True
+        if self.stopping and action not in {'state', 'finish'}:
+            raise ValueError('This workspace is shutting down. Start a new response to use Computer again.')
         if action == 'state':
-            return await self.state()
-        if action == 'release':
-            async with self.lock:
-                if self.controls() == actor:
+            return await self.state(tab)
+        async with self.lock:
+            if self.stopping and action != 'finish':
+                raise ValueError('This workspace is shutting down. Start a new response to use Computer again.')
+            self.controls()
+            # Finalization cannot depend on a live control lease or successful handoff.
+            if action == 'finish':
+                if body.get('args', {}).get('all') is True or self.agent_recording():
+                    return await self.stop_recording()
+                return {'recording': bool(self.recording)}
+            released = self.release_pending
+            if released:
+                await self.release_buttons()
+            await self.settle_foreground()
+            if action == 'release':
+                if self.controls() == actor and self.controller_tab == tab:
                     await self.release_buttons()
-                    self.controller = ''
-                return await self.state()
-        if action == 'claim':
-            async with self.lock:
+                    self.controller = self.controller_tab = ''
+                    await self.settle_foreground()
+                return await self.state(tab)
+            if action == 'claim':
                 if actor == 'agent':
                     raise ValueError('Only a signed-in person can take control.')
                 if self.controls() and self.controller != actor:
                     raise ValueError('Another person is controlling this browser.')
-                if self.controller != actor:
+                if self.recording and self.recording.get('tab', '') != tab:
+                    raise ValueError('Stop the recording in its current tab before switching control.')
+                if not released and (self.controller != actor or self.controller_tab != tab):
                     await self.release_buttons()
-                self.controller, self.lease_until = actor, time.monotonic()+60
-                return await self.state()
-        # Finish capture on every agent checkpoint/response before the archive.
-        if action == 'finish':
-            async with self.lock:
-                return await self.stop_recording()
-        async with self.lock:
-            controller = self.controls()
-            if self.release_pending:
-                await self.release_buttons()
-            if controller and self.controller != actor:
+                self.controller, self.controller_tab, self.lease_until = actor, tab, time.monotonic()+60
+                await self.settle_foreground()
+                return await self.state(tab)
+            if action == 'close_tab':
+                if not tab:
+                    raise ValueError('Only a pull request tab can be closed.')
+                controller = self.controls()
+                if self.recording and self.recording.get('tab', '') == tab:
+                    raise ValueError('Stop the recording before closing this tab.')
+                if not self.page_for(tab):
+                    self.review_pages.pop(tab, None)
+                    self.frame_cache.pop(tab, None)
+                    return await self.state(tab)
+                if controller and controller != actor:
+                    raise ValueError('Another person is controlling this browser.')
+                if self.controller_tab == tab:
+                    await self.release_buttons()
+                for page in self.review_pages.get(tab, []):
+                    if not page.is_closed():
+                        await page.close()
+                self.review_pages.pop(tab, None)
+                self.frame_cache.pop(tab, None)
+                if self.controller_tab == tab:
+                    self.controller = self.controller_tab = ''
+                await self.settle_foreground()
+                return await self.state(tab)
+            if self.controls() and self.controller != actor:
                 raise ValueError('A person has control of the browser. Wait for them to release it; do not loop or retry browser actions.')
-            if actor != 'agent' and self.controls() != actor:
-                raise ValueError('Take control before interacting with the browser.')
-            if actor != 'agent' and self.controller == actor:
+            if actor != 'agent' and (self.controls() != actor or self.controller_tab != tab):
+                raise ValueError('Take control of this tab before interacting with the browser.')
+            if self.recording and self.recording.get('tab', '') != tab:
+                raise ValueError('Stop the recording in its current tab before switching control.')
+            if actor != 'agent':
                 self.lease_until = time.monotonic()+60
+            if action == 'record_stop':
+                if actor == 'agent' and self.recording and not self.agent_recording():
+                    raise ValueError('A person is recording this browser. They must stop the recording.')
+                return await self.stop_recording()
             args = body.get('args', {})
             if action == 'input':
                 if actor == 'agent':
                     raise ValueError('Desktop input requires a signed-in controller.')
                 input_commands(args.get('events'))
-                await self.ensure_desktop()
-                await self.desktop_input(args['events'])
-                self.lease_until = time.monotonic()+60
-                await self.refresh_frame()
-                return await self.state()
-            await self.open()
-            if actor != 'agent':
-                self.lease_until = time.monotonic()+60
-            if action == 'open':
+                if not tab:
+                    await self.ensure_desktop()
+                    await self.desktop_input(args['events'])
+                    self.foreground_tab = ''
+                    self.lease_until = time.monotonic()+60
+                    await self.refresh_frame()
+                    return await self.state()
+            if tab:
+                page = self.page_for(tab)
+                if not page and action == 'open':
+                    page = await self.open_review_page(tab)
+                if not page:
+                    raise ValueError('Open this pull request tab before interacting with it.')
+            else:
+                await self.open()
+                page = self.page
+            if tab:
+                await self.begin_review_foreground(tab)
+                await self.show_review_page(page)
+            self.foreground_tab = tab
+            if action == 'input':
+                await self.browser_input(page, args['events'])
+            elif action == 'open':
                 if args.get('url'):
-                    await self.page.goto(valid_url(args['url']), wait_until='domcontentloaded')
+                    await page.goto(valid_url(args['url']), wait_until='domcontentloaded')
             elif action == 'click':
                 if 'role' in args:
-                    await self.page.get_by_role(args['role'], name=args['name'], exact=True).click()
+                    await page.get_by_role(args['role'], name=args['name'], exact=True).click()
                 else:
-                    await self.page.mouse.click(max(0, min(WIDTH-1, float(args['x']))), max(0, min(HEIGHT-1, float(args['y']))))
+                    await page.mouse.click(max(0, min(WIDTH-1, float(args['x']))), max(0, min(HEIGHT-1, float(args['y']))))
             elif action == 'fill':
-                await self.page.get_by_label(args['label'], exact=True).fill(args['value'])
+                await page.get_by_label(args['label'], exact=True).fill(args['value'])
             elif action == 'type':
-                await self.page.keyboard.insert_text(str(args['text'])[:10000])
+                await page.keyboard.insert_text(str(args['text'])[:10000])
             elif action == 'key':
                 key = args['key']
                 if key not in {'Enter', 'Tab', 'Shift+Tab', 'Escape', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Control+a', 'Meta+a', 'Space'}:
                     raise ValueError('Unsupported browser key.')
-                await self.page.keyboard.press(key)
+                await page.keyboard.press(key)
             elif action == 'scroll':
-                await self.page.mouse.wheel(0, max(-1800, min(1800, int(args['dy']))))
+                await page.mouse.wheel(0, max(-1800, min(1800, int(args['dy']))))
             elif action == 'back':
-                await self.page.go_back(wait_until='domcontentloaded')
+                await page.go_back(wait_until='domcontentloaded')
             elif action == 'screenshot':
                 available = self.budget()
                 path = CAPTURES / capture_name(args.get('name'), 'png')
-                raw = await asyncio.to_thread(self.desktop_image, 'PNG')
+                raw = await page.screenshot(full_page=False) if tab else await asyncio.to_thread(self.desktop_image, 'PNG')
                 if len(raw) > min(MEDIA_LIMIT, available):
                     raise ValueError('Screenshot exceeds the capture budget.')
                 partial = path.with_suffix('.partial')
@@ -499,24 +766,23 @@ class Computer:
                     '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '6', '-b:v', '700k',
                     '-t', '600', '-fs', str(min(25*1024*1024, available-512*1024)), '-f', 'webm', str(path),
                     stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-                self.recording = {'process': process, 'path': path, 'started': time.time()}
+                self.recording = {'process': process, 'path': path, 'started': time.time(), 'tab': tab, 'actor': actor}
                 await asyncio.sleep(.3)
                 if process.returncode is not None:
                     result = await self.stop_recording()
                     return result
                 return {'recording': True, 'name': path.with_suffix('.webm').name, 'path': str(path.with_suffix('.webm')), 'max_seconds': 600}
-            elif action == 'record_stop':
-                return await self.stop_recording()
             elif action != 'read':
                 raise ValueError('Unknown computer action.')
-            await self.refresh_frame()
+            await self.refresh_frame(tab)
             if actor != 'agent':
-                return await self.state()
-            Path('/artifacts').mkdir(exist_ok=True)
-            await self.page.screenshot(path='/artifacts/browser.png')
-            return {'url': self.page.url, 'title': await self.page.title(),
-                    'text': (await self.page.locator('body').inner_text())[:24000],
-                    'elements': await self.page.locator('a,button,input,select,textarea').evaluate_all(
+                return await self.state(tab)
+            if not tab:
+                Path('/artifacts').mkdir(exist_ok=True)
+                await page.screenshot(path='/artifacts/browser.png')
+            return {'url': page.url, 'title': await page.title(),
+                    'text': (await page.locator('body').inner_text())[:24000],
+                    'elements': await page.locator('a,button,input,select,textarea').evaluate_all(
                         "els => els.slice(0,80).map(e => ({tag:e.tagName,role:e.getAttribute('role'),name:e.innerText||e.getAttribute('aria-label')||e.getAttribute('placeholder'),type:e.type}))"),
                     'screenshot': 'The Computer panel shows the browser. Use browser_screenshot for a named saved capture.'}
 
@@ -569,7 +835,7 @@ def request(body, *, start=True):
         if not isinstance(exc.reason, ConnectionRefusedError):
             raise  # A lost reply does not prove the command was not applied.
         if not start:
-            return {'available': False}
+            return {'available': False, 'tab': valid_tab(body.get('tab', ''))}
     Path('/tmp/moyai-computer').mkdir(exist_ok=True)
     with open('/tmp/moyai-computer/start.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

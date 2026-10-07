@@ -280,6 +280,29 @@ async def test_cancel_during_provisioning_cannot_orphan_sandbox(runner, monkeypa
     assert runner.store.run(run["id"])["status"] == "cancelled"
 
 
+async def test_active_stop_revokes_capability_and_saves_without_waiting_for_ui_lock(runner):
+    from unittest.mock import AsyncMock
+
+    run = runner.store.create_run('Stop active work', '', 'modal', [])
+    runner.store.update_run(run['id'], status='running', token_hash='active-capability')
+    sandbox = FakeSandbox()
+    async def terminate():
+        row = runner.store.run(run['id'])
+        assert row['status'] == 'stopping' and row['token_hash'] == ''
+        await sandbox.terminate_sandbox()
+    sandbox.terminate = aio(terminate)
+    runner.sandboxes[run['id']] = sandbox
+    capture_busy = asyncio.Lock()
+    await capture_busy.acquire()
+    runner.computer = SimpleNamespace(locks={run['id']: capture_busy}, save_captures=AsyncMock())
+    try:
+        await asyncio.wait_for(runner.cancel(run['id']), 1)
+        assert sandbox.terminated
+        runner.computer.save_captures.assert_awaited_once_with(sandbox, run['id'], releasing=True)
+    finally:
+        capture_busy.release()
+
+
 async def test_shutdown_during_provisioning_cleans_up_after_creation(runner, monkeypatch):
     sandbox = FakeSandbox()
     started, release = asyncio.Event(), asyncio.Event()

@@ -6,17 +6,22 @@ import time
 from contextlib import asynccontextmanager
 
 import modal
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from . import captures
 
 
+TAB_PATTERN = r'^(?:https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*|)$'
+TAB_UPDATE_NOTICE = 'This workspace browser needs a restart to support PR tabs. Open the PR in GitHub for now.'
+
+
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['claim', 'release', 'input', 'open', 'click', 'type', 'key', 'scroll', 'back', 'screenshot', 'record_start', 'record_stop']
+    action: Literal['claim', 'release', 'input', 'open', 'click', 'type', 'key', 'scroll', 'back', 'screenshot', 'record_start', 'record_stop', 'close_tab']
     args: dict = Field(default_factory=dict)
+    tab: str = Field(default='', max_length=512, pattern=TAB_PATTERN)
 
 
 class DesktopConnection:
@@ -74,6 +79,7 @@ class Computer:
         self.locks = {}
         self.slots = asyncio.Semaphore(4)
         self.capture_locks = {}
+        self.releasing = {}
         self.connections = {}
         self.connection_lock = asyncio.Lock()
         store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')
@@ -81,6 +87,10 @@ class Computer:
     def touched(self, run_id):
         rows = self.store.rows('SELECT touched FROM computer_activity WHERE run_id=?', (run_id,))
         return rows[0]['touched'] if rows else 0
+
+    def shutting_down(self, run_id, sandbox_id):
+        return (self.store.run(run_id)['status'] == 'stopping' or
+                bool(sandbox_id and self.releasing.get(run_id) == sandbox_id))
 
     def authorize(self, request, run_id, mutation=False):
         self.security.require(request, mutation=mutation)
@@ -97,8 +107,11 @@ class Computer:
     async def sandbox(self, run):
         if not run.get('sandbox_id'):
             return None
-        sandbox = await self.manager.provider(run).get(run['sandbox_id'])
-        return sandbox if await sandbox.poll.aio() is None else None
+        try:
+            sandbox = await self.manager.provider(run).get(run['sandbox_id'])
+            return sandbox if await sandbox.poll.aio() is None else None
+        except modal.exception.NotFoundError:
+            return None
 
     @asynccontextmanager
     async def connection(self, run):
@@ -180,27 +193,33 @@ class Computer:
                 self.store.event(run_id, 'artifact', 'Browser captures saved. Open Computer or Files to view them.')
                 await self.manager.persist()
 
-    async def save_before_release(self, sandbox, run_id):
+    async def save_captures(self, sandbox, run_id, *, releasing):
+        if releasing:
+            self.releasing[run_id] = sandbox.object_id
         try:
-            result = await self.execute(sandbox, 'request', json.dumps({'action': 'finish'}))
+            result = await self.execute(sandbox, 'request', json.dumps({'action': 'finish', 'args': {'all': releasing}}))
             if result.get('error'):
-                self.store.event(run_id, 'error', 'Browser recording could not be finalized. Any partial capture remains in the workspace.')
+                self.store.event(run_id, 'error', 'Browser recording could not be finalized before shutdown.' if releasing else
+                                 'Browser recording could not be finalized. Any partial capture remains in the workspace.')
             await self.sync(sandbox, run_id)
         except Exception:
-            self.store.event(run_id, 'error', 'Browser captures could not be copied from the sandbox. Any completed captures remain in its workspace snapshot.')
+            self.store.event(run_id, 'error', 'Some browser captures could not be saved. Continuing workspace shutdown.' if releasing else
+                             'Browser captures could not be copied from the sandbox. Completed captures remain in the live workspace for another save attempt.')
 
     def routes(self):
         router = APIRouter()
 
         @router.get('/api/runs/{run_id}/computer')
-        async def state(run_id: str, request: Request):
+        async def state(run_id: str, request: Request, tab: str = Query(default='', max_length=512, pattern=TAB_PATTERN)):
             run, actor = self.authorize(request, run_id)
             async with self.locks.setdefault(run_id, asyncio.Lock()):
-                stamp, sid, value = self.cache.get(run_id, (0, None, None))
+                stamp, sid, value = self.cache.get((run_id, tab), (0, None, None))
                 if time.monotonic() - stamp >= .08 or sid != run.get('sandbox_id'):
                     try:
                         async with self.connection(run) as connection:
-                            value = await connection.request({'action':'state'}) if connection else {'available': False}
+                            value = await connection.request({'action': 'state', 'tab': tab, 'actor': actor}) if connection else {'available': False, 'tab': tab}
+                            if tab and value.get('tab') != tab:
+                                value = {'available': False, 'tab': tab, 'notice': TAB_UPDATE_NOTICE}
                             value['has_sandbox'] = connection is not None
                             if connection:
                                 try:
@@ -208,10 +227,10 @@ class Computer:
                                 except Exception:
                                     value['notice'] = 'A capture could not be saved to the app yet. Keeping the workspace copy and retrying.'
                     except Exception:
-                        value = {'available': False, 'notice': 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.'}
+                        value = {'available': False, 'tab': tab, 'notice': 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.'}
                     if len(self.cache) >= 32:
                         self.cache.pop(min(self.cache, key=lambda key: self.cache[key][0]), None)
-                    self.cache[run_id] = (time.monotonic(), run.get('sandbox_id'), value)
+                    self.cache[run_id, tab] = (time.monotonic(), run.get('sandbox_id'), value)
                 return {**value, 'has_sandbox': value.get('has_sandbox', False), 'actor': actor,
                         'captures': captures.listing(self.settings, run_id)}
 
@@ -220,21 +239,52 @@ class Computer:
             run, actor = self.authorize(request, run_id, mutation=True)
             if len(json.dumps(body.args)) > 16000:
                 raise HTTPException(413, 'Computer command too large.')
-            async with self.locks.setdefault(run_id, asyncio.Lock()), self.connection(run) as connection:
-                if not connection:
-                    raise HTTPException(409, 'This workspace is asleep. Send a message to Moyai to start it again.')
+            async with self.locks.setdefault(run_id, asyncio.Lock()):
                 try:
-                    result = await connection.request({**body.model_dump(), 'actor': actor})
-                    if result.get('error'):
-                        raise HTTPException(409, result['error'])
-                    if body.action != 'release':
-                        self.store.execute('INSERT INTO computer_activity VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET touched=excluded.touched', (run_id, time.time()))
-                    if body.action in {'screenshot', 'record_stop'}:
-                        await self.sync(connection.sandbox, run_id)
-                    return {**result, 'ok': True, 'actor': actor, 'has_sandbox': True,
-                            'captures': captures.listing(self.settings, run_id)}
+                    run = self.store.run(run_id)
+                    closing = body.action == 'close_tab' and bool(body.tab)
+                    if not closing and self.shutting_down(run_id, run.get('sandbox_id')):
+                        raise HTTPException(409, 'This workspace is shutting down. Saved captures remain available in Files.')
+                    async with self.connection(run) as connection:
+                        if not connection:
+                            if closing:
+                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
+                            raise HTTPException(409, 'This workspace is asleep. Send a message to Moyai to start it again.')
+                        if body.tab:
+                            probe = {'action': 'state', 'tab': body.tab, 'actor': actor}
+                            try:
+                                scope = await connection.request(probe)
+                            except HTTPException:
+                                if not closing:
+                                    raise
+                                # Older scripts lack the streaming bridge. Only a
+                                # healthy legacy reply proves no named page exists.
+                                scope = await self.execute(connection.sandbox, 'request', json.dumps(probe))
+                                if scope.get('tab') == body.tab:
+                                    raise
+                            if scope.get('tab') != body.tab:
+                                if closing and 'tab' not in scope and 'error' not in scope and all(
+                                    isinstance(scope.get(field), bool) for field in ('available', 'recording')
+                                ):
+                                    return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
+                                raise HTTPException(503, TAB_UPDATE_NOTICE)
+                            if closing and scope.get('available') is False and scope.get('recording') is False:
+                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
+                        if self.shutting_down(run_id, run.get('sandbox_id')):
+                            raise HTTPException(409, 'This workspace is shutting down. Saved captures remain available in Files.')
+                        result = await connection.request({**body.model_dump(), 'actor': actor})
+                        if result.get('error'):
+                            raise HTTPException(409, result['error'])
+                        if body.action != 'release':
+                            self.store.execute('INSERT INTO computer_activity VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET touched=excluded.touched', (run_id, time.time()))
+                        if body.action in {'screenshot', 'record_stop'}:
+                            await self.sync(connection.sandbox, run_id)
+                        return {**result, 'ok': True, 'actor': actor, 'tab': body.tab, 'has_sandbox': True,
+                                'captures': captures.listing(self.settings, run_id)}
                 finally:
-                    self.cache.pop(run_id, None)
+                    for key in list(self.cache):
+                        if key[0] == run_id:
+                            self.cache.pop(key, None)
 
         @router.get('/api/runs/{run_id}/computer/captures/{name}')
         def content(run_id: str, name: str, request: Request, download: bool = False):

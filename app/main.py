@@ -522,10 +522,12 @@ def create_app(settings: Settings | None = None):
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
         sidebar_id = run['parent_run_id'] or run_id
+        pr_summary = session_pull_requests.summaries([run_id])[run_id]
         return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
                 **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
-                'pr_summary': session_pull_requests.summaries([run_id])[run_id],
+                'pr_summary': pr_summary,
                 "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
+                'pull_requests': pr_summary['pull_requests'],
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),

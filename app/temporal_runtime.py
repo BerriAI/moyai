@@ -33,14 +33,16 @@ class TemporalRunManager(DurableRunner):
             ON CONFLICT(run_id) DO UPDATE SET revision=revision+1''', (run['id'],))
 
     async def cancel(self, run_id):
-        if self.coordinator:
-            await self.coordinator.cancel_children(run_id)
         if not self.is_active(run_id) and self.state(run_id).get('phase') not in {'warm', 'warm_cleanup'}:
+            if self.coordinator:
+                await self.coordinator.cancel_children(run_id)
             return
         self.store.update_run(run_id, status='stopping', token_hash='')
         self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
         self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
         self.submit(self.store.run(run_id))
+        if self.coordinator:
+            await self.coordinator.cancel_children(run_id)
 
     async def recover(self):
         if not (self.settings.encryption_key or self.settings.session_secret):

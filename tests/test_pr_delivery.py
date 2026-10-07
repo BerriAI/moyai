@@ -9,7 +9,7 @@ from test_workspace import workspace
 
 
 def test_pr_cards_require_a_receipt_from_this_run_or_a_direct_child(workspace):
-    app, _ = workspace
+    app, client = workspace
     store = app.state.store
     runs = [store.create_run('PR handoff', '', 'demo', [])['id'] for _ in range(4)]
     parent, other, child, grandchild = runs
@@ -22,6 +22,31 @@ def test_pr_cards_require_a_receipt_from_this_run_or_a_direct_child(workspace):
         assert [pr.url for pr in selected] == [urls[0], urls[2]]
         # A child cannot borrow its parent's publication receipt.
         assert [pr.url for pr in pr_delivery.select_prs(conn, child, answer)] == [urls[2], urls[3]]
+    for run_id, expected in [(parent, [urls[0], urls[2]]), (child, [urls[2], urls[3]])]:
+        data = client.get(f'/api/runs/{run_id}').json()
+        assert data['pull_requests'] == data['pr_summary']['pull_requests']
+        assert [pr['url'] for pr in data['pull_requests']] == expected
+
+
+def test_session_pr_list_alias_tracks_publications_and_deleted_children(workspace):
+    app, client = workspace
+    store = app.state.store
+    parent = store.create_run('Discuss https://github.com/BerriAI/moyai/pull/999', '', 'demo', [])['id']
+    child = store.create_run('Child publication', '', 'demo', [])['id']
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (parent, child))
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests'] == []
+    url = publication(app, child, title='A confirmed change')
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests']
+    assert [(pr['url'], pr['title']) for pr in data['pull_requests']] == [(url, 'A confirmed change')]
+    store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (child,))
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests'] == []
+    store.execute("UPDATE runs SET deleted_at='' WHERE id=?", (child,))
+    data = client.get(f'/api/runs/{parent}').json()
+    assert data['pull_requests'] == data['pr_summary']['pull_requests']
+    assert [pr['url'] for pr in data['pull_requests']] == [url]
 
 
 def test_pr_selection_requires_the_exact_url_and_supports_legacy_receipts(workspace):

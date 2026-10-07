@@ -1,6 +1,7 @@
 /* Small line icons shared by the shell. Decorative only: callers keep accessible labels. */
 (function(root){
   const paths={
+    pull:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10M18 17V9a4 4 0 0 0-4-4h-2m3-3-3 3 3 3"/>',
     copy:'<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
     check:'<path d="m5 12 4 4L19 6"/>',
     plus:'<path d="M12 5v14M5 12h14"/>',

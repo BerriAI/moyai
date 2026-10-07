@@ -191,3 +191,117 @@ test('the pending input queue is bounded and overflow stops rather than replays'
   finish();await tick();await flush();assert.equal(commands.length,1);
   view.close();
 });
+
+const prA='https://github.com/BerriAI/moyai/pull/145',prB='https://github.com/BerriAI/moyai/pull/135';
+const prFrame=(tab,controller='')=>({...frame(tab,controller),surface:'browser',tab,controller,controller_tab:controller?tab:''});
+test('PR pages use explicit identity for open, control, poll and delayed release',async()=>{
+  const requests=[];let finishClaim;
+  const {view}=browser(async(path,options)=>{
+    requests.push({path,body:options?JSON.parse(options.body):null});
+    if(!options)return prFrame(decodeURIComponent(path.split('?tab=')[1]));
+    if(JSON.parse(options.body).action==='claim')await new Promise(resolve=>finishClaim=resolve);
+    return prFrame(JSON.parse(options.body).tab,'owner');
+  });
+  const first=node(),second=node();const opening=view.open('one',first,{tab:prA,autoload:true});await tick();
+  assert.equal(requests[1].body.tab,prA);assert.equal(requests[1].body.action,'claim');
+  const replacement=view.open('one',second,{tab:prB});
+  finishClaim();await opening;await replacement;
+  assert.equal(requests.some(r=>r.body?.action==='open'),false,'Cancelled PR open cannot navigate the replacement');
+  assert.deepEqual(requests.find(r=>r.body?.action==='release').body,{action:'release',tab:prA});
+  assert.equal(second.child.querySelector('[data-address]').textContent,prB);
+  view.close();await tick();
+});
+
+test('PR activation preserves an existing browser page and restored tabs do not seize control',async()=>{
+  const commands=[];const {view}=browser(async(path,options)=>{
+    if(!options)return prFrame(prA);
+    commands.push(JSON.parse(options.body));return prFrame(prA,'owner');
+  });
+  await view.open('one',node(),{tab:prA});assert.equal(commands.length,0);
+  await view.open('one',node(),{tab:prA,autoload:true});
+  assert.deepEqual(commands.at(-1),{action:'open',args:{},tab:prA},'No URL forces navigation on a previously opened tab');
+  view.close();await tick();
+});
+
+test('legacy or wrong-tab frames never render under a PR title or trigger navigation',async()=>{
+  const commands=[],host=node();const {view}=browser(async(path,options)=>{
+    if(options){commands.push(JSON.parse(options.body));return prFrame(prA,'owner');}
+    return frame('https://private-agent-page.example');
+  });
+  await view.open('one',host,{tab:prA,autoload:true});
+  assert.equal(host.child.querySelector('[data-screen]').hidden,true);
+  assert.match(host.child.querySelector('[data-notice]').textContent,/updated browser/);
+  assert.equal(commands.length,0);view.close();await tick();
+});
+
+test('named PR browser input uses the shared pointer, keyboard and paste batches with its tab identity',async()=>{
+  const commands=[];
+  const {view,flush}=browser(async(path,options)=>{
+    if(options)commands.push(JSON.parse(options.body));
+    else assert.equal(path,'/api/runs/one/computer?tab='+encodeURIComponent(prA));
+    return prFrame(prA,'owner');
+  });
+  const host=node();await view.open('one',host,{tab:prA});
+  const input=host.child.querySelector('[data-keyboard]'),screen=host.child.querySelector('[data-screen]');
+  screen.emit('pointerdown',{clientX:20,clientY:30,button:0,pointerId:1});
+  screen.emit('pointerup',{clientX:20,clientY:30,button:0,pointerId:1});
+  input.emit('compositionstart');type(input,'日本語',{isComposing:true});input.emit('compositionend');await flush(0);
+  input.emit('paste',{clipboardData:{getData:()=>'+test@example.com'}});key(input,'Enter');await flush();
+  assert.deepEqual(commands,[{action:'input',tab:prA,args:{events:[
+    {type:'pointer',phase:'down',x:40,y:60,button:0},{type:'pointer',phase:'up',x:40,y:60,button:0},
+    {type:'text',text:'日本語'},{type:'paste',text:'+test@example.com'},{type:'key',key:'Enter'}
+  ]}}]);
+  view.close();await tick();assert.deepEqual(commands.at(-1),{action:'release',tab:prA});
+});
+
+test('the expected surface and exact controller tab both gate direct input',async()=>{
+  for(const [tab,data] of [
+    ['',{...frame(),controller_tab:prA}],['',{...frame(),surface:'browser'}],
+    [prA,{...prFrame(prA,'owner'),controller_tab:prB}],
+    [prA,{...prFrame(prA,'owner'),controller_tab:undefined}],
+    [prA,{...prFrame(prA,'owner'),surface:'desktop'}]
+  ]){
+    const commands=[];
+    const {view,flush}=browser(async(path,options)=>{if(options)commands.push(JSON.parse(options.body));return data;});
+    const host=node();await view.open('one',host,{tab});type(host.child.querySelector('[data-keyboard]'),'blocked');await flush();
+    assert.equal(commands.length,0);assert.equal(host.child.querySelector('[data-keyboard]').readOnly,true);
+    if(tab&&data.surface==='desktop')assert.equal(host.child.querySelector('[data-screen]').hidden,true);
+    view.close();await tick();
+  }
+});
+
+test('closing a PR during claim waits for its acknowledgment and prevents a late open',async()=>{
+  const commands=[];let finishClaim;
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options)return prFrame(prA);
+    const command=JSON.parse(options.body);commands.push(command);
+    if(command.action==='claim')await new Promise(resolve=>finishClaim=resolve);
+    if(command.action==='close_tab')throw new Error('Stop the recording before closing this tab.');
+    return prFrame(prA,'owner');
+  });
+  const host=node(),opening=view.open('one',host,{tab:prA,autoload:true});await tick();
+  const closing=view.closeTab('one',prA);await tick();assert.equal(commands.length,1);
+  finishClaim();await opening;await assert.rejects(closing,/Stop the recording/);
+  assert.deepEqual(commands.map(command=>command.action),['claim','close_tab']);
+  assert.ok(commands.every(command=>command.tab===prA));assert.notEqual(host.child.removed,true);
+  type(host.child.querySelector('[data-keyboard]'),'resume');await flush();
+  assert.equal(commands.at(-1).action,'input','A rejected close retains usable controls');
+  view.close();await tick();
+});
+
+test('PR cleanup waits for in-flight input, discards its queue, and targets only the closed page',async()=>{
+  const commands=[];let finishInput,finishClose;
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options)return prFrame(prA,'owner');
+    const command=JSON.parse(options.body);commands.push(command);
+    if(command.action==='input')await new Promise(resolve=>finishInput=resolve);
+    if(command.action==='close_tab')await new Promise(resolve=>finishClose=resolve);
+    return prFrame(prA,'owner');
+  });
+  const host=node();await view.open('one',host,{tab:prA});const input=host.child.querySelector('[data-keyboard]');
+  type(input,'in flight');await flush();type(input,'queued');
+  const closing=view.closeTab('one',prA);type(input,'later');await flush();assert.equal(commands.length,1);
+  finishInput();await tick();assert.deepEqual(commands.map(command=>command.action),['input','close_tab']);
+  assert.equal(commands[1].tab,prA);assert.notEqual(host.child.removed,true);
+  finishClose();await closing;view.close();await tick();
+});

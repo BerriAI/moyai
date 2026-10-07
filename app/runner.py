@@ -15,6 +15,8 @@ from .message_queue import MessageQueue
 from .modal_clients import ModalClients
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
+CAPTURE_RELEASE_TIMEOUT = 35
+RETAINED_RELEASES = 128
 SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
 SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not be saved. "
                 "The previous workspace checkpoint is unchanged. Download the recovered files before continuing; "
@@ -46,6 +48,7 @@ class RunManager:
         store.sandbox_provider = lambda: settings.sandbox_provider
         self.jobs = {}
         self.sandboxes = {}
+        self.releases = {}
         self.slots = asyncio.Semaphore(settings.max_concurrent_runs)
         self.closing = False
         self.prepare_context = None
@@ -77,7 +80,36 @@ class RunManager:
                               checkpoint_error=reason, pending_result=json.dumps(pending))
         return True
 
-    async def terminate(self, sandbox):
+    async def terminate(self, sandbox, run_id):
+        identity = (run_id, sandbox.object_id)
+        task = self.releases.get(identity)
+        if not task or (task.done() and (task.cancelled() or task.exception())):
+            task = asyncio.create_task(self.release_sandbox(sandbox, run_id))
+            # A disconnected waiter must not abandon cleanup or leave a failed
+            # background task unobserved. A later caller retries failed releases.
+            task.add_done_callback(self.release_done)
+        self.releases.pop(identity, None)
+        self.releases[identity] = task
+        await asyncio.shield(task)
+
+    def release_done(self, task):
+        if not task.cancelled():
+            task.exception()
+        completed = [key for key, value in self.releases.items() if value.done()]
+        # Keep recent deduplication without retaining every rotated sandbox.
+        # Very late callers can repeat idempotent finish/copy/provider cleanup.
+        for key in completed[:-RETAINED_RELEASES]:
+            self.releases.pop(key, None)
+
+    async def release_sandbox(self, sandbox, run_id):
+        if getattr(self, 'computer', None):
+            try:
+                # The runtime serializes finish, and capture_locks serialize
+                # immutable copies. A busy UI request must not block shutdown.
+                async with asyncio.timeout(CAPTURE_RELEASE_TIMEOUT):
+                    await self.computer.save_captures(sandbox, run_id, releasing=True)
+            except Exception:
+                self.store.event(run_id, 'error', 'Some browser captures could not be saved. Continuing workspace shutdown.')
         async with asyncio.timeout(30):
             await sandbox.terminate.aio()
             # terminate() acknowledges the request before the machine exits.
@@ -110,7 +142,7 @@ class RunManager:
             if row["sandbox_id"] and not self.settings.missing_sandbox(row.get("sandbox_provider")):
                 try:
                     sandbox = await self.provider(row).get(row["sandbox_id"])
-                    await self.terminate(sandbox)
+                    await self.terminate(sandbox, row['id'])
                 except Exception:
                     self.store.event(row["id"], "error", "Could not confirm sandbox cleanup. Check the sandbox provider; its configured timeout still applies.")
 
@@ -188,24 +220,28 @@ class RunManager:
         return self.store.run(run_id)["status"] in TERMINAL | {"stopping"}
 
     async def cancel(self, run_id):
-        if self.coordinator:
-            await self.coordinator.cancel_children(run_id)
         run = self.store.run(run_id)
         if run["status"] in TERMINAL and run_id not in self.jobs:
+            if self.coordinator:
+                await self.coordinator.cancel_children(run_id)
             return
         # Revoke capabilities immediately, even while provisioning is still in flight.
         self.store.update_run(run_id, status="stopping", token_hash="")
         self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
         self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
-        self.store.event(run_id, "status", "Stop requested. Finishing sandbox cleanup.")
+        self.store.event(run_id, "status", "Stop requested. Saving recordings before shutting down the workspace.")
         sandbox = self.sandboxes.get(run_id)
-        if sandbox:
-            await sandbox.terminate.aio()
-        elif run["status"] == "queued" or (run.get("chat_enabled") and not self.store.rows(
-                "SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,))):
+        if not sandbox and (run["status"] == "queued" or (run.get("chat_enabled") and not self.store.rows(
+                "SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)))):
             # Slack may already have atomically reserved the stop while the
             # background job is still fetching context, before claiming a turn.
             self.store.update_run(run_id, status="cancelled")
+        pending = ([self.terminate(sandbox, run_id)] if sandbox else [])
+        if self.coordinator:
+            pending.append(self.coordinator.cancel_children(run_id))
+        for result in await asyncio.gather(*pending, return_exceptions=True):
+            if isinstance(result, BaseException):
+                raise result
 
     async def execute(self, run):
         run_id = run["id"]
@@ -227,7 +263,7 @@ class RunManager:
                             # move the same user turn to another machine.
                             sandbox = self.sandboxes.get(run_id)
                             if sandbox:
-                                await self.terminate(sandbox)
+                                await self.terminate(sandbox, run_id)
                                 self.sandboxes.pop(run_id, None)
                             self.store.event(run_id, "status", "Workspace saved. Continuing on a fresh cloud machine.")
                             turn = {**self.store.run(run_id), "prompt": run["prompt"],
@@ -253,7 +289,7 @@ class RunManager:
             sandbox = self.sandboxes.pop(run_id, None)
             if sandbox:
                 try:
-                    await self.terminate(sandbox)
+                    await self.terminate(sandbox, run_id)
                     self.store.event(run_id, "status", "Sandbox terminated")
                 except Exception:
                     self.store.event(run_id, "error", "Sandbox cleanup was not confirmed. Check the sandbox provider; the sandbox timeout still applies.")
@@ -476,7 +512,7 @@ class RunManager:
 
     async def save_artifact(self, sandbox, run_id):
         if getattr(self, 'computer', None):
-            await self.computer.save_before_release(sandbox, run_id)
+            await self.computer.save_captures(sandbox, run_id, releasing=False)
         try:
             info = await sandbox.filesystem.stat.aio("/artifacts/result.zip")
             if info.size > 20 * 1024 * 1024:

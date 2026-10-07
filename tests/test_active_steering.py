@@ -26,7 +26,7 @@ async def checkpoint_wait(durable, phase):
     manager, cloud, run_id = durable
     await drive(manager, run_id, phase='checkpointed')
     state = manager.state(run_id)
-    await manager.cleanup(state)
+    await manager.cleanup(state, run_id)
     state.update(phase=phase, sandbox_id='', segment=1, cursor=0)
     state.pop('result', None)
     if phase == 'waiting_children':

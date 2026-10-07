@@ -1,10 +1,12 @@
 """Saved top-level chats reuse machines; cleanup and attribution remain durable."""
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from app.db import Store
+from app.computer import Computer
 from app.config import MODEL_CATALOG
 from app.durable_runner import DurableRunner
 from app.security import digest
@@ -93,8 +95,8 @@ async def test_lost_termination_ack_recovers_without_duplicate_answer(durable, m
     tick = clock(monkeypatch)
     await drive(manager, run_id, phase='warm')
     terminate = manager.terminate
-    async def lost_ack(machine):
-        await terminate(machine)
+    async def lost_ack(machine, session_id):
+        await terminate(machine, session_id)
         raise ConnectionError('Lost termination acknowledgement')
     manager.terminate = lost_ack
     tick.now += 300
@@ -177,8 +179,14 @@ async def test_stop_at_finish_or_during_idle_releases_without_losing_answer(dura
     manager, cloud, root = durable
     manager.settings.sandbox_idle_seconds = 300
     await drive(manager, root, phase=phase)
+    finalized = []
+    async def save_captures(machine, run_id, *, releasing):
+        assert machine.alive and releasing is True
+        finalized.append(run_id)
+    manager.computer = SimpleNamespace(locks={}, touched=lambda _: 0, save_captures=save_captures)
     await manager.cancel(root)
     await drive(manager, root)
+    assert finalized == [root]
     assert not cloud.machines[0].alive
     assert manager.store.run(root)['status'] == 'cancelled'
     assert manager.store.run(root)['token_hash'] == ''
@@ -276,21 +284,36 @@ def test_runtime_reports_effective_idle_setting(workspace):
     assert client.get('/api/config').json()['sandbox_idle_seconds'] == 300
 
 
-async def test_computer_activity_extends_idle_but_flushes_captures_before_release(durable, monkeypatch):
+@pytest.mark.parametrize('idle_seconds', [0, 300])
+async def test_computer_capture_scope_follows_turn_and_workspace_lifetime(durable, monkeypatch, idle_seconds):
     manager, cloud, root = durable
-    manager.settings.sandbox_idle_seconds = 300
+    manager.settings.sandbox_idle_seconds = idle_seconds
     tick = clock(monkeypatch)
-    await drive(manager, root, phase='warm')
     touched = tick.now + 250
     calls = []
-    async def save(machine, run_id):
+    async def execute(machine, action, payload=None):
         assert machine.alive
-        assert run_id == root
-        calls.append('saved')
-    manager.computer = SimpleNamespace(touched=lambda _: touched, locks={}, save_before_release=save)
-    tick.now += 300
-    assert (await manager.advance(root))['idle_seconds'] == 250
+        if action == 'captures':
+            return []
+        assert action == 'request'
+        body = json.loads(payload)
+        assert body['action'] == 'finish'
+        calls.append(body['args']['all'])
+        return {}
+    manager.computer = Computer(manager.settings, manager.store, None, manager, None)
+    manager.computer.execute = execute
+    manager.computer.touched = lambda _: touched
+    manager.save_artifact = DurableRunner.save_artifact.__get__(manager)
+    await drive(manager, root, phase='checkpointed')
+    assert calls == [False]
     assert cloud.machines[0].alive
-    tick.now += 250
-    assert await manager.advance(root) is False
-    assert calls == ['saved'] and not cloud.machines[0].alive
+    if idle_seconds:
+        await drive(manager, root, phase='warm')
+        tick.now += 300
+        assert (await manager.advance(root))['idle_seconds'] == 250
+        assert calls == [False] and cloud.machines[0].alive
+        tick.now += 250
+        assert await manager.advance(root) is False
+    else:
+        await drive(manager, root)
+    assert calls == [False, True] and not cloud.machines[0].alive

@@ -336,13 +336,20 @@ class AgentCoordinator:
     async def cancel_group(self, parent_id, group_id):
         self.group(parent_id, group_id)
         self.store.execute("UPDATE agent_groups SET status='cancelled' WHERE id=?", (group_id,))
-        for child in self.children(group_id):
-            await self.manager.cancel(child['id'])
+        results = await asyncio.gather(*(self.manager.cancel(child['id']) for child in self.children(group_id)),
+                                       return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
         self.store.event(parent_id, 'agents', 'Stop requested for the worker group', {'group_id': group_id})
 
     async def cancel_children(self, parent_id):
-        for group in self.store.rows("SELECT id FROM agent_groups WHERE parent_id=? AND status IN ('preparing','running','cancelled')", (parent_id,)):
-            await self.cancel_group(parent_id, group['id'])
+        groups = self.store.rows("SELECT id FROM agent_groups WHERE parent_id=? AND status IN ('preparing','running','cancelled')", (parent_id,))
+        results = await asyncio.gather(*(self.cancel_group(parent_id, group['id']) for group in groups),
+                                       return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     def read_artifact(self, parent_id, args):
         child = self.store.run(args.child_id)

@@ -2,10 +2,13 @@
 (function(root,factory){
   const value=factory();if(typeof module==='object'&&module.exports)module.exports=value;else root.MoyaiPanel=value;
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
+  function prUrl(value){
+    return typeof value==='string'&&value.length<=512&&/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(value)?value:null;
+  }
   function restore(value){
     try{
       const data=JSON.parse(value);
-      const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','files','file','activity','chat'].includes(t.kind)&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
+      const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','files','file','activity','chat','pulls','pr'].includes(t.kind)&& (t.kind!=='pr'||prUrl(t.url))&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
       return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||60)),tabs};
     }catch{return {visible:false,active:'',width:60,tabs:[]};}
   }
@@ -34,24 +37,27 @@
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
     const activity=layout.querySelector('#session-details');
-    const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',files:'file',file:'file',chat:'chat',activity:'list'};
+    const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',files:'file',file:'file',chat:'chat',activity:'list',pulls:'pull',pr:'pull'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
     panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" title="Add tab" aria-expanded="false">${ico('plus',18)}</button><span class="panel-spacer"></span><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel" title="Expand">${ico('expand',17)}</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel" title="Hide panel">${ico('panel',18)}</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
+    const card=document.createElement('aside');card.className='session-pull-requests';card.setAttribute('aria-label','Session pull requests');card.hidden=true;layout.append(card);
+    let pullRequests=[],prSignature='';
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
+    const closingStatus=document.createElement('div');closingStatus.className='panel-empty';closingStatus.setAttribute('role','status');closingStatus.textContent='Closing tabs…';closingStatus.hidden=true;views.append(closingStatus);
     if(activity){parking.append(activity);activity.hidden=false;}
-    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
+    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
     function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');layout.closest('.workspace')?.style.setProperty('--workspace-panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
     resize(width);q('.panel-resize').setAttribute('aria-valuemin','30');q('.panel-resize').setAttribute('aria-valuemax','70');
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
     q('.panel-resize').onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();resize(width+(e.key==='ArrowLeft'?3:-3));}};
     function draw(){
-      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab">${ico('x',13)}</button></div>`).join('');
+      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`).join('');
       q('.panel-tabs').querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
       q('.panel-tabs').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
       document.querySelector('#toggle-details')?.setAttribute('aria-expanded',String(visible&&tabs.get(active)?.kind==='activity'));
       const toggle=document.querySelector('#workspace-panel-toggle');if(toggle){toggle.setAttribute('aria-expanded',String(visible));toggle.setAttribute('aria-label',visible?'Hide workspace panel':'Show workspace panel');toggle.classList.toggle('is-active',visible);}
     }
-    q('.panel-tabs').onkeydown=e=>{if(!e.target.matches('[role="tab"]'))return;const ids=[...tabs.keys()],idx=ids.indexOf(active);let next;if(e.key==='ArrowRight')next=ids[(idx+1)%ids.length];if(e.key==='ArrowLeft')next=ids[(idx+ids.length-1)%ids.length];if(e.key==='Home')next=ids[0];if(e.key==='End')next=ids.at(-1);if(next){e.preventDefault();select(next);q('[aria-selected="true"]')?.focus();}if(e.key==='Delete'){e.preventDefault();remove(active);}};
+    q('.panel-tabs').onkeydown=e=>{if(!e.target.matches('[role="tab"]'))return;const ids=[...tabs.values()].filter(t=>!t.closing).map(t=>t.id),idx=ids.indexOf(active);let next;if(e.key==='ArrowRight')next=ids[(idx+1)%ids.length];if(e.key==='ArrowLeft')next=ids[(idx+ids.length-1)%ids.length];if(e.key==='Home')next=ids[0];if(e.key==='End')next=ids.at(-1);if(next){e.preventDefault();select(next);q('[aria-selected="true"]')?.focus();}if(e.key==='Delete'){e.preventDefault();remove(active);}};
     function setVisible(value){
       visible=value;panel.hidden=!value;layout.classList.toggle('panel-open',value);layout.classList.toggle('panel-expanded',value&&expanded);menu(false);draw();save();
     }
@@ -59,7 +65,7 @@
     function menu(open){q('.panel-menu').hidden=!open;q('[data-add]').setAttribute('aria-expanded',String(open));if(open){q('.panel-menu input').value='';drawMenu();q('.panel-menu input').focus();}}
     function drawMenu(){
       const search=q('.panel-menu input').value.toLowerCase();
-      const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
+      const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Open this session’s PRs in the browser'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
       q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span class="panel-tab-icon">${ico(glyph[item.kind],16)}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
@@ -68,27 +74,57 @@
     function outside(e){if(!panel.contains(e.target))menu(false);}document.addEventListener('pointerdown',outside);
     panel.addEventListener('keydown',e=>{if(e.key==='Escape'&&!q('.panel-menu').hidden){menu(false);q('[data-add]').focus();}});
     function make(kind,data={}){
+      if(kind==='pr'){
+        const receipt=pullRequests.find(pr=>pr.url.toLowerCase()===String(data.url).toLowerCase());
+        if(!receipt)return null;
+        data={...data,id:'pr:'+receipt.url.toLowerCase(),url:receipt.url,title:receipt.title};
+      }
       if(kind==='chat'&&data.chatId){const existing=[...tabs.values()].find(t=>t.chatId===data.chatId);if(existing)return existing;}
-      const id=data.id||(kind==='file'?'file:'+data.path:kind==='chat'?'chat:'+(data.chatId||crypto.randomUUID()):kind);
+      const id=data.id||(kind==='pr'?'pr:'+data.url.toLowerCase():kind==='file'?'file:'+data.path:kind==='chat'?'chat:'+(data.chatId||crypto.randomUUID()):kind);
       if(tabs.has(id))return tabs.get(id);if(tabs.size>=16){toast('Close a tab before opening another.');return null;}
-      const t={...data,id,kind,uid:crypto.randomUUID(),title:data.title||({computer:'Computer',files:'Files',chat:'Side chat',activity:'Activity'}[kind]||'File')};
+      const t={...data,id,kind,uid:crypto.randomUUID(),title:data.title||({computer:'Computer',files:'Files',chat:'Side chat',activity:'Activity',pulls:'Pull requests'}[kind]||'File')};
       t.element=document.createElement('section');t.element.className='panel-view panel-'+kind;t.element.id='view-'+t.uid;t.element.setAttribute('role','tabpanel');t.element.setAttribute('aria-labelledby','tab-'+t.uid);t.element.hidden=true;views.append(t.element);tabs.set(id,t);return t;
     }
     function open(kind,data={}){const t=make(kind,data);if(t)select(t.id);return true;}
-    function select(id){
-      if(disposed||!tabs.has(id))return;
-      const previous=tabs.get(active);if(previous?.id===id&&visible)return;
+    function select(id,autoload=false){
+      const t=tabs.get(id);if(disposed||!t||t.closing)return;
+      const previous=tabs.get(active);if(previous?.id===id&&visible&&!autoload)return;
       previous?.deactivate?.();if(previous)previous.element.hidden=true;
-      active=id;const t=tabs.get(id);t.element.hidden=false;setVisible(true);
+      active=id;closingStatus.hidden=true;if(autoload)t.autoload=true;t.element.hidden=false;setVisible(true);
       if(!t.loaded){t.loaded=true;mount(t);}
       t.activate?.();draw();save();q('[aria-selected="true"]')?.scrollIntoView({block:'nearest',inline:'nearest'});
     }
-    function remove(id){const t=tabs.get(id);if(!t)return;t.deactivate?.();t.dispose?.();if(t.kind==='activity')parking.append(activity);t.element.remove();tabs.delete(id);if(id===active){active='';const next=[...tabs.keys()].at(-1);if(next)select(next);else hide();}draw();save();}
+    function reconcile(){
+      // Close completions preserve current selection and the user's visibility choice.
+      if(!tabs.has(active)){
+        active='';const next=[...tabs.values()].reverse().find(t=>!t.closing);
+        if(next){if(visible)select(next.id);else active=next.id;}
+        else if(!tabs.size)setVisible(false);
+      }
+      closingStatus.hidden=!!active||!tabs.size;draw();save();
+    }
+    function show(){
+      const t=tabs.get(active);if(t&&!t.closing)select(t.id);else{setVisible(true);reconcile();}
+    }
+    async function remove(id){
+      const t=tabs.get(id);if(!t||t.closing)return;
+      t.closing=true;draw();
+      try{if(t.kind==='pr'&&run.mode==='modal')await computer.closeTab(run.id,t.url);}
+      catch(e){if(good(t)){t.closing=false;reconcile();toast(e.message);}return;}
+      if(!good(t))return;
+      if(id===active)t.deactivate?.();t.dispose?.();if(t.kind==='activity')parking.append(activity);
+      t.element.remove();tabs.delete(id);reconcile();
+    }
     function good(t){return !disposed&&tabs.get(t.id)===t;}
     function error(t,e){if(good(t))t.element.innerHTML=`<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`;t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t));}
     function loading(t){t.element.innerHTML='<div class="panel-empty" role="status">Loading…</div>';}
     async function mount(t){
       const epoch=t.epoch=(t.epoch||0)+1;const current=()=>good(t)&&epoch===t.epoch;
+      if(t.kind==='pulls'){renderPulls(t.element);return;}
+      if(t.kind==='pr'){
+        t.activate=()=>{const autoload=!!t.autoload;t.autoload=false;computer.open(run.id,t.element,{tab:t.url,title:t.title,autoload});};
+        t.deactivate=()=>computer.close();return;
+      }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='activity'){t.element.append(activity);return;}
       if(t.kind==='chat'){mountChat(t);return;}
@@ -119,6 +155,39 @@
         t.deactivate=()=>t.element.querySelectorAll('video').forEach(v=>v.pause());
       }catch(e){if(current())error(t,e);}
     }
+    function renderPulls(host){
+      host.innerHTML=`<header class="pull-requests-heading"><h2>Pull requests</h2><span>${pullRequests.length}</span></header><div class="pull-request-list">${pullRequests.map(pr=>`<a class="pull-request-row" href="${esc(pr.url)}" data-pr-url="${esc(pr.url)}" title="${esc(pr.title)}" target="_blank" rel="noopener noreferrer"><span class="pull-request-icon">${ico('pull',18)}</span><span><strong>${esc(pr.title)}</strong><small>${esc(pr.repository)} #${pr.number}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Pull requests created in this session will appear here.</p>'}</div>`;
+    }
+    function openPullRequest(url){
+      const pr=pullRequests.find(item=>item.url.toLowerCase()===String(url).toLowerCase());
+      if(!pr)return false;
+      const t=make('pr',{url:pr.url,title:pr.title});
+      if(t)select(t.id,true);return !!t;
+    }
+    function syncPullRequests(data){
+      if(disposed||data.id!==run.id||!Array.isArray(data.pull_requests))return;
+      pullRequests=data.pull_requests.filter(pr=>prUrl(pr.url));
+      const signature=JSON.stringify(pullRequests);if(signature===prSignature)return;prSignature=signature;
+      card.hidden=!pullRequests.length;layout.classList.toggle('has-pull-requests',!!pullRequests.length);renderPulls(card);
+      const toggle=document.querySelector('#pull-requests-button');if(toggle){toggle.hidden=!pullRequests.length;toggle.title=`Pull requests (${pullRequests.length})`;}
+      for(const t of [...tabs.values()]){
+        if(t.kind==='pulls')renderPulls(t.element);
+        if(t.kind==='pr'){
+          const receipt=pullRequests.find(pr=>pr.url.toLowerCase()===t.url.toLowerCase());
+          if(!receipt)remove(t.id);else t.title=receipt.title;
+        }
+      }
+      draw();save();
+    }
+    function followPullRequest(event){
+      if(event.defaultPrevented||event.metaKey||event.ctrlKey||event.shiftKey||event.altKey||event.button)return;
+      const link=event.target.closest('a[href]');if(!link)return;
+      // Embedded side chats and saved documents have their own source scope.
+      if(!link.closest('#conversation,.session-pull-requests,.panel-pulls'))return;
+      const url=prUrl(link.getAttribute('href'));if(url&&openPullRequest(url))event.preventDefault();
+    }
+    layout.addEventListener('click',followPullRequest);
+    syncPullRequests(run);
     function openFile(file){return open('file',{path:file.archive_path,title:file.name});}
     function decorate(element,files){
       MoyaiFiles.decorate(element,files,{onOpen:openFile});
@@ -184,7 +253,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Open this session’s PRs in the browser'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.
@@ -203,7 +272,7 @@
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
     restoring=false;save();
     api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
-    return {open,openFile,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)select(tabs.has(active)?active:tabs.keys().next().value);else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);panel.remove();layout.classList.remove('panel-open','panel-expanded');}};
+    return {open,openFile,openPullRequest,syncPullRequests,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-pull-requests');}};
   }
-  return {create,restore,fileTree,renderFileTree};
+  return {create,restore,fileTree,renderFileTree,prUrl};
 });

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
+from modal.exception import NotFoundError
 
 from app import captures
 from app.computer import DesktopConnection
@@ -188,6 +190,7 @@ async def test_desktop_batches_validate_before_execution_and_preserve_native_ord
     c = computer.Computer()
     c.ensure_desktop = AsyncMock()
     c.open = AsyncMock()
+    c.ensure_desktop = AsyncMock()
     c.refresh_frame = AsyncMock()
     sent = []
     async def launch(*args, **kwargs):
@@ -321,3 +324,767 @@ def test_loopback_request_does_not_retry_unknown_input_delivery(monkeypatch):
     with pytest.raises(computer.urllib.error.URLError):
         computer.request({'action':'input','args':{'events':[{'type':'text','text':'once'}]}})
     assert attempts == [True]
+
+
+PR_TAB = 'https://github.com/BerriAI/moyai/pull/145'
+OTHER_TAB = 'https://github.com/BerriAI/moyai/pull/151'
+
+
+def test_named_computer_routes_scope_frames_and_invalidate_shared_lease(workspace):
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    async def execute(body):
+        assert body['actor'] != 'agent'
+        return {'available': True, 'tab': body.get('tab', ''), 'frame': body.get('tab', '')}
+    transport = AsyncMock(side_effect=execute)
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    for tab in ['', PR_TAB, OTHER_TAB]:
+        result = client.get(url, params={'tab': tab}).json()
+        assert result['tab'] == result['frame'] == tab
+    assert len(hub.cache) == 3
+    assert client.post(url, json={'action': 'claim', 'tab': OTHER_TAB}).status_code == 200
+    assert not hub.cache
+    assert transport.call_count == 5
+    assert transport.call_args.args[0]['tab'] == OTHER_TAB
+    client.cookies.clear()
+    assert client.get(url, params={'tab': PR_TAB}).status_code == 401
+
+
+def test_old_computer_runtime_cannot_render_or_mutate_the_agent_page(workspace):
+    app, client, _, url = cloud(workspace)
+    hub = app.state.computer
+    transport = AsyncMock(return_value={'available': True, 'frame': 'agent-secret'})
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    result = client.get(url, params={'tab': PR_TAB}).json()
+    assert result['available'] is False and not result.get('frame')
+    assert result['tab'] == PR_TAB
+    assert 'needs a restart' in result['notice']
+    transport.reset_mock()
+    result = client.post(url, json={'action': 'open', 'tab': PR_TAB})
+    assert result.status_code == 503
+    assert 'needs a restart' in result.json()['detail']
+    assert transport.call_count == 1
+    assert transport.call_args.args[0]['action'] == 'state'
+
+
+@pytest.mark.parametrize('state', ['no-id', 'stopped', 'missing', 'unknown'])
+def test_named_close_acknowledges_absence_but_not_provider_failure(workspace, monkeypatch, state):
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    sandbox = SimpleNamespace(poll=SimpleNamespace(aio=AsyncMock(return_value=0)))
+    provider = SimpleNamespace(get=AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(hub.manager, 'provider', lambda _: provider)
+    if state != 'no-id':
+        app.state.store.update_run(rid, sandbox_id='disposable-sandbox')
+    if state == 'missing':
+        provider.get.side_effect = NotFoundError('Sandbox expired')
+    elif state == 'unknown':
+        provider.get.side_effect = HTTPException(503, 'Provider temporarily unavailable')
+    transport = AsyncMock()
+    hub.cache[rid, PR_TAB] = (0, 'disposable-sandbox', {'available': True})
+    result = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
+    assert result.status_code == (503 if state == 'unknown' else 200)
+    assert not hub.cache
+    transport.assert_not_awaited()
+    if state == 'no-id':
+        provider.get.assert_not_awaited()
+    assert client.post(url, json={'action': 'open', 'tab': PR_TAB}).status_code == (503 if state == 'unknown' else 409)
+    assert client.post(url, json={'action': 'close_tab', 'tab': PR_TAB}, headers={'X-CSRF-Token': 'wrong'}).status_code == 403
+
+
+@pytest.mark.parametrize('recording', [False, True])
+def test_named_close_on_healthy_legacy_runtime_never_mutates_the_agent_browser(workspace, recording):
+    app, client, _, url = cloud(workspace)
+    hub = app.state.computer
+    transport = AsyncMock(return_value={'available': True, 'recording': recording, 'frame': 'agent-frame'})
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    result = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
+    assert result.status_code == 200 and result.json()['tab'] == PR_TAB
+    assert transport.await_count == 1
+    assert transport.call_args.args[0]['action'] == 'state'
+
+
+@pytest.mark.parametrize('scope', [{}, {'available': False}, {'available': False, 'recording': 'invalid'},
+    {'available': False, 'recording': False, 'error': 'State failed'},
+    {'available': False, 'recording': False, 'tab': OTHER_TAB}])
+def test_named_close_does_not_treat_malformed_or_wrong_scope_as_absent(workspace, scope):
+    app, client, _, url = cloud(workspace)
+    hub = app.state.computer
+    transport = AsyncMock(return_value=scope)
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    assert client.post(url, json={'action': 'close_tab', 'tab': PR_TAB}).status_code == 503
+    assert transport.await_count == 1
+    assert transport.call_args.args[0]['action'] == 'state'
+
+
+def test_named_close_preserves_live_runtime_recording_rejection(workspace):
+    app, client, _, url = cloud(workspace)
+    hub = app.state.computer
+    transport = AsyncMock(side_effect=[{'available': False, 'tab': PR_TAB, 'recording': True},
+                                        {'error': 'Stop the recording before closing this tab.'}])
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    result = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
+    assert result.status_code == 409 and 'Stop the recording' in result.json()['detail']
+    assert transport.await_count == 2
+
+
+
+@pytest.mark.parametrize('tab', ['javascript:alert(1)', 'https://github.com.evil/a/b/pull/1',
+    'https://user:pass@github.com/a/b/pull/1', 'https://github.com/a/b/pull/0', PR_TAB + '?token=secret',
+    PR_TAB + '/files', PR_TAB + '#comment', 'https://github.com/' + 'a' * 500 + '/b/pull/1'])
+def test_named_computer_tab_validation_agrees_at_api_and_runtime(workspace, tab):
+    _, client, _, url = cloud(workspace)
+    assert client.get(url, params={'tab': tab}).status_code == 422
+    assert client.post(url, json={'action': 'open', 'tab': tab}).status_code == 422
+    with pytest.raises(ValueError, match='canonical'):
+        computer.valid_tab(tab)
+
+
+class BrowserPage:
+    """Page interface fixture: assertions exercise Computer's production routing."""
+    def __init__(self, name):
+        self.url, self.closed, self.events = name, False, {}
+        self.mouse = SimpleNamespace(click=AsyncMock(), wheel=AsyncMock(), move=AsyncMock(), down=AsyncMock(), up=AsyncMock())
+        self.keyboard = SimpleNamespace(insert_text=AsyncMock(), press=AsyncMock())
+        self.bring_to_front = AsyncMock()
+        self.screenshot = AsyncMock(return_value=PNG + name.encode())
+        self.goto = AsyncMock(side_effect=self.navigate)
+        self.title = AsyncMock(return_value=name)
+        self.go_back = AsyncMock()
+    async def navigate(self, url, **kwargs):
+        self.url = url
+    async def close(self):
+        self.closed = True
+    def is_closed(self):
+        return self.closed
+    def set_default_timeout(self, value):
+        pass
+    def on(self, event, callback):
+        self.events[event] = callback
+    def locator(self, selector):
+        return SimpleNamespace(inner_text=AsyncMock(return_value=self.url), evaluate_all=AsyncMock(return_value=[]))
+
+
+@pytest.fixture
+def review_desktop(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    native = SimpleNamespace(active=11, windows={11: 'normal', 22: 'maximized'}, inputs=[], changes=[])
+    c.desktop = SimpleNamespace(poll=lambda: None)
+    c.ensure_desktop = AsyncMock()
+    c.desktop_image = lambda image_format='JPEG': f'native-window-{native.active}'.encode()
+    async def window_command(*args):
+        if args == ('getactivewindow',):
+            return str(native.active) if native.active else None
+        assert args[:2] == ('windowactivate', '--sync')
+        target = int(args[2])
+        if target not in native.windows:
+            return None
+        native.active = target
+        return ''
+    c.window_command = AsyncMock(side_effect=window_command)
+    async def desktop_input(events):
+        if any(event['type'] == 'text' for event in events):
+            native.inputs.append(native.active)
+    c.desktop_input = AsyncMock(side_effect=desktop_input)
+    async def new_cdp_session(page):
+        async def send(method, args=None):
+            identity = page.native_window
+            if method == 'Browser.getWindowForTarget':
+                return {'windowId': identity, 'bounds': {'windowState': native.windows[identity]}}
+            assert method == 'Browser.setWindowBounds' and args['windowId'] == identity
+            state = args['bounds']['windowState']
+            native.changes.append((identity, state))
+            native.windows[identity] = state
+            if state == 'minimized' and native.active == identity:
+                native.active = 11 if 11 in native.windows else 0
+            return {}
+        return SimpleNamespace(send=AsyncMock(side_effect=send), detach=AsyncMock())
+    c.review_context = SimpleNamespace(pages=[], new_cdp_session=AsyncMock(side_effect=new_cdp_session))
+    def attach(tab, name, window=22, tracked=True):
+        page = BrowserPage(name)
+        page.native_window = window
+        native.windows.setdefault(window, 'normal')
+        async def focus():
+            native.active = window
+        page.bring_to_front = AsyncMock(side_effect=focus)
+        c.review_context.pages.append(page)
+        if tracked:
+            c.track_review_page(tab, page)
+        return page
+    review = attach(PR_TAB, 'review')
+    return c, native, review, attach
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('exit_action', ['release', 'desktop', 'expiry', 'close'])
+async def test_pr_handoff_restores_native_window_before_desktop_input(review_desktop, exit_action):
+    c, native, review, _ = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    assert native.active == 22
+    if exit_action == 'expiry':
+        c.lease_until = 0
+    action = 'claim' if exit_action in {'desktop', 'expiry'} else 'close_tab' if exit_action == 'close' else 'release'
+    await c.command({'action': action, 'actor': 'owner', 'tab': '' if action == 'claim' else PR_TAB})
+    assert native.active == 11
+    assert c.page is None and c.context is None
+    await c.command({'action': 'claim', 'actor': 'owner'})
+    result = await c.command({'action': 'input', 'actor': 'owner', 'args': {'events': [{'type': 'text', 'text': 'terminal input'}]}})
+    assert native.inputs == [11]
+    assert base64.b64decode(result['frame']) == b'native-window-11'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changed_desktop', ['closed', 'new-window'])
+async def test_pr_handoff_handles_changed_native_desktop_without_opening_agent_page(review_desktop, changed_desktop):
+    c, native, _, _ = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    if changed_desktop == 'closed':
+        native.windows.pop(11)
+    else:
+        native.windows[33] = 'normal'
+        native.active = 33
+    await c.command({'action': 'release', 'actor': 'owner', 'tab': PR_TAB})
+    assert native.active == (0 if changed_desktop == 'closed' else 33)
+    assert native.windows[22] == 'minimized'
+    assert c.page is None and c.context is None and not c.foreground_tab
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    assert native.active == 22 and native.windows[22] == 'maximized'
+
+
+@pytest.mark.asyncio
+async def test_review_switch_popup_and_shared_window_handoff_preserve_active_owner(review_desktop):
+    c, native, first, attach = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    second = attach(OTHER_TAB, 'second', 23)
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': OTHER_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': OTHER_TAB})
+    await c.command({'action': 'release', 'actor': 'owner', 'tab': PR_TAB})
+    popup = attach(PR_TAB, 'late-shared-popup', 23, tracked=False)
+    await first.events['popup'](popup)
+    assert native.active == 23 and c.controller_tab == OTHER_TAB
+    assert native.windows[23] != 'minimized'
+    second.bring_to_front.assert_awaited()
+    await c.command({'action': 'close_tab', 'actor': 'owner', 'tab': PR_TAB})
+    assert native.active == 23 and c.controller_tab == OTHER_TAB and not second.closed
+    # Several live targets can occupy the same browser window.
+    attach(OTHER_TAB, 'same-window', 23)
+    native.changes.clear()
+    await c.command({'action': 'release', 'actor': 'owner', 'tab': OTHER_TAB})
+    assert native.active == 11 and native.changes.count((23, 'minimized')) == 1
+    late = attach(OTHER_TAB, 'after-release', 24, tracked=False)
+    native.active = 24
+    await second.events['popup'](late)
+    assert native.active == 11 and native.windows[24] == 'minimized'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('missing_page', [False, True])
+@pytest.mark.parametrize('finalizer', ['automatic', 'manual'])
+async def test_pr_recording_pins_foreground_until_finalized_even_without_page(review_desktop, tmp_path, missing_page, finalizer):
+    c, native, review, _ = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    path = tmp_path / 'pinned.partial'
+    path.write_bytes(WEBM)
+    recording = {'actor': 'owner', 'tab': PR_TAB, 'path': path, 'started': computer.time.time(),
+                 'process': SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))}
+    c.recording = recording
+    await c.command({'action': 'release', 'actor': 'owner', 'tab': PR_TAB})
+    if missing_page:
+        await review.close()
+    await c.settle_foreground()
+    assert native.active == 22 and c.recording is recording and c.foreground_tab == PR_TAB
+    with pytest.raises(ValueError, match='recording'):
+        await c.command({'action': 'claim', 'actor': 'owner'})
+    with pytest.raises(ValueError, match='recording'):
+        await c.command({'action': 'close_tab', 'actor': 'owner', 'tab': PR_TAB})
+    if finalizer == 'manual':
+        await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+        result = await c.command({'action': 'record_stop', 'actor': 'owner', 'tab': PR_TAB})
+    else:
+        result = await c.stop_recording()
+    assert result['name'] == 'pinned.webm' and not c.recording
+    assert native.active == (22 if finalizer == 'manual' and not missing_page else 11)
+
+
+@pytest.mark.asyncio
+async def test_uncertain_handoff_blocks_native_input_and_can_retry(review_desktop):
+    c, native, _, _ = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    session = c.review_context.new_cdp_session.side_effect
+    c.review_context.new_cdp_session.side_effect = RuntimeError('CDP temporarily disconnected')
+    with pytest.raises(RuntimeError, match='disconnected'):
+        await c.command({'action': 'release', 'actor': 'owner', 'tab': PR_TAB})
+    with pytest.raises(RuntimeError, match='disconnected'):
+        await c.command({'action': 'input', 'actor': 'owner', 'args': {'events': [{'type': 'text', 'text': 'must not reach PR'}]}})
+    assert not native.inputs and c.foreground_tab == PR_TAB
+    c.review_context.new_cdp_session.side_effect = session
+    await c.command({'action': 'claim', 'actor': 'owner'})
+    assert native.active == 11 and not c.foreground_tab
+
+
+@pytest.mark.asyncio
+async def test_handoff_failure_keeps_frame_loop_alive_and_preserves_finalized_capture(review_desktop, tmp_path):
+    c, _, _, _ = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    c.controller = c.controller_tab = ''
+    path = tmp_path / 'limit.partial'
+    path.write_bytes(WEBM)
+    c.recording = {'actor': 'owner', 'tab': PR_TAB, 'path': path, 'started': computer.time.time(),
+                   'process': SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))}
+    c.settle_foreground = AsyncMock(side_effect=RuntimeError('Handoff unavailable'))
+    task = computer.asyncio.create_task(c.frames())
+    try:
+        await computer.asyncio.sleep(.15)
+        assert not task.done() and not c.recording
+        assert path.with_suffix('.webm').exists()
+        assert c.settle_foreground.await_count >= 2
+    finally:
+        task.cancel()
+        await computer.asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_whole_service_finish_fences_already_queued_and_later_mutations(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    await c.command({'action': 'finish'})
+    assert not c.stopping
+    await c.lock.acquire()
+    queued = computer.asyncio.create_task(c.command({'action': 'claim', 'actor': 'owner'}))
+    await computer.asyncio.sleep(0)
+    release = computer.asyncio.create_task(c.command({'action': 'finish', 'args': {'all': True}}))
+    await computer.asyncio.sleep(0)
+    assert c.stopping
+    c.lock.release()
+    with pytest.raises(ValueError, match='shutting down'):
+        await queued
+    assert await release == {'recording': False}
+    for action in ['claim', 'open', 'record_start']:
+        with pytest.raises(ValueError, match='shutting down'):
+            await c.command({'action': action, 'actor': 'owner'})
+    assert not (await c.command({'action': 'state'}))['recording']
+    assert await c.command({'action': 'finish', 'args': {'all': True}}) == {'recording': False}
+    (tmp_path / 'saved.webm').write_bytes(WEBM)
+    assert base64.b64decode(computer.capture_read('saved.webm')['data']) == WEBM
+
+
+@pytest.mark.asyncio
+async def test_whole_service_finish_drains_active_record_start_without_waiting_for_handoff(review_desktop, monkeypatch):
+    c, _, _, _ = review_desktop
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'open', 'actor': 'owner', 'tab': PR_TAB})
+    started, resume = computer.asyncio.Event(), computer.asyncio.Event()
+    process = SimpleNamespace(returncode=None, send_signal=lambda _: None)
+    async def finished():
+        process.returncode = 0
+        return 0
+    process.wait = AsyncMock(side_effect=finished)
+    async def spawn(*args, **kwargs):
+        assert args[0] == 'ffmpeg'
+        Path(args[-1]).write_bytes(WEBM)
+        started.set()
+        await resume.wait()
+        return process
+    monkeypatch.setattr(computer.asyncio, 'create_subprocess_exec', spawn)
+    recording = computer.asyncio.create_task(c.command({'action': 'record_start', 'actor': 'owner', 'tab': PR_TAB}))
+    await started.wait()
+    cdp_count = c.review_context.new_cdp_session.await_count
+    c.review_context.new_cdp_session.side_effect = AssertionError('Shutdown must not wait on window restoration')
+    release = computer.asyncio.create_task(c.command({'action': 'finish', 'args': {'all': True}}))
+    await computer.asyncio.sleep(0)
+    assert c.stopping and not release.done()
+    resume.set()
+    assert (await recording)['recording']
+    result = await release
+    assert Path(result['path']).read_bytes() == WEBM and not c.recording
+    assert c.review_context.new_cdp_session.await_count == cdp_count
+
+
+@pytest.mark.asyncio
+async def test_named_pages_keep_agent_context_history_frames_and_lease_separate(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    c.page, first, second = BrowserPage('agent'), BrowserPage('first'), BrowserPage('second')
+    c.open = AsyncMock()
+    c.ensure_desktop = AsyncMock()
+    context = SimpleNamespace(new_page=AsyncMock(side_effect=[first, second]))
+    c.ensure_desktop = AsyncMock()
+    c.browser = SimpleNamespace(is_connected=lambda: True, new_context=AsyncMock(return_value=context))
+    async def command(action, tab=PR_TAB, **args):
+        return await c.command({'action': action, 'tab': tab, 'actor': 'google:owner', 'args': args})
+    assert not (await command('state'))['available']
+    await command('claim')
+    assert context.new_page.call_count == 0
+    with pytest.raises(ValueError, match='Open this'):
+        await command('click', x=1, y=2)
+    await command('open')
+    await command('open', url='https://github.com/BerriAI/moyai/pull/145/files')
+    await command('open')
+    assert first.goto.call_count == 2 and first.url.endswith('/files')
+    await command('type', text='review comment draft')
+    first.keyboard.insert_text.assert_awaited_once_with('review comment draft')
+    c.page.keyboard.insert_text.assert_not_awaited()
+    first.bring_to_front.assert_awaited()
+    first_state = await command('state')
+    await command('claim', OTHER_TAB)
+    await command('release')  # A delayed release from the old panel must not release B.
+    assert c.controls() == 'google:owner' and c.controller_tab == OTHER_TAB
+    with pytest.raises(ValueError, match='Take control of this tab'):
+        await command('type', text='stale')
+    await command('open', OTHER_TAB)
+    second_state = await command('state', OTHER_TAB)
+    assert first_state['frame'] != second_state['frame']
+    assert first_state['tab'] == PR_TAB and second_state['tab'] == OTHER_TAB
+    assert c.page.url == 'agent' and c.browser.new_context.call_count == 1
+    with pytest.raises(ValueError, match='Another person'):
+        await c.command({'action': 'close_tab', 'tab': PR_TAB, 'actor': 'google:other'})
+    await command('close_tab')
+    assert c.controls() == 'google:owner' and c.controller_tab == OTHER_TAB
+    assert first.closed and not second.closed and not c.page.closed
+    assert not (await command('state'))['available']
+    assert (await command('state', OTHER_TAB))['available']
+    await command('release', OTHER_TAB)
+    await command('close_tab', OTHER_TAB)  # Cleanup also works after releasing the lease.
+    assert second.closed
+    with pytest.raises(ValueError, match='signed-in person'):
+        await c.command({'action': 'open', 'tab': PR_TAB})
+
+
+@pytest.mark.asyncio
+async def test_review_popup_scope_page_limit_and_recording_tab_are_enforced(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    c.open = AsyncMock()
+    c.ensure_desktop = AsyncMock()
+    c.page = BrowserPage('agent')
+    first, popup = BrowserPage('first'), BrowserPage('popup')
+    c.track_review_page(PR_TAB, first)
+    await first.events['popup'](popup)
+    assert c.page_for(PR_TAB) is popup and c.page.url == 'agent'
+    await popup.close()
+    assert c.page_for(PR_TAB) is first
+    for number in range(15):
+        c.track_review_page(f'https://github.com/a/b/pull/{number + 1}', BrowserPage(str(number)))
+    with pytest.raises(ValueError, match='16-tab limit'):
+        await c.open_review_page(OTHER_TAB)
+    rejected = BrowserPage('too-many')
+    await first.events['popup'](rejected)
+    assert rejected.closed
+    c.recording = {'tab': PR_TAB, 'path': tmp_path / 'capture.partial'}
+    state = await c.command({'action': 'state', 'tab': OTHER_TAB, 'actor': 'google:owner'})
+    assert state['recording_elsewhere'] and not state['recording']
+    for action, tab in [('claim', OTHER_TAB), ('close_tab', PR_TAB)]:
+        with pytest.raises(ValueError, match='Stop the recording'):
+            await c.command({'action': action, 'tab': tab, 'actor': 'google:owner'})
+
+
+@pytest.mark.asyncio
+async def test_review_browser_startup_never_creates_or_reuses_the_agent_context(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    review, agent = BrowserPage('review'), BrowserPage('agent')
+    review_context = SimpleNamespace(new_page=AsyncMock(return_value=review))
+    agent_context = SimpleNamespace(new_page=AsyncMock(return_value=agent), on=lambda *args: None)
+    c.ensure_desktop = AsyncMock()
+    c.browser = SimpleNamespace(is_connected=lambda: True, new_context=AsyncMock(side_effect=[review_context, agent_context]))
+    assert await c.open_review_page(PR_TAB) is review
+    assert c.page is None and c.context is None
+    await c.open()
+    assert c.page is agent and c.context is agent_context and c.review_context is review_context
+    assert c.page_for(PR_TAB) is review
+
+
+@pytest.mark.asyncio
+async def test_recording_can_stop_after_its_review_page_disappears(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    path = tmp_path / 'closed-page.partial'
+    path.write_bytes(WEBM)
+    c.recording = {'tab': PR_TAB, 'path': path, 'started': computer.time.time(),
+                   'process': SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))}
+    await c.command({'action': 'claim', 'tab': PR_TAB, 'actor': 'google:owner'})
+    result = await c.command({'action': 'record_stop', 'tab': PR_TAB, 'actor': 'google:owner'})
+    assert result['name'] == 'closed-page.webm' and not c.recording
+    assert c.page is None and not c.review_pages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('lease_actor,lease_tab,expired,recording_tab,allowed', [
+    ('google:owner', PR_TAB, False, None, True),
+    ('google:owner', OTHER_TAB, False, None, True),
+    ('google:other', OTHER_TAB, False, None, False),
+    ('google:other', OTHER_TAB, True, None, True),
+    ('', '', False, None, True),
+    ('google:owner', PR_TAB, False, PR_TAB, False),
+    ('google:owner', PR_TAB, True, PR_TAB, False),
+    ('', '', False, PR_TAB, False),
+    ('google:owner', OTHER_TAB, False, OTHER_TAB, True),
+    ('google:other', OTHER_TAB, False, OTHER_TAB, False),
+    ('google:other', OTHER_TAB, True, OTHER_TAB, True),
+    ('', '', False, OTHER_TAB, True),
+    ('google:owner', '', False, '', True),
+])
+async def test_close_lifecycle_preserves_other_tab_lease_frames_and_recording(
+        monkeypatch, tmp_path, lease_actor, lease_tab, expired, recording_tab, allowed):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    monkeypatch.setattr(computer.time, 'monotonic', lambda: 100)
+    c = computer.Computer()
+    first, other, agent = BrowserPage('first'), BrowserPage('other'), BrowserPage('agent')
+    c.page = agent
+    c.track_review_page(PR_TAB, first)
+    c.track_review_page(OTHER_TAB, other)
+    c.frame_cache = {PR_TAB: ('first-frame', 1), OTHER_TAB: ('other-frame', 2), '': ('agent-frame', 3)}
+    c.controller, c.controller_tab = lease_actor, lease_tab
+    c.lease_until = 99 if expired else 160
+    c.foreground_tab = recording_tab if recording_tab is not None else lease_tab
+    recording = {'tab': recording_tab, 'path': tmp_path / 'active.partial'} if recording_tab is not None else None
+    c.recording = recording
+    body = {'action': 'close_tab', 'tab': PR_TAB, 'actor': 'google:owner'}
+    if allowed:
+        assert not (await c.command(body))['available']
+        assert first.closed and PR_TAB not in c.review_pages and PR_TAB not in c.frame_cache
+    else:
+        with pytest.raises(ValueError, match='Another person|Stop the recording'):
+            await c.command(body)
+        assert not first.closed and c.page_for(PR_TAB) is first
+        assert c.frame_cache[PR_TAB] == ('first-frame', 1)
+    expected_actor = '' if expired or (allowed and lease_tab == PR_TAB) else lease_actor
+    expected_tab = '' if expired or (allowed and lease_tab == PR_TAB) else lease_tab
+    assert (c.controller, c.controller_tab) == (expected_actor, expected_tab)
+    assert c.recording is recording and not other.closed and not agent.closed
+    assert c.frame_cache[OTHER_TAB] == ('other-frame', 2) and c.frame_cache[''] == ('agent-frame', 3)
+    assert c.foreground_tab == (recording_tab if recording_tab is not None else expected_tab)
+    for page in (first, other, agent):
+        page.bring_to_front.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_failed_close_retains_surviving_popup_for_retry(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    first, popup = BrowserPage('first'), BrowserPage('popup')
+    c.track_review_page(PR_TAB, first)
+    c.track_review_page(PR_TAB, popup)
+    await c.command({'action': 'claim', 'tab': PR_TAB, 'actor': 'google:owner'})
+    frame = c.frame_cache[PR_TAB]
+    real_close = popup.close
+    popup.close = AsyncMock(side_effect=RuntimeError('Browser transport disconnected'))
+    body = {'action': 'close_tab', 'tab': PR_TAB, 'actor': 'google:owner'}
+    with pytest.raises(RuntimeError, match='disconnected'):
+        await c.command(body)
+    assert first.closed and not popup.closed and c.page_for(PR_TAB) is popup
+    assert c.frame_cache[PR_TAB] == frame
+    assert c.controller == 'google:owner' and c.controller_tab == PR_TAB
+    popup.close = real_close
+    assert not (await c.command(body))['available']
+    assert popup.closed and PR_TAB not in c.review_pages and PR_TAB not in c.frame_cache
+    assert not c.controller
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('externally_closed', [False, True])
+@pytest.mark.parametrize('lease_tab,recording_tab', [(OTHER_TAB, OTHER_TAB), (PR_TAB, None), ('', ''), (OTHER_TAB, None)])
+async def test_absent_close_preserves_other_actors_control_and_recordings(
+        monkeypatch, tmp_path, externally_closed, lease_tab, recording_tab):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    monkeypatch.setattr(computer.time, 'monotonic', lambda: 100)
+    c = computer.Computer()
+    c.page = BrowserPage('agent')
+    other = BrowserPage('other')
+    c.track_review_page(OTHER_TAB, other)
+    if externally_closed:
+        closed = BrowserPage('closed')
+        c.track_review_page(PR_TAB, closed)
+        await closed.close()
+        closed.close = AsyncMock(side_effect=AssertionError('Already closed'))
+    c.frame_cache = {PR_TAB: ('stale-frame', 1), OTHER_TAB: ('other-frame', 2), '': ('agent-frame', 3)}
+    c.controller, c.controller_tab, c.lease_until = 'google:other', lease_tab, 160
+    c.foreground_tab = lease_tab
+    recording = {'tab': recording_tab, 'path': tmp_path / 'active.partial'} if recording_tab is not None else None
+    c.recording = recording
+    result = await c.command({'action': 'close_tab', 'tab': PR_TAB, 'actor': 'google:owner'})
+    assert result['tab'] == PR_TAB and not result['available']
+    assert PR_TAB not in c.review_pages and PR_TAB not in c.frame_cache
+    assert (c.controller, c.controller_tab, c.lease_until) == ('google:other', lease_tab, 160)
+    assert c.recording is recording and c.foreground_tab == ('' if lease_tab == PR_TAB else lease_tab)
+    assert not other.closed and not c.page.closed
+    assert c.frame_cache == {OTHER_TAB: ('other-frame', 2), '': ('agent-frame', 3)}
+    other.bring_to_front.assert_not_awaited()
+    c.page.bring_to_front.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('externally_closed', [False, True])
+@pytest.mark.parametrize('expired', [False, True])
+async def test_absent_recording_owner_still_requires_explicit_stop(monkeypatch, tmp_path, externally_closed, expired):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    monkeypatch.setattr(computer.time, 'monotonic', lambda: 100)
+    c = computer.Computer()
+    if externally_closed:
+        closed = BrowserPage('closed')
+        c.track_review_page(PR_TAB, closed)
+        await closed.close()
+    c.frame_cache[PR_TAB] = ('last-recorded-frame', 1)
+    c.controller, c.controller_tab, c.lease_until = 'google:other', PR_TAB, 99 if expired else 160
+    recording = {'tab': PR_TAB, 'path': tmp_path / 'recording.partial'}
+    c.recording = recording
+    with pytest.raises(ValueError, match='Stop the recording'):
+        await c.command({'action': 'close_tab', 'tab': PR_TAB, 'actor': 'google:owner'})
+    assert c.recording is recording and c.frame_cache[PR_TAB] == ('last-recorded-frame', 1)
+    assert c.page is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('actor,tab,expired', [
+    ('agent', '', False), ('google:owner', '', False), ('google:owner', PR_TAB, False),
+    ('google:owner', '', True), ('google:owner', PR_TAB, True),
+])
+async def test_agent_turn_finish_preserves_human_recording_ownership(monkeypatch, tmp_path, actor, tab, expired):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    clock, signals = [0], []
+    monotonic = computer.time.monotonic
+    monkeypatch.setattr(computer.time, 'monotonic', lambda: monotonic() + clock[0])
+    c = computer.Computer()
+    c.page = BrowserPage('agent')
+    c.open = AsyncMock()
+    c.ensure_desktop = AsyncMock()
+    if tab:
+        c.track_review_page(tab, BrowserPage('review'))
+    process = SimpleNamespace(returncode=None, send_signal=signals.append)
+    async def finished():
+        process.returncode = 0
+        return 0
+    process.wait = AsyncMock(side_effect=finished)
+    async def spawn(*args, **kwargs):
+        assert args[0] == 'ffmpeg'
+        Path(args[-1]).write_bytes(WEBM)
+        return process
+    monkeypatch.setattr(computer.asyncio, 'create_subprocess_exec', spawn)
+    if actor != 'agent':
+        await c.command({'action': 'claim', 'actor': actor, 'tab': tab})
+    await c.command({'action': 'record_start', 'actor': actor, 'tab': tab, 'args': {'name': 'owned'}})
+    recording = c.recording
+    if expired:
+        clock[0] = 61
+    await c.command({'action': 'finish'})  # Exact agent-finally and turn-artifact request.
+    if actor == 'agent':
+        assert not c.recording and signals == [computer.signal.SIGINT]
+        assert recording['path'].with_suffix('.webm').exists()
+        return
+    assert c.recording is recording and recording['actor'] == actor and recording['tab'] == tab
+    assert not signals and recording['path'].exists() and not recording['path'].with_suffix('.webm').exists()
+    assert (c.controller, c.controller_tab) == (('', '') if expired else (actor, tab))
+    clock[0] = 61  # Expiring human control must not transfer capture ownership to the agent.
+    with pytest.raises(ValueError, match='recording'):
+        await c.command({'action': 'record_stop'})
+    assert c.recording is recording and not signals
+    await c.command({'action': 'claim', 'actor': actor, 'tab': tab})
+    await c.command({'action': 'record_stop', 'actor': actor, 'tab': tab})
+    assert not c.recording and signals == [computer.signal.SIGINT]
+    assert recording['path'].with_suffix('.webm').exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tab', ['', PR_TAB])
+async def test_whole_sandbox_finish_finalizes_human_capture_without_taking_control(monkeypatch, tmp_path, tab):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    path = tmp_path / 'teardown.partial'
+    path.write_bytes(WEBM)
+    c.recording = {'actor': 'google:owner', 'tab': tab, 'path': path, 'started': computer.time.time(),
+                   'process': SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))}
+    c.controller, c.controller_tab = 'google:owner', tab
+    c.lease_until = computer.time.monotonic() + 60
+    result = await c.command({'action': 'finish', 'args': {'all': True}})
+    assert result['name'] == 'teardown.webm' and not c.recording
+    assert (c.controller, c.controller_tab) == ('google:owner', tab)
+
+
+@pytest.mark.asyncio
+async def test_pr_input_uses_content_coordinates_and_validates_before_any_event(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    page = BrowserPage('review')
+    c.track_review_page(PR_TAB, page)
+    initial = await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    assert initial['surface'] == 'browser' and initial['tab'] == PR_TAB
+    c.desktop = SimpleNamespace(poll=lambda: None)
+    c.window_command = AsyncMock(return_value=None)
+    c.frame = 'desktop-frame'
+    c.desktop_input = AsyncMock(side_effect=AssertionError('PR input must not use xdotool'))
+    c.clear_clipboard = AsyncMock(side_effect=AssertionError('PR input must not use desktop clipboard'))
+    assert (await c.state())['surface'] == 'desktop' and (await c.state())['frame'] == 'desktop-frame'
+    sent = []
+    for name in ('move', 'down', 'up', 'wheel'):
+        setattr(page.mouse, name, AsyncMock(side_effect=lambda *args, _name=name, **kwargs: sent.append((_name, args, kwargs))))
+    for name in ('insert_text', 'press'):
+        setattr(page.keyboard, name, AsyncMock(side_effect=lambda *args, _name=name, **kwargs: sent.append((_name, args, kwargs))))
+    invalid = [{'type': 'text', 'text': 'must not type'}, {'type': 'pointer', 'phase': 'move', 'x': float('nan'), 'y': 2}]
+    with pytest.raises(ValueError):
+        await c.command({'action': 'input', 'actor': 'owner', 'tab': PR_TAB, 'args': {'events': invalid}})
+    assert not sent
+    page.bring_to_front.assert_not_awaited()
+    events = [{'type': 'pointer', 'phase': 'down', 'x': 22, 'y': 88},
+              {'type': 'pointer', 'phase': 'move', 'x': 45, 'y': 90}, {'type': 'pointer', 'phase': 'up'},
+              {'type': 'paste', 'text': 'text fixture'}, {'type': 'key', 'key': 'Meta+a'},
+              {'type': 'scroll', 'dx': 30, 'dy': -1600}]
+    result = await c.command({'action': 'input', 'actor': 'owner', 'tab': PR_TAB, 'args': {'events': events}})
+    assert sent == [('move', (22, 88), {}), ('down', (), {'button': 'left'}), ('move', (45, 90), {}),
+                    ('up', (), {'button': 'left'}), ('insert_text', ('text fixture',), {}),
+                    ('press', ('Control+a',), {}), ('wheel', (30, -1200), {})]
+    assert result['surface'] == 'browser' and result['controller_tab'] == PR_TAB and result['frame']
+    assert c.frame == 'desktop-frame'
+    c.desktop_input.assert_not_awaited()
+    c.clear_clipboard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expired_pr_drag_releases_original_page_before_new_tab_claim(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    first, second = BrowserPage('first'), BrowserPage('second')
+    c.track_review_page(PR_TAB, first)
+    c.track_review_page(OTHER_TAB, second)
+    await c.command({'action': 'claim', 'actor': 'owner', 'tab': PR_TAB})
+    await c.command({'action': 'input', 'actor': 'owner', 'tab': PR_TAB,
+                     'args': {'events': [{'type': 'pointer', 'phase': 'down', 'x': 10, 'y': 10}]}})
+    c.clear_clipboard = AsyncMock()
+    c.lease_until = 0
+    first.mouse.up.side_effect = RuntimeError('Pointer release interrupted')
+    with pytest.raises(RuntimeError, match='Pointer release'):
+        await c.command({'action': 'claim', 'actor': 'next-owner', 'tab': OTHER_TAB})
+    assert c.release_pending and c.release_tab == PR_TAB and not c.controller
+    first.mouse.up.reset_mock(side_effect=True)
+    result = await c.command({'action': 'claim', 'actor': 'next-owner', 'tab': OTHER_TAB})
+    assert [call.kwargs['button'] for call in first.mouse.up.await_args_list] == ['left', 'middle', 'right']
+    second.mouse.up.assert_not_awaited()
+    c.clear_clipboard.assert_not_awaited()
+    assert result['controller'] == 'next-owner' and result['controller_tab'] == OTHER_TAB
+    await c.command({'action': 'release', 'actor': 'owner', 'tab': PR_TAB})
+    assert c.controller == 'next-owner' and c.controller_tab == OTHER_TAB
+    second.mouse.up.assert_not_awaited()
+
+
+@pytest.mark.parametrize('fallback,expected', [
+    ({'available': True, 'recording': False}, 200),
+    ({'available': True, 'recording': False, 'error': 'State unavailable'}, 503),
+    ({'available': False, 'recording': False, 'tab': PR_TAB}, 503),
+])
+def test_named_close_legacy_bridge_fallback_requires_healthy_unscoped_state(workspace, fallback, expected):
+    app, client, _, url = cloud(workspace)
+    hub = app.state.computer
+    native = AsyncMock(side_effect=OSError('Legacy script has no bridge'))
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=native))
+    hub.execute = AsyncMock(return_value=fallback)
+    response = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
+    assert response.status_code == expected
+    assert native.await_count == 1 and native.call_args.args[0]['action'] == 'state'
+    assert hub.execute.await_count == 1 and json.loads(hub.execute.call_args.args[2])['action'] == 'state'

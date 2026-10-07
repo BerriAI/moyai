@@ -195,7 +195,7 @@ async def test_cross_scope_checkpointed_steering_keeps_the_saved_handoff(durable
     manager,cloud,run_id=durable
     await drive(manager,run_id,phase='checkpointed')
     state=manager.state(run_id);old=state['message_id']
-    await manager.cleanup(state)
+    await manager.cleanup(state, run_id)
     state.update(phase=phase,sandbox_id='');manager.save(run_id,state)
     manager.store.update_run(run_id,status=phase)
     target,_=manager.store.enqueue_message(run_id,'Continue with this instead','steer-wait',**scope)
