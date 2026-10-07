@@ -67,6 +67,88 @@ def test_slack_harness_with_initial_task(slack_app, harness):
     assert app.state.store.messages(submitted[0]['id'])[0]['content'] == 'Read the repository'
 
 
+
+def use_model_defaults(settings):
+    # The shared fixtures explicitly opt into Hermes for historical assertions.
+    settings.agent_harness = 'claude-agent-sdk'
+    settings.model_fields_set.discard('agent_harness')
+
+
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'codex'), ('opus', 'claude-agent-sdk'), ('glm', 'claude-agent-sdk')])
+def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspace, monkeypatch, model, harness):
+    app, client = workspace
+    use_model_defaults(app.state.settings)
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    catalog = client.get('/api/config').json()
+    assert catalog['harness'] == 'codex'
+    canonical = app.state.settings.resolve_model(model)
+    assert next(item for item in catalog['models'] if item['id'] == canonical)['default_harness'] == harness
+    response = client.post('/api/runs', json={'prompt': 'Use the model default', 'model': model})
+    assert response.status_code == 201, response.text
+    run = response.json()
+    assert (run['model'], run['harness']) == (canonical, harness)
+    switched = client.post(f"/api/runs/{run['id']}/messages", json={'content': 'Now use the other model', 'client_id': 'switch-model-pairing', 'model': 'opus' if model == 'astra' else 'astra'})
+    assert switched.status_code == 202, switched.text
+    assert app.state.store.run(run['id'])['harness'] == harness
+    child = client.post('/api/runs', json={'prompt': 'Continue in a side chat', 'side_chat_of': run['id'], 'model': 'astra'})
+    assert child.status_code == 201, child.text
+    assert child.json()['harness'] == harness
+    explicit = client.post('/api/runs', json={'prompt': 'Keep my selected harness', 'model': model, 'harness': 'hermes'})
+    assert explicit.json()['harness'] == 'hermes'
+
+
+@pytest.mark.parametrize('thread_chat', [True, False])
+@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'codex'), (OPUS, 'claude-agent-sdk')])
+def test_slack_new_sessions_pair_configured_model(slack_app, thread_chat, model, harness):
+    app, client, submitted, _ = slack_app
+    use_model_defaults(app.state.settings)
+    app.state.settings.agent_model = model
+    app.state.settings.slack_thread_chat_enabled = thread_chat
+    response = client.post('/hooks/slack/events', **signed(event()))
+    assert response.status_code == 200, response.text
+    assert (submitted[0]['model'], submitted[0]['harness']) == (model, harness)
+
+
+def test_slack_selected_model_pairs_only_new_thread(slack_app):
+    app, client, submitted, _ = slack_app
+    use_model_defaults(app.state.settings)
+    app.state.settings.agent_model = OPUS
+    response = client.post('/hooks/slack/events', **signed(event(text='<@U99999999> model astra')))
+    assert response.status_code == 200, response.text
+    run = app.state.store.rows('SELECT * FROM runs')[0]
+    assert (run['model'], run['harness']) == ('openai/gpt-6-astra', 'codex')
+    send(client, 1, '<@U99999999> model opus')
+    current = app.state.store.run(run['id'])
+    assert (current['model'], current['harness']) == (OPUS, 'codex')
+
+
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'codex'), ('opus', 'claude-agent-sdk')])
+def test_new_automation_default_persists_across_edits_and_launches(workspace, monkeypatch, model, harness):
+    app, client = workspace
+    use_model_defaults(app.state.settings)
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    definition = {'name': 'Model workflow', 'prompt': 'Read the project', 'mode': 'demo', 'model': model}
+    created = client.post('/api/automations', json={'definition': definition})
+    assert created.status_code == 201, created.text
+    automation = created.json()
+    assert automation['definition']['harness'] == harness
+    endpoint = f"/api/automations/{automation['id']}"
+    edited = client.put(endpoint, json={'revision': 1, 'definition': {**definition, 'model': 'opus' if model == 'astra' else 'astra'}})
+    assert edited.status_code == 200, edited.text
+    assert edited.json()['definition']['harness'] == harness
+    launched = client.post(endpoint + '/run', json={'revision': 2, 'client_id': 'paired-harness-launch'})
+    assert launched.status_code == 202, launched.text
+    assert app.state.store.run(launched.json()['run_id'])['harness'] == harness
+    explicit = client.post('/api/automations', json={'definition': {**definition, 'harness': 'hermes'}})
+    assert explicit.json()['definition']['harness'] == 'hermes'
+    # Saved definitions that predate harness selection keep their legacy engine.
+    stored = json.loads(app.state.automations.row(automation['id'])['definition'])
+    stored.pop('harness')
+    app.state.store.execute('UPDATE automations SET definition=? WHERE id=?', (json.dumps(stored), automation['id']))
+    legacy = client.put(endpoint, json={'revision': 2, 'definition': definition})
+    assert legacy.status_code == 200, legacy.text
+    assert legacy.json()['definition']['harness'] == 'hermes'
+
 def test_journal_retains_completed_tool_receipts():
     from sandbox.harness_agent import TurnJournal
     journal = TurnJournal([], 'request')
@@ -98,7 +180,7 @@ def test_sdk_wire_uses_existing_sealed_model_broker():
             response = client.post('/v1/messages?beta=true', headers={'x-api-key': 'test-token'}, json=payload)
             assert response.status_code == 200 and 'message_stop' in response.text
             assert calls[0] == payload
-            relay.before_model = lambda: False
+            relay.before_model = lambda request: False
             assert client.post('/v1/messages', headers={'x-api-key': 'test-token'}, json=payload).status_code == 409
             assert len(calls) == 1
     finally:
@@ -218,6 +300,84 @@ def test_unregistered_litellm_binding_fails_before_startup():
         agent.validate()
 
 
+@pytest.fixture
+def installed_litellm_runtime(monkeypatch):
+    import sys
+    from pathlib import Path
+    from types import ModuleType, SimpleNamespace
+    from sandbox import harness_dependencies
+    litellm = ModuleType('litellm')
+    litellm.Harness, litellm.aagent_session = object(), object()
+    monkeypatch.setitem(sys.modules, 'litellm', litellm)
+    for name in ('claude_agent_sdk', 'deepagents', 'langchain_litellm'):
+        monkeypatch.setitem(sys.modules, name, ModuleType(name))
+    source = harness_dependencies.LITELLM_SOURCE / 'litellm' / 'harness'
+    is_dir = Path.is_dir
+    monkeypatch.setattr(Path, 'is_dir', lambda path: False if path == source else is_dir(path))
+    monkeypatch.setattr(harness_dependencies.shutil, 'which', lambda name: '/prepared/bin/' + name)
+    def version_only(command, **kwargs):
+        assert command == ['opencode', '--version'], 'Unexpected runtime install'
+        return SimpleNamespace(returncode=0, stdout='1.18.35\n')
+    monkeypatch.setattr(harness_dependencies.subprocess, 'run', version_only)
+    return harness_dependencies
+
+
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+def test_ready_litellm_harness_does_not_require_codex(installed_litellm_runtime, monkeypatch, harness):
+    from types import SimpleNamespace
+    from sandbox.harness_registry import create_agent
+    def unavailable_codex():
+        raise RuntimeError('Codex is unavailable')
+    monkeypatch.setattr(installed_litellm_runtime, 'prepare_codex', unavailable_codex)
+    agent = create_agent(harness, spec={}, relay=SimpleNamespace(), config={}, activity=None,
+                         step=lambda: None, cwd='/workspace')
+    try:
+        agent.validate()
+    finally:
+        agent.close()
+
+
+@pytest.mark.parametrize('entrypoint', ['codex', 'image'])
+@pytest.mark.parametrize('install_fails', [False, True])
+def test_native_validation_and_image_entrypoint_require_codex(installed_litellm_runtime, monkeypatch, entrypoint, install_fails):
+    import importlib.metadata
+    import runpy
+    import subprocess
+    from types import SimpleNamespace
+    from sandbox.harness_registry import create_agent
+    dependencies, calls = installed_litellm_runtime, []
+    installed_version = importlib.metadata.version
+    def version(package):
+        if package == 'openai-codex':
+            raise importlib.metadata.PackageNotFoundError(package)
+        return installed_version(package)
+    def install(args, **kwargs):
+        calls.append(args)
+        if args[1:4] == ['-m', 'pip', 'install'] and install_fails:
+            raise subprocess.CalledProcessError(1, args)
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(importlib.metadata, 'version', version)
+    monkeypatch.setattr(dependencies.subprocess, 'run', install)
+    agent = (create_agent('codex', spec={}, relay=SimpleNamespace(), config={}, activity=None,
+                          step=lambda: None, cwd='/workspace') if entrypoint == 'codex' else None)
+    def invoke():
+        if agent is not None:
+            agent.validate()
+        else:
+            runpy.run_path(dependencies.__file__, run_name='__main__')
+    try:
+        if install_fails:
+            with pytest.raises(subprocess.CalledProcessError):
+                invoke()
+        else:
+            invoke()
+        installs = [args[1:] for args in calls if args[1:4] == ['-m', 'pip', 'install']]
+        assert installs == [['-m', 'pip', 'install', 'openai-codex==0.161.0']]
+    finally:
+        if agent is not None:
+            agent.close()
+
+
 @pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
 @pytest.mark.parametrize('model', [OPUS, 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3', 'custom-alias'])
 def test_all_litellm_harnesses_can_be_selected(workspace, monkeypatch, harness, model):
@@ -235,7 +395,7 @@ def test_all_litellm_harnesses_can_be_selected(workspace, monkeypatch, harness, 
 def test_catalog_covers_upstream_harness_enum():
     litellm = pytest.importorskip('litellm.harness')
     from sandbox.harness_registry import HARNESSES
-    assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE'} == {h.name for h in litellm.Harness}
+    assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE', 'CODEX'} == {h.name for h in litellm.Harness}
 
 
 def test_responses_input_is_not_translated():
@@ -351,17 +511,16 @@ def native_cli_runtime(tmp_path, monkeypatch):
     store.close()
 
 
-@pytest.mark.parametrize('kind', ['codex', 'opencode'])
-def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_cli_runtime, monkeypatch, kind):
+def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_cli_runtime, monkeypatch):
     runtime = native_cli_runtime
-    first = runtime.create(kind)
+    first = runtime.create('opencode')
     assert first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')['completed']
     assert 'Original constraint' in runtime.calls[0]['prompt']
     assert 'state' not in runtime.host  # Native upload belongs after answer delivery.
     first.close()
     assert runtime.host['state']['files'] and not list(first.native.cache.rglob('*'))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'replacement-capability')
-    second = runtime.create(kind)
+    second = runtime.create('opencode')
     try:
         assert second.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] is True
@@ -377,10 +536,10 @@ def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_c
 def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtime, compaction_fails):
     from sandbox.context_store import ContextUnavailable
     runtime = native_cli_runtime
-    first = runtime.create('codex')
+    first = runtime.create('opencode')
     first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
     first.close()
-    agent = runtime.create('codex')
+    agent = runtime.create('opencode')
     old_lease, completed_writes, compactions = [], [], []
     def reject():
         if len(runtime.calls) != 2:
@@ -422,7 +581,7 @@ def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtim
     assert len(runtime.calls) == 3 and not runtime.calls[-1]['resumed']
     assert 'Saved write receipt' in runtime.calls[-1]['prompt']
     assert [body['action'] for body in runtime.requests] == ['begin', 'commit', 'begin', 'invalidate', 'restart', 'commit']
-    third = runtime.create('codex')
+    third = runtime.create('opencode')
     try:
         assert third.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] and runtime.calls[-1]['prompt'] == 'TLDR?'
@@ -431,12 +590,12 @@ def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtim
         third.close()
 
 
-@pytest.mark.parametrize('field,value', [('harness', 'opencode'), ('workdir', '/other-workspace'),
+@pytest.mark.parametrize('field,value', [('harness', 'codex'), ('workdir', '/other-workspace'),
     ('model', 'litellm_proxy/other-model'), ('native_session_id', None), ('native_session_id', '--last'),
     ('files', {}), ('files', {'../escape': 'eA=='})])
 def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_runtime, field, value):
     runtime = native_cli_runtime
-    first = runtime.create('codex')
+    first = runtime.create('opencode')
     first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
     first.close()
     saved = runtime.host['state']
@@ -446,7 +605,7 @@ def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_ru
         state = json.loads(saved['state'])
         state[field] = value
         saved['state'] = json.dumps(state)
-    second = runtime.create('codex')
+    second = runtime.create('opencode')
     try:
         assert second.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] is False
@@ -455,7 +614,7 @@ def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_ru
         second.close()
     assert runtime.host.get('state'), 'The successful fresh fallback must replace the rejected checkpoint'
     assert len(runtime.calls) == 2  # The rejected native state never started an SDK invocation.
-    third = runtime.create('codex')
+    third = runtime.create('opencode')
     try:
         assert third.run_conversation('Next question', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] and runtime.calls[-1]['prompt'] == 'Next question'
@@ -466,7 +625,7 @@ def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_ru
 @pytest.mark.parametrize('failure', ['runtime_error', 'interrupted', 'pending_tool'])
 def test_unfinished_native_cli_turn_cannot_publish_resume_state(native_cli_runtime, failure):
     runtime = native_cli_runtime
-    agent = runtime.create('codex')
+    agent = runtime.create('opencode')
     if failure == 'runtime_error':
         runtime.stream.result.stop_reason = 'runtime_error'
     elif failure == 'interrupted':
@@ -483,7 +642,7 @@ def test_unfinished_native_cli_turn_cannot_publish_resume_state(native_cli_runti
 
 def test_goal_iteration_renews_native_contract_and_discards_intermediate_result(native_cli_runtime):
     runtime = native_cli_runtime
-    agent = runtime.create('codex')
+    agent = runtime.create('opencode')
     agent.run_conversation('First step.', conversation_history=[], system_message='Original rules')
     previous = agent.native
     assert previous.staged is not None and 'state' not in runtime.host
@@ -540,9 +699,9 @@ def test_native_cli_version_comes_from_installed_binary_and_failure_disables_res
     calls = []
     def version(command, **kwargs):
         calls.append(command)
-        return SimpleNamespace(returncode=0, stdout='codex-cli 0.159.0\n')
+        return SimpleNamespace(returncode=0, stdout='1.18.35\n')
     monkeypatch.setattr(harness_dependencies.subprocess, 'run', version)
-    assert harness_dependencies.runtime_version('codex') == 'codex-cli 0.159.0'
-    assert calls == [['codex', '--version']]
+    assert harness_dependencies.runtime_version('opencode') == '1.18.35'
+    assert calls == [['opencode', '--version']]
     monkeypatch.setattr(harness_dependencies.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=1, stdout=''))
-    assert harness_dependencies.runtime_version('codex') == ''
+    assert harness_dependencies.runtime_version('opencode') == ''

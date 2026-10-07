@@ -1,12 +1,71 @@
 # Agent harnesses
 
-New web sessions, Slack threads and saved automations default to **Claude Agent
-SDK** (`claude-agent-sdk`). `AGENT_HARNESS` overrides the default. Explicitly
+New web sessions, Slack threads and saved automations default to **Codex SDK**
+(`codex`) for GPT-6 Astra and **Claude Agent SDK** (`claude-agent-sdk`) for Opus 5.5.
+Other models retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
+overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` setting
+to enable automatic pairing. The new-session picker shows the effective automatic
+choice and supports an explicit override. Explicitly
 selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents and
 Tool Loop. All configured models remain selectable with every harness. The configured
 `AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
-selected model and tool calls through the runtime's native API (Messages for
-Claude Agent SDK); selecting it does not establish provider compatibility.
+selected model and tool calls through the runtime's native API (Responses for
+Codex, Messages for Claude); selecting it does not establish provider compatibility.
+
+## Codex SDK
+
+`sandbox/codex_harness.py` uses the published Python `openai-codex==0.161.0`
+package and its pinned `openai-codex-cli-bin==0.161.0` app-server runtime directly.
+It replaces the LiteLLM harness wrapper for the existing `codex` selection.
+The SDK requires Python 3.10 or later; Moyai's sandbox uses Python 3.12 or later.
+Published runtime wheels support Linux x86_64 and ARM64. Older workspace snapshots
+install the pinned SDK/runtime on first use.
+
+Codex runs inside Moyai's isolated machine with a fresh, temporary native home and
+an ephemeral thread for every invocation. Native authentication, transcripts and
+summaries are never resumed across requesters. The shared public journal described
+below supplies restored context and records completed actions. Moyai keeps ownership
+of sessions, memory, skills, delegated workers, permissions, checkpoints and delivery.
+Native delegation is disabled with `agents.enabled=false`; native hooks, apps,
+memory, bundled skill instructions and automatic project instructions are disabled.
+Project runtime configuration is untrusted. Only Moyai's configured MCP server is
+added, and inherited provider credentials and runtime switches are removed.
+
+The SDK receives the run capability and sends Responses requests to Moyai's local
+relay using a custom provider. The broker still pins the selected model, authorizes
+each request, enforces limits and records spend through LiteLLM Gateway. Native
+approval policy is `never`; the enclosing machine supplies filesystem isolation
+and connected-app authorization remains in the broker. Runtime request and stream
+retries are disabled; only confirmed context rejection can automatically restart
+the native session through Moyai's recovery path.
+
+Astra's model catalog selects native **code mode**, even when the corresponding
+feature flags are false. The model calls `functions.exec`, which can invoke native
+shell/file tools and Moyai MCP tools. Moyai saves receipts from public
+`commandExecution`, `fileChange`, `mcpToolCall` and `imageView` lifecycle items.
+Code-mode outer call IDs differ from nested tool IDs. Before allowing the next
+model request, the relay waits for its output IDs to appear in the ordered native
+`rawResponseItem/completed` stream and for all nested receipts to settle. Only
+those IDs are consumed from raw events; private request/response contents never
+become public receipts. A missing receipt blocks the boundary rather than inventing
+completion. Corrections, delegation waits and cooperative checkpoints occur at
+these boundaries; native in-flight steering is not enabled.
+
+This integration uses the SDK's `AsyncCodexClient` and the pinned app-server's
+experimental `experimentalRawEvents` thread option, passed through its supported
+dictionary request API. The generated high-level thread API does not expose that
+option. An SDK/runtime upgrade must reverify native tool schemas, event ordering
+and receipt identity with the transport tests below.
+
+Codex receives the selected model's context budget and an 80% native compaction
+threshold. With Moyai's custom provider, the pinned runtime summarizes through
+ordinary `/v1/responses`; it does not require a separate `/responses/compact`
+endpoint. Native summaries remain private. Confirmed pre-generation context
+rejection uses the same bounded journal-recovery path as Claude, preserving the
+original request, deadlines and completed receipts. The gateway must support both
+Responses and Chat Completions for durable summary generation. For Astra it must
+also preserve native Responses items such as `additional_tools`, tool namespaces,
+custom tool calls/outputs and streamed completion events.
 
 ## Claude Agent SDK
 
@@ -43,7 +102,7 @@ wait for credentials/delegated work, or apply a correction at a complete tool
 boundary. In-flight redirect is a Hermes capability; Claude uses boundary
 steering. Stop revokes the capability and terminates the isolated machine.
 
-Claude, Codex and OpenCode can resume a compatible, successfully completed native
+Claude and OpenCode can resume a compatible, successfully completed native
 conversation on the next chat turn, including after the sandbox process exits.
 The SDK receives only the new request; it owns its existing conversation instead
 of receiving the public journal again inside a new user message. Completed
@@ -71,11 +130,11 @@ most 256 regular files for CLI runtimes; oversized state uses the public journal
 Native plaintext lives outside `/workspace` and is removed before attachments,
 project preparation or agent startup, including when starting a cloned child.
 Each SDK uses an isolated config/cache directory and fresh relay credentials.
-Claude uses the pinned SDK's public `SessionStore` protocol; Codex/OpenCode use
-LiteLLM's public resume API and their persisted native files. Missing, corrupt or
+Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode uses
+LiteLLM's public resume API and its persisted native files. Missing, corrupt or
 incompatible state selects a fresh session before inference. An ambiguous SDK
 failure never automatically retries the task. Interrupted turns, intermediate
-goal iterations, Deep Agents and Tool Loop retain public-journal recovery;
+goal iterations, Codex, Deep Agents and Tool Loop retain public-journal recovery;
 Hermes retains its existing separate history flow.
 
 Malformed native state and confirmed context recovery can publish a replacement
@@ -288,18 +347,19 @@ choices, Slack selection and adapter creation. Each adapter implements
 `sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
 checkpointing and delivery.
 
-The LiteLLM adapters use `litellm.aagent_session`, or `litellm.aagent_resume` for
-eligible Codex/OpenCode conversations, with the named bindings in
-`sandbox/harness_bindings.py`. The pinned beta source
+OpenCode, Deep Agents and Tool Loop use `litellm.aagent_session`, or
+`litellm.aagent_resume` for eligible OpenCode conversations, with the named
+bindings in `sandbox/harness_bindings.py`. The pinned beta source
 is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
-contain that API. Claude Agent SDK stays pinned at `0.2.163`. No upstream source
+contain that API. Claude Agent SDK stays pinned at `0.2.163`; the native Codex
+Python SDK and its bundled runtime are pinned at `0.161.0`. No upstream source
 is vendored. Add a new registry definition and lifecycle adapter to extend Moyai.
 
 ## Verification
 
 ```sh
-uv run pytest -q tests/test_claude_sdk.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py
-uv run pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py
+uv run pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_claude_sdk.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py
+uv run pytest -q --tb=line tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py
 node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
 ```
 
@@ -308,6 +368,14 @@ pinned Claude SDK, MCP tool transport, encrypted broker endpoint and SQLite.
 They verify the same native session ID after cold restoration, a new-request-only
 SDK prompt, and one execution of a completed tool. Provider responses are local
 fixtures; these checks do not establish production response latency.
+
+`test_codex_sdk_transport.py` runs the actual pinned app-server and MCP bridge with
+a local synthetic Responses server. It exercises Astra's native code-mode shell,
+file patch and MCP calls; interruption after saved receipts; provider failure
+without replay; repeated native compaction; and a fresh requester invocation using
+only public saved context. It also verifies project-config isolation and private
+summary exclusion. These tests make no provider calls and do not establish live
+Astra/Opus gateway compatibility or model task quality.
 
 `uv run python -m scripts.context_checkpoint_demo` demonstrates repeated cold
 filesystem restores and summary-failure recovery using synthetic data and a
@@ -343,7 +411,11 @@ a cache read is reported. It does not exercise coding tools or production Slack.
 For full coding-tool verification, run `python -m scripts.harness_smoke` **inside
 an isolated container or Modal sandbox**, with the same gateway credentials.
 It creates, reads and executes a test program, calls a read-only workspace tool
-and follows up from saved receipts. `SMOKE_HARNESS` selects the runtime. Do not
+and follows up after reopening the durable context store. `SMOKE_HARNESS` selects
+the runtime and `SMOKE_MODEL` selects the configured model. The native Codex/Astra
+and Claude/Opus 5.5 pairings both passed this live gateway probe. Native compaction
+remains covered by the fixture-backed tests
+described above. Do not
 run agent-generated shell commands on the web host or a developer's computer.
 
 A PR and local checks do not update the hosted agent. Production rollout requires

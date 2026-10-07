@@ -296,7 +296,7 @@ class Automations:
         harness = body.definition.harness
         if 'harness' not in body.definition.model_fields_set:
             harness = (Definition.model_validate_json(self.row(automation_id)['definition']).harness
-                       if automation_id else self.settings.agent_harness)
+                       if automation_id else self.settings.default_harness(body.definition.model or None))
         definition = body.definition.model_copy(update={'harness': harness,
                                                       'model': self.settings.harness_model(harness, body.definition.model or None),
                                                       'plugins': sorted(set(body.definition.plugins))})

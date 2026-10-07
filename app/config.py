@@ -226,6 +226,16 @@ class Settings(BaseSettings):
         from .harnesses import resolve
         return resolve(value).id
 
+    def default_harness(self, value: str | None = None) -> str:
+        """Choose once for a new session; explicit deployment settings win."""
+        model = self.resolve_model(value)
+        if 'agent_harness' in self.model_fields_set:
+            return self.agent_harness
+        return {
+            'openai/gpt-6-astra': 'codex',
+            'anthropic/claude-opus-5-5': 'claude-agent-sdk',
+        }.get(model, self.agent_harness)
+
     def harness_model(self, harness: str, value: str | None = None) -> str:
         from .harnesses import validate_harness
         model = self.resolve_model(value)

@@ -102,7 +102,7 @@ class ClaudeAgent(HarnessAgent):
     def interrupt(self):
         self.stopped.set()
 
-    def before_model(self):
+    def before_model(self, request=None):
         if self.journal and not self.journal.pending:
             self.context.step()
             if not self.stopped.is_set():

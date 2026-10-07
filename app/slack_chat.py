@@ -228,13 +228,14 @@ class SlackChat:
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
-                    harness = selected_harness if not harness_error and selected_harness else self.settings.agent_harness
-                    model = self.settings.harness_model(harness)
+                    model = self.settings.resolve_model()
                     if selected_model:
                         try:
-                            model = self.settings.harness_model(harness, selected_model)
+                            model = self.settings.resolve_model(selected_model)
                         except ValueError as exc:
                             model_error, selected_model, command = str(exc), None, 'model'
+                    harness = selected_harness if not harness_error and selected_harness else self.settings.default_harness(model)
+                    self.settings.harness_model(harness, model)
                     conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id,harness) VALUES(?,?,'','modal',?,?,?,?,1,?,?,?)",
                                  (run_id, prompt or original_prompt, 'idle' if command else 'queued', json.dumps(plugins), stamp, stamp, model, actor_id, harness))
                     conn.execute("INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,mention_ts,context_status) VALUES(?,?,?,?,?,?,?,'pending')",

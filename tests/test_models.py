@@ -20,7 +20,7 @@ def test_code_catalog_addition_reaches_picker_and_model_validation(workspace, mo
     app, client = workspace
     monkeypatch.setitem(MODEL_CATALOG, 'example/new-model', 'New model')
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
-    assert {'id': 'example/new-model', 'name': 'New model'} in client.get('/api/config').json()['models']
+    assert {'id': 'example/new-model', 'name': 'New model', 'default_harness': 'hermes'} in client.get('/api/config').json()['models']
     response = client.post('/api/runs', json={'prompt': 'Use the new model', 'model': 'example/new-model'})
     assert response.status_code == 201
     assert response.json()['model'] == 'example/new-model'
@@ -35,8 +35,8 @@ def test_model_selection_is_validated_and_frozen_on_each_queued_message(workspac
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     models = client.get('/api/config').json()['models']
     assert {x['id'] for x in models} >= {ASTRA, SOL, OPUS, GLM}
-    assert {'id': GLM, 'name': 'GLM-5.3'} in models
-    assert {'id': SOL, 'name': 'GPT-6.1 Sol'} in models
+    assert {'id': GLM, 'name': 'GLM-5.3', 'default_harness': 'hermes'} in models
+    assert {'id': SOL, 'name': 'GPT-6.1 Sol', 'default_harness': 'hermes'} in models
     before = len(app.state.store.rows('SELECT id FROM runs'))
     assert client.post('/api/runs', json={'prompt': 'Invalid model', 'model': 'unapproved'}).status_code == 422
     assert len(app.state.store.rows('SELECT id FROM runs')) == before

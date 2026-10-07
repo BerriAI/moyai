@@ -1,6 +1,5 @@
 """Runtime-specific launch and tool configuration. No agent loop or wire conversion."""
 from dataclasses import dataclass
-import json
 from pathlib import Path
 import tempfile
 
@@ -61,30 +60,6 @@ def local_sandbox(cwd, config, native=None):
     return sandbox_class(native)(cwd)
 
 
-def codex_sandbox(cwd, config, native=None):
-    class CodexSandbox(sandbox_class(native)):
-        is_container = True  # The enclosing Modal machine provides isolation.
-
-        async def exec(self, cmd, *, env=None, cwd=None):
-            cmd = list(cmd)
-            if cmd[0] == 'codex':
-                server = config['mcp_servers']['workspace']
-                overrides = ['model_providers.litellm.request_max_retries=0',
-                             'model_providers.litellm.stream_max_retries=0']
-                for key in ('command', 'args'):
-                    overrides.append('mcp_servers.moyai.' + key + '=' + json.dumps(server.get(key, [])))
-                overrides.extend('mcp_servers.moyai.env.' + key + '=' + json.dumps(value)
-                                 for key, value in server.get('env', {}).items())
-                cmd[-1:-1] = [part for entry in overrides for part in ('-c', entry)]
-            return await super().exec(cmd, env=env, cwd=cwd)
-    return CodexSandbox(cwd)
-
-
-def codex_options(config):
-    from litellm import CodexOptions
-    return CodexOptions()
-
-
 def opencode_options(config):
     from litellm import OpenCodeOptions
     server = config['mcp_servers']['workspace']
@@ -104,7 +79,6 @@ def tool_loop_options(config):
 
 
 RUNTIME_BINDINGS = {
-    'codex': RuntimeBinding(codex_sandbox, codex_options),
     'opencode': RuntimeBinding(local_sandbox, opencode_options),
     'deepagents': RuntimeBinding(local_sandbox, deepagents_options, in_process=True),
     'tool-loop': RuntimeBinding(local_sandbox, tool_loop_options, in_process=True, native_file_tools=False),

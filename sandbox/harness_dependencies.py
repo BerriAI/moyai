@@ -12,6 +12,7 @@ import shutil
 
 LITELLM_REVISION = '2cee61626d9581bc22bbdeefb1924f854f50d427'
 LITELLM_SOURCE = Path('/opt/litellm-harness')
+CODEX_SDK_VERSION = '0.161.0'
 
 
 def ensure_pip() -> None:
@@ -21,14 +22,14 @@ def ensure_pip() -> None:
 
 
 def prepare_binary(binding):
-    packages = {'codex': '@openai/codex@0.160.1', 'opencode': 'opencode-ai@1.18.35'}
+    packages = {'opencode': 'opencode-ai@1.18.35'}
     if binding in packages and not shutil.which(binding):
         subprocess.run(['npm', 'install', '-g', packages[binding]], check=True, timeout=300)
 
 
 def runtime_version(binding):
     """Fingerprint the installed CLI, including binaries from older snapshots."""
-    if binding not in {'codex', 'opencode'}:
+    if binding != 'opencode':
         return ''
     try:
         result = subprocess.run([binding, '--version'], capture_output=True, text=True, timeout=10)
@@ -36,6 +37,18 @@ def runtime_version(binding):
         return ''
     value = result.stdout.strip()
     return value if result.returncode == 0 and value and len(value) <= 200 else ''
+
+
+def prepare_codex():
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        installed = version('openai-codex')
+    except PackageNotFoundError:
+        installed = ''
+    if installed != CODEX_SDK_VERSION:
+        ensure_pip()
+        subprocess.run([sys.executable, '-m', 'pip', 'install',
+                        'openai-codex==' + CODEX_SDK_VERSION], check=True, timeout=300)
 
 
 def prepare_runtime():
@@ -77,6 +90,6 @@ def prepare_runtime():
 
 
 if __name__ == '__main__':
+    prepare_codex()
     prepare_runtime()
-    prepare_binary('codex')
     prepare_binary('opencode')

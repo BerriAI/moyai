@@ -398,7 +398,8 @@ def create_app(settings: Settings | None = None):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
-        return {"harnesses": choices(), "harness": settings.agent_harness, "cloud_ready": not missing, "missing": missing, "model": settings.harness_model(settings.agent_harness), "models": settings.model_choices(),
+        return {"harnesses": choices(), "harness": settings.default_harness(), "cloud_ready": not missing, "missing": missing,
+                "model": settings.resolve_model(), "models": [{**model, "default_harness": settings.default_harness(model["id"])} for model in settings.model_choices()],
                 "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
@@ -479,7 +480,7 @@ def create_app(settings: Settings | None = None):
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
-            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.agent_harness)
+            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.default_harness(body.model))
             model = settings.harness_model(harness, body.model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))

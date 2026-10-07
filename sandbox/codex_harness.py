@@ -1,0 +1,239 @@
+"""Native Codex SDK execution within Moyai's existing sandbox and lifecycle."""
+import asyncio
+import json
+import os
+from pathlib import Path
+import tempfile
+import threading
+from uuid import uuid4
+
+try:
+    from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from .harness_dependencies import prepare_codex
+    from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
+except ImportError:
+    from harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from harness_dependencies import prepare_codex
+    from context_recovery import run_with_context_recovery, prepare_context, maintain_context
+
+
+RECEIPT_TIMEOUT_SECONDS = 10
+
+
+def toml_value(value):
+    if isinstance(value, dict):
+        return '{' + ','.join(json.dumps(key) + '=' + toml_value(item)
+                              for key, item in value.items() if item is not None) + '}'
+    return json.dumps(value)
+
+
+class CodexAgent(HarnessAgent):
+    def __init__(self, *, spec, relay, config, activity, step, cwd, definition, context_store=None):
+        self.context = HarnessContext(spec, relay, config, activity, step, cwd)
+        self.context_store = context_store
+        self.stopped = threading.Event()
+        self.receipts = threading.Condition(threading.RLock())
+        self.journal = None
+        self.calls = {}
+        self.completed = set()
+        self.compaction_window = None
+        self.boundary_failed = False
+        self.model_calls = 0
+        relay.before_model = self.before_model
+        relay.context_recovery = True
+
+    def validate(self):
+        prepare_codex()
+        from openai_codex.async_client import AsyncCodexClient  # noqa: F401
+
+    def interrupt(self):
+        # The host invokes this at a settled tool boundary. User Stop separately
+        # revokes the broker capability and terminates the enclosing sandbox.
+        self.stopped.set()
+
+    def before_model(self, request=None):
+        with self.receipts:
+            if request is not None:
+                try:
+                    items = json.loads(request).get('input', [])
+                    expected = {item['call_id'] for item in items if isinstance(item, dict)
+                                and item.get('type') in {'function_call_output', 'custom_tool_call_output'}}
+                except (ValueError, TypeError, KeyError):
+                    self.boundary_failed = True
+                    return False
+                # HTTP and app-server notifications arrive on different threads.
+                # Input IDs are only a barrier; wire text never becomes a receipt.
+                if not self.receipts.wait_for(lambda: expected <= self.completed and not self.journal.pending,
+                                              timeout=RECEIPT_TIMEOUT_SECONDS):
+                    self.boundary_failed = True
+                    return False
+            if self.journal and not self.journal.pending:
+                self.context.step()
+                limit = self.context.spec.get('max_iterations')
+                if limit and self.model_calls >= limit:
+                    self.boundary_failed = True
+                if not self.stopped.is_set() and not self.boundary_failed:
+                    maintain_context(self)
+                    self.model_calls += 1
+            return not self.stopped.is_set() and not self.boundary_failed
+
+    def sdk_config(self, home):
+        from openai_codex import CodexConfig
+        from codex_cli_bin import bundled_codex_path, bundled_path_dir
+        ctx = self.context
+        settings = {
+            'model_provider': 'moyai',
+            'model_providers': {'moyai': {
+                'name': 'Moyai', 'base_url': ctx.relay.url + '/v1', 'wire_api': 'responses',
+                'env_key': 'WORKSPACE_RUN_TOKEN', 'requires_openai_auth': False,
+                'supports_websockets': False, 'request_max_retries': 0, 'stream_max_retries': 0}},
+            'mcp_servers': {'moyai': ctx.config['mcp_servers']['workspace']},
+            'projects': {str(Path(ctx.cwd).resolve()): {'trust_level': 'untrusted'}},
+            'project_doc_max_bytes': 0, 'web_search': 'disabled',
+            'features': {'hooks': False, 'apps': False, 'memories': False,
+                         'multi_agent': False, 'unified_exec': False, 'shell_snapshot': False},
+            'skills': {'include_instructions': False, 'bundled': {'enabled': False}},
+            'agents': {'enabled': False},
+            'cli_auth_credentials_store': 'ephemeral', 'history': {'persistence': 'none'},
+        }
+        if self.compaction_window:
+            settings['model_context_window'] = self.compaction_window
+            settings['model_auto_compact_token_limit'] = max(1024, self.compaction_window * 4 // 5)
+        # CodexConfig.env merges the parent environment. Clear inherited secrets
+        # and runtime switches rather than handing the child another provider key.
+        keep = {'PATH', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT'}
+        env = {key: value if key in keep else '' for key, value in os.environ.items()}
+        env.update(CODEX_HOME=str(home), WORKSPACE_RUN_TOKEN=os.environ['WORKSPACE_RUN_TOKEN'])
+        if bundled_path_dir():
+            env['PATH'] = str(bundled_path_dir()) + os.pathsep + os.environ.get('PATH', '')
+        settings_args = tuple(name + '=' + toml_value(value) for name, value in settings.items())
+        # The SDK merges env, and empty native feature/originator variables still
+        # have meaning. Remove them before exec instead of treating blank as unset.
+        remove = set(os.environ) - keep - {'CODEX_HOME', 'WORKSPACE_RUN_TOKEN'}
+        launch = ['/usr/bin/env', *[part for key in sorted(remove) for part in ('-u', key)],
+                  str(bundled_codex_path()), *[part for value in settings_args for part in ('-c', value)],
+                  'app-server', '--listen', 'stdio://']
+        return CodexConfig(cwd=str(home), env=env,
+                           launch_args_override=tuple(launch), config_overrides=settings_args,
+                           client_name='moyai', client_title='Moyai', experimental_api=True)
+
+    def record_item(self, item, *, completed):
+        kind = item.get('type')
+        if kind == 'commandExecution':
+            name, args = 'terminal', {'command': item.get('command', ''), 'cwd': item.get('cwd', '')}
+            output = item.get('aggregatedOutput') or ''
+            failed = item.get('status') != 'completed' or item.get('exitCode') != 0
+        elif kind == 'fileChange':
+            name, args = 'apply_patch', {'changes': item.get('changes', [])}
+            output = json.dumps(item.get('changes', []), ensure_ascii=False)
+            failed = item.get('status') != 'completed'
+        elif kind == 'mcpToolCall':
+            name = 'mcp__' + item['server'] + '__' + item['tool']
+            args = item.get('arguments') or {}
+            result = item.get('result') or {}
+            failed = item.get('status') != 'completed' or bool(result.get('isError'))
+            # Native errors may contain raw provider credentials or private stderr.
+            output = json.dumps(result, ensure_ascii=False) if result else 'Tool failed; action not confirmed.'
+        elif kind == 'imageView':
+            name, args = 'view_image', {'path': item.get('path', '')}
+            output, failed = 'Image viewed.', False
+        else:
+            return
+        call_id = item['id']
+        with self.receipts:
+            if call_id in self.completed:
+                return
+            if call_id not in self.calls:
+                self.calls[call_id] = (name, args)
+                self.journal.tool_started(call_id, name, args)
+                self.context.activity.start(call_id, name, args)
+            if completed:
+                self.journal.tool_finished(call_id, output)
+                self.context.activity.complete(call_id, name, args, {
+                    'content': [{'type': 'text', 'text': output}], 'isError': failed})
+                self.completed.add(call_id)
+                self.receipts.notify_all()
+
+    def run_conversation(self, prompt, *, conversation_history, system_message):
+        self.validate()
+        self.stopped.clear()
+        self.boundary_failed = False
+        self.model_calls = 0
+        conversation_history = prepare_context(self, conversation_history)
+        self.journal = TurnJournal(conversation_history, prompt, self.context_store)
+        return run_with_context_recovery(self, prompt, conversation_history,
+            lambda current: asyncio.run(self._run(current, system_message)))
+
+    async def _run(self, prompt, system_message):
+        from openai_codex.async_client import AsyncCodexClient
+        self.calls.clear()
+        self.completed.clear()
+        self.journal.call_namespace = uuid4().hex
+        message_items = {}
+        finished, answer = False, ''
+        # Native transcripts are private, disposable state. Only Moyai's public
+        # journal crosses requester/model changes and filesystem checkpoints.
+        try:
+            with tempfile.TemporaryDirectory(prefix='moyai-codex-') as home:
+                async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
+                    async with AsyncCodexClient(self.sdk_config(home)) as client:
+                        await client.initialize()
+                        thread = await client.thread_start({
+                            'model': self.context.spec['model'].removeprefix('openai/'), 'modelProvider': 'moyai',
+                            'cwd': self.context.cwd, 'ephemeral': True,
+                            'developerInstructions': system_message + '\nUse Moyai MCP tools for authorized app actions. '
+                                'Do not start detached work. Moyai owns credentials, memory, skills and delegation.',
+                            'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
+                            # The pinned SDK exposes this native app-server field
+                            # through dict params. Only output IDs are consumed.
+                            'experimentalRawEvents': True})
+                        turn = await client.turn_start(thread.thread.id, prompt)
+                        while True:
+                            event = await client.next_turn_notification(turn.turn.id)
+                            payload = (event.payload.params if hasattr(event.payload, 'params') else
+                                       event.payload.model_dump(mode='json', by_alias=True))
+                            if event.method == 'rawResponseItem/completed':
+                                item = payload.get('item', {})
+                                if item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
+                                    # Astra's code-mode outer call ID differs from
+                                    # nested tool item IDs. This event follows all
+                                    # nested receipts on the same ordered stream.
+                                    with self.receipts:
+                                        self.completed.add(item['call_id'])
+                                        self.receipts.notify_all()
+                            elif event.method in {'item/started', 'item/completed'}:
+                                item = payload['item']
+                                if item['type'] == 'agentMessage' and event.method == 'item/completed':
+                                    if item['id'] in message_items:
+                                        continue
+                                    message_items[item['id']] = item
+                                    text = item.get('text', '')
+                                    if text and item.get('phase') != 'final_answer':
+                                        self.journal.finish(text)
+                                        self.context.activity.commentary(text)
+                                else:
+                                    self.record_item(item, completed=event.method == 'item/completed')
+                            elif event.method == 'turn/completed':
+                                finished = payload['turn']['status'] == 'completed'
+                                break
+        except Exception:
+            # Preserve receipts without exposing provider payloads or native logs.
+            pass
+        interrupted = self.stopped.is_set()
+        completed = finished and not interrupted and not self.boundary_failed and not self.journal.pending
+        if completed:
+            final_text = [item['text'] for item in message_items.values()
+                          if item.get('phase') == 'final_answer' and item.get('text')]
+            for text in final_text:
+                self.journal.finish(text)
+            # Presentation is derived from native items, never another event.
+            # Commentary already belongs to the journal; only confirmed final
+            # items are committed here, once per native identity, not per text.
+            answer = '\n'.join(final_text or [item['text'] for item in message_items.values() if item.get('text')])
+        return {'completed': bool(completed), 'interrupted': interrupted,
+                'failed': not completed and not interrupted, 'messages': self.journal.messages,
+                'final_response': answer if completed else 'Codex stopped before completing the response. Saved tool receipts are preserved.'}
+
+    def close(self):
+        self.context.relay.before_model = None
+        self.context.relay.context_recovery = False

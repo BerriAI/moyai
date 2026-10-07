@@ -149,7 +149,7 @@ class SlackSessions:
         plugins = [x['id'] for x in self.connectors.list() if x['connected'] and x['enabled']]
         try:
             run = self.store.create_slack_run(event_id, prompt, plugins, channel, root, user, ts, team, file_ids=file_ids,
-                                            harness=self.settings.agent_harness, model=self.settings.harness_model(self.settings.agent_harness))
+                                            harness=self.settings.default_harness(), model=self.settings.resolve_model())
         except ValueError:
             raise HTTPException(503, 'The session queue is full.')
         if run:

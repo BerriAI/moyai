@@ -30,7 +30,7 @@ def native_storage(root, legacy_home, temporary):
     remove(root)
     for path in (legacy_home / '.claude' / 'projects', legacy_home / '.cache' / 'litellm-harness'):
         remove(path)
-    for pattern in ('claude-resume-*', 'litellm-harness-*'):
+    for pattern in ('claude-resume-*', 'litellm-harness-*', 'moyai-codex-*'):
         for path in temporary.glob(pattern):
             remove(path)
     try:

@@ -79,7 +79,7 @@ class BrokerRelay:
                     if route in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}:
                         if relay.context_recovery and relay.context_required:
                             return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
-                        if relay.before_model and not relay.before_model():
+                        if relay.before_model and not relay.before_model(raw):
                             return self.error(409, 'Saving at a complete tool boundary.')
                     if credential_route:
                         try:

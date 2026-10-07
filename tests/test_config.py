@@ -56,3 +56,34 @@ def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
     assert {'id': 'openai/gpt-6.1-sol', 'name': 'GPT-6.1 Sol'} in settings.model_choices()
     assert settings.resolve_model('sol') == 'openai/gpt-6.1-sol'
+
+
+@pytest.mark.parametrize(('model', 'harness'), [
+    ('astra', 'codex'), ('6-astra', 'codex'), ('GPT-6 Astra', 'codex'),
+    ('opus', 'claude-agent-sdk'), ('Claude Opus 5.5', 'claude-agent-sdk'),
+    ('glm', 'claude-agent-sdk'), ('sol', 'claude-agent-sdk'),
+    ('custom-gateway-model', 'claude-agent-sdk'),
+])
+def test_new_session_default_harness_resolves_models(model, harness, monkeypatch):
+    monkeypatch.delenv('AGENT_HARNESS', raising=False)
+    settings = Settings(_env_file=None, agent_model='custom-gateway-model')
+    assert settings.default_harness(model) == harness
+    with pytest.raises(ValueError, match='enabled'):
+        settings.default_harness('not-configured')
+
+
+@pytest.mark.parametrize('source', ['init', 'environment', 'dotenv'])
+@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex'])
+def test_explicit_harness_configuration_overrides_model_pairings(tmp_path, monkeypatch, source, harness):
+    monkeypatch.delenv('AGENT_HARNESS', raising=False)
+    env_file, kwargs = None, {}
+    if source == 'init':
+        kwargs['agent_harness'] = harness
+    elif source == 'environment':
+        monkeypatch.setenv('AGENT_HARNESS', harness)
+    else:
+        env_file = tmp_path / '.env'
+        env_file.write_text(f'AGENT_HARNESS={harness}\n')
+    settings = Settings(_env_file=env_file, agent_model='openai/gpt-6-astra', **kwargs)
+    assert settings.default_harness() == harness
+    assert settings.default_harness('opus') == harness

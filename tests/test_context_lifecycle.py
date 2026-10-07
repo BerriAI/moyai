@@ -17,7 +17,7 @@ def test_native_plaintext_is_removed_before_attachments_and_project_start(tmp_pa
     root, home, temporary = tmp_path / 'session/.native-sdk', tmp_path / 'root', tmp_path / 'tmp'
     old_paths = [root / 'claude/projects/parent.jsonl', home / '.claude/projects/parent.jsonl',
                  home / '.cache/litellm-harness/parent.json', temporary / 'claude-resume-parent/session.jsonl',
-                 temporary / 'litellm-harness-parent/state.json']
+                 temporary / 'litellm-harness-parent/state.json', temporary / 'moyai-codex-parent/logs/runtime.log']
     for path in old_paths:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('PRIVATE PARENT TRANSCRIPT')

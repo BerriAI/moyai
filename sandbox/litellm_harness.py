@@ -41,7 +41,7 @@ class LiteLLMAgent(HarnessAgent):
             self.runtime_version = runtime_version(self.definition.runtime_binding)
 
     def prepare_native(self, system_message):
-        if self.definition.runtime_binding not in {'codex', 'opencode'}:
+        if self.definition.runtime_binding != 'opencode':
             return
         try:
             from .native_session import NativeSession
@@ -80,7 +80,7 @@ class LiteLLMAgent(HarnessAgent):
     def interrupt(self):
         self.stopped.set()
 
-    def before_model(self):
+    def before_model(self, request=None):
         # Public runtime events, rather than model-wire parsing, own the journal.
         # If tool result delivery is still catching up, defer the checkpoint.
         if self.journal and not self.journal.pending:

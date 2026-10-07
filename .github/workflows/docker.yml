@@ -20,7 +20,9 @@ jobs:
         with:
           node-version: '22'
       - name: Test session search and sidebar interactions
-        run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs
+        run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs tests/test_harness_picker.cjs tests/test_automation_editor.cjs
+      - name: Test native Codex runtime and model defaults
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_config.py tests/test_models.py tests/test_claude_sdk.py
       - name: Test persistent context and real SDK continuation
         run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_claude_native_compaction.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py tests/test_goals.py tests/test_continuation.py
       - name: Build production image
