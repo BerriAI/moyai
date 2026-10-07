@@ -22,23 +22,23 @@ New sessions default to the native **Claude Agent SDK** with prompt caching enab
 
 Moyai uses [LiteLLM](https://github.com/BerriAI/litellm) for inference, so it can run on any of the 100+ providers LiteLLM supports. Point it at your [LiteLLM gateway](https://docs.litellm.ai/), switch models between messages, and spend is tracked per teammate. Provider keys stay on the server, and the sandbox never sees them.
 
-## Before vs after: 79% cheaper
+## Moyai vs Devin price
 
-We moved our internal coding agent from Devin to Moyai. Same work, same 31 days: $101,872 on Devin vs about $21,700 on Moyai
+We moved our internal coding agent from Devin to Moyai. For the same work over the same 31 days, Moyai cost about $21,700 and Devin cost $101,872, which is 79% less
 
-**Before: Devin, $101,872 in 31 days**
+**Devin: $101,872 in 31 days**
 
 <p align="center">
   <img src="docs/assets/cost-before-devin.png" alt="Devin billing dashboard showing $101,872.24 spent between Aug 30 and Sep 29" width="100%">
 </p>
 
-**After: Moyai, about $700 a day**
+**Moyai: about $21,700 in 31 days, or $700 a day**
 
 <p align="center">
   <img src="docs/assets/cost-after-moyai.png" alt="Running total over the same 31 days: Devin reaches $101,872 while Moyai reaches $21,700, saving $80,172" width="100%">
 </p>
 
-Read the full story in the launch post: [Moyai is now open source](https://docs.litellm.ai/blog/moyai-open-source)
+Read the full story in the launch post: [Open Sourcing Moyai](https://docs.litellm.ai/blog/moyai-open-source)
 
 ## Getting started
 
