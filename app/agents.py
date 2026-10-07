@@ -197,24 +197,29 @@ class AgentCoordinator:
     def enqueue_child(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            child = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
-            group = conn.execute('SELECT * FROM agent_groups WHERE id=? AND parent_id=?',
-                                 (child['agent_group_id'], child['parent_run_id'])).fetchone()
-            if not group:
-                raise ValueError('This subagent has no saved parent assignment.')
-            parent = conn.execute('SELECT status FROM runs WHERE id=?', (child['parent_run_id'],)).fetchone()
-            if parent and parent['status'] == 'stopping':
-                raise ValueError('Wait for the parent session to finish stopping before messaging this agent.')
-            # Upgrade older completed groups lazily before their first direct chat.
-            settled = not conn.execute("SELECT 1 FROM runs r WHERE r.agent_group_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running'))) LIMIT 1", (group['id'],)).fetchone()
-            if group['status'] in {'completed', 'cancelled'} and not group['result_snapshot'] and settled:
-                self.snapshot_group_in(conn, group)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
+            message, created = self.enqueue_child_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
         if created:
+            child = self.store.run(run_id)
             self.store.event(run_id, 'chat', 'Message queued', {'message_id': message['id']})
             self.store.event(child['parent_run_id'], 'agents', 'Direct message queued for ' + child['agent_label'],
                              {'child_id': run_id, 'message_id': message['id']})
         return message, created
+
+    def enqueue_child_in(self, conn, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False):
+        """Keep child admission and result snapshots in the caller's transaction."""
+        child = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+        group = conn.execute('SELECT * FROM agent_groups WHERE id=? AND parent_id=?',
+                             (child['agent_group_id'], child['parent_run_id'])).fetchone()
+        if not group:
+            raise ValueError('This subagent has no saved parent assignment.')
+        parent = conn.execute('SELECT status FROM runs WHERE id=?', (child['parent_run_id'],)).fetchone()
+        if parent and parent['status'] == 'stopping':
+            raise ValueError('Wait for the parent session to finish stopping before messaging this agent.')
+        # Upgrade older completed groups lazily before their first direct chat.
+        settled = not conn.execute("SELECT 1 FROM runs r WHERE r.agent_group_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running'))) LIMIT 1", (group['id'],)).fetchone()
+        if group['status'] in {'completed', 'cancelled'} and not group['result_snapshot'] and settled:
+            self.snapshot_group_in(conn, group)
+        return self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
 
     def wait_result(self, parent_id, group_id):
         return {'group_id': group_id, 'children': [{'id': c['id'], 'label': c['agent_label']} for c in self.children(group_id)],

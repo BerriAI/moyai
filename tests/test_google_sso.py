@@ -196,3 +196,37 @@ def test_google_login_respects_saved_role_and_preserves_users_link(sso):
     assert client.get(callback, follow_redirects=False).headers['location'] == '/#users'
     assert client.get('/api/session').json()['role'] == 'member'
     assert client.get('/api/admin/users').status_code == 403
+
+
+@pytest.mark.parametrize('generation', [0, 2, 999999999999999])
+def test_google_login_returns_to_the_exact_credential_request(sso, generation):
+    _, client, _ = sso
+    target = '/#run=' + 'a' * 32 + '&credential=' + 'b' * 32 + f'&generation={generation}'
+    callback, _, _ = begin(sso, target)
+    response = client.get(callback, follow_redirects=False)
+    assert response.headers['location'] == target
+
+
+@pytest.mark.parametrize('suffix', [
+    '&credential=' + 'b' * 32,
+    '&credential=' + 'b' * 32 + '&generation=-1',
+    '&credential=' + 'b' * 32 + '&generation=02',
+    '&credential=' + 'b' * 32 + '&generation=9007199254740993',
+    '&credential=' + 'b' * 32 + '&generation=2&token=secret',
+    '&credential=' + 'b' * 32 + '&generation=2&credential=' + 'c' * 32,
+    '&credential=%62' + 'b' * 31 + '&generation=2',
+    '&credential=' + 'b' * 32 + '&generation=2\n',
+])
+def test_google_login_rejects_malformed_credential_targets(sso, suffix):
+    _, client, _ = sso
+    callback, _, _ = begin(sso, '/#run=' + 'a' * 32 + suffix)
+    assert client.get(callback, follow_redirects=False).headers['location'] == '/#tasks'
+
+
+def test_cancelled_google_login_preserves_credential_target_for_retry(sso):
+    _, client, _ = sso
+    target = '/#run=' + 'a' * 32 + '&credential=' + 'b' * 32 + '&generation=2'
+    callback, _, _ = begin(sso, target)
+    response = client.get(callback + '&error=access_denied', follow_redirects=False)
+    assert response.headers['location'] == '/?signin=cancelled' + target[1:]
+    assert client.get('/api/session').json()['authenticated'] is False

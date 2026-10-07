@@ -24,7 +24,7 @@ function fixture({kind='skill',admin=true,saved=[],skill=null,rootId='root-one',
         for(const match of value.matchAll(/<([a-z]+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)){
           const [,tag,attrs,name]=match,field=element(name);children.push(name);
           field.tagName=tag.toUpperCase();field.required=/\brequired\b/.test(attrs);field.disabled=/\bdisabled\b/.test(attrs);field.hidden=/\bhidden\b/.test(attrs);field.open=/\bopen\b/.test(attrs);
-          field.value=decode(attrs.match(/\bvalue="([^"]*)"/)?.[1]||'');field.type=attrs.match(/\btype="([^"]*)"/)?.[1]||'';
+          field.value=decode(attrs.match(/\bvalue="([^"]*)"/)?.[1]||'');field.type=attrs.match(/\btype="([^"]*)"/)?.[1]||'';field.checked=/\bchecked\b/.test(attrs);
         }
         // Derive native initial values from the actual rendered HTML.
         for(const match of value.matchAll(/<(select|textarea)\b([^>]*\bid="([^"]+)"[^>]*)>([\s\S]*?)<\/\1>/g)){
@@ -416,4 +416,165 @@ test('1Password pending requests get a masked token field without JSON entry',as
   assert.equal(f.element('secret-input-0').type,'password');
   assert.equal(f.element('secret-use-organization').disabled,true);
   assert.equal(f.elements.has('secret-value'),false);
+});
+
+const linkRun='a'.repeat(32),linkRequest='b'.repeat(32);
+const accessLink=(generation=2)=>`#run=${linkRun}&credential=${linkRequest}&generation=${generation}`;
+
+test('session links accept only a complete canonical credential target',()=>{
+  const {ctx}=fixture({kind:'key'});
+  assert.equal(ctx.parseSessionLink('#run='+linkRun).runId,linkRun);
+  for(const generation of [0,2,999999999999999]){
+    const parsed=ctx.parseSessionLink(accessLink(generation));
+    assert.equal(parsed.credentialId,linkRequest);assert.equal(parsed.generation,generation);
+  }
+  for(const link of ['#tasks',accessLink()+'&token=secret',accessLink().replace('&generation=2',''),accessLink().replace('generation=2','generation=-1'),accessLink().replace('generation=2','generation=02'),accessLink().replace('generation=2','generation=9007199254740993'),accessLink().replace('credential=','credential=%62'),accessLink()+'&credential='+linkRequest,accessLink().replace('#run=','#run=X'),accessLink()+'\n']){
+    assert.equal(ctx.parseSessionLink(link),null,link);
+  }
+});
+
+function linkedFixture(){
+  const f=fixture({kind:'key'}),target=f.element('credential-requests'),buttons=new Map(),focuses=[],scrolls=[],paths=[];
+  f.ctx.state.selected=linkRun;
+  f.ctx.history={replaceState:(_,__,path)=>paths.push(path)};
+  target.querySelectorAll=()=>Array.from(target.innerHTML.matchAll(/data-provide-key="([^"]+)"/g),match=>{
+    const id=match[1],button={dataset:{provideKey:id},focus:()=>focuses.push(id),closest:()=>({scrollIntoView:()=>scrolls.push(id)})};
+    buttons.set(id,button);return button;
+  });
+  target.querySelector=selector=>buttons.get(selector.match(/data-provide-key="([^"]+)"/)?.[1])||null;
+  const setLink=()=>{f.ctx.state.credentialLink={...f.ctx.parseSessionLink(accessLink()),pageVersion:1};};
+  setLink();
+  const request={id:linkRequest,generation:2,provider:'fireworks',reason:'Deploy',can_personal:true,can_organization:true,preferred_scope:'session'};
+  return {...f,target,buttons,focuses,scrolls,paths,request,setLink};
+}
+
+test('Slack link highlights and focuses only its exact request, then waits for a click',async()=>{
+  const f=linkedFixture(),other={...f.request,id:'c'.repeat(32)};
+  f.ctx.renderCredentialRequests([other,f.request]);
+  assert.deepEqual(f.focuses,[linkRequest]);assert.deepEqual(f.scrolls,[linkRequest]);
+  assert.match(f.target.innerHTML,/credential-request-linked/);assert.match(f.target.innerHTML,/Select Provide Secret below/);
+  assert.match(f.target.innerHTML,/Availability: Session only/);
+  assert.match(f.target.innerHTML,/aria-describedby="credential-link-instruction"/);
+  assert.equal(f.element('credential-dialog').open,undefined);
+  assert.equal(f.ctx.state.credentialLink,null);assert.equal(f.paths.at(-1),'#run='+linkRun);
+  f.buttons.get(linkRequest).onclick();await flush();
+  assert.equal(f.element('credential-dialog').open,true);
+  assert.equal(f.element('secret-use-session').checked,true);
+  assert.equal(f.element('secret-scope').value,'personal');assert.equal(f.element('secret-lifetime').value,'session');
+  assert.doesNotMatch(f.target.innerHTML,/credential-request-linked/);
+});
+
+test('missing, replaced, and resolved targets never highlight another request or revive on a poll',()=>{
+  for(const first of [[],[{id:linkRequest,generation:3,provider:'fireworks',can_personal:true}],[{id:'c'.repeat(32),generation:2,provider:'fireworks',can_personal:true}]]){
+    const f=linkedFixture();f.ctx.renderCredentialRequests(first);
+    assert.match(f.target.innerHTML,/access link is no longer current/);
+    assert.deepEqual(f.focuses,[]);assert.doesNotMatch(f.target.innerHTML,/credential-request-linked/);
+    f.ctx.renderCredentialRequests([f.request]);
+    assert.deepEqual(f.focuses,[]);assert.doesNotMatch(f.target.innerHTML,/credential-request-linked/);
+    assert.equal(f.ctx.parseSessionLink(f.paths.at(-1)).credentialId,'');
+  }
+});
+
+test('link permissions are visible without focusing an unavailable action',()=>{
+  const f=linkedFixture();f.ctx.renderCredentialRequests([{...f.request,can_personal:false,can_organization:false}]);
+  assert.match(f.target.innerHTML,/Only the requester or an organization admin/);
+  assert.deepEqual(f.focuses,[]);assert.doesNotMatch(f.target.innerHTML,/data-provide-key|credential-request-linked/);
+});
+
+test('credential refresh preserves an open draft and never refocuses the linked action',async()=>{
+  const f=linkedFixture();f.ctx.renderCredentialRequests([f.request]);
+  f.buttons.get(linkRequest).onclick();await flush();
+  f.element('secret-value').value='synthetic-in-progress';
+  f.ctx.renderCredentialRequests([{...f.request,preferred_scope:'organization'}]);
+  assert.equal(f.element('secret-value').value,'synthetic-in-progress');
+  assert.equal(f.element('secret-lifetime').value,'session');assert.deepEqual(f.focuses,[linkRequest]);
+});
+
+test('all Slack availability choices carry into the existing editable form and submission',async()=>{
+  for(const [preferred_scope,scope,lifetime] of [['session','personal','session'],['personal','personal','persistent'],['organization','organization','persistent']]){
+    const f=fixture({kind:'key'});
+    await f.ctx.openCredentialDialog({id:'key',generation:4,provider:'fireworks',can_personal:true,can_organization:true,preferred_scope});
+    assert.equal(f.element('secret-use-'+preferred_scope).checked,true);
+    f.element('secret-value').value='synthetic-key';await f.element('credential-form').onsubmit({preventDefault(){}});
+    assert.equal(f.posts[0].body.scope,scope);assert.equal(f.posts[0].body.lifetime,lifetime);assert.equal(f.posts[0].body.generation,4);
+  }
+});
+
+test('a disallowed Slack choice never silently becomes personal or organization access',async()=>{
+  for(const preferred_scope of ['organization','session','personal']){
+    const organization=preferred_scope==='organization',f=fixture({kind:'key',admin:!organization});
+    await f.ctx.openCredentialDialog({id:'key',provider:'fireworks',can_personal:organization,can_organization:!organization,preferred_scope});
+    assert.equal(f.element('secret-use-'+preferred_scope).checked,true);assert.equal(f.element('secret-use-'+preferred_scope).disabled,true);
+    assert.equal(f.element('secret-scope').value,'');assert.equal(f.element('secret-lifetime').value,'');
+    assert.match(f.element('credential-form').innerHTML,/selected in Slack/);
+    f.element('secret-value').value='synthetic-key';await f.element('credential-form').onsubmit({preventDefault(){}});assert.equal(f.posts.length,0);
+    const different=f.element(organization?'secret-use-session':'secret-use-organization');different.checked=true;different.onchange();
+    await f.element('credential-form').onsubmit({preventDefault(){}});assert.equal(f.posts[0].body.scope,organization?'personal':'organization');
+  }
+});
+
+test('navigation consumes pending highlights, clears open drafts, and cancels a delayed form response',async()=>{
+  const f=linkedFixture();
+  let finish;f.ctx.api=()=>new Promise(resolve=>finish=resolve);
+  const pending=f.ctx.openCredentialDialog(f.request);
+  f.ctx.resetCredentialNavigation();f.ctx.state.pageVersion++;f.ctx.state.selected='elsewhere';
+  finish({providers:[{id:'fireworks'}],secrets:[]});await pending;
+  assert.equal(f.element('credential-dialog').open,undefined);assert.equal(f.ctx.state.credentialLink,null);
+  f.ctx.renderCredentialRequests([f.request]);assert.deepEqual(f.focuses,[]);
+  const g=linkedFixture();await g.ctx.openCredentialDialog(g.request);g.element('secret-value').value='synthetic-draft';
+  g.ctx.resetCredentialNavigation();assert.equal(g.element('credential-dialog').open,false);assert.equal(g.element('credential-form').innerHTML,'');
+});
+
+test('async session opening retains a target across metadata retry and ignores a late old session',async()=>{
+  const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),renders=[],pending=[];
+  Object.assign(f.ctx,{stopStream:()=>f.ctx.resetCredentialNavigation(),setView(){},sessionTitle:()=>'',refreshRuns:async()=>{},
+    renderChat:run=>{renders.push(run.id);f.ctx.renderCredentialRequests(run.credential_requests);},
+    api:()=>new Promise(resolve=>pending.push(resolve))});
+  f.ctx.document.hidden=true;f.ctx.state.runs=[{id:linkRun},{id:'d'.repeat(32)}];f.ctx.state.expandedParents=new Set();
+  vm.runInContext(app.slice(app.indexOf('async function openRun('),app.indexOf('function renderChat(')),f.ctx);
+  const run={id:linkRun,chat_enabled:true,credential_requests:[f.request]},opening=f.ctx.openRun(linkRun,accessLink());
+  f.ctx.state.sessionEdits=1;pending.shift()(run);await flush();
+  assert.equal(f.ctx.state.credentialLink.credentialId,linkRequest);
+  pending.shift()(run);await opening;assert.deepEqual(f.focuses,[linkRequest]);
+  const old=f.ctx.openRun(linkRun,accessLink()),otherId='d'.repeat(32),next=f.ctx.openRun(otherId);
+  assert.equal(f.paths.at(-1),'#run='+otherId); // Refresh during loading cannot resurrect the previous target.
+  pending[1]({id:otherId,chat_enabled:true,credential_requests:[]});await next;
+  pending[0](run);await old;
+  assert.equal(f.ctx.state.selected,otherId);assert.equal(f.ctx.state.credentialLink,null);
+  assert.equal(f.paths.at(-1),'#run='+otherId);assert.deepEqual(renders,[linkRun,otherId]);assert.deepEqual(f.focuses,[linkRequest]);
+});
+
+function routeFixture(authenticated){
+  const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),opened=[],handlers={},redirects=[];
+  for(const id of ['google-signin','signin-error','logout'])f.element(id);
+  Object.assign(f.ctx,{location:{hash:accessLink(),search:'',assign:url=>redirects.push(url)},URLSearchParams,
+    applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
+    registerWebMCP(){},navigate:async view=>opened.push({view}),openRun:async(id,hash)=>opened.push({id,hash}),
+    settingsViews:new Set(['secrets','users']),window:{addEventListener:(event,handler)=>handlers[event]=handler},
+    api:async(path,options)=>{
+      if(path==='/api/session')return {authenticated,google_enabled:true,google_domains:['example.com'],local:true};
+      if(path==='/api/auth/google/start'){f.posts.push(JSON.parse(options.body));return {url:'https://accounts.google.com/fixture'};}
+      return {};
+    }});
+  const query=f.ctx.$;f.ctx.$=selector=>selector==='.rail-foot small'?f.element('rail-label'):query(selector);
+  f.ctx.document.querySelectorAll=()=>[];
+  vm.runInContext(app.slice(app.indexOf("window.addEventListener('hashchange'"),app.indexOf("document.querySelector('.skip-link')"))+
+    app.slice(app.indexOf('async function boot('),app.indexOf('function registerWebMCP(')),f.ctx);
+  return {...f,opened,handlers,redirects};
+}
+
+test('boot and hash changes share the complete session link parser while plain app routes remain intact',async()=>{
+  const f=routeFixture(true);await f.ctx.boot();
+  assert.deepEqual(f.opened,[{id:linkRun,hash:accessLink()}]);
+  f.ctx.location.hash='#run='+linkRun;f.handlers.hashchange();await flush();
+  assert.deepEqual(f.opened.at(-1),{id:linkRun,hash:'#run='+linkRun});
+  f.ctx.location.hash='#secrets';f.handlers.hashchange();await flush();assert.deepEqual(f.opened.at(-1),{view:'secrets'});
+  f.ctx.location.hash=accessLink()+'&key=must-not-parse';f.handlers.hashchange();await flush();assert.deepEqual(f.opened.at(-1),{view:'tasks'});
+});
+
+test('signed-out boot sends the complete credential target through Google sign-in',async()=>{
+  const f=routeFixture(false);await f.ctx.boot();
+  assert.deepEqual(f.opened,[]);
+  await f.element('google-signin').onclick();
+  assert.deepEqual(f.posts,[{return_to:'/'+accessLink()}]);assert.deepEqual(f.redirects,['https://accounts.google.com/fixture']);
 });

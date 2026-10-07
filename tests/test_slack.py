@@ -3,6 +3,7 @@ import hmac
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlencode
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,11 +13,11 @@ from app.connectors import ConnectorError
 from app.main import create_app
 
 
-def signed(payload, timestamp=None):
-    body = json.dumps(payload).encode()
+def signed(payload, timestamp=None, *, form=False):
+    body = (urlencode({'payload': json.dumps(payload)}) if form else json.dumps(payload)).encode()
     timestamp = str(timestamp or int(time.time()))
     signature = "v0=" + hmac.new(b"slack-test-signing-secret", b"v0:" + timestamp.encode() + b":" + body, hashlib.sha256).hexdigest()
-    return {"content": body, "headers": {"Content-Type": "application/json", "X-Slack-Request-Timestamp": timestamp, "X-Slack-Signature": signature}}
+    return {"content": body, "headers": {"Content-Type": "application/x-www-form-urlencoded" if form else "application/json", "X-Slack-Request-Timestamp": timestamp, "X-Slack-Signature": signature}}
 
 
 def event(event_id="EvTest1", **overrides):

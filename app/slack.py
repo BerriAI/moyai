@@ -14,6 +14,7 @@ from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
 from .slack_files import SlackFiles, file_ids as slack_file_ids
+from .slack_credentials import SlackCredentials
 
 
 class SlackSessions:
@@ -26,6 +27,7 @@ class SlackSessions:
         self.session_titles = None
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
+        self.access = SlackCredentials(self)
         self.agentchat, self.channel = connect_agentchat(self)
 
     def status(self):

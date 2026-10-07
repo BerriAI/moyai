@@ -216,6 +216,354 @@ def test_checkpoint_handoffs_do_not_post_synthetic_answers_to_slack(slack_app):
     assert len(answers) == 1 and 'The actual result' in answers[0]['text']
 
 
+@pytest.mark.parametrize('state', ['idle', 'handoff', 'cancelled', 'deleted'])
+def test_pending_access_forms_and_slack_notices_agree_after_followups(slack_app, state):
+    from test_credentials import access_followup, access_request
+    from test_spend import active, sign_in
+
+    app, client, root = start(slack_app)
+    app.state.settings.slack_thread_chat_enabled = False
+    store, vault = app.state.store, app.state.credentials
+    store.claim_message(root)
+    store.update_run(root, status='running')
+    child = active(app, model='test-model')
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (root, child['id']))
+    requests = {}
+    for run_id in (root, child['id']):
+        run = store.run(run_id)
+        requests[run_id] = access_request(vault, run)['request_id']
+        if state == 'handoff':
+            access_followup(app, run)
+        else:
+            store.finish_message(run_id, run['active_message_id'], 'Access is still needed')
+            store.update_run(run_id, status='idle' if state == 'deleted' else state)
+            if state == 'deleted':
+                store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), run_id))
+    access_request(vault, active(app, model='test-model'))  # Unrelated requests never enter this Slack thread.
+    sign_in(app, client)
+    visible = set()
+    for run_id, request_id in requests.items():
+        response = client.get('/api/runs/' + run_id)
+        assert response.status_code == (404 if state == 'deleted' else 200)
+        if response.status_code == 200:
+            forms = response.json()['credential_requests']
+            assert [row['id'] for row in forms] == ([request_id] if state in {'idle', 'handoff'} else [])
+            visible.update(row['id'] for row in forms)
+    app.state.settings.slack_thread_chat_enabled = True
+    app.state.slack.chat.collect()
+    app.state.slack.chat.collect()
+    notices = store.rows("SELECT dedupe_key,metadata FROM slack_outbox WHERE run_id=? AND dedupe_key LIKE 'credential:%'", (root,))
+    assert {row['dedupe_key'] for row in notices} == {'credential:' + request_id for request_id in visible}
+    assert len(notices) == len(visible)
+    for run_id, request_id in requests.items():
+        if request_id in visible:
+            card = next(row for row in notices if row['dedupe_key'] == 'credential:' + request_id)
+            assert json.loads(card['metadata'])['credential_request_id'] == request_id
+
+
+@pytest.fixture
+def access_delivery(slack_app, monkeypatch):
+    from app.credentials import CredentialRequest
+    from test_spend import active
+
+    app, client, _, _ = slack_app
+    client.portal.call(app.state.slack.chat.shutdown)
+    calls = []
+
+    async def request(method, url, **kwargs):
+        assert kwargs['headers']['Authorization'] == 'Bearer separate-bot-secret'
+        calls.append((url.rsplit('/', 1)[-1], kwargs['json']))
+        return {'ok': True, 'ts': '1790719999.123456'}
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+
+    def deliver():
+        app.state.slack.chat.last_post.clear()
+        asyncio.run(app.state.slack.chat.deliver_one())
+
+    def prepare(*, child=False, post=True):
+        _, _, root = start(slack_app)
+        app.state.store.claim_message(root)
+        app.state.store.update_run(root, status='running')
+        run = app.state.store.run(root)
+        if child:
+            run = active(app, user=run['active_user_id'], model='test-model')
+            app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (root, run['id']))
+        result = app.state.credentials.request(run, CredentialRequest(provider='generic', name='Vercel',
+            reason='Deploy the requested site', request_key='deploy', input_fields=[{
+                'name': 'VERCEL_TOKEN', 'label': 'Vercel access token', 'secret': True, 'required': True}]))
+        app.state.slack.chat.collect()
+        if post:
+            deliver()
+        return root, run['id'], result['request_id']
+
+    return app, client, prepare, calls, deliver
+
+
+def scope_action(request_id, scope='personal', *, generation=0, clicked='1790720000.123456'):
+    return {'type': 'block_actions', 'team': {'id': 'T12345678'}, 'user': {'id': 'U12345678'},
+        'channel': {'id': 'C12345678'},
+        'container': {'type': 'message', 'channel_id': 'C12345678', 'message_ts': '1790719999.123456'},
+        'message': {'ts': '1790719999.123456', 'thread_ts': ROOT},
+        'actions': [{'type': 'button', 'action_id': 'credential_scope_' + scope,
+            'value': json.dumps({'request_id': request_id, 'generation': generation}), 'action_ts': clicked}],
+        'response_url': 'https://untrusted.example/must-never-be-called'}
+
+
+@pytest.mark.parametrize('child,scope,label', [(False, 'organization', 'Organization'),
+    (False, 'session', 'Session only'), (False, 'personal', 'Personal'), (True, 'personal', 'Personal')])
+def test_slack_access_scope_updates_one_named_card_and_links_exact_secure_form(access_delivery, child, scope, label):
+    app, client, prepare, calls, deliver = access_delivery
+    root, run_id, request_id = prepare(child=child)
+    first = calls[-1]
+    assert first[0] == 'chat.postMessage'
+    assert first[1]['text'] == 'Credentials requested: VERCEL_TOKEN'
+    assert first[1]['channel'] == 'C12345678' and first[1]['thread_ts'] == ROOT
+    buttons = first[1]['blocks'][-1]['elements']
+    assert [button['text']['text'] for button in buttons] == ['Organization', 'Personal', 'Session only']
+    assert all('url' not in button for button in buttons)
+    before = app.state.store.messages(root)
+    # A later participant does not become the original access requester.
+    app.state.store.execute("UPDATE runs SET active_user_id='slack:T12345678:U87654321' WHERE id=?", (run_id,))
+    response = client.post('/hooks/slack/interactions', **signed(scope_action(request_id, scope), form=True))
+    assert response.status_code == 200
+    deliver()
+    update = calls[-1]
+    assert update[0] == 'chat.update' and update[1]['ts'] == '1790719999.123456'
+    assert 'thread_ts' not in update[1]
+    assert 'Selected: ' + label + '.' in update[1]['blocks'][1]['text']['text']
+    link = update[1]['blocks'][-1]['elements'][0]
+    assert link['text']['text'] == 'Provide Secret'
+    assert link['url'] == f'https://workspace.example/#run={run_id}&credential={request_id}&generation=0'
+    row = app.state.credentials.row(request_id)
+    assert (row['preferred_scope'], row['scope_revision'], row['status']) == (scope, 1, 'pending')
+    assert app.state.store.messages(root) == before
+    assert not app.state.store.rows('SELECT * FROM provider_secrets')
+    app.state.slack.chat.collect()
+    deliver()
+    assert [method for method, _ in calls] == ['chat.postMessage', 'chat.update']
+
+
+@pytest.mark.parametrize('invalid', ['signature', 'expired', 'action', 'secret', 'team', 'channel', 'timestamp',
+    'thread', 'requester', 'allowlist', 'paused', 'deleted', 'cancelled', 'resolved', 'generation', 'bot'])
+def test_slack_access_actions_reject_changed_or_foreign_context(access_delivery, invalid):
+    app, client, prepare, calls, _ = access_delivery
+    root, _, request_id = prepare()
+    payload = scope_action(request_id)
+    store = app.state.store
+    if invalid == 'action':
+        payload['actions'][0]['action_id'] = 'personal'
+    elif invalid == 'secret':
+        payload['actions'][0]['value'] = json.dumps({'request_id': request_id, 'generation': 0, 'value': 'private-input'})
+    elif invalid == 'team':
+        payload['team']['id'] = 'T87654321'
+    elif invalid == 'channel':
+        payload['channel']['id'] = payload['container']['channel_id'] = 'C87654321'
+    elif invalid == 'timestamp':
+        payload['message']['ts'] = payload['container']['message_ts'] = '1790719998.123456'
+    elif invalid == 'thread':
+        payload['message']['thread_ts'] = '1790719998.123456'
+    elif invalid == 'requester':
+        payload['user']['id'] = 'U87654321'
+        store.execute("UPDATE runs SET active_user_id='slack:T12345678:U87654321' WHERE id=?", (root,))
+    elif invalid == 'allowlist':
+        app.state.settings.slack_session_users = 'U87654321'
+    elif invalid == 'paused':
+        store.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (root,))
+    elif invalid == 'deleted':
+        store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), root))
+    elif invalid == 'cancelled':
+        store.update_run(root, status='cancelled')
+    elif invalid == 'resolved':
+        store.execute("UPDATE credential_requests SET status='declined' WHERE id=?", (request_id,))
+    elif invalid == 'generation':
+        store.execute('UPDATE credential_requests SET generation=1 WHERE id=?', (request_id,))
+    elif invalid == 'bot':
+        app.state.connectors.save('slack', {'bot': {'access_token': 'replacement',
+            'team': {'id': 'T12345678'}, 'bot_user_id': 'U00000000'}}, 'Changed')
+    body = signed(payload, int(time.time()) - 601 if invalid == 'expired' else None, form=True)
+    if invalid == 'signature':
+        body['content'] += b' '
+    response = client.post('/hooks/slack/interactions', **body)
+    expected = 401 if invalid in {'signature', 'expired'} else 400 if invalid in {'action', 'secret'} else 403 if invalid in {'team', 'requester', 'allowlist'} else 409
+    assert response.status_code == expected
+    row = app.state.credentials.row(request_id)
+    assert (row['preferred_scope'], row['scope_revision']) == ('', 0)
+    assert [method for method, _ in calls] == ['chat.postMessage']
+
+
+def test_slack_access_choices_are_ordered_and_cas_preserves_changes_during_delivery(access_delivery, monkeypatch):
+    app, client, prepare, calls, deliver = access_delivery
+    _, _, request_id = prepare()
+    original = app.state.connectors.request
+
+    def choose(scope, clicked):
+        response = client.post('/hooks/slack/interactions', **signed(scope_action(request_id, scope, clicked=clicked), form=True))
+        assert response.status_code == 200
+
+    async def delayed(method, url, **kwargs):
+        result = await original(method, url, **kwargs)
+        choose('session', '1790720001.000001')
+        return result
+
+    choose('personal', '1790720000.000001')
+    monkeypatch.setattr(app.state.connectors, 'request', delayed)
+    deliver()
+    card = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key=?", ('credential:' + request_id,))[0]
+    assert card['status'] == 'pending' and card['slack_ts'] == '1790719999.123456'
+    monkeypatch.setattr(app.state.connectors, 'request', original)
+    # Duplicate and out-of-order retries cannot undo a newer choice.
+    choose('organization', '1790720000.000001')
+    choose('session', '1790720001.000001')
+    choose('session', '1790720002.000001')
+    deliver()
+    row = app.state.credentials.row(request_id)
+    assert (row['preferred_scope'], row['scope_revision']) == ('session', 2)
+    assert 'Selected: Session only.' in calls[-1][1]['blocks'][1]['text']['text']
+    assert [method for method, _ in calls] == ['chat.postMessage', 'chat.update', 'chat.update']
+    assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key=?", ('credential:' + request_id,))) == 1
+
+
+def test_slack_access_legacy_card_reopens_and_resolves_in_place(access_delivery):
+    from app.credentials import Resolve
+
+    app, client, prepare, calls, deliver = access_delivery
+    _, _, request_id = prepare()
+    store, vault = app.state.store, app.state.credentials
+    # Older releases saved only a plain-text notice and its confirmed timestamp.
+    store.execute("UPDATE slack_outbox SET metadata='{}',text='Access is needed' WHERE dedupe_key=?", ('credential:' + request_id,))
+    app.state.slack.chat.collect()
+    deliver()
+    assert calls[-1][0] == 'chat.update'
+    assert client.post('/hooks/slack/interactions', **signed(scope_action(request_id), form=True)).status_code == 200
+    deliver()
+    # Credentials owns reopening; the card consumes its generation/reset fields.
+    store.execute("UPDATE credential_requests SET generation=1,preferred_scope='',scope_revision=0 WHERE id=?", (request_id,))
+    app.state.slack.chat.collect()
+    deliver()
+    buttons = calls[-1][1]['blocks'][-1]['elements']
+    assert len(buttons) == 3 and all('url' not in button for button in buttons)
+    assert {json.loads(button['value'])['generation'] for button in buttons} == {1}
+    assert client.post('/hooks/slack/interactions', **signed(scope_action(request_id), form=True)).status_code == 409
+    current = scope_action(request_id, generation=1)
+    assert client.post('/hooks/slack/interactions', **signed(current, form=True)).status_code == 200
+    vault.resolve(request_id, Resolve(decision='decline', generation=1), vault.row(request_id)['actor_id'], False)
+    app.state.slack.chat.collect()
+    deliver()
+    assert all(block['type'] != 'actions' for block in calls[-1][1]['blocks'])
+    assert 'declined' in calls[-1][1]['blocks'][-1]['text']['text']
+    assert client.post('/hooks/slack/interactions', **signed(current, form=True)).status_code == 409
+    assert sum(method == 'chat.postMessage' for method, _ in calls) == 1
+
+
+@pytest.mark.parametrize('change', ['paused', 'channel', 'bot', 'deleted'])
+def test_slack_access_rechecks_destination_after_token_refresh(access_delivery, monkeypatch, change):
+    app, _, prepare, calls, deliver = access_delivery
+    root, _, request_id = prepare(post=False)
+
+    async def refresh():
+        if change == 'paused':
+            app.state.store.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (root,))
+        elif change == 'channel':
+            app.state.store.execute("UPDATE slack_threads SET channel='C87654321' WHERE run_id=?", (root,))
+        elif change == 'deleted':
+            app.state.store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), root))
+        else:
+            app.state.connectors.save('slack', {'bot': {'access_token': 'replacement',
+                'team': {'id': 'T12345678'}, 'bot_user_id': 'U00000000'}}, 'Changed')
+        return 'separate-bot-secret'
+
+    monkeypatch.setattr(app.state.connectors, 'slack_bot_token', refresh)
+    deliver()
+    assert not calls
+    assert app.state.store.rows('SELECT status FROM slack_outbox WHERE dedupe_key=?', ('credential:' + request_id,))[0]['status'] == 'uncertain'
+
+
+@pytest.mark.parametrize('known_card', [False, True])
+def test_slack_access_recovery_updates_known_cards_without_reposting_uncertain_initial_sends(access_delivery, known_card):
+    app, client, prepare, calls, deliver = access_delivery
+    _, _, request_id = prepare(post=known_card)
+    app.state.store.execute("UPDATE slack_outbox SET status='sending' WHERE dedupe_key=?", ('credential:' + request_id,))
+
+    async def recover():
+        app.state.slack.chat.recover()
+        await app.state.slack.chat.shutdown()
+
+    client.portal.call(recover)
+    deliver()
+    assert [method for method, _ in calls] == (['chat.postMessage', 'chat.update'] if known_card else [])
+    status = app.state.store.rows('SELECT status FROM slack_outbox WHERE dedupe_key=?', ('credential:' + request_id,))[0]['status']
+    assert status == ('sent' if known_card else 'uncertain')
+
+
+@pytest.mark.parametrize('known_card', [False, True])
+def test_slack_access_retries_failed_updates_during_normal_collection_only(access_delivery, monkeypatch, known_card):
+    app, client, prepare, calls, deliver = access_delivery
+    _, _, request_id = prepare(post=known_card)
+    if known_card:
+        assert client.post('/hooks/slack/interactions', **signed(scope_action(request_id), form=True)).status_code == 200
+    original = app.state.connectors.request
+
+    async def lost_response(method, url, **kwargs):
+        await original(method, url, **kwargs)
+        raise TimeoutError('Provider response lost after delivery')
+
+    monkeypatch.setattr(app.state.connectors, 'request', lost_response)
+    deliver()
+    assert app.state.store.rows('SELECT status FROM slack_outbox WHERE dedupe_key=?', ('credential:' + request_id,))[0]['status'] == 'uncertain'
+    monkeypatch.setattr(app.state.connectors, 'request', original)
+    app.state.slack.chat.collect()
+    deliver()
+    assert [method for method, _ in calls] == (['chat.postMessage', 'chat.update', 'chat.update'] if known_card else ['chat.postMessage'])
+    assert app.state.credentials.row(request_id)['scope_revision'] == (1 if known_card else 0)
+    if known_card:
+        assert calls[-1][1]['blocks'][-1]['elements'][0]['text']['text'] == 'Provide Secret'
+
+
+@pytest.mark.parametrize('paused', ['connection', 'thread', 'installation', 'resolved'])
+def test_slack_access_rearms_skipped_cards_only_for_same_enabled_destination(access_delivery, paused):
+    app, _, prepare, calls, deliver = access_delivery
+    root, _, request_id = prepare(post=False)
+    store = app.state.store
+    if paused == 'thread':
+        store.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (root,))
+    else:
+        store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0)")
+    app.state.slack.chat.collect()
+    deliver()
+    assert store.rows('SELECT status FROM slack_outbox WHERE dedupe_key=?', ('credential:' + request_id,))[0]['status'] == 'skipped'
+    store.execute('UPDATE slack_threads SET paused=0 WHERE run_id=?', (root,))
+    store.execute("DELETE FROM connection_policies WHERE provider='slack'")
+    if paused == 'installation':
+        app.state.connectors.save('slack', {'bot': {'access_token': 'replacement',
+            'team': {'id': 'T12345678'}, 'bot_user_id': 'U00000000'}}, 'Changed')
+    elif paused == 'resolved':
+        store.execute("UPDATE credential_requests SET status='declined' WHERE id=?", (request_id,))
+    app.state.slack.chat.collect()
+    deliver()
+    assert [method for method, _ in calls] == ([] if paused in {'installation', 'resolved'} else ['chat.postMessage'])
+
+
+def test_slack_access_duplicate_ack_retries_a_failed_checkpoint(access_delivery, monkeypatch):
+    app, client, prepare, _, _ = access_delivery
+    _, _, request_id = prepare()
+    flushed = []
+
+    async def flush():
+        flushed.append(1)
+        if len(flushed) == 1:
+            raise RuntimeError('Checkpoint temporarily unavailable')
+
+    monkeypatch.setattr(app.state.slack.checkpoints, 'flush', flush)
+    payload = signed(scope_action(request_id), form=True)
+    with pytest.raises(RuntimeError, match='Checkpoint temporarily unavailable'):
+        client.post('/hooks/slack/interactions', **payload)
+    assert app.state.credentials.row(request_id)['preferred_scope'] == 'personal'
+    assert client.post('/hooks/slack/interactions', **payload).status_code == 200
+    assert len(flushed) == 2
+    assert app.state.credentials.row(request_id)['scope_revision'] == 1
+
+
 def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(slack_app):
     app, client, run_id = start(slack_app)
     for index, changes in enumerate([

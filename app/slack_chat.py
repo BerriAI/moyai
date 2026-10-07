@@ -409,9 +409,7 @@ class SlackChat:
                                'I need an administrator to review an external change. Approve or deny the exact action in the web session.\n' + self.link(run_id))
                 # A child can ask while the Slack-linked parent waits for it.
                 if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='credential_requests'").fetchone():
-                    for key in conn.execute("SELECT q.id,q.run_id FROM credential_requests q JOIN runs r ON r.id=q.run_id WHERE (r.id=? OR r.parent_run_id=?) AND q.status='pending' AND q.message_id=r.active_message_id AND r.status IN ('running','saving','waiting_credential')",(run_id,run_id)).fetchall():
-                        self.queue(conn,run_id,'credential:'+key['id'],'approval',
-                                   'Access is needed to continue. Connect through the secure form, or choose to continue without access. Do not paste credentials in Slack.\n' + self.link(key['run_id']))
+                    self.owner.access.collect_in(conn, binding)
                 if binding['status'] == 'interrupted':
                     self.queue(conn, run_id, f"interrupted:{run_id}:{binding['updated_at']}", 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 
@@ -449,7 +447,10 @@ class SlackChat:
                 else:
                     data = json.loads(row['metadata'])
                     source = self.owner.channel.source_for_run(row['run_id'], {**data, 'kind': row['kind']})
-                    if data.get('captures'):
+                    if data.get('credential_request_id'):
+                        sent_ts, delivered = await self.owner.channel.credential_card(source, row['id'])
+                        self.store.execute("UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
+                    elif data.get('captures'):
                         sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                     else:
                         if data.get('pull_requests'):
@@ -458,7 +459,8 @@ class SlackChat:
                         else:
                             response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
                         sent_ts = response.metadata['slack_ts']
-                self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
+                if not json.loads(row['metadata']).get('credential_request_id'):
+                    self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
                 if row['kind'] != 'reaction':
                     self.activity.posted(row['run_id'])
                 if row['kind'] in {'ack', 'reaction'}:
@@ -470,6 +472,8 @@ class SlackChat:
                 self.store.event(row['run_id'], 'status',
                     'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
                     if row['kind'] == 'reaction' else
+                    'Slack access card update could not be confirmed. It will be retried in the same message.'
+                    if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
                     'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
                 if isinstance(exc, asyncio.CancelledError):
                     raise
@@ -511,6 +515,7 @@ class SlackChat:
 
     def recover(self):
         self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'")
+        self.store.execute("UPDATE slack_outbox SET status='pending' WHERE status='uncertain' AND slack_ts!='' AND json_extract(metadata,'$.credential_request_id') IS NOT NULL")
         self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND "
                            "(kind='ack' OR (kind='progress' AND json_extract(metadata,'$.event_id') IS NULL) "
                            "OR (kind='control' AND dedupe_key LIKE 'received:%'))")

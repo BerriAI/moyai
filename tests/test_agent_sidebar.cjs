@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const script = readFileSync('app/static/app.js','utf8');
 function helpers(){
   const context={state:{selected:'worker-b'},relative:()=> '2m ago'};
-  vm.createContext(context);
+  vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);
   vm.runInContext(script.slice(script.indexOf('const esc ='),script.indexOf('const state ='))+
     script.slice(script.indexOf('function sessionTitle('),script.indexOf('function modelName('))+
     script.slice(script.indexOf('function sidebarGroups('),script.indexOf('function renderSidebar(')),context);
@@ -16,7 +16,7 @@ function scopeHelpers(){
   const context={state:{userId:'google:alice',role:'admin',authenticated:true,runsRefresh:0,runs:[]},URLSearchParams,
     location:{hash:''},$:()=>element,localStorage:{getItem:key=>saved.get(key),setItem:(key,value)=>saved.set(key,value)},
     renderSidebar:()=>{},showError:error=>errors.push(error.message)};
-  vm.createContext(context);
+  vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);
   vm.runInContext(script.slice(script.indexOf('async function refreshRuns('),script.indexOf('async function renderHome(')),context);
   vm.runInContext(readFileSync('app/static/users.js','utf8'),context);
   return {context,element,saved,errors};

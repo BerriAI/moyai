@@ -61,6 +61,8 @@ class DurableRunner(RunManager):
 
     async def advance(self, run_id):
         async with self.locks.setdefault(run_id, asyncio.Lock()):
+            if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
+                self.credentials.reconcile_resolutions(run_id)
             row = self.store.run(run_id)
             if not row or row['deleted_at']:
                 return False
@@ -370,8 +372,13 @@ class DurableRunner(RunManager):
             spec['chat_enabled'] = True
             if state.get('resume_group') and self.coordinator:
                 spec['agent_results'] = self.coordinator.results(run_id, state['resume_group'])
+            state.pop('credential_delivery', None)
             if state.get('resume_credential') and self.credentials:
                 spec['credential_resolution'] = self.credentials.resolution(run_id,state['resume_credential'])
+                resolution = spec['credential_resolution']
+                if resolution['status'] in {'provided', 'declined'} and 'generation' in resolution:
+                    state['credential_delivery'] = {'request_id': state['resume_credential'],
+                                                    'generation': resolution['generation']}
             if self.settings.run_timeout_seconds:
                 remaining = self.settings.run_timeout_seconds - (time.time() - state['turn_started'])
                 if remaining <= 0:
@@ -412,6 +419,7 @@ class DurableRunner(RunManager):
                     event_phase = event.get('data', {}).get('phase')
                     if event_phase == 'execution_started':
                         state['execution_started'] = True
+                        self.acknowledge_credential(run_id, state)
                         state.pop('startup_deadline', None)
                         self.running_status(run_id, 'running')
                     elif event_phase == 'reconnecting' and not state.get('execution_started'):
@@ -420,6 +428,11 @@ class DurableRunner(RunManager):
                         state['last_error'] = str(event.get('message', ''))
                 state['cursor'] = report['cursor']
                 if report.get('final'):
+                    # sandbox.agent can emit a completed/steered final only
+                    # after resumed_context and execution_started. The final
+                    # also acknowledges delivery if that event batch was lost.
+                    if report['final'].get('completed') or report['final'].get('steer_message_id'):
+                        self.acknowledge_credential(run_id, state)
                     self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
                     state['result'] = {**report['final'], 'message_id': state['message_id']}
                     if not state['result'].get('startup_retry'):
@@ -581,6 +594,8 @@ class DurableRunner(RunManager):
                     self.save(run_id, state)
                     return True
             self.store.finish_message(run_id, state['message_id'], state['response'], state['outcome'])
+            if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
+                self.credentials.reconcile_resolutions(run_id)
             status = 'idle' if state['outcome'] in {'completed', 'steered'} else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
             if status != 'idle':
                 self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (run_id,))
@@ -598,6 +613,13 @@ class DurableRunner(RunManager):
                 return {'idle_seconds': max(0.01, self.idle_deadline(state) - time.time())}
             return self.store.has_queued_messages(run_id)
         return True
+
+    def acknowledge_credential(self, run_id, state):
+        receipt = state.pop('credential_delivery', None)
+        if receipt and self.credentials:
+            self.credentials.acknowledge(run_id, state['message_id'], receipt['request_id'], receipt['generation'])
+            state.pop('resume_credential', None)
+            state.pop('wait_credential', None)
 
     async def cleanup(self, state):
         if not state.get('sandbox_id'):

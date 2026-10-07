@@ -889,6 +889,10 @@ def create_app(settings: Settings | None = None):
     async def broker_attachment(run_id: str, attachment_id: str, request: Request):
         return store.attachments.broker_file(require_run(run_id, request), attachment_id)
 
+    @app.post('/hooks/slack/interactions')
+    async def slack_interactions(request: Request):
+        return await slack.access.receive(request)
+
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
         return await slack.receive(request, missing_cloud())

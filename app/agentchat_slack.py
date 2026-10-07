@@ -179,6 +179,20 @@ class SlackWebhookChannel:
     async def reply(self, source, content):
         return await self.reply_rich(source, self.rich_reply(source, content))
 
+    async def credential_card(self, source, card_id):
+        installation = self.owner.connectors.slack_installation()
+        identity = (installation.get('team_id'), installation.get('user_id'))
+        token = await self.owner.connectors.slack_bot_token()
+        binding = self.destination(source, identity)
+        payload, timestamp, metadata = self.owner.access.payload(card_id, binding, identity)
+        target = {'ts': timestamp} if timestamp else {'thread_ts': binding['thread_ts']}
+        response = await self.owner.connectors.request('POST', 'https://slack.com/api/' + ('chat.update' if timestamp else 'chat.postMessage'),
+            headers={'Authorization': f'Bearer {token}'}, json={**payload, 'channel': binding['channel'], **target})
+        sent = response.get('ts')
+        if response.get('ok') is not True or not isinstance(sent, str) or not sent or (timestamp and sent != timestamp):
+            raise RuntimeError('Slack access card delivery could not be confirmed.')
+        return sent, metadata
+
     async def reply_rich(self, source: Message, content: RichReply) -> Message:
         # Resolve the destination from our saved binding, never model output.
         installation = self.owner.connectors.slack_installation()

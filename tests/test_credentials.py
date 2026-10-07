@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import SecretStr
 
-from app.credentials import CredentialRequest, Credentials, Invoke, Resolve, SaveSecret
+from app.credentials import CredentialRequest, Credentials, Invoke, Materialize, ReportFailure, Resolve, SaveSecret
 from app.db import Store, now
 from app.security import Security
 from app.temporal_runtime import TemporalRunManager
@@ -588,3 +588,571 @@ def test_permission_recovery_pauses_only_this_request_and_keeps_shared_credentia
     # The service administrator can grant permissions without replacing its key.
     assert client.post(endpoint,json={'secret_id':saved,'generation':1}).status_code==200
     assert vault.materialize(run,Materialize(request_ids=[request['request_id']]))['status']=='ready'
+
+
+def access_followup(app, run, actor='google:bob', model=None):
+    store=app.state.store
+    store.finish_message(run['id'],run['active_message_id'],'','steered')
+    store.enqueue_message(run['id'],'Continue investigating','access-followup',model=model,user_id=actor)
+    store.claim_message(run['id'])
+    store.update_run(run['id'],status='running')
+    return store.run(run['id'])
+
+
+@pytest.mark.parametrize('handoff',['requester','model','same-turn'])
+@pytest.mark.parametrize('status',['running','saving','waiting_credential','queued','provisioning',
+                                   'reconnecting','waiting_environment','waiting_children','idle','completed'])
+def test_pending_form_survives_followup_states(workspace,handoff,status):
+    app,client=workspace
+    sign_in(app,client)
+    run=active(app)
+    request=access_request(app.state.credentials,run)
+    original=run['active_message_id']
+    if handoff!='same-turn':
+        run=access_followup(app,run,'google:bob' if handoff=='requester' else 'google:alice',
+                            model='openai/gpt-6-sol' if handoff=='model' else None)
+    app.state.store.update_run(run['id'],status=status)
+    visible=client.get('/api/runs/'+run['id']).json()['credential_requests']
+    assert [row['id'] for row in visible]==[request['request_id']]
+    assert visible[0]['can_personal'] and visible[0]['generation']==0
+    assert app.state.credentials.row(request['request_id'])['message_id']==original
+
+
+@pytest.mark.parametrize('decision',['provide','decline'])
+@pytest.mark.parametrize('handoff',[True,False])
+def test_historical_resolution_queues_once_under_original_actor(workspace,monkeypatch,decision,handoff):
+    from app.credentials import Materialize
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    original=active(app)
+    request=access_request(vault,original)
+    run=access_followup(app,original) if handoff else original
+    if not handoff:
+        vault.store.finish_message(run['id'],run['active_message_id'],'Access is still needed')
+        vault.store.update_run(run['id'],status='idle')
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    body={'decision':decision,'generation':0}
+    if decision=='provide':
+        body.update(scope='personal',lifetime='session',value=generic_value('env'))
+    endpoint='/api/credentials/requests/'+request['request_id']
+    assert client.post(endpoint,json=body).status_code==200
+    vault.store=Store(app.state.settings.data_dir)
+    assert client.post(endpoint,json=body).status_code==200
+    queued=vault.store.rows("SELECT * FROM messages WHERE run_id=? AND status='queued'",(run['id'],))
+    assert len(queued)==1 and queued[0]['user_id']=='google:alice'
+    assert vault.store.run(run['id'])['active_user_id']==('google:bob' if handoff else 'google:alice')
+    assert vault.store.run(run['id'])['active_message_id']==run['active_message_id']
+    assert vault.row(request['request_id'])['message_id']==original['active_message_id']
+    assert len(vault.store.rows('SELECT * FROM provider_secrets'))==(decision=='provide')
+    assert 'synthetic-secret' not in json.dumps(vault.store.messages(run['id'])+vault.store.events(run['id']))
+    if decision=='provide' and handoff:
+        with pytest.raises(HTTPException):
+            vault.materialize(run,Materialize(request_ids=[request['request_id']]))
+    if handoff:
+        vault.store.finish_message(run['id'],run['active_message_id'],'Finished follow-up')
+    assert vault.store.claim_message(run['id'])['id']==queued[0]['id']
+    if decision=='provide':
+        assert vault.materialize(vault.store.run(run['id']),Materialize(request_ids=[request['request_id']]))['status']=='ready'
+
+
+@pytest.mark.parametrize('actor,scope,expected',[
+    ('bob','personal',200),('bob','organization',403),('charlie','personal',403),
+    ('alice','personal',403),('alice','organization',200)])
+def test_historical_form_keeps_requester_and_admin_permissions(workspace,monkeypatch,actor,scope,expected):
+    app,client=workspace
+    sign_in(app,client,'bob','bob@berri.ai')
+    run=active(app,'google:bob')
+    request=access_request(app.state.credentials,run)
+    access_followup(app,run,'google:charlie')
+    sign_in(app,client,actor,actor+'@berri.ai')
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    form=client.get('/api/runs/'+run['id']).json()['credential_requests'][0]
+    assert form['can_personal']==(actor=='bob') and form['can_organization']==(actor=='alice')
+    result=client.post('/api/credentials/requests/'+request['request_id'],json={
+        'scope':scope,'lifetime':'session','value':generic_value('env'),'generation':0})
+    assert result.status_code==expected
+    assert len(app.state.store.rows('SELECT * FROM provider_secrets'))==(expected==200)
+    if expected==200:
+        queued=app.state.store.rows("SELECT user_id FROM messages WHERE run_id=? AND status='queued'",(run['id'],))
+        assert queued==[{'user_id':'google:bob'}]
+
+
+@pytest.mark.parametrize('blocked',['stopping','cancelled','interrupted','failed','deleted','full'])
+def test_historical_resolution_failure_does_not_save_or_queue(workspace,blocked):
+    app,client=workspace
+    sign_in(app,client)
+    run=active(app)
+    request=access_request(app.state.credentials,run)
+    run=access_followup(app,run)
+    store=app.state.store
+    if blocked=='full':
+        for index in range(5):
+            store.enqueue_message(run['id'],'Queued follow-up','full-'+str(index),user_id='google:bob')
+    elif blocked=='deleted':
+        store.execute('UPDATE runs SET deleted_at=? WHERE id=?',(now(),run['id']))
+    else:
+        store.update_run(run['id'],status=blocked)
+    before=store.messages(run['id'])
+    response=client.post('/api/credentials/requests/'+request['request_id'],json={
+        'scope':'personal','lifetime':'session','value':generic_value('env'),'generation':0})
+    assert response.status_code==(404 if blocked=='deleted' else 409)
+    assert not store.rows('SELECT * FROM provider_secrets') and store.messages(run['id'])==before
+    assert app.state.credentials.row(request['request_id'])['status']=='pending'
+    if blocked not in {'deleted','full'}:
+        assert client.get('/api/runs/'+run['id']).json()['credential_requests']==[]
+
+
+@pytest.mark.parametrize('operation',['request','materialize'])
+def test_pending_handle_reissue_and_materialization_recover_current_turn(workspace,monkeypatch,operation):
+    from app.credentials import Materialize
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    original=active(app)
+    request=access_request(vault,original)
+    run=access_followup(app,original,'google:alice')
+    args=Materialize(request_ids=[request['request_id']])
+    result=access_request(vault,run) if operation=='request' else vault.materialize(run,args)
+    assert result['request_id']==request['request_id'] and result['generation']==1
+    assert vault.row(request['request_id'])['message_id']==run['active_message_id']
+    assert vault.resolution(run['id'],request['request_id'])['status']=='pending'
+    assert access_request(vault,run)['generation']==1
+    monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
+    body={'scope':'personal','lifetime':'session','value':generic_value('env')}
+    endpoint='/api/credentials/requests/'+request['request_id']
+    assert client.post(endpoint,json={**body,'generation':0}).status_code==409
+    assert client.post(endpoint,json={**body,'generation':1}).status_code==200
+    assert not vault.store.has_queued_messages(run['id'])
+
+
+def test_pending_recovery_cannot_adopt_another_requester(workspace):
+    from app.credentials import Materialize
+    app,client=workspace
+    sign_in(app,client)
+    vault=app.state.credentials
+    original=active(app)
+    request=access_request(vault,original)
+    run=access_followup(app,original)
+    with pytest.raises(HTTPException) as error:
+        vault.materialize(run,Materialize(request_ids=[request['request_id']]))
+    assert error.value.status_code==403
+    assert access_request(vault,run)['request_id']!=request['request_id']
+    row=vault.row(request['request_id'])
+    assert row['actor_id']=='google:alice' and row['message_id']==original['active_message_id'] and row['generation']==0
+
+
+def select(vault, request_id, scope, actor='google:alice', generation=0):
+    with vault.store.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        return vault.select_scope_in(conn, request_id, generation, scope, actor)
+
+
+def test_scope_selection_persists_is_idempotent_and_resets_on_reopen(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    vault = app.state.credentials
+    run = active(app)
+    request_id = requested(app, run)['request_id']
+    for revision, scope in enumerate(('organization', 'personal', 'session'), start=1):
+        selected = select(vault, request_id, scope)
+        assert selected['preferred_scope'] == scope and selected['scope_revision'] == revision
+        assert select(vault, request_id, scope)['scope_revision'] == revision
+        pending = client.get('/api/runs/' + run['id']).json()['credential_requests'][0]
+        assert pending['preferred_scope'] == scope and pending['scope_revision'] == revision
+    assert not vault.store.rows('SELECT * FROM provider_secrets')
+    next_run = access_followup(app, run, 'google:alice')
+    assert requested(app, next_run)['generation'] == 1
+    assert vault.row(request_id)['preferred_scope'] == ''
+    assert vault.row(request_id)['scope_revision'] == 0
+    with pytest.raises(HTTPException) as error:
+        select(vault, request_id, 'organization')
+    assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize('blocked', ['actor', 'generation', 'resolved', 'stopping', 'deleted', 'scope'])
+def test_scope_selection_rejects_invalid_context_without_mutation(workspace, blocked):
+    app, client = workspace
+    sign_in(app, client)
+    vault = app.state.credentials
+    run = active(app)
+    request_id = requested(app, run)['request_id']
+    if blocked == 'resolved':
+        vault.store.execute("UPDATE credential_requests SET status='declined' WHERE id=?", (request_id,))
+    if blocked == 'stopping':
+        vault.store.update_run(run['id'], status='stopping')
+    if blocked == 'deleted':
+        vault.store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), run['id']))
+    with pytest.raises(HTTPException):
+        select(vault, request_id, 'invalid' if blocked == 'scope' else 'organization',
+               actor='google:bob' if blocked == 'actor' else 'google:alice',
+               generation=1 if blocked == 'generation' else 0)
+    assert vault.row(request_id)['preferred_scope'] == ''
+    assert vault.row(request_id)['scope_revision'] == 0
+
+
+@pytest.mark.parametrize('slack_requester', [True, False])
+def test_scope_selection_requires_fresh_verified_identity_equivalence(workspace, slack_requester):
+    app, client = workspace
+    sign_in(app, client)
+    vault = app.state.credentials
+    slack_id = 'slack:T1:U1'
+    vault.store.execute("INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,'slack','alice@berri.ai','Alice',?,?)",
+                        (slack_id, now(), now()))
+    requester, selector = (slack_id, 'google:alice') if slack_requester else ('google:alice', slack_id)
+    run = active(app, requester)
+    request_id = requested(app, run)['request_id']
+    with pytest.raises(HTTPException):
+        select(vault, request_id, 'personal', selector)
+    vault.store.execute('UPDATE users SET profile_eligible=1,profile_checked_at=? WHERE id=?', (now(), slack_id))
+    assert select(vault, request_id, 'personal', selector)['preferred_scope'] == 'personal'
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    vault.store.execute('UPDATE users SET profile_checked_at=? WHERE id=?', (old, slack_id))
+    with pytest.raises(HTTPException):
+        select(vault, request_id, 'organization', selector)
+    assert vault.row(request_id)['preferred_scope'] == 'personal'
+
+
+def test_scope_preference_does_not_grant_organization_save_permission(workspace, monkeypatch):
+    app, client = workspace
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    vault = app.state.credentials
+    run = active(app, 'google:bob')
+    request_id = requested(app, run)['request_id']
+    select(vault, request_id, 'organization', 'google:bob')
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    response = client.post('/api/credentials/requests/' + request_id,
+                           json={'scope': 'organization', 'value': 'synthetic-example-key', 'generation': 0})
+    assert response.status_code == 403
+    assert not vault.store.rows('SELECT * FROM provider_secrets')
+    assert vault.row(request_id)['status'] == 'pending'
+
+
+def test_scope_migration_and_request_labels(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    vault = app.state.credentials
+    request_id = requested(app, run)['request_id']
+    with vault.store.connect() as conn:
+        conn.execute('ALTER TABLE credential_requests DROP COLUMN preferred_scope')
+        conn.execute('ALTER TABLE credential_requests DROP COLUMN scope_revision')
+    for _ in range(2):
+        vault = Credentials(app.state.store, app.state.security, app.state.settings, app.state.manager, SimpleNamespace(flush=None))
+        assert vault.row(request_id)['preferred_scope'] == ''
+        assert vault.row(request_id)['scope_revision'] == 0
+    assert vault.request_label(vault.row(request_id)) == 'Fireworks API key'
+    run = active(app)
+    request = vault.request(run, CredentialRequest(provider='generic', name='vercel', reason='Deploy the site',
+                           request_key='vercel', input_fields=[{'name': 'VERCEL_TOKEN', 'label': 'Access token'}]))
+    assert vault.request_label(vault.row(request['request_id'])) == 'VERCEL_TOKEN'
+
+
+async def waiting(durable, provider='generic'):
+    manager, cloud, run_id = durable
+    vault = attach(manager)
+    manager.store.execute("UPDATE messages SET user_id='google:alice' WHERE run_id=?", (run_id,))
+    await drive(manager, run_id, phase='monitor')
+    args = CredentialRequest(provider=provider, name='vercel' if provider == 'generic' else '',
+                             reason='Deploy the requested site', request_key='deploy')
+    request = vault.request(manager.store.run(run_id), args)
+    state = manager.state(run_id)
+    result = {'message': 'Access needed', 'continuation': True, 'completed': False,
+              'wait_credential': request['request_id']}
+    state.update(phase='save', exit_code=0, result=result)
+    manager.store.update_run(run_id, pending_result=json.dumps(result))
+    manager.save(run_id, state)
+    await drive(manager, run_id, phase='waiting_credential')
+    return vault, request, args
+
+
+def resolve(vault, request, *, generation=0, decision='provide'):
+    row = vault.row(request['request_id'])
+    body = (Resolve(decision='decline', generation=generation) if decision == 'decline' else
+            Resolve(generation=generation, scope='personal', lifetime='session',
+                    value=SecretStr(json.dumps({'VERCEL_TOKEN': KEY}) if row['provider'] == 'generic' else KEY)))
+    return vault.resolve(request['request_id'], body, 'google:alice', False)
+
+
+def restart(manager, cloud):
+    successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    attach(successor)
+    return successor
+
+
+def continuations(manager, run_id):
+    return manager.store.rows("SELECT * FROM messages WHERE run_id=? AND client_id LIKE 'credential-%'", (run_id,))
+
+
+def handoff(manager, run_id, user='google:bob'):
+    return manager.store.enqueue_message(run_id, 'Follow-up from another requester', 'handoff',
+                                         user_id=user, send_now=True)[0]
+
+
+@pytest.mark.parametrize('ordering', ['resolved_first', 'handoff_first', 'finished_first', 'finish_crash'])
+@pytest.mark.parametrize('decision', ['provide', 'decline'])
+async def test_resolution_handoff_orders_restart_and_replay_deliver_once(durable, ordering, decision):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    original = manager.state(run_id)['message_id']
+    if ordering == 'resolved_first':
+        resolve(vault, request, decision=decision)
+    target = handoff(manager, run_id)
+    await manager.advance(run_id)
+    assert manager.state(run_id)['phase'] == 'finish'
+    if ordering == 'finished_first':
+        await manager.advance(run_id)
+    elif ordering == 'finish_crash':
+        manager.store.finish_message(run_id, original, '', 'steered')
+    if ordering != 'resolved_first':
+        resolve(vault, request, decision=decision)
+    successor = restart(manager, cloud)
+    await successor.advance(run_id)
+    resolve(successor.credentials, request, decision=decision)
+    successor.credentials.reconcile_resolutions(run_id)
+    messages = continuations(successor, run_id)
+    assert len(messages) == 1 and messages[0]['user_id'] == 'google:alice'
+    assert messages[0]['client_id'] == f"credential-{request['request_id']}-0"
+    assert successor.credentials.row(request['request_id'])['resolution_pending'] == 0
+    assert successor.store.rows('SELECT status FROM messages WHERE id=?', (target['id'],))[0]['status'] != 'cancelled'
+    assert KEY not in json.dumps(successor.store.messages(run_id) + successor.store.events(run_id))
+
+
+@pytest.mark.parametrize('decision', ['provide', 'decline'])
+async def test_normal_checkpoint_resume_acks_same_turn_and_later_handoff_cannot_replay(durable, decision):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    original = manager.state(run_id)['message_id']
+    resolve(vault, request, decision=decision)
+    successor = restart(manager, cloud)
+    await drive(successor, run_id, phase='monitor')
+    assert cloud.machines[1].spec['credential_resolution']['generation'] == 0
+    assert cloud.machines[1].spec['credential_resolution']['status'] == ('provided' if decision == 'provide' else 'declined')
+    assert successor.state(run_id)['message_id'] == original
+    # Receipt is durable even when the execution-start event was lost from the
+    # transport batch: a completed final also confirms that spec was consumed.
+    await drive(successor, run_id)
+    assert successor.credentials.row(request['request_id'])['resolution_pending'] == 0
+    assert not continuations(successor, run_id)
+    assert len([m for m in successor.store.messages(run_id) if m['role'] == 'user']) == 1
+    successor.credentials.reconcile_resolutions(run_id)
+    assert not continuations(successor, run_id)
+
+
+async def test_execution_start_receipt_survives_restart_and_is_bound_to_loaded_generation(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    await drive(manager, run_id, phase='monitor')
+    state = manager.state(run_id)
+    assert state['credential_delivery']['generation'] == 0
+    # Replacement arrives after the immutable generation-zero spec was written.
+    vault.report_failure(manager.store.run(run_id), ReportFailure(request_id=request['request_id'], revision=1, failure='permission'))
+    resolve(vault, request, generation=1)
+    manager.acknowledge_credential(run_id, state)
+    manager.save(run_id, state)
+    assert vault.row(request['request_id'])['resolution_pending'] == 1
+    successor = restart(manager, cloud)
+    await drive(successor, run_id)
+    messages = continuations(successor, run_id)
+    assert len(messages) == 1 and messages[0]['client_id'].endswith('-1')
+
+
+async def test_execution_start_ack_survives_crash_before_final_receipt(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    await drive(manager, run_id, phase='monitor')
+    reads = 0
+
+    async def started_then_lost(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise ConnectionError('Worker lost before final receipt')
+        return json.dumps({'state': 'running', 'cursor': 1, 'events': [
+            {'kind': 'status', 'message': 'Execution started', 'data': {'phase': 'execution_started'}}]})
+
+    manager.command = started_then_lost
+    with pytest.raises(ConnectionError):
+        await manager.advance(run_id)
+    assert vault.row(request['request_id'])['resolution_pending'] == 0
+    assert 'credential_delivery' not in manager.state(run_id)
+    successor = restart(manager, cloud)
+    await drive(successor, run_id)
+    assert not continuations(successor, run_id)
+
+
+async def test_reinstall_with_reopened_pending_request_discards_old_spec_receipt(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    await drive(manager, run_id, phase='monitor')
+    vault.report_failure(manager.store.run(run_id), ReportFailure(request_id=request['request_id'], revision=1, failure='permission'))
+    state = manager.state(run_id)
+    assert state['credential_delivery']['generation'] == 0
+    state['phase'] = 'install'
+    manager.save(run_id, state)
+    await manager.advance(run_id)
+    assert cloud.machines[1].spec['credential_resolution']['status'] == 'pending'
+    assert cloud.machines[1].spec['credential_resolution']['generation'] == 1
+    assert 'credential_delivery' not in manager.state(run_id)
+
+
+@pytest.mark.parametrize('consume', ['request', 'materialize', 'invoke'])
+async def test_direct_original_turn_consumption_prevents_later_handoff_replay(durable, monkeypatch, consume):
+    manager, cloud, run_id = durable
+    vault, request, args = await waiting(durable, provider='fireworks' if consume == 'invoke' else 'generic')
+    resolve(vault, request)
+    run = manager.store.run(run_id)
+    if consume == 'request':
+        assert vault.request(run, args)['status'] == 'provided'
+    elif consume == 'materialize':
+        assert vault.materialize(run, Materialize(request_ids=[request['request_id']]))['status'] == 'ready'
+    else:
+        actual = httpx.AsyncClient
+        monkeypatch.setattr('app.credentials.httpx.AsyncClient', lambda **kw: actual(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, json={'data': []})), **kw))
+        assert (await vault.invoke(run, Invoke(request_id=request['request_id'], method='GET', path='/models')))[0] == 200
+    assert vault.row(request['request_id'])['resolution_pending'] == 0
+    handoff(manager, run_id)
+    await drive(manager, run_id)
+    assert not continuations(manager, run_id)
+
+
+async def test_rejected_usage_does_not_acknowledge_resolution(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable, provider='fireworks')
+    resolve(vault, request)
+    run = manager.store.run(run_id)
+    with pytest.raises(HTTPException):
+        await vault.invoke(run, Invoke(request_id=request['request_id'], method='GET', path='/unapproved'))
+    with pytest.raises(HTTPException):
+        vault.materialize(run, Materialize(request_ids=[request['request_id']]))
+    assert vault.row(request['request_id'])['resolution_pending'] == 1
+    handoff(manager, run_id)
+    await drive(manager, run_id)
+    assert len(continuations(manager, run_id)) == 1
+
+
+async def test_full_queue_defers_without_failing_other_messages_then_retries_after_claim(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    target = handoff(manager, run_id)
+    for index in range(4):
+        manager.store.enqueue_message(run_id, 'Queued task', 'task-' + str(index), user_id='google:bob')
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'queued'
+    assert vault.row(request['request_id'])['resolution_pending'] == 1
+    assert not continuations(manager, run_id)
+    assert len([m for m in manager.store.messages(run_id) if m['status'] == 'queued']) == 5
+    successor = restart(manager, cloud)
+    await successor.advance(run_id)  # Claims the handoff and frees one queue slot.
+    assert successor.state(run_id)['message_id'] == target['id']
+    await successor.advance(run_id)  # Reconciliation now admits the continuation.
+    assert len(continuations(successor, run_id)) == 1
+    assert not [m for m in successor.store.messages(run_id) if m['status'] in {'cancelled', 'failed'}]
+    notices = [e for e in successor.store.events(run_id) if 'automatic continuation could not be queued' in e['message']]
+    assert len(notices) == 1
+
+
+async def test_hundred_turn_limit_is_visible_without_exceeding_cap_or_cancelling_work(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    target = handoff(manager, run_id)
+    with manager.store.connect() as conn:
+        for index in range(98):
+            conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,user_id) VALUES(?,'user','Prior task','completed',?,?,'google:alice')",
+                         (run_id, 'prior-' + str(index), now()))
+    await drive(manager, run_id)
+    vault.reconcile_resolutions(run_id)
+    assert not continuations(manager, run_id)
+    assert '100-turn limit' in vault.row(request['request_id'])['resolution_error']
+    assert len([m for m in manager.store.messages(run_id) if m['role'] == 'user']) == 100
+    assert manager.store.rows('SELECT status FROM messages WHERE id=?', (target['id'],))[0]['status'] == 'queued'
+    notices = [e for e in manager.store.events(run_id) if 'Start a new session' in e['message']]
+    assert len(notices) == 1
+
+
+@pytest.mark.parametrize('terminal', ['cancelled', 'failed', 'interrupted'])
+async def test_stop_or_failure_discards_undelivered_resolution_without_replay(durable, terminal):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    state = manager.state(run_id)
+    manager.store.finish_message(run_id, state['message_id'], 'Stopped', terminal)
+    manager.store.update_run(run_id, status=terminal)
+    vault.reconcile_resolutions(run_id)
+    assert vault.row(request['request_id'])['resolution_pending'] == 0
+    manager.store.update_run(run_id, status='idle')
+    vault.reconcile_resolutions(run_id)
+    assert not continuations(manager, run_id)
+
+
+@pytest.mark.parametrize('actor', ['google:alice', 'google:bob'])
+async def test_checkpointed_handoff_precedence_including_legacy_same_actor_keeps_delivery(durable, actor):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    resolve(vault, request)
+    target = handoff(manager, run_id, actor)
+    state = manager.state(run_id)
+    assert manager.message_queue.accept_steer(run_id, state['message_id']) == target['id']
+    state.update(phase='checkpointed', result={'continuation': True, 'wait_credential': request['request_id'],
+                                             'steer_message_id': target['id']}, exit_code=0)
+    manager.save(run_id, state)
+    await drive(manager, run_id)
+    assert len(continuations(manager, run_id)) == 1
+    assert vault.row(request['request_id'])['resolution_pending'] == 0
+
+
+async def test_ordinary_queued_same_actor_message_does_not_replace_same_turn_resume(durable):
+    manager, cloud, run_id = durable
+    vault, request, _ = await waiting(durable)
+    original = manager.state(run_id)['message_id']
+    manager.store.enqueue_message(run_id, 'Next ordinary task', 'ordinary', user_id='google:alice')
+    resolve(vault, request)
+    await drive(manager, run_id, phase='monitor')
+    assert manager.state(run_id)['message_id'] == original
+    assert cloud.machines[1].spec['credential_resolution']['status'] == 'provided'
+    await drive(manager, run_id)
+    assert not continuations(manager, run_id)
+
+
+@pytest.mark.parametrize('blocked', ['parent_stop', 'queue_cap'])
+async def test_deferred_child_delivery_retains_parent_admission_and_snapshot_transaction(durable, blocked):
+    from test_agents import launch, pause_parent
+
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    vault = attach(manager)
+    await pause_parent(manager, root, result['group_id'])
+    child = coordinator.children(result['group_id'])[0]['id']
+    await drive(manager, child, phase='monitor')
+    run = manager.store.run(child)
+    request = vault.request(run, CredentialRequest(provider='fireworks', reason='Check worker access', request_key='worker'))
+    vault.resolve(request['request_id'], Resolve(scope='personal', lifetime='session', value=SecretStr(KEY)), 'google:tin', False)
+    manager.store.finish_message(child, run['active_message_id'], 'Frozen worker answer', 'completed')
+    manager.store.update_run(child, status='idle', summary='Frozen worker answer')
+    manager.store.execute("UPDATE agent_groups SET status='completed' WHERE id=?", (result['group_id'],))
+    if blocked == 'parent_stop':
+        manager.store.update_run(root, status='stopping')
+    else:
+        with manager.store.connect() as conn:
+            for index in range(99):
+                conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,user_id) VALUES(?,'user','Prior task','completed',?,?,'google:tin')",
+                             (child, 'prior-' + str(index), now()))
+    vault.reconcile_resolutions(child)
+    assert vault.row(request['request_id'])['resolution_pending'] == 1
+    assert not continuations(manager, child)
+    assert not coordinator.group(root, result['group_id'])['result_snapshot']
+    if blocked == 'parent_stop':
+        manager.store.update_run(root, status='idle')
+    else:
+        manager.store.execute("UPDATE messages SET status='deleted' WHERE run_id=? AND client_id='prior-0'", (child,))
+    vault.reconcile_resolutions(child)
+    queued = continuations(manager, child)
+    assert len(queued) == 1 and queued[0]['user_id'] == 'google:tin'
+    manager.store.update_run(child, summary='Later worker answer')
+    assert coordinator.results(root, result['group_id'])['children'][0]['summary'] == 'Frozen worker answer'

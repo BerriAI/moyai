@@ -27,7 +27,7 @@ async function api(path, options = {}) {
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.sessionHeaderRun = null; savedFiles.reset(); }
+function stopStream(){ resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.sessionHeaderRun = null; savedFiles.reset(); }
 async function showUnavailableSession(id){
   if(state.selected!==id)return;
   $('#content').innerHTML='<p role="status">This session is no longer available.</p>';
@@ -221,7 +221,7 @@ async function navigate(view) {
     if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
   }
 }
-async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(state.sessionArchived)params.set('archived','true');if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(state.sessionArchived)params.set('archived','true');if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
 async function changeSessionView(archived){
   state.sessionArchived=archived;state.runsRefresh++;state.runs=[];
   document.querySelectorAll('[data-session-view]').forEach(button=>button.setAttribute('aria-pressed',String((button.dataset.sessionView==='archived')===archived)));
@@ -285,10 +285,13 @@ async function submitTask(e){
   }
   catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
 }
-async function openRun(id){
+async function openRun(id,hash='#run='+id){
+  const link=parseSessionLink(hash);
   const sessionEdits=state.sessionEdits||0;
   const titleEdits=state.titleEdits||0;
   stopStream();const version=++state.pageVersion;state.selected=id;
+  if(link?.runId===id&&link.credentialId)state.credentialLink={...link,pageVersion:version};
+  history.replaceState(null,'',state.credentialLink?.hash||'#run='+id);
   let run;
   try{run=await api(`/api/runs/${id}`);}catch(error){
     if(version!==state.pageVersion)return;
@@ -296,9 +299,9 @@ async function openRun(id){
     throw error;
   }
   if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;
-  if(sessionEdits!==(state.sessionEdits||0))return openRun(id);
+  if(sessionEdits!==(state.sessionEdits||0))return openRun(id,hash);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
-  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
+  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',state.credentialLink?.hash||'#run='+id);
   if(run.chat_enabled){renderChat(run);return;}
   $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':(run.sandbox_provider==='substrate'?'Substrate sandbox':'Modal sandbox')}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated sandbox supplied by your selected provider.'}</div></aside></div>`;
@@ -458,7 +461,7 @@ function updateChat(run,initial=false){
     if(atBottom)box.scrollTop=box.scrollHeight;
   }
   $('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;
-  updateChatStatus(run);renderCredentialRequests(run.credential_requests||[]);if(atBottom)box.scrollTop=box.scrollHeight;renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
+  updateChatStatus(run);const focusedCredential=renderCredentialRequests(run.credential_requests||[]);if(atBottom&&!focusedCredential)box.scrollTop=box.scrollHeight;renderApprovals(run.approvals||[]);renderSlackContext(run.slack_source);renderAgentDetails(run.agents);
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
   savedFiles.sync(run);
   $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
@@ -603,8 +606,8 @@ window.addEventListener('keydown',e=>{if(e.key==='Escape'){setSidebar(false);if(
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
-  const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1];
-  (linkedRun?openRun(linkedRun):navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks')).catch(showError);
+  const linkedRun=parseSessionLink(location.hash);
+  (linkedRun?openRun(linkedRun.runId,linkedRun.hash):navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks')).catch(showError);
 });
 document.querySelector('.skip-link')?.addEventListener('click',event=>{event.preventDefault();$('#content').focus();});
 async function boot(){
@@ -626,7 +629,7 @@ async function boot(){
     $('#logout').hidden=!!session.local;
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';}
     $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{await api('/api/logout',{method:'POST'});location.reload();}catch(error){button.disabled=false;showError(error);}};
-    const linkedRun=location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]; if(linkedRun)await openRun(linkedRun);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
+    const linkedRun=parseSessionLink(location.hash); if(linkedRun)await openRun(linkedRun.runId,linkedRun.hash);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
   }catch(e){$('#content').innerHTML='<div class="error-banner">'+esc(e.message)+'</div>';}

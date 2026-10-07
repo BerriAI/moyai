@@ -10,7 +10,7 @@ function harness(){
   const state={selected:'parent',runs:[],folders:[],organization:{},runsRefresh:0,expandedParents:new Set(['parent']),closedFolders:new Set(),drafts:{parent:'Unsent reply'}};
   const panelUpdates=[];
   const context={state,URL,URLSearchParams,ico:()=>'',glyph:{},location:{hash:''},$:node,relative:()=> '2m ago',document:{activeElement:null},workspacePanel:{syncTitles:rows=>panelUpdates.push(rows)},sessionFolderIcon:'',CSS:{escape:x=>x}};
-  vm.createContext(context);
+  vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);
   vm.runInContext(slice('const esc =','const state =')+slice('function sessionTitle(','function modelName(')+slice('function sidebarGroups(','function setView(')+slice('async function refreshRuns(','async function renderHome('),context);
   return {context,state,node,panelUpdates};
 }

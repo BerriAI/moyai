@@ -3,6 +3,7 @@ import asyncio
 import hmac
 import json
 import re
+import sqlite3
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -33,7 +34,8 @@ Provider = Literal['fireworks', 'openai', 'anthropic', 'together', 'groq', 'gene
 Scope = Literal['session', 'personal', 'organization']
 Lifetime = Literal['session', 'persistent']
 Format = Literal['env', 'file']
-ACTIVE = {'running', 'awaiting_approval', 'saving', 'waiting_credential'}
+ACCESSIBLE = {'running', 'awaiting_approval', 'saving', 'waiting_credential', 'queued',
+              'provisioning', 'reconnecting', 'waiting_environment', 'waiting_children', 'idle', 'completed'}
 ENV_NAME = re.compile(r'^[A-Z_][A-Z0-9_]{0,127}$')
 RESERVED_ENV = {'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'ENV', 'BASH_ENV', 'IFS',
                 'PWD', 'OLDPWD', 'TMPDIR', 'NODE_OPTIONS', 'WORKSPACE_RUN_TOKEN',
@@ -265,7 +267,9 @@ class Credentials:
                     'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
                     'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
                     'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
-                    'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'"},
+                    'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
+                    'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
+                    'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
             }.items():
                 columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
                 for field, declaration in fields.items():
@@ -419,8 +423,45 @@ class Credentials:
         suffix = '' if request['provider'] == 'anthropic' else '/v1'
         return {**result, 'instructions': 'Use credentials_http_request with this request_id. For Python SDKs, base_url=os.environ["MOYAI_CREDENTIAL_PROXY_URL"] + "/' + request['id'] + suffix + '", api_key=os.environ["WORKSPACE_RUN_TOKEN"]. Set max_retries=0 and stream=False. The endpoint is rebuilt each turn; do not hard-code it. No raw provider key is available. Provider charges are separate from Moyai gateway spend.'}
 
+    def pending_rows(self, conn: sqlite3.Connection, run_id: str, *, include_children: bool = False) -> list[sqlite3.Row]:
+        # Pending access belongs to the session and requester, not its latest turn.
+        return conn.execute(f"""SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id
+            WHERE (r.id=? OR (? AND r.parent_run_id=?)) AND r.deleted_at=''
+            AND r.status IN ({','.join('?' for _ in ACCESSIBLE)}) AND q.status='pending'
+            ORDER BY q.created_at,q.id""", (run_id, include_children, run_id, *ACCESSIBLE)).fetchall()
+
+    @staticmethod
+    def request_label(row):
+        fields = json.loads(row['input_fields'])
+        if len(fields) == 1:
+            return fields[0]['name']
+        return row['name'] or PROVIDERS[row['provider']]['name'] + ' API key'
+
+    def select_scope_in(self, conn, request_id, generation, scope, actor_id):
+        """Record a sharing preference, never a grant. Caller owns the transaction."""
+        if scope not in {'session', 'personal', 'organization'}:
+            raise HTTPException(422, 'Choose Organization, Personal, or Session only.')
+        row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, 'Credential request not found.')
+        run = conn.execute('SELECT * FROM runs WHERE id=?', (row['run_id'],)).fetchone()
+        if not run or run['deleted_at']:
+            raise HTTPException(404, 'Session not found.')
+        if (row['status'] != 'pending' or row['generation'] != generation
+                or run['status'] not in ACCESSIBLE):
+            raise HTTPException(409, 'This access request changed. Open the current session.')
+        if not (self.same_requester(actor_id, row['actor_id'])
+                or self.same_requester(row['actor_id'], actor_id)):
+            raise HTTPException(403, 'Only the requester can choose how to share this access.')
+        if row['preferred_scope'] != scope:
+            conn.execute('UPDATE credential_requests SET preferred_scope=?,scope_revision=scope_revision+1 WHERE id=?',
+                         (scope, request_id))
+        return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone())
+
     def reopen_in(self, conn, row, failure, run=None):
-        if row['status'] != 'provided':
+        if row['status'] not in {'provided', 'pending'}:
+            return dict(row)
+        if row['status'] == 'pending' and (not run or row['message_id'] == run['active_message_id']):
             return dict(row)
         if run and row['message_id'] != run['active_message_id']:
             current = conn.execute('SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND request_key=?',
@@ -438,7 +479,7 @@ class Credentials:
                              (row['request_key'][:60] + '-renew-' + uuid4().hex[:8], row['id']))
             conn.execute('UPDATE credential_requests SET message_id=?,actor_id=? WHERE id=?',
                          (run['active_message_id'], run['active_user_id'], row['id']))
-        conn.execute("UPDATE credential_requests SET status='pending',secret_id='',resolved_at='',generation=generation+1,revision=revision+1,failure=? WHERE id=?",
+        conn.execute("UPDATE credential_requests SET status='pending',secret_id='',resolved_at='',generation=generation+1,revision=revision+1,preferred_scope='',scope_revision=0,resolution_pending=0,resolution_error='',failure=? WHERE id=?",
                      (failure, row['id']))
         self.audit_in(conn, row['actor_id'], row['secret_id'], 'requested again: ' + failure, row['run_id'])
         return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
@@ -468,6 +509,15 @@ class Credentials:
             if not prior:
                 prior = conn.execute("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'",
                                      (run['id'], run['active_message_id'])).fetchone()
+            if not prior:
+                for candidate in self.pending_rows(conn, run['id']):
+                    same_actor = (self.same_requester(candidate['actor_id'], run['active_user_id'])
+                                  or self.same_requester(run['active_user_id'], candidate['actor_id']))
+                    if (same_actor and candidate['request_key'] == args.request_key
+                            and self.matching(candidate, args.model_dump()) and candidate['reason'] == args.reason
+                            and json.loads(candidate['input_fields']) == json.loads(input_fields)):
+                        prior = self.reopen_in(conn, candidate, candidate['failure'], run)
+                        break
             if prior:
                 row = dict(prior)
                 if row['status'] == 'provided':
@@ -499,21 +549,80 @@ class Credentials:
                        'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
                 conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
                 self.audit_in(conn, actor, row['secret_id'], 'reused' if secret else 'requested', run['id'])
+            if row['status'] in {'provided', 'declined'}:
+                self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
         self.store.event(run['id'], 'credential', 'Access ready' if row['status'] == 'provided' else 'Access requested', {'request_id': row['id']})
         return self.ready(row)
+
+    def acknowledge_in(self, conn, run_id, message_id, request_id, generation):
+        """A receipt belongs to the exact generation delivered to its original turn."""
+        conn.execute("""UPDATE credential_requests SET resolution_pending=0,resolution_error=''
+            WHERE id=? AND run_id=? AND message_id=? AND generation=? AND resolution_pending=1 AND status IN ('provided','declined')
+            AND EXISTS(SELECT 1 FROM messages m JOIN runs r ON r.id=m.run_id
+                WHERE m.id=? AND m.run_id=? AND m.status='running' AND r.active_message_id=m.id)""",
+            (request_id, run_id, message_id, generation, message_id, run_id))
+
+    def acknowledge(self, run_id, message_id, request_id, generation):
+        with self.store.connect() as conn:
+            self.acknowledge_in(conn, run_id, message_id, request_id, generation)
+
+    def enqueue_resolution_in(self, conn, run, row):
+        content = (f"Secure access update: {row['name'] or row['provider']} access was {row['status']}. "
+                   f"Continue the task that requested it: {row['reason']} "
+                   "Inspect current state before retrying any external action.")
+        enqueue = self.manager.coordinator.enqueue_child_in if run['parent_run_id'] else self.store.enqueue_message_in
+        enqueue(conn, row['run_id'], content, f"credential-{row['id']}-{row['generation']}", None, row['actor_id'])
+        conn.execute("UPDATE credential_requests SET resolution_pending=0,resolution_error='' WHERE id=? AND generation=?",
+                     (row['id'], row['generation']))
+
+    def reconcile_resolutions(self, run_id):
+        """Finish a delivery abandoned by a handoff, including after worker restart."""
+        if not self.store.rows('SELECT 1 FROM credential_requests WHERE run_id=? AND resolution_pending=1 LIMIT 1', (run_id,)):
+            return
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+            if not run:
+                return
+            rows = conn.execute("""SELECT q.*,m.status AS message_status FROM credential_requests q
+                JOIN messages m ON m.id=q.message_id AND m.run_id=q.run_id
+                WHERE q.run_id=? AND q.resolution_pending=1""", (run_id,)).fetchall()
+            for row in rows:
+                if (run['deleted_at'] or run['status'] not in ACCESSIBLE
+                        or row['message_status'] not in {'running', 'completed', 'steered'}):
+                    conn.execute("UPDATE credential_requests SET resolution_pending=0,resolution_error='' WHERE id=?", (row['id'],))
+                    continue
+                if row['message_status'] == 'running':
+                    continue
+                # Child admission can freeze group results before queue admission.
+                # A deferred delivery must not commit half of that operation.
+                conn.execute('SAVEPOINT credential_delivery')
+                try:
+                    self.enqueue_resolution_in(conn, run, row)
+                except ValueError as exc:
+                    conn.execute('ROLLBACK TO credential_delivery')
+                    count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
+                    detail = ('This session reached its 100-turn limit. Start a new session to continue.'
+                              if count >= 100 else str(exc))
+                    if detail != row['resolution_error']:
+                        conn.execute('UPDATE credential_requests SET resolution_error=? WHERE id=?', (detail, row['id']))
+                        conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'credential',?,?,?)",
+                                     (run_id, 'Access decision saved, but automatic continuation could not be queued. ' + detail,
+                                      json.dumps({'request_id': row['id'], 'turn_id': row['message_id']}), now()))
+                finally:
+                    conn.execute('RELEASE credential_delivery')
 
     def resolution(self, run_id, request_id):
         row = self.row(request_id)
         run = self.store.run(run_id)
         if row['run_id'] != run_id or row['message_id'] != run['active_message_id']:
             raise ValueError('Credential request does not belong to this turn.')
-        return self.ready(row)
+        return {**self.ready(row), 'generation': row['generation']}
 
     def pending(self, run, user_id, admin):
-        if run['status'] not in ACTIVE:
-            return []
-        rows = self.store.rows("SELECT * FROM credential_requests WHERE run_id=? AND message_id=? AND status='pending'", (run['id'], run['active_message_id']))
-        return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure')},
+        with self.store.connect() as conn:
+            rows = self.pending_rows(conn, run['id'])
+        return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure', 'preferred_scope', 'scope_revision')},
                  'input_fields': json.loads(row['input_fields']),
                  'root_id': self.root(run), 'can_personal': self.same_requester(user_id, row['actor_id']), 'can_organization': admin,
                  **self.setup(row), 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
@@ -525,7 +634,7 @@ class Credentials:
             row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Credential request not found.')
-            run = self.store.run(row['run_id'])
+            run = conn.execute('SELECT * FROM runs WHERE id=?', (row['run_id'],)).fetchone()
             if not run or run['deleted_at']:
                 raise HTTPException(404, 'Session not found.')
             own = self.same_requester(user_id, row['actor_id'])
@@ -535,7 +644,7 @@ class Credentials:
                 raise HTTPException(409, 'This access request changed. Reopen the form before continuing.')
             if row['status'] != 'pending':
                 return row['run_id']  # Lost acknowledgements never save twice.
-            if run['status'] not in ACTIVE or run['active_message_id'] != row['message_id']:
+            if run['status'] not in ACCESSIBLE:
                 raise HTTPException(409, 'This session is no longer waiting for that access.')
             secret_id = ''
             if body.decision == 'provide':
@@ -567,8 +676,18 @@ class Credentials:
                     secret_id = self.insert_secret(conn, data, user_id, admin, self.root(run))
             status = 'provided' if secret_id else 'declined'
             secret_revision = conn.execute('SELECT revision FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()[0] if secret_id else 1
-            conn.execute('UPDATE credential_requests SET status=?,secret_id=?,secret_revision=?,resolved_at=? WHERE id=?',
+            conn.execute('UPDATE credential_requests SET status=?,secret_id=?,secret_revision=?,resolved_at=?,resolution_pending=1,resolution_error=\'\' WHERE id=?',
                          (status, secret_id, secret_revision, now(), request_id))
+            original_running = (run['active_message_id'] == row['message_id'] and conn.execute(
+                "SELECT 1 FROM messages WHERE id=? AND run_id=? AND status='running'",
+                (row['message_id'], row['run_id'])).fetchone())
+            if not original_running:
+                # Restore the requester through queue admission, without replaying
+                # the completed turn or borrowing the active person's identity.
+                try:
+                    self.enqueue_resolution_in(conn, run, {**dict(row), 'status': status})
+                except ValueError as exc:
+                    raise HTTPException(409, str(exc)) from None
             self.audit_in(conn, user_id, secret_id, status, row['run_id'])
         self.store.event(row['run_id'], 'credential', 'Access supplied' if secret_id else 'Access request declined', {'request_id': request_id})
         return row['run_id']
@@ -593,7 +712,10 @@ class Credentials:
                 row, secret = self.authorized_request(conn, run, request_id)
                 if row['provider'] != 'generic':
                     raise HTTPException(422, 'Use the inference proxy for provider keys.')
+                if row['status'] == 'pending':
+                    return self.ready(self.reopen_in(conn, row, row['failure'], run))
                 if row['status'] != 'provided':
+                    self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
                     return self.ready(row)
                 if not secret or not self.permitted(secret, run, run['active_user_id']):
                     return self.ready(self.reopen_in(conn, row, 'unavailable', run))
@@ -601,6 +723,8 @@ class Credentials:
                     return self.ready(self.reopen_in(conn, row, self.status(secret), run))
                 accepted.append((self.binding_in(conn, row, secret), secret))
             # No plaintext is produced until every selected handle is authorized.
+            for row, _ in accepted:
+                self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
             return {'status': 'ready', 'bindings': [{'request_id': row['id'], 'revision': row['revision'],
                     'format': secret['format'], 'env_var': secret['env_var'],
                     'value': self.security.decrypt(secret['encrypted'])} for row, secret in accepted]}
@@ -662,6 +786,7 @@ class Credentials:
         if self.slots.locked():
             raise HTTPException(429, 'Provider request capacity is busy. No provider call was made.')
         async with self.slots:
+            self.acknowledge(run['id'], run['active_message_id'], request['id'], request['generation'])
             value = self.security.decrypt(secret['encrypted'])
             headers = {'x-api-key': value, 'anthropic-version': '2023-06-01'} if secret['provider'] == 'anthropic' else {'Authorization': 'Bearer ' + value}
             try:

@@ -23,7 +23,7 @@ COOKIE = "google_login"
 
 
 class SignInStart(BaseModel):
-    return_to: str = Field(default="/#tasks", max_length=100)
+    return_to: str = Field(default="/#tasks", max_length=200)
 
 
 class GoogleSignIn:
@@ -105,7 +105,7 @@ class GoogleSignIn:
                 raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
             self.attempts.append(now)
             state, browser, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
-            return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32})", body.return_to) else "/#tasks"
+            return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32}(?:&credential=[a-f0-9]{32}&generation=(?:0|[1-9][0-9]{0,14}))?)", body.return_to) else "/#tasks"
             self.store.execute("DELETE FROM login_states WHERE expires<?", (time.time(),))
             self.store.execute("INSERT INTO login_states VALUES(?,?,?,?,?,?)",
                                (digest(state), digest(browser), nonce, verifier, return_to, time.time() + 600))
@@ -131,7 +131,8 @@ class GoogleSignIn:
                 row = conn.execute("DELETE FROM login_states WHERE state_hash=? AND browser_hash=? AND expires>? RETURNING *",
                                    (digest(state), digest(browser), time.time())).fetchone()
             result = "cancelled" if error else "failed"
-            response = RedirectResponse(f"/?signin={result}#tasks", status_code=303)
+            return_hash = row["return_path"][1:] if row else "#tasks"
+            response = RedirectResponse(f"/?signin={result}{return_hash}", status_code=303)
             response.delete_cookie(COOKIE, path="/auth/google")
             if not row or not browser or error or not code:
                 return response

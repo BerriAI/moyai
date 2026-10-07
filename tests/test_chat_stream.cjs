@@ -13,6 +13,7 @@ function browser() {
   let nextTimer = 0;
   const context = {
     state,
+    document: {querySelector:()=>null},
     savedFiles: {reset() {}},
     computer: {closed:false,close() {this.closed=true;}},
     EventSource: class {
@@ -33,7 +34,7 @@ function browser() {
     setTimeout: fn => {timers.set(++nextTimer, fn); return nextTimer;},
     clearTimeout: id => timers.delete(id),
   };
-  vm.createContext(context);
+  vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);
   vm.runInContext(
     script.slice(script.indexOf('function stopStream()'), script.indexOf('function sessionTitle(')) +
     script.slice(script.indexOf('function connectChatStream('), script.indexOf('function updateChatStatus(')), context);

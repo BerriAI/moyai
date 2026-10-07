@@ -99,6 +99,10 @@
 .credential-request-footer{padding:10px 14px;border-top:1px solid var(--line)}
 .credential-request-footer button{padding:7px 12px;background:#fff}
 .credential-request-failure{padding:0 18px}
+#credential-requests .credential-request.credential-request-linked{border:2px solid var(--purple)}
+.credential-request .credential-link-instruction{margin:0;padding:0 18px 12px;color:var(--purple);font-weight:500}
+.credential-request .credential-request-scope{margin:0;padding:0 18px 12px;color:var(--muted);font-size:.78rem}
+.credential-link-notice{padding:12px 16px;border:1px solid var(--line);border-radius:8px;background:var(--soft);font-size:.85rem}
 #credential-dialog .credential-request-reason{white-space:pre-wrap;overflow-wrap:anywhere}
 #credential-dialog .credential-context{overflow-wrap:anywhere;color:var(--muted);margin:8px 0 16px}
 .credential-request-details{font-size:.78rem;color:var(--muted);margin-bottom:16px}

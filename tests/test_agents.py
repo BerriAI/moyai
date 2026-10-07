@@ -341,6 +341,43 @@ async def test_child_chat_during_parent_stop_is_rejected_without_losing_assignme
     assert len(manager.store.messages(child)) == 1
 
 
+@pytest.mark.parametrize('parent_state', ['stopping', 'legacy_completed', 'handed_off'])
+async def test_historical_child_access_resolution_keeps_parent_admission_and_results(durable, parent_state):
+    from fastapi import HTTPException
+    from app.credentials import Resolve
+    from test_credentials import attach as attach_credentials, access_request, generic_value
+
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    vault = attach_credentials(manager)
+    await pause_parent(manager, root, result['group_id'])
+    child = coordinator.children(result['group_id'])[0]['id']
+    await drive(manager, child, phase='monitor')
+    request = access_request(vault, manager.store.run(child))
+    await drive(manager, child)
+    body = Resolve(scope='personal', lifetime='session', value=generic_value('env'), generation=0)
+    if parent_state == 'stopping':
+        manager.store.update_run(root, status='stopping')
+        with pytest.raises(HTTPException) as error:
+            vault.resolve(request['request_id'], body, 'google:tin', False)
+        assert error.value.status_code == 409 and 'finish stopping' in error.value.detail
+        assert vault.row(request['request_id'])['status'] == 'pending'
+        assert not manager.store.rows('SELECT * FROM provider_secrets') and not manager.store.has_queued_messages(child)
+        return
+    if parent_state == 'handed_off':
+        assert coordinator.handoff(root, result['group_id'])
+    else:
+        manager.store.execute("UPDATE agent_groups SET status='completed' WHERE id=?", (result['group_id'],))
+    vault.resolve(request['request_id'], body, 'google:tin', False)
+    queued = manager.store.rows("SELECT * FROM messages WHERE run_id=? AND status='queued'", (child,))
+    assert len(queued) == 1 and queued[0]['user_id'] == 'google:tin'
+    assert manager.store.rows('SELECT root_id FROM provider_secrets') == [{'root_id': root}]
+    await drive(manager, child)
+    manager.store.update_run(child, summary='New follow-up answer')
+    assert coordinator.results(root, result['group_id'])['children'][0]['summary'] == 'Saved answer'
+    assert coordinator.results(root, result['group_id'], latest=True)['children'][0]['summary'] == 'New follow-up answer'
+
+
 async def test_cancelled_group_cannot_freeze_other_workers_that_are_still_stopping(durable):
     manager, cloud, root = durable
     coordinator, result, _ = await launch(durable, count=2)

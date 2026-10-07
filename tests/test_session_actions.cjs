@@ -8,7 +8,7 @@ function harness() {
   const state = {runs:[{id:'one'},{id:'two'}],runsRefresh:1,chatRefresh:1,chatRun:{id:'one',archived:false}};
   const context = {state,renderSidebar:()=>{},toast:message=>notices.push(message),
     refreshRuns:async()=>calls.push('refresh'),api:async(path,options)=>calls.push({path,options})};
-  vm.createContext(context);vm.runInContext(source,context);
+  vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);vm.runInContext(source,context);
   return {context,state,notices,calls};
 }
 function menuHarness(chat) {
@@ -120,10 +120,10 @@ test('delayed deletion never navigates away from a newly selected session',async
 test('archive while opening a session rereads its metadata before rendering the header',async()=>{
   const app=readFileSync('app/static/app.js','utf8');let finish,rendered,reads=0;
   const state={runs:[{id:'one'}],pageVersion:0,expandedParents:new Set()};
-  const c={state,stopStream(){},refreshRuns:async()=>{},document:{hidden:true},
+  const c={state,stopStream(){},refreshRuns:async()=>{},document:{hidden:true,querySelector:()=>null},
     setView(){},sessionTitle:()=>'',history:{replaceState(){}},renderChat:run=>rendered=run,
     api:async()=>{if(++reads===1)return new Promise(resolve=>finish=resolve);return {id:'one',chat_enabled:true,archived:true};}};
-  vm.createContext(c);
+  vm.createContext(c);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),c);
   vm.runInContext(app.slice(app.indexOf('async function openRun('),app.indexOf('function renderChat(')),c);
   const pending=c.openRun('one');state.sessionEdits=1;
   finish({id:'one',chat_enabled:true,archived:false});await pending;
@@ -134,7 +134,7 @@ function availabilityHarness(){
   const h=harness(),c=h.context,app=readFileSync('app/static/app.js','utf8');
   const content={innerHTML:'Old conversation'},source={close(){this.closed=true;}};
   Object.assign(h.state,{pageVersion:1,selected:'one',source,drafts:{one:'Unsent reply'}});
-  Object.assign(c,{$:()=>content,computer:{close(){}},savedFiles:{reset(){}},clearTimeout(){},
+  Object.assign(c,{document:{querySelector:()=>null},history:{replaceState(){}},$:()=>content,computer:{close(){}},savedFiles:{reset(){}},clearTimeout(){},
     navigate:async view=>{c.stopStream();h.state.selected=null;h.state.pageVersion++;h.calls.push({navigate:view});}});
   vm.runInContext(app.slice(app.indexOf('function stopStream()'),app.indexOf('function sessionTitle('))+
     app.slice(app.indexOf('async function openRun('),app.indexOf('function renderChat('))+
@@ -173,7 +173,7 @@ for(const method of ['openRun','refreshChat']){
 
 test('legacy task streams also close on the terminal deletion marker',async()=>{
   const {context:c,state,content}=availabilityHarness();
-  Object.assign(c,{document:{hidden:true},setView(){},sessionTitle:()=>'',esc:value=>value,
+  Object.assign(c,{document:{hidden:true,querySelector:()=>null},setView(){},sessionTitle:()=>'',esc:value=>value,
     history:{replaceState(){}},terminal:new Set(['completed']),renderApprovals(){},bindSessionHeaderActions(){},eventHTML:()=>'',statusLabel:value=>value,
     savedFiles:{reset(){},sync(){}},showError:error=>{throw error;},
     EventSource:class{constructor(){this.handlers={};}addEventListener(name,handler){this.handlers[name]=handler;}close(){this.closed=true;}},

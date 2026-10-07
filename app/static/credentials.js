@@ -1,5 +1,17 @@
 /* Secret values live only in this form and its HTTPS submission. */
 let credentialDialogGeneration=0;
+// Keep run links strict: credentials are identifiers, never values or arbitrary URLs.
+function parseSessionLink(hash){
+  if(typeof hash!=='string')return null;
+  const match=/^#run=([a-f0-9]{32})(?:&credential=([a-f0-9]{32})&generation=(0|[1-9][0-9]{0,14}))?$/.exec(hash);
+  return match?{runId:match[1],credentialId:match[2]||'',generation:match[3]===undefined?null:Number(match[3]),hash}:null;
+}
+function resetCredentialNavigation(){
+  state.credentialLink=null;state.credentialHighlight=null;state.credentialLinkNotice='';
+  credentialDialogGeneration++;
+  const dialog=document.querySelector('#credential-dialog');if(dialog?.open)dialog.close();
+}
+function credentialAvailability(scope){return {session:'Session only',personal:'Personal',organization:'Organization'}[scope]||'';}
 const onePasswordAccess={
   provider:'generic',name:'1password-shared',format:'env',label:'1Password Shared',
   setup_url:'https://developer.1password.com/docs/service-accounts/get-started/',
@@ -46,17 +58,41 @@ function credentialMatches(secret,request,rootId){
 }
 function renderCredentialRequests(requests){
   const target=document.querySelector('#credential-requests');if(!target)return;
-  const signature=JSON.stringify(requests);if(target.dataset.signature===signature)return;target.dataset.signature=signature;
-  target.innerHTML=requests.map(r=>{
+  const link=state.credentialLink;
+  let focusId='';
+  if(link&&link.runId===state.selected&&link.pageVersion===state.pageVersion){
+    // Consume on the first complete session response, including unavailable targets.
+    // A later poll or browser refresh must not revive a stale Slack link.
+    state.credentialLink=null;
+    history.replaceState(null,'','#run='+link.runId);
+    const request=requests.find(r=>r.id===link.credentialId&&r.generation===link.generation);
+    if(request&&(request.can_personal||request.can_organization)){
+      state.credentialHighlight={id:request.id,generation:request.generation};focusId=request.id;
+    }else state.credentialLinkNotice=request?'Only the requester or an organization admin can provide this secret.':'This access link is no longer current. The request may have been resolved or replaced. '+(requests.length?'Check the pending requests below.':'There are no pending access requests in this session.');
+  }
+  if(state.credentialHighlight&&!requests.some(r=>r.id===state.credentialHighlight.id&&r.generation===state.credentialHighlight.generation)){
+    state.credentialHighlight=null;state.credentialLinkNotice='This access request has been resolved or is no longer available.';
+  }
+  const signature=JSON.stringify([requests,state.credentialHighlight,state.credentialLinkNotice]);if(target.dataset.signature===signature)return false;target.dataset.signature=signature;
+  target.innerHTML=(state.credentialLinkNotice?`<p class="credential-link-notice" role="status">${esc(state.credentialLinkNotice)}</p>`:'')+requests.map(r=>{
     const generic=r.provider==='generic';
     const failure={expired:'Saved access expired.',invalid:'Saved access needs updating.',permission:'Saved access needs additional permissions.'}[r.failure]||'';
     const fields=credentialInputFields(r),name=fields.length===1?fields[0].name:generic?r.name:(r.provider_name||r.provider)+' API key';
-    return `<section class="credential-request" aria-label="Credentials requested"><div class="credential-request-heading"><span aria-hidden="true">⚿</span><span>Credentials requested: <strong>${esc(name)}</strong></span></div>${failure?`<p class="credential-request-failure">${esc(failure)}</p>`:''}<div class="credential-request-footer">${r.can_personal||r.can_organization?`<button type="button" data-provide-key="${esc(r.id)}" aria-haspopup="dialog" aria-controls="credential-dialog">Provide Secret</button>`:'<small>Waiting for the requester or an organization admin.</small>'}</div></section>`;
+    const highlighted=state.credentialHighlight?.id===r.id&&state.credentialHighlight.generation===r.generation,availability=credentialAvailability(r.preferred_scope);
+    return `<section class="credential-request${highlighted?' credential-request-linked':''}" data-credential-request="${esc(r.id)}" aria-label="Credentials requested"><div class="credential-request-heading"><span aria-hidden="true">⚿</span><span>Credentials requested: <strong>${esc(name)}</strong></span></div>${failure?`<p class="credential-request-failure">${esc(failure)}</p>`:''}${availability?`<p class="credential-request-scope">Availability: ${esc(availability)}</p>`:''}${highlighted?`<p class="credential-link-instruction" id="credential-link-instruction" role="status">Select Provide Secret below to enter this credential securely.</p>`:''}<div class="credential-request-footer">${r.can_personal||r.can_organization?`<button type="button" data-provide-key="${esc(r.id)}" aria-haspopup="dialog" aria-controls="credential-dialog"${highlighted?' aria-describedby="credential-link-instruction"':''}>Provide Secret</button>`:'<small>Waiting for the requester or an organization admin.</small>'}</div></section>`;
   }).join('');
   target.querySelectorAll('[data-provide-key]').forEach(button=>button.onclick=()=>{
     const request=requests.find(r=>r.id===button.dataset.provideKey);
+    state.credentialHighlight=null;renderCredentialRequests(requests);
     openCredentialDialog(request).catch(showError);
   });
+  if(focusId&&!document.querySelector('#credential-dialog')?.open){
+    const button=target.querySelector(`[data-provide-key="${focusId}"]`);
+    button?.closest('.credential-request').scrollIntoView({block:'center',behavior:'instant'});
+    button?.focus({preventScroll:true});
+    return !!button;
+  }
+  return false;
 }
 
 async function renderSecrets(){
@@ -95,10 +131,10 @@ async function openOnePasswordDialog(){
 }
 
 async function openCredentialDialog(request=null,secret=null,preset=null){
-  const generation=++credentialDialogGeneration,dialog=$('#credential-dialog'),form=$('#credential-form');
+  const generation=++credentialDialogGeneration,page=state.pageVersion,runId=state.selected,dialog=$('#credential-dialog'),form=$('#credential-form');
   if(dialog.open)dialog.close();
   const data=await api('/api/credentials'+(request?'?run_id='+encodeURIComponent(state.selected):''));
-  if(generation!==credentialDialogGeneration)return;
+  if(generation!==credentialDialogGeneration||page!==state.pageVersion||runId!==state.selected)return;
   // Refresh manager metadata so an already open page cannot overwrite a newer revision.
   if(secret){secret=data.secrets.find(s=>s.id===secret.id);if(!secret?.can_manage)throw new Error('This credential is no longer available to edit.');}
   const rootId=request?(data.root_id||request.root_id||state.selected):(secret?.root_id||'');
@@ -111,7 +147,11 @@ async function openCredentialDialog(request=null,secret=null,preset=null){
   const existingScope=secret?(secret.scope==='session'?'personal':secret.scope):'';
   const existingLifetime=secret?credentialLifetime(secret):'';
   const inputFields=credentialInputFields(request||preset);
-  const useSelector=request?`<fieldset class="secret-use-field"><legend>Who can use this secret?</legend><div class="secret-use-selector" role="radiogroup" aria-label="Secret availability"><span class="secret-use-highlight" aria-hidden="true"></span>${[['session','Session only'],['personal','Personal'],['organization','Organization']].map(([value,label])=>`<label><input id="secret-use-${value}" type="radio" name="secret-use" value="${value}" ${value==='personal'&&canPersonal?'checked':''} ${(value==='organization'?!canOrganization:!canPersonal)?'disabled':''}><span>${label}</span></label>`).join('')}</div><p id="secret-use-description" class="secret-use-description">${canPersonal?'Only you, across future sessions.':'Choose Organization to share access with your organization.'}</p></fieldset><input id="secret-scope" type="hidden" value="${canPersonal?'personal':''}"><input id="secret-lifetime" type="hidden" value="${canPersonal?'persistent':''}">`:'';
+  const useChoice=credentialAvailability(request?.preferred_scope)?request.preferred_scope:(canPersonal?'personal':'');
+  const choiceAllowed=useChoice==='organization'?canOrganization:!!useChoice&&canPersonal;
+  const useDescriptions={session:'Only for this session and its subagents. Not reused in other sessions.',personal:'Only you, across future sessions.',organization:'Everyone in your organization, across future sessions.'};
+  const useDescription=choiceAllowed?useDescriptions[useChoice]:useChoice==='organization'?'Organization was selected in Slack. An organization admin must provide it, or you can choose another option.':useChoice?'Personal access was selected in Slack. Only the requester can provide it, or you can choose Organization.':'Choose Organization to share access with your organization.';
+  const useSelector=request?`<fieldset class="secret-use-field"><legend>Who can use this secret?</legend><div class="secret-use-selector" role="radiogroup" aria-label="Secret availability"><span class="secret-use-highlight" aria-hidden="true"></span>${[['session','Session only'],['personal','Personal'],['organization','Organization']].map(([value,label])=>`<label><input id="secret-use-${value}" type="radio" name="secret-use" value="${value}" ${value===useChoice?'checked':''} ${(value==='organization'?!canOrganization:!canPersonal)?'disabled':''}><span>${label}</span></label>`).join('')}</div><p id="secret-use-description" class="secret-use-description">${useDescription}</p></fieldset><input id="secret-scope" type="hidden" value="${choiceAllowed?(useChoice==='organization'?'organization':'personal'):''}"><input id="secret-lifetime" type="hidden" value="${choiceAllowed?(useChoice==='session'?'session':'persistent'):''}">`:'';
   const localExpiry=secret?.expires_at?new Date(Date.parse(secret.expires_at)-new Date(secret.expires_at).getTimezoneOffset()*60000).toISOString().slice(0,16):'';
   const labelField=`<div class="field"><label for="secret-label">Display name</label><input id="secret-label" maxlength="80" placeholder="My service access" autocomplete="off" value="${esc(secret?.label||preset?.label||'')}"></div>`,expiryField=`<div class="field"><label for="secret-expiry">Provider expiry (optional, your local time)</label><input id="secret-expiry" type="datetime-local" value="${esc(localExpiry)}"><small>Leave blank if unknown or if the credential does not expire.</small></div>`;
   const requestContext=request?`<p class="credential-context">${esc(inputFields.length===1?inputFields[0].name:request.provider==='generic'?request.name:(request.provider_name||providers[0]?.name||request.provider)+' API key')}</p>`:'';
