@@ -90,6 +90,30 @@ test('failed filter change clears foreign rows and preserves selected chat',asyn
   assert.deepEqual(errors,['List unavailable']);
 });
 
+test('archive view forwards its scope and discards a late active listing',async()=>{
+  const {context:c}=scopeHelpers(),pending=[];
+  c.document={querySelectorAll:()=>[]};
+  c.$=()=>({setAttribute:()=>{}});
+  c.api=path=>path==='/api/session-folders'?Promise.resolve({folders:[]}):new Promise(resolve=>pending.push({path,resolve}));
+  const active=c.refreshRuns(),archived=c.changeSessionView(true);
+  assert.equal(new URL(pending[1].path,'http://local').searchParams.get('archived'),'true');
+  pending[1].resolve([{id:'archived'}]);await archived;
+  pending[0].resolve([{id:'stale-active'}]);await active;
+  assert.equal(c.state.runs[0].id,'archived');
+});
+
+test('switching between empty active and archived lists refreshes the empty message',()=>{
+  const c=helpers(),elements=new Map();
+  for(const id of ['#session-search','#task-count','#workspace-name','#session-list'])
+    elements.set(id,{value:'',innerHTML:'',scrollTop:0});
+  Object.assign(c,{document:{activeElement:null},$:id=>elements.get(id)});
+  Object.assign(c.state,{runs:[],folders:[],organization:{},expandedParents:new Set(),closedFolders:new Set()});
+  vm.runInContext(script.slice(script.indexOf('function renderSidebar('),script.indexOf('function setView(')),c);
+  c.renderSidebar();assert.match(elements.get('#session-list').innerHTML,/conversations will appear/);
+  c.state.sessionArchived=true;c.renderSidebar();
+  assert.match(elements.get('#session-list').innerHTML,/No archived sessions/);
+});
+
 const runs=[{id:'parent',prompt:'Benchmark models',children:[
   {id:'worker-a',agent_label:'Cases 1–20',status:'running'},
   {id:'worker-b',agent_label:'Cases 21–40',status:'idle'},

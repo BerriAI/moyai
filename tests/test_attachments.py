@@ -207,3 +207,22 @@ async def test_database_checkpoint_also_restores_uploaded_bytes(workspace, tmp_p
     restore_checkpoint(settings)
     restored = Store(settings.data_dir)
     assert restored.rows('SELECT data FROM attachments WHERE id=?', (file['id'],))[0]['data'].startswith(b'# Context')
+
+
+def test_deleted_session_attachment_is_not_readable(workspace):
+    from test_sessions import settled_session
+    from uuid import uuid4
+    from app.db import now
+
+    app, client = workspace
+    store = app.state.store
+    run_id = settled_session(app)
+    message_id = store.messages(run_id)[0]['id']
+    attachment_id = uuid4().hex
+    store.execute('INSERT INTO attachments VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                  (attachment_id, 'google:bob', message_id, 'private.png', 3, 'hash', 'image/png', '', now(), b'raw', b'preview'))
+    assert client.get('/api/attachments/' + attachment_id).status_code == 200
+    assert client.delete('/api/runs/' + run_id).status_code == 200
+    for suffix in ('', '/preview', '/audio'):
+        assert client.get('/api/attachments/' + attachment_id + suffix).status_code == 404
+    assert store.rows('SELECT data FROM attachments WHERE id=?', (attachment_id,))[0]['data'] == b'raw'

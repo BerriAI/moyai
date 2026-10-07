@@ -241,6 +241,8 @@ class SlackChat:
                 # An adopted session may already have web-only updates.
                 self.collect_progress_in(conn, binding, False)
             run_id = binding['run_id']
+            if conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at!=''", (run_id,)).fetchone():
+                return None  # Retain the binding and receipts; never restart a deleted thread.
             if Decimal(ts) < Decimal(binding['started_ts']):
                 return None
             if binding['paused'] and not mentioned and command not in {'wake', 'status'}:
@@ -393,9 +395,9 @@ class SlackChat:
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            for binding in conn.execute('SELECT t.*,r.status,r.updated_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
+            for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
                 run_id = binding['run_id']
-                allowed = enabled and binding['team_id'] == team
+                allowed = enabled and binding['team_id'] == team and not binding['deleted_at']
                 if not allowed:
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
                 self.collect_answers_in(conn, binding, allowed)
@@ -424,7 +426,8 @@ class SlackChat:
                     or (row['paused'] and row['kind'] in {'answer', 'input', 'input_update', 'progress', 'approval', 'reaction'})):
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
-            if not self.store.execute("UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'", (row['id'],)):
+            if not self.store.execute("""UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'
+                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='')""", (row['id'],)):
                 continue
             try:
                 # Persist before external side effects. Ambiguous sends are

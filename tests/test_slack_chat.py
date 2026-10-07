@@ -827,3 +827,27 @@ def test_explicit_capture_followup_delivers_without_a_new_pr(media_delivery):
     assert len(uploaded) == 2
     replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
     assert len(replies) == 1 and not replies[0].get('attachments')
+
+
+def test_deleted_slack_binding_cannot_continue_or_be_readopted(slack_app):
+    from test_spend import sign_in
+
+    app, client, run_id = start(slack_app)
+    finish(app, run_id, 'Saved result')
+    store = app.state.store
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    source = store.slack_source(run_id)
+    before = store.messages(run_id)
+    assert client.delete('/api/runs/' + run_id).status_code == 200
+    assert not store.rows("SELECT 1 FROM slack_outbox WHERE run_id=? AND status='pending'", (run_id,))
+    for index, prompt in enumerate(('Follow up normally', '<@U99999999> Explicit new mention', '/wake', '/model openai/gpt-6-astra'), 71):
+        payload = event(f'Deleted{index}', type='message', ts=f'17907199{index:02d}.123456', thread_ts=source['thread_ts'], text=prompt)
+        assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert store.messages(run_id) == before
+    assert len(store.rows('SELECT id FROM runs')) == 1
+    # Legacy adoption still finds the retained deleted row, then refuses it.
+    store.execute('DELETE FROM slack_threads WHERE run_id=?', (run_id,))
+    payload = event('DeletedLegacy', type='message', ts='1790720999.123456', thread_ts=source['thread_ts'], text='<@U99999999> Re-adopt this thread')
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert store.messages(run_id) == before
+    assert len(store.rows('SELECT id FROM runs')) == 1

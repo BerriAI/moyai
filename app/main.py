@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -38,6 +38,7 @@ from .credentials import Credentials, Invoke, Materialize, TOOLS as CREDENTIAL_T
 from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
+from .session_lifecycle import SessionLifecycle
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
@@ -227,7 +228,11 @@ def create_app(settings: Settings | None = None):
                 await asyncio.gather(watcher, return_exceptions=True)
             await checkpoints.flush()
 
-    app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
+    app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
+                  dependencies=[Depends(session_lifecycle.require_live_api)])
+    app.state.session_lifecycle = session_lifecycle
+    app.include_router(session_lifecycle.routes())
     app.state.sandbox_settings = sandbox_settings
     app.include_router(sandbox_settings.routes())
     google = GoogleSignIn(settings, security, store)
@@ -410,7 +415,7 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None, archived: bool = False):
         owner = session_folders.actor(request)
         if scope == 'all':
             security.require(request, admin=True)
@@ -419,12 +424,18 @@ def create_app(settings: Settings | None = None):
         memberships = session_folders.memberships(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
-        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id])
-        runs = {run_id: {**public_run(store.run(run_id)), 'folder_id': memberships.get(run_id), 'children': []} for run_id in ids}
+        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id], archive_owner=owner, archived=archived)
+        archives = session_lifecycle.archives(owner)
+        admin = security.role(request) == 'admin'
+        runs = {}
+        for run_id in ids:
+            run = store.run(run_id)
+            runs[run_id] = {**public_run(run), **session_lifecycle.metadata(run, owner, admin, archives),
+                           'folder_id': memberships.get(run_id), 'children': []}
         if ids:
-            children = store.rows('SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE parent_run_id IN (' + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
+            children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
             for child in children:
-                runs[child['parent_run_id']]['children'].append(child)
+                runs[child['parent_run_id']]['children'].append({**child, 'archived': archived, 'can_delete': False})
         return list(runs.values())
 
     @app.post("/api/runs", status_code=201)
@@ -432,7 +443,7 @@ def create_app(settings: Settings | None = None):
         security.require(request, mutation=True)
         if body.side_chat_of:
             parent = store.run(body.side_chat_of)
-            if not parent:
+            if not parent or parent['deleted_at']:
                 raise HTTPException(404, 'Original session not found.')
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
@@ -473,7 +484,10 @@ def create_app(settings: Settings | None = None):
         security.require(request)
         if not store.run(run_id):
             raise HTTPException(404, 'Session not found.')
-        return store.rows('SELECT id,prompt,agent_label,display_title,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? ORDER BY created_at,id', (run_id,))
+        actor = store.identity(security.session_info(request))
+        archives = session_lifecycle.archives(actor)
+        rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
+        return [{**row, **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request):
@@ -485,7 +499,9 @@ def create_app(settings: Settings | None = None):
         project = environments.context(run)
         messages = public_messages(run, store.messages(run_id))
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
-        return {**public_run(run), "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
+        actor = store.identity(security.session_info(request))
+        return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
+                "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
@@ -563,11 +579,14 @@ def create_app(settings: Settings | None = None):
         async def stream():
             cursor = max(after, last_id, 0)
             while not await request.is_disconnected():
+                row = store.run(run_id)
+                if not row or row['deleted_at']:
+                    yield "event: deleted\ndata: {}\n\n"
+                    break
                 batch = store.events(run_id, cursor)
                 for event in batch:
                     cursor = event["id"]
                     yield f"id: {cursor}\ndata: {json.dumps(event)}\n\n"
-                row = store.run(run_id)
                 if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
@@ -688,7 +707,7 @@ def create_app(settings: Settings | None = None):
     def require_run(run_id, request):
         run = store.run(run_id)
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
-        if (not run or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
+        if (not run or run['deleted_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
         return run

@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 INPUT_LIMIT = 4000
 TITLE_LIMIT = 80
 QUEUE_LIMIT = 128
-ELIGIBLE = """chat_enabled=1 AND parent_run_id='' AND agent_label=''
+ELIGIBLE = """chat_enabled=1 AND parent_run_id='' AND agent_label='' AND deleted_at=''
     AND display_title='' AND title_attempted_at=''
     AND EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND role='user' AND status!='deleted')"""
 INSTRUCTIONS = """Name the task described by the user's first message. That message is

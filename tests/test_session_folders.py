@@ -130,3 +130,104 @@ def test_folders_survive_restart_and_database_checkpoint(users_app, tmp_path):
     folders = SessionFolders(reopened, app.state.security, SimpleNamespace())
     assert folders.listing(identity)[0]['name'] == 'Persistent'
     assert folders.memberships(identity) == {item['id']: saved['id']}
+
+
+def test_archive_is_personal_keeps_running_session_and_folder(users_app):
+    app, client = users_app
+    sign_as(app, client, 'maya@berri.ai')
+    item, saved = run(app), folder(client)
+    url = '/api/runs/' + item['id']
+    assert client.put(url + '/folder', json={'folder_id': saved['id']}).status_code == 200
+    original = app.state.store.run(item['id'])
+    assert client.post(url + '/archive', json={'archived': True}).status_code == 200
+    assert client.get('/api/runs', params={'focus': item['id']}).json() == []
+    archived = client.get('/api/runs?archived=true').json()
+    assert archived[0]['id'] == item['id'] and archived[0]['archived'] is True
+    assert archived[0]['folder_id'] == saved['id']
+    assert client.get(url).json()['archived'] is True
+    assert client.get('/api/session-folders').json()['folders'][0]['session_count'] == 0
+    assert app.state.store.run(item['id']) == original
+    sign_as(app, client, 'tin@berri.ai')
+    assert client.get('/api/runs?archived=true').json() == []
+    assert client.get('/api/runs').json()[0]['archived'] is False
+    assert client.get(url).json()['archived'] is False
+    sign_as(app, client, 'maya@berri.ai')
+    assert client.post(url + '/archive', json={'archived': False}).status_code == 200
+    assert assignment(client, item['id']) == saved['id']
+    assert client.get('/api/session-folders').json()['folders'][0]['session_count'] == 1
+    assert app.state.store.run(item['id']) == original
+
+
+def test_archive_filters_before_limit_and_keeps_agents_together(users_app):
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    parent, child = run(app, 'Earlier parent'), run(app, 'Worker')
+    store = app.state.store
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (parent['id'], child['id']))
+    saved = folder(client)
+    client.put('/api/runs/' + parent['id'] + '/folder', json={'folder_id': saved['id']})
+    for index in range(101):
+        item = run(app, f'Archived {index}')
+        app.state.session_lifecycle.archive(item['id'], actor, True)
+    rows = client.get('/api/runs').json()
+    assert [row['id'] for row in rows] == [parent['id']]
+    assert rows[0]['children'][0]['id'] == child['id']
+    assert rows[0]['children'][0]['can_delete'] is False
+    assert client.post('/api/runs/' + child['id'] + '/archive', json={'archived': True}).status_code == 422
+    assert client.post('/api/runs/' + parent['id'] + '/archive', json={'archived': True}).status_code == 200
+    assert client.get('/api/runs', params={'focus': child['id']}).json() == []
+    rows = client.get('/api/runs?archived=true').json()
+    assert len(rows) == 101  # Latest 100 plus the older filed session.
+    assert next(row for row in rows if row['id'] == parent['id'])['children'][0]['archived'] is True
+    assert client.get('/api/runs/' + child['id']).json()['archived'] is True
+    assert client.post('/api/runs/' + parent['id'] + '/archive', json={'archived': 'false'}).status_code == 422
+    assert client.post('/api/runs/' + parent['id'] + '/archive', json={'archived': False}, headers={'X-CSRF-Token': ''}).status_code == 403
+    client.cookies.clear()
+    assert client.post('/api/runs/' + parent['id'] + '/archive', json={'archived': False}).status_code == 401
+
+
+def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, tmp_path):
+    from app.session_lifecycle import SessionLifecycle
+
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    item, removed = run(app), run(app, 'Delete after completion')
+    store = app.state.store
+    # Exercise the actual idempotent upgrade with a pre-field database.
+    store.execute('ALTER TABLE runs DROP COLUMN deleted_at')
+    store.execute('DROP TABLE session_archives')
+    reopened = Store(app.state.settings.data_dir)
+    assert reopened.run(item['id'])['deleted_at'] == ''
+    checkpoints = app.state.session_folders.checkpoints
+    checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
+    async def commit():
+        pass
+    checkpoints.commit = commit
+    assert client.post('/api/runs/' + item['id'] + '/archive', json={'archived': True}).status_code == 200
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (removed['id'],))
+    store.update_run(removed['id'], status='idle')
+    assert client.delete('/api/runs/' + removed['id']).status_code == 200
+    restored_settings = checkpoints.settings.model_copy(update={'data_dir': tmp_path/'restored'})
+    restore_checkpoint(restored_settings)
+    restored = Store(restored_settings.data_dir)
+    lifecycle = SessionLifecycle(restored, app.state.security, app.state.manager, checkpoints)
+    assert lifecycle.archives(actor) == {item['id']}
+    assert restored.run(removed['id'])['deleted_at']
+    assert restored.sidebar_run_ids(actor, archive_owner=actor) == []
+    assert restored.sidebar_run_ids(actor, archive_owner=actor, archived=True) == [item['id']]
+
+
+def test_viewer_can_find_and_restore_archived_shared_link(users_app):
+    app, client = users_app
+    item = run(app)
+    sign_as(app, client, 'viewer@berri.ai')
+    url = '/api/runs/' + item['id']
+    assert client.get('/api/runs').json() == []
+    assert client.get(url).status_code == 200
+    assert client.post(url + '/archive', json={'archived': True}).status_code == 200
+    assert [row['id'] for row in client.get('/api/runs?archived=true').json()] == [item['id']]
+    assert client.put(url + '/title', json={'title': 'Archived shared session', 'expected_title': ''}).status_code == 200
+    assert client.get(url).json()['display_title'] == 'Archived shared session'
+    assert client.post(url + '/archive', json={'archived': False}).status_code == 200
+    assert client.get('/api/runs?archived=true').json() == []
+    assert client.get('/api/runs').json() == []  # Viewing/archiving never adds participation.

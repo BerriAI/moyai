@@ -124,7 +124,7 @@ class RunManager:
         return await modal.Client.from_credentials.aio(self.settings.modal_token_id, self.settings.modal_token_secret)
 
     def submit(self, run):
-        if self.closing or run["id"] in self.jobs:
+        if self.closing or run.get('deleted_at') or run["id"] in self.jobs:
             return
         task = asyncio.create_task(self.chat(run) if run.get("chat_enabled") else self.execute(run))
         self.jobs[run["id"]] = task

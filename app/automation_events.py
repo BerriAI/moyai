@@ -160,7 +160,7 @@ class AutomationEvents:
             if run_id in seen or len(seen) >= 100:
                 return False
             seen.add(run_id)
-            run = conn.execute('SELECT parent_run_id,side_chat_of,chat_enabled FROM runs WHERE id=?', (run_id,)).fetchone()
+            run = conn.execute("SELECT parent_run_id,side_chat_of,chat_enabled FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
             if not run or not run['chat_enabled'] or run['parent_run_id']:
                 return False
             if conn.execute('SELECT 1 FROM automation_runs WHERE run_id=?', (run_id,)).fetchone():

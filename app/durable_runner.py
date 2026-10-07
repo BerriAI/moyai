@@ -62,7 +62,7 @@ class DurableRunner(RunManager):
     async def advance(self, run_id):
         async with self.locks.setdefault(run_id, asyncio.Lock()):
             row = self.store.run(run_id)
-            if not row:
+            if not row or row['deleted_at']:
                 return False
             state = self.state(run_id)
             if state.get('phase') in {'warm', 'warm_cleanup'}:

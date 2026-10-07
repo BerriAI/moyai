@@ -372,6 +372,8 @@ class Credentials:
         root_id = root_id or body.root_id if body.lifetime == 'session' else ''
         if body.lifetime == 'session' and not root_id:
             raise HTTPException(422, 'Session credentials must be associated with a session.')
+        if root_id and not conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at=''", (root_id,)).fetchone():
+            raise HTTPException(404, 'Session not found.')
         value = self.validated_value(body)
         fields = {key: getattr(body, key) for key in ('provider', 'scope', 'lifetime', 'name', 'format', 'env_var', 'expires_at')}
         fields.update(label=body.label.strip(), root_id=root_id)
@@ -524,6 +526,8 @@ class Credentials:
             if not row:
                 raise HTTPException(404, 'Credential request not found.')
             run = self.store.run(row['run_id'])
+            if not run or run['deleted_at']:
+                raise HTTPException(404, 'Session not found.')
             own = self.same_requester(user_id, row['actor_id'])
             if not own and not admin:
                 raise HTTPException(403, 'Only the requester or an administrator can resolve this request.')
@@ -705,7 +709,7 @@ class Credentials:
                     raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
             if values['lifetime'] == 'session':
                 root = self.store.run(values['root_id']) if values['root_id'] else None
-                if not root or self.root(root) != values['root_id']:
+                if not root or root['deleted_at'] or self.root(root) != values['root_id']:
                     raise HTTPException(422, 'Choose an existing root session for session-only use.')
                 if values['scope'] == 'personal' and not self.same_requester(values['owner_id'], root['active_user_id']):
                     raise HTTPException(403, 'Choose your own session for personal credentials.')
@@ -733,6 +737,8 @@ class Credentials:
         async def list_keys(request: Request, run_id: str = ''):
             user, admin = actor(request)
             run = self.store.run(run_id) if re.fullmatch(r'[0-9a-f]{32}', run_id) else None
+            if run and run['deleted_at']:
+                raise HTTPException(404, 'Session not found.')
             root_id = self.root(run) if run else ''
             return {'providers': [{'id': key, 'name': value['name'], 'setup_url': value['setup']} for key, value in PROVIDERS.items()],
                     'root_id': root_id, 'secrets': self.list_secrets(user, admin, root_id)}
@@ -742,7 +748,7 @@ class Credentials:
             user, admin = actor(request, True)
             if body.lifetime == 'session':
                 root = self.store.run(body.root_id) if body.root_id else None
-                if not root or self.root(root) != body.root_id:
+                if not root or root['deleted_at'] or self.root(root) != body.root_id:
                     raise HTTPException(422, 'Provide session credentials through a session request.')
                 if body.scope == 'personal' and not self.same_requester(user, root['active_user_id']):
                     raise HTTPException(403, 'Choose your own session for personal credentials.')

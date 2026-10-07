@@ -405,3 +405,183 @@ async def test_checkpoints_replace_latest_session_archive_and_restore_chat(tmp_p
     restored=Store(settings.data_dir)
     assert len(restored.messages(run['id'])) == 2
     assert (settings.data_dir/'artifacts'/archive.name).read_bytes() == b'newest files from second turn'
+
+
+def settled_session(app, owner='google:bob', **kwargs):
+    store = app.state.store
+    run = store.create_run('Settled session', '', 'demo', [], chat_enabled=True, user_id=owner, **kwargs)
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (run['id'],))
+    store.update_run(run['id'], status='idle')
+    return run['id']
+
+
+def test_delete_requires_exact_creator_or_admin_and_preserves_records(workspace):
+    from app.db import now
+    from test_spend import sign_in
+
+    app, client = workspace
+    store = app.state.store
+    run_id = settled_session(app)
+    sign_in(app, client, 'other', 'other@berri.ai')
+    url = '/api/runs/' + run_id
+    assert client.get(url).json()['can_delete'] is False
+    assert client.delete(url).status_code == 403
+    # An accounting link does not grant deletion authority for Slack-created work.
+    with store.connect() as conn:
+        slack = store.slack_identity_in(conn, 'TTEAM', 'UOWNER')
+    linked = settled_session(app, owner=slack)
+    store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:other', slack))
+    assert client.get('/api/runs/' + linked).json()['can_delete'] is False
+    assert client.delete('/api/runs/' + linked).status_code == 403
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    assert client.get(url).json()['can_delete'] is True
+    assert client.delete(url, headers={'X-CSRF-Token': ''}).status_code == 403
+    assert client.delete(url, headers={'Origin': 'https://other.example'}).status_code == 403
+    store.execute("INSERT INTO model_requests(id,key_hash,run_id,user_id,model,created_at,status,cost) VALUES('retained-cost','key',?,'google:bob','model',?,'completed','0.5')", (run_id, now()))
+    original_messages = store.messages(run_id)
+    assert client.delete(url).status_code == 200
+    assert client.delete(url).status_code == 200
+    assert store.run(run_id)['deleted_at']
+    assert store.messages(run_id) == original_messages
+    assert store.rows("SELECT cost FROM model_requests WHERE id='retained-cost'")[0]['cost'] == '0.5'
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    assert client.delete('/api/runs/' + linked).status_code == 200
+    client.cookies.clear()
+    assert client.delete(url).status_code == 401
+
+
+def test_delete_hides_parent_and_agents_and_blocks_all_session_access(workspace):
+    from test_agent_sidebar import seeded_group
+    from test_spend import sign_in
+    from app.security import digest
+
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    parent, child, _ = seeded_group(app)
+    folder = client.post('/api/session-folders', json={'name': 'Keep folder'}).json()['id']
+    assert client.put('/api/runs/' + parent + '/folder', json={'folder_id': folder}).status_code == 200
+    assert client.post('/api/runs/' + parent + '/archive', json={'archived': True}).status_code == 200
+    side = settled_session(app, side_chat_of=parent)
+    removed_side = settled_session(app, side_chat_of=side)
+    assert client.delete('/api/runs/' + child).status_code == 422
+    assert client.delete('/api/runs/' + removed_side).status_code == 200
+    assert client.get('/api/runs/' + side + '/side-chats').json() == []
+    assert client.delete('/api/runs/' + parent).status_code == 200
+    assert store.run(child)['deleted_at'] == store.run(parent)['deleted_at']
+    for archived in (False, True):
+        rows = client.get('/api/runs', params={'scope': 'all', 'archived': archived, 'focus': child}).json()
+        assert not {parent, child, removed_side}.intersection(row['id'] for row in rows)
+    assert client.get('/api/session-folders').json()['folders'][0]['session_count'] == 0
+    for run_id in (parent, child):
+        url = '/api/runs/' + run_id
+        for suffix in ('', '/side-chats', '/artifact', '/files', '/files/content?path=secret', '/computer', '/computer/captures/capture.png'):
+            assert client.get(url + suffix).status_code == 404, suffix
+        stream = client.get(url + '/events', headers={'Last-Event-ID': '1'})
+        assert stream.status_code == 200
+        assert stream.text == 'event: deleted\ndata: {}\n\n'  # No retained history on reconnect.
+        assert client.post(url + '/messages', json={'content': 'Cannot continue', 'client_id': 'after-delete'}).status_code == 404
+        assert client.post(url + '/cancel').status_code == 404
+        assert client.post(url + '/archive', json={'archived': False}).status_code == 404
+        assert client.put(url + '/folder', json={'folder_id': None}).status_code == 404
+        assert client.put(url + '/title', json={'title': 'Cannot rename deleted session', 'expected_title': ''}).status_code == 404
+        assert client.get('/api/credentials', params={'run_id': run_id}).status_code == 404
+        with pytest.raises(ValueError, match='deleted'):
+            store.enqueue_message(run_id, 'Cannot bypass HTTP', 'bypass-delete')
+    assert client.post('/api/runs', json={'prompt': 'Cannot copy deleted context', 'side_chat_of': parent}).status_code == 404
+    assert client.get('/api/runs/' + side).status_code == 200  # Side chats are independent sessions.
+    # A stale worker cannot reuse an otherwise valid capability on retained rows.
+    store.execute("UPDATE runs SET mode='modal',status='running',token_hash=? WHERE id=?", (digest('test-capability'), parent))
+    assert client.post('/broker/' + parent + '/tools/call', json={'name': 'anything', 'arguments': {}}, headers={'Authorization': 'Bearer test-capability'}).status_code == 401
+
+
+@pytest.mark.parametrize('busy', ['running', 'queued', 'injected', 'manager', 'warm', 'warm_cleanup', 'slack_sending'])
+def test_delete_rejects_unsettled_parent_or_child(workspace, monkeypatch, busy):
+    from test_agent_sidebar import seeded_group
+    from app.db import now
+
+    app, client = workspace
+    store = app.state.store
+    parent, child, _ = seeded_group(app)
+    if busy == 'running':
+        store.update_run(child, status='running')
+    elif busy in {'queued', 'injected'}:
+        store.execute('UPDATE messages SET status=? WHERE run_id=?', (busy, child))
+    elif busy == 'manager':
+        monkeypatch.setattr(app.state.manager, 'is_active', lambda run_id: run_id == child)
+    elif busy == 'slack_sending':
+        store.execute("INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,status,created_at) VALUES(?,'sending','answer','Answer','sending',?)", (child, now()))
+    else:
+        store.execute('CREATE TABLE IF NOT EXISTS durable_sessions(run_id TEXT PRIMARY KEY,state TEXT NOT NULL)')
+        store.execute('INSERT INTO durable_sessions VALUES(?,?)', (child, json.dumps({'phase': busy})))
+    response = client.delete('/api/runs/' + parent)
+    assert response.status_code == 409 and 'Stop' in response.json()['detail']
+    assert store.run(parent)['deleted_at'] == store.run(child)['deleted_at'] == ''
+
+
+def test_delete_and_enqueue_share_transaction_boundary(workspace):
+    from threading import Barrier
+    from fastapi import HTTPException
+
+    app, _ = workspace
+    store, lifecycle = app.state.store, app.state.session_lifecycle
+    outcomes = set()
+    for index in range(12):
+        run_id = settled_session(app)
+        barrier = Barrier(2)
+        def delete():
+            barrier.wait()
+            try:
+                lifecycle.delete(run_id, 'google:bob', False)
+                return 'deleted'
+            except HTTPException as exc:
+                assert exc.status_code == 409
+                return 'busy'
+        def enqueue():
+            barrier.wait()
+            try:
+                store.enqueue_message(run_id, 'Concurrent follow-up', f'race-{index:04}')
+                return 'queued'
+            except ValueError as exc:
+                assert 'deleted' in str(exc)
+                return 'blocked'
+        with ThreadPoolExecutor(2) as pool:
+            deleted, queued = pool.submit(delete), pool.submit(enqueue)
+            outcome = (deleted.result(), queued.result())
+        assert outcome in {('deleted', 'blocked'), ('busy', 'queued')}
+        assert bool(store.run(run_id)['deleted_at']) != store.has_queued_messages(run_id)
+        outcomes.add(outcome)
+    assert outcomes  # Scheduling may favor one side; both valid outcomes preserve the invariant.
+
+
+async def test_open_event_stream_closes_when_session_is_deleted(workspace):
+    app, client = workspace
+    run_id = settled_session(app)
+    async def connected():
+        return False
+    request = SimpleNamespace(headers={}, cookies=dict(client.cookies), is_disconnected=connected)
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, 'path', '') == '/api/runs/{run_id}/events')
+    response = await endpoint(run_id, request)
+    stream = response.body_iterator
+    for _ in range(10):
+        if 'event: run-status' in await anext(stream):
+            break
+    else:
+        pytest.fail('The open session stream never published its status')
+    app.state.session_lifecycle.delete(run_id, 'google:bob', False)
+    assert await anext(stream) == 'event: deleted\ndata: {}\n\n'
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+def test_deleted_session_rejects_replayed_creation_and_side_chat_source(workspace):
+    app, client = workspace
+    store = app.state.store
+    run_id = settled_session(app, client_id='create-before-delete')
+    assert client.delete('/api/runs/' + run_id).status_code == 200
+    with pytest.raises(ValueError, match='deleted'):
+        store.create_run('Settled session', '', 'demo', [], chat_enabled=True, user_id='google:bob', client_id='create-before-delete')
+    with pytest.raises(ValueError, match='no longer exists'):
+        store.create_run('Side chat copy', '', 'demo', [], chat_enabled=True, side_chat_of=run_id)
+    assert store.claim_message(run_id) is None
+    assert app.state.session_lifecycle.can_delete({'owner_id': '', 'parent_run_id': ''}, '', False) is False

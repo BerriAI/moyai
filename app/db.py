@@ -123,6 +123,11 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
                     source_id TEXT NOT NULL, target_id TEXT NOT NULL, created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS session_archives (
+                    owner_id TEXT NOT NULL REFERENCES users(id),
+                    run_id TEXT NOT NULL REFERENCES runs(id), archived_at TEXT NOT NULL,
+                    PRIMARY KEY(owner_id, run_id)
+                );
             """)
             if 'metadata' not in {row['name'] for row in conn.execute('PRAGMA table_info(slack_outbox)')}:
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
@@ -157,7 +162,7 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at', 'deleted_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_owner ON runs(owner_id,id)')
@@ -213,14 +218,16 @@ class Store:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params)]
 
-    def sidebar_run_ids(self, user_id=None, extra_ids=()):
+    def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False):
         """Filter before the recent limit and apply the same scope to filed/focused runs.
 
         Identity links affect this shared-workspace view only, never authorization.
         A submission remains participation even when subsequently soft-deleted.
         """
-        prefix, params, predicate = '', [], "parent_run_id=''"
-        if user_id is not None:
+        prefix, params, predicate = '', [], "parent_run_id='' AND deleted_at=''"
+        # Explicit personal archive membership remains discoverable even when
+        # the viewer reached a shared session by link without participating.
+        if user_id is not None and not (archived and archive_owner is not None):
             prefix = """WITH identities AS (
                 SELECT ? AS id WHERE ? != ''
                 UNION SELECT id FROM users WHERE kind='slack' AND linked_user_id=?
@@ -234,6 +241,9 @@ class Store:
             ) """
             params = [user_id, user_id, user_id]
             predicate += ' AND id IN (SELECT id FROM mine)'
+        if archive_owner is not None:
+            predicate += ' AND ' + ('' if archived else 'NOT ') + 'EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=runs.id AND a.owner_id=?)'
+            params.append(archive_owner)
         query = prefix + 'SELECT id FROM runs WHERE ' + predicate
         ids = [row['id'] for row in self.rows(query + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100', params)]
         # Bound placeholders even for accounts with many personally filed sessions.
@@ -261,8 +271,10 @@ class Store:
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
+                    if previous['deleted_at']:
+                        raise ValueError('This session was deleted. Start a new session.')
                     if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
@@ -270,7 +282,7 @@ class Store:
                     return self.run(previous['run_id'])
             context = ''
             if side_chat_of:
-                parent = conn.execute('SELECT prompt,summary FROM runs WHERE id=?', (side_chat_of,)).fetchone()
+                parent = conn.execute("SELECT prompt,summary FROM runs WHERE id=? AND deleted_at=''", (side_chat_of,)).fetchone()
                 if not parent:
                     raise ValueError('The original session no longer exists.')
                 recent = conn.execute("SELECT role,content FROM messages WHERE run_id=? AND status NOT IN ('queued','deleted') ORDER BY id DESC LIMIT 30", (side_chat_of,)).fetchall()
@@ -396,6 +408,8 @@ class Store:
     def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row and row['deleted_at']:
+            raise ValueError('This session was deleted. Start a new session.')
         if not row or not row["chat_enabled"]:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
         existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
@@ -435,8 +449,8 @@ class Store:
     def claim_message(self, run_id):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute("SELECT status,steer_message_id FROM runs WHERE id=?", (run_id,)).fetchone()
-            if not run or run["status"] in {"stopping", "cancelled", "interrupted"}:
+            run = conn.execute("SELECT status,steer_message_id,deleted_at FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run['deleted_at'] or run["status"] in {"stopping", "cancelled", "interrupted"}:
                 return None
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone():
                 return None

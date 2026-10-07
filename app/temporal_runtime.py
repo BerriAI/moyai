@@ -25,6 +25,8 @@ class TemporalRunManager(DurableRunner):
         self.ready = asyncio.Event()
 
     def submit(self, run):
+        if run.get('deleted_at'):
+            return
         # DB inbox is authoritative. Network errors leave the wake request
         # pending, rather than accepting a message and losing its dispatch.
         self.store.execute('''INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)

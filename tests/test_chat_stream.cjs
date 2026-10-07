@@ -8,7 +8,7 @@ const vm = require('node:vm');
 function browser() {
   const script = readFileSync('app/static/app.js', 'utf8');
   const sources = [], timers = new Map(), rendered = [], refreshes = [], live = [];
-  const notice = {hidden: true};
+  const notice = {hidden: true}, content = {innerHTML:'Previous conversation'}, navigations = [], notices = [];
   const state = {selected: 'chat-a', source: null, drafts: {'chat-a': 'unsent reply'}};
   let nextTimer = 0;
   const context = {
@@ -20,13 +20,15 @@ function browser() {
       addEventListener(name, handler) { this.handlers[name] = handler; }
       close() { this.closed = true; }
     },
-    $: selector => selector === '#connection-state' ? notice : {
+    $: selector => selector === '#connection-state' ? notice : selector === '#content' ? content : {
       insertAdjacentHTML: (_, text) => rendered.push(text),
     },
     eventHTML: event => event.id,
     refreshChat: async id => {refreshes.push(id);},
     updateChatStatus: () => {},
     renderLiveWork: (event, disconnected) => { live.push({event, disconnected}); },
+    toast: message => notices.push(message),
+    navigate: async view => {context.stopStream();state.selected=null;navigations.push(view);},
     showError: error => {throw error;},
     setTimeout: fn => {timers.set(++nextTimer, fn); return nextTimer;},
     clearTimeout: id => timers.delete(id),
@@ -37,7 +39,7 @@ function browser() {
     script.slice(script.indexOf('function connectChatStream('), script.indexOf('function updateChatStatus(')), context);
   context.connectChatStream({id: 'chat-a', events: [{id: 10}]});
   const retry = () => {const [id, fn] = timers.entries().next().value; timers.delete(id); fn();};
-  return {context, state, sources, timers, rendered, refreshes, notice, retry, live};
+  return {context, state, sources, timers, rendered, refreshes, notice, retry, live, content, navigations, notices};
 }
 
 test('recovers after repeated deployment errors, resumes the cursor, and preserves the draft', () => {
@@ -84,6 +86,19 @@ test('late callbacks from an old stream cannot change the replacement chat', () 
   assert.equal(b.notice.hidden, true);
   assert.equal(b.timers.size, 0);
   assert.deepEqual(b.rendered, []);
+  b.sources[0].handlers.deleted();
+  assert.deepEqual(b.navigations, []);
+});
+
+test('a reconnecting deleted stream clears the conversation and stops retrying',async()=>{
+  const b=browser();
+  b.sources[0].onerror();b.retry();
+  await b.sources[1].handlers.deleted();
+  assert.equal(b.sources[1].closed,true);assert.equal(b.state.source,null);
+  assert.equal(b.state.selected,null);assert.equal(b.timers.size,0);
+  assert.deepEqual(b.navigations,['tasks']);assert.match(b.content.innerHTML,/no longer available/);
+  assert.equal(b.state.drafts['chat-a'],'unsent reply');
+  b.sources[1].onerror();assert.equal(b.timers.size,0);
 });
 
 test('a steering receipt refreshes its user input before subsequent public updates',()=>{

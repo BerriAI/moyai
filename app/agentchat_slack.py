@@ -53,7 +53,8 @@ class SessionState:
         if len(parts) != 4 or parts[0] != 'slack':
             return ()
         _, team, channel, thread = parts
-        bindings = self.store.rows('SELECT run_id FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
+        bindings = self.store.rows("""SELECT run_id FROM slack_threads t JOIN runs r ON r.id=t.run_id
+                                   WHERE team_id=? AND channel=? AND thread_ts=? AND r.deleted_at=''""",
                                    (team, channel, thread))
         if not bindings:
             return ()

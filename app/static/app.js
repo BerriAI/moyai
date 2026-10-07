@@ -18,14 +18,22 @@ async function api(path, options = {}) {
       response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
       `Upload failed (HTTP ${response.status}). Retry this file.`
     ) : `The request could not be completed (HTTP ${response.status}).`;
-    throw new Error(typeof body.detail === 'string' ? body.detail : fallback);
+    const error = new Error(typeof body.detail === 'string' ? body.detail : fallback);
+    error.status = response.status;
+    throw error;
   }
   return body;
 }
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; savedFiles.reset(); }
+function stopStream(){ if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.sessionHeaderRun = null; savedFiles.reset(); }
+async function showUnavailableSession(id){
+  if(state.selected!==id)return;
+  $('#content').innerHTML='<p role="status">This session is no longer available.</p>';
+  toast('This session is no longer available.');
+  await navigate('tasks');
+}
 function sessionTitle(run={}){
   const text=value=>typeof value==='string'?value.replace(/\s+/g,' ').trim():'';
   const names=run.parent_run_id?[run.agent_label,run.display_title]:[run.display_title,run.agent_label];
@@ -144,10 +152,10 @@ function renderSidebar(){
   // Polling must not replace the source element during a native drag.
   if(state.draggedSessionId)return;
   const search=($('#session-search').value||'').trim().toLowerCase();
-  const sections=sidebarSections(state.runs,state.folders,search);
+  const sections=sidebarSections(state.runs,state.sessionArchived?[]:state.folders,search);
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
-  const signature=JSON.stringify([state.selected,search,[...state.expandedParents],[...state.closedFolders],sections]);
+  const signature=JSON.stringify([state.selected,state.sessionArchived,search,[...state.expandedParents],[...state.closedFolders],sections]);
   if(state.sidebarSignature===signature)return;
   state.sidebarSignature=signature;
   const list=$('#session-list'),scroll=list.scrollTop;
@@ -156,8 +164,8 @@ function renderSidebar(){
   list.innerHTML=sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
     return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
-  }).join('')+(state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:sidebarRenderSessions(sections.recent,search));
-  if(!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`;
+  }).join('')+(!state.sessionArchived&&state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:sidebarRenderSessions(sections.recent,search));
+  if(!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':state.sessionArchived?'No archived sessions.':'Your conversations will appear here.'}</p>`;
   list.scrollTop=scroll;
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
 }
@@ -213,7 +221,14 @@ async function navigate(view) {
     if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
   }
 }
-async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||location.hash.match(/^#run=([a-f0-9]{32})$/)?.[1]||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(state.sessionArchived)params.set('archived','true');if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+async function changeSessionView(archived){
+  state.sessionArchived=archived;state.runsRefresh++;state.runs=[];
+  document.querySelectorAll('[data-session-view]').forEach(button=>button.setAttribute('aria-pressed',String((button.dataset.sessionView==='archived')===archived)));
+  $('#session-list').setAttribute('aria-label',archived?'Archived sessions':'Recent sessions');
+  renderSidebar();
+  try{await refreshRuns();}catch(error){showError(error);}
+}
 function restoreSessionScope(){
   const canViewAll=state.authenticated&&state.role==='admin';
   state.sessionScope='mine';
@@ -271,13 +286,23 @@ async function submitTask(e){
   catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
 }
 async function openRun(id){
+  const sessionEdits=state.sessionEdits||0;
   const titleEdits=state.titleEdits||0;
-  stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;
+  stopStream();const version=++state.pageVersion;state.selected=id;
+  let run;
+  try{run=await api(`/api/runs/${id}`);}catch(error){
+    if(version!==state.pageVersion)return;
+    if(error.status===404){await showUnavailableSession(id);return;}
+    throw error;
+  }
+  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;
+  if(sessionEdits!==(state.sessionEdits||0))return openRun(id);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
   if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
   if(run.chat_enabled){renderChat(run);return;}
   $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':(run.sandbox_provider==='substrate'?'Substrate sandbox':'Modal sandbox')}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated sandbox supplied by your selected provider.'}</div></aside></div>`;
+  bindSessionHeaderActions(run);
   $('#back').onclick=()=>navigate('tasks').catch(showError);
   if($('#cancel'))$('#cancel').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await openRun(id);}catch(e){toast(e.message);}};
   if($('#retry'))$('#retry').onclick=async()=>{await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));};
@@ -288,6 +313,7 @@ async function openRun(id){
     source.onmessage=(e)=>{if(state.selected!==id)return;const event=JSON.parse(e.data);$('#timeline').insertAdjacentHTML('beforeend',eventHTML(event));if(event.kind==='approval') refreshApproval(id).catch(showError);};
     source.addEventListener('run-status',e=>{if(state.selected===id)$('#run-status').innerHTML=statusLabel(JSON.parse(e.data).status);});
     source.addEventListener('settled',()=>{source.close();if(state.selected===id)openRun(id).catch(showError);});
+    source.addEventListener('deleted',()=>{if(version===state.pageVersion&&state.source===source)showUnavailableSession(id).catch(showError);});
     source.onerror=()=>{if(source.readyState===EventSource.CLOSED)toast('Activity stream disconnected. Reopen this task to reconnect.');};
   }
 }
@@ -306,6 +332,7 @@ function renderChat(run){
   $('#header-actions').innerHTML=`${(run.parent_run_id||run.side_chat_of)?`<button class="quiet parent-session-link" data-open-parent="${esc(run.parent_run_id||run.side_chat_of)}" title="Open parent session">← Parent session</button>`:''}<span id="run-status"></span>${run.mode==='modal'?`<button id="computer-button" class="quiet details-toggle header-icon" aria-label="Computer" title="Computer" aria-controls="workspace-panel">${icon('monitor')}</button>`:''}<button id="files-button" class="quiet details-toggle" aria-controls="workspace-panel" hidden>Files</button><button id="toggle-details" class="quiet details-toggle header-icon" aria-label="Activity" title="Activity" aria-expanded="false" aria-controls="session-details">${icon('list')}</button><button id="workspace-panel-toggle" class="quiet details-toggle header-icon" aria-label="Show workspace panel" title="Workspace panel" aria-controls="workspace-panel" aria-expanded="false">${icon('panel')}</button>`;
   $('#content').innerHTML=`<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Respond to Moyai or ask something else"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill" title="Skills · or type /">${icon('slash',16)}</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model,false,run.harness)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message">${icon('up',18)}</button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Type / for skills · Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}${run.project_environment?.name?`<div class="detail-row"><span>Project environment</span><span>${esc(run.project_environment.name)} · ${esc(run.project_environment.commit_sha.slice(0,8))}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`;
+  bindSessionHeaderActions(run);
   workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onCreated:()=>refreshRuns().catch(showError)});
   $('#workspace-panel-toggle').onclick=()=>workspacePanel.toggle();
   $('#toggle-details').onclick=()=>workspacePanel.open('activity');$('#close-details').onclick=()=>workspacePanel.hide();
@@ -351,6 +378,7 @@ function connectChatStream(run){
       if(['chat','approval','artifact','context','agents','credential'].includes(event.kind)||(event.data?.phase==='steering'&&event.data?.message_id)||
         (event.data?.live_status===true&&MoyaiActivity.isFocus(event)&&String(event.data.input_id)!==String(MoyaiActivity.current(state.chatRun).input)))refreshChat(id).catch(showError);
     };
+    source.addEventListener('deleted',()=>{if(current())showUnavailableSession(id).catch(showError);});
     source.addEventListener('run-status',e=>{if(current()){$('#connection-state').hidden=true;updateChatStatus(JSON.parse(e.data));}});
     source.onerror=()=>{
       if(!current())return;
@@ -462,7 +490,17 @@ function renderSlackContext(source){
   const status=ready?`${messages.length} messages from the ${source.kind}`:({pending:'Waiting to read the conversation…',fetching:'Reading the conversation…',unavailable:'Conversation could not be read',legacy:'This session started before automatic Slack context'})[source.context_status]||'Context unavailable';
   target.innerHTML=`<section class="card source-context"><h3>Slack context</h3><p>${esc(status)}</p>${source.permalink?`<a href="${esc(source.permalink)}" target="_blank" rel="noopener noreferrer">Open source conversation ↗</a>`:''}${source.warning?`<p class="source-warning">${esc(source.warning)}</p>`:''}${ready?`<details><summary>View included messages</summary><div class="source-messages">${messages.map(m=>`<article><small>${esc(m.user)} · ${new Date(Number(m.ts)*1000).toLocaleString()}</small><p>${esc(m.text)}${m.text_truncated?'…':''}</p></article>`).join('')}</div></details>`:''}</section>`;
 }
-async function refreshChat(id){const version=state.chatRefresh=(state.chatRefresh||0)+1;const run=await api(`/api/runs/${id}`);if(version===state.chatRefresh&&state.selected===id&&$('#conversation'))updateChat(run);}
+async function refreshChat(id){
+  const page=state.pageVersion,version=state.chatRefresh=(state.chatRefresh||0)+1;
+  const current=()=>page===state.pageVersion&&version===state.chatRefresh&&state.selected===id;
+  let run;
+  try{run=await api(`/api/runs/${id}`);}catch(error){
+    if(!current())return;
+    if(error.status===404){await showUnavailableSession(id);return;}
+    throw error;
+  }
+  if(current()&&$('#conversation'))updateChat(run);
+}
 function eventHTML(event){if(MoyaiActivity.isFocus(event))return '';const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});const detail=event.data?.command||event.data?.detail;return `<div class="event event-${esc(event.kind)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;}
 function renderApprovals(approvals){ if(!$('#approvals'))return;$('#approvals').innerHTML=approvals.filter(a=>a.status==='pending').map(a=>`<div class="approval"><h3>Approval needed: ${esc(a.tool)}</h3><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>${state.role==='admin'?`<div class="approval-actions"><button data-approval="${a.id}" data-decision="approve" class="primary small">Approve once</button><button data-approval="${a.id}" data-decision="deny" class="small">Deny</button></div>`:'<p>An organization administrator must approve this action.</p>'}</div>`).join('');document.querySelectorAll('[data-approval]').forEach(b=>b.onclick=async()=>{try{await api(`/api/approvals/${b.dataset.approval}`,{method:'POST',body:JSON.stringify({decision:b.dataset.decision})});await refreshApproval(state.selected);}catch(e){toast(e.message);}});}
 async function refreshApproval(id){if(state.selected!==id)return;const run=await api(`/api/runs/${id}`);if(state.selected===id){renderApprovals(run.approvals);$('#run-status').innerHTML=statusLabel(run.status);}}
@@ -555,6 +593,7 @@ $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
 bindSessionFolderDragDrop($('#session-list'));
 $('#session-scope').onchange=changeSessionScope;
+document.querySelectorAll('[data-session-view]').forEach(button=>button.onclick=()=>changeSessionView(button.dataset.sessionView==='archived'));
 $('#search-sessions').setAttribute('aria-controls','session-search-field');
 $('#search-sessions').setAttribute('aria-expanded','false');
 $('#session-search').oninput=renderSidebar;

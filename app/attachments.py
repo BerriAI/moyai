@@ -254,6 +254,9 @@ class Attachments:
             rows = self.store.rows(f'SELECT {META} FROM attachments WHERE id=?', (attachment_id,))
             if not rows or (rows[0]['message_id'] is None and rows[0]['owner_id'] != owner):
                 raise HTTPException(404, 'Attachment not found.')
+            if rows[0]['message_id'] is not None and not self.store.rows("""SELECT 1 FROM messages m
+                    JOIN runs r ON r.id=m.run_id WHERE m.id=? AND r.deleted_at=''""", (rows[0]['message_id'],)):
+                raise HTTPException(404, 'Attachment not found.')
             return rows[0]
 
         @router.get('/api/attachments/{attachment_id}/preview')

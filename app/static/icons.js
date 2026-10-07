@@ -24,6 +24,9 @@
     up:'<path d="M12 19V5.5M6 11l6-6 6 6"/>',
     slash:'<rect x="4" y="4" width="16" height="16" rx="3"/><path d="m14 8.5-4 7"/>',
     chevron:'<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>',
+    archive:'<rect x="3" y="3" width="18" height="5" rx="1"/><path d="M5 8v12h14V8M10 12h4"/>',
+    restore:'<path d="M5 8v12h14V8M12 15V3m-4 4 4-4 4 4"/>',
+    trash:'<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7"/>',
     more:'<circle cx="5.5" cy="12" r=".9" fill="currentColor"/><circle cx="12" cy="12" r=".9" fill="currentColor"/><circle cx="18.5" cy="12" r=".9" fill="currentColor"/>',
     x:'<path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>',
   };

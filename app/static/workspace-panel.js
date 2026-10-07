@@ -127,12 +127,19 @@
     function mountChat(t){
       t.element.innerHTML=`<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" maxlength="16000" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`;
       const form=t.element.querySelector('form'),input=form.querySelector('textarea'),log=t.element.querySelector('[role="log"]'),status=form.querySelector('[data-status]'),model=form.querySelector('select'),send=form.querySelector('[type="submit"]'),stop=form.querySelector('[data-stop]'),link=t.element.querySelector('[data-full]');
-      let timer,inFlight=false,enabled=false,signature='',current=null;
+      let timer,inFlight=false,enabled=false,unavailable=false,signature='';
       model.onchange=()=>{t.model=model.value;save();};
       input.value=t.draft||'';input.oninput=()=>{t.draft=input.value;save();};
-      function showEmpty(){if(!t.chatId)log.innerHTML='<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>';}
+      function showEmpty(){if(!t.chatId&&!unavailable)log.innerHTML='<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>';}
+      function failed(e){
+        if(!good(t)||unavailable)return;
+        if(e.status!==404){status.textContent=e.message;return;}
+        unavailable=true;clearTimeout(timer);signature='';status.textContent='';
+        log.innerHTML='<div class="panel-empty" role="status">This side chat is no longer available.</div>';
+        input.disabled=model.disabled=send.disabled=stop.disabled=true;stop.hidden=link.hidden=true;
+      }
       function drawChat(data){
-        current=data;syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
+        syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
         if(signature!==next){
           signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
           log.innerHTML=transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join('');
@@ -146,7 +153,7 @@
         stop.hidden=!working;send.title=working?'Queue side message':'Send side message';link.hidden=false;link.href='/#run='+t.chatId;
         if(data.approvals?.some(a=>a.status==='pending')||data.credential_requests?.length)status.textContent='Action needed. Open this side chat as a full session to continue.';
       }
-      async function poll(){clearTimeout(timer);if(!enabled||!good(t)||!t.chatId||inFlight||document.hidden)return;inFlight=true;try{const data=await api('/api/runs/'+t.chatId);if(good(t))drawChat(data);}catch(e){if(good(t))status.textContent=e.message;}finally{inFlight=false;if(enabled&&good(t))timer=setTimeout(poll,2000);}}
+      async function poll(){clearTimeout(timer);if(!enabled||unavailable||!good(t)||!t.chatId||inFlight||document.hidden)return;inFlight=true;const chatId=t.chatId;try{const data=await api('/api/runs/'+chatId);if(good(t)&&!unavailable&&t.chatId===chatId)drawChat(data);}catch(e){if(t.chatId===chatId)failed(e);}finally{inFlight=false;if(enabled&&!unavailable&&good(t))timer=setTimeout(poll,2000);}}
       t.activate=()=>{enabled=true;showEmpty();poll();};t.deactivate=()=>{enabled=false;clearTimeout(timer);};t.dispose=t.deactivate;
       function visibility(){if(!document.hidden&&enabled)poll();}document.addEventListener('visibilitychange',visibility);t.dispose=()=>{t.deactivate();document.removeEventListener('visibilitychange',visibility);};
       form.onsubmit=async e=>{
@@ -154,13 +161,14 @@
         const body={...(t.chatId?{content:text}:{prompt:text,mode:run.mode,repo_url:run.repo_url,environment_id:run.environment_id||'auto',harness:run.harness||'hermes',plugins:run.plugins,side_chat_of:run.id}),model:model.value||run.model};
         const submission=JSON.stringify(body);if(t.submission!==submission||!t.clientId){t.clientId=crypto.randomUUID();t.submission=submission;}save();
         try{
-          if(!t.chatId){const created=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});t.chatId=created.id;t.title=text.length>28?text.slice(0,28)+'…':text;draw();sideChats.push(created);onCreated?.();}
+          if(!t.chatId){const created=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});if(!good(t)||unavailable)return;t.chatId=created.id;t.title=text.length>28?text.slice(0,28)+'…':text;draw();sideChats.push(created);onCreated?.();}
           else await api(`/api/runs/${t.chatId}/messages`,{method:'POST',body:JSON.stringify({...body,client_id:t.clientId})});
-          t.draft='';t.clientId='';t.submission='';input.value='';save();if(good(t)){await poll();input.disabled=false;input.focus();}
-        }catch(e){if(good(t))status.textContent=e.message;}finally{send.disabled=false;input.disabled=false;}
+          if(!good(t)||unavailable)return;
+          t.draft='';t.clientId='';t.submission='';input.value='';save();await poll();if(good(t)&&!unavailable){input.disabled=false;input.focus();}
+        }catch(e){failed(e);}finally{send.disabled=unavailable;input.disabled=unavailable;}
       };
       input.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();if(!send.disabled)form.requestSubmit();}};
-      stop.onclick=async()=>{stop.disabled=true;try{await api(`/api/runs/${t.chatId}/cancel`,{method:'POST'});await poll();}catch(e){status.textContent=e.message;}finally{stop.disabled=false;}};
+      stop.onclick=async()=>{if(unavailable||!good(t))return;stop.disabled=true;try{await api(`/api/runs/${t.chatId}/cancel`,{method:'POST'});await poll();}catch(e){failed(e);}finally{stop.disabled=unavailable;}};
       showEmpty();
     }
     const {titleFor=(r)=>(r.parent_run_id?r.agent_label||r.display_title:r.display_title||r.agent_label)||r.prompt,matchesSession=(r,s)=>(r.prompt||'').toLowerCase().includes(s)}=arguments[0];
