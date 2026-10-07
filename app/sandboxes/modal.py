@@ -2,17 +2,19 @@
 import modal
 
 from ..workspace_image import workspace_image
+from ..modal_clients import ModalClients
 
 
 class ModalProvider:
     name = 'modal'
 
-    def __init__(self, settings):
+    def __init__(self, settings, clients=None):
         self.settings = settings
+        self.clients = clients if clients is not None else ModalClients()
         self.image = lambda: workspace_image(settings)
 
     async def client(self):
-        return await modal.Client.from_credentials.aio(self.settings.modal_token_id, self.settings.modal_token_secret)
+        return await self.clients.get(self.settings)
 
     async def get(self, identity):
         return await modal.Sandbox.from_id.aio(identity, client=await self.client())

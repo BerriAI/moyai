@@ -16,6 +16,7 @@ from . import billing_sources
 from .db import now
 from .security import digest
 from .spend import period
+from .modal_clients import ModalClients
 
 log = logging.getLogger(__name__)
 PROVIDERS = {'render': 'Render', 'modal': 'Modal', 'temporal': 'Temporal Cloud'}
@@ -58,6 +59,7 @@ class InfrastructureCosts:
         self.store, self.settings, self.security, self.checkpoints = store, settings, security, checkpoints
         self.task = None
         self.wake = asyncio.Event()
+        self.modal_clients = ModalClients()
         with store.connect() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS infrastructure_bills (
@@ -187,7 +189,7 @@ class InfrastructureCosts:
         try:
             async with asyncio.timeout(55):
                 if job['provider'] == 'modal':
-                    values = await billing_sources.modal_costs(self.settings, start, end)
+                    values = await billing_sources.modal_costs(self.settings, start, end, clients=self.modal_clients)
                 else:
                     state = json.loads(job['state'])
                     def save_state(value):

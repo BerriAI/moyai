@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from .environments import EnvironmentPending
 from .security import digest
 from .message_queue import MessageQueue
+from .modal_clients import ModalClients
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
@@ -52,6 +53,7 @@ class RunManager:
         self.coordinator = None
         self.credentials = None
         self.message_queue = MessageQueue(store)
+        self.modal_clients = ModalClients()
 
     async def persist(self):
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
@@ -115,13 +117,13 @@ class RunManager:
     def provider(self, run=None, *, identity='', name=None):
         from .sandboxes import provider, provider_for_id
         selected = name or (provider_for_id(identity) if identity else (run or {}).get('sandbox_provider'))
-        backend = provider(self.settings, selected)
+        backend = provider(self.settings, selected, modal_clients=self.modal_clients)
         if backend.name == 'modal':
             backend.client, backend.image = self.client, self.image
         return backend
 
     async def client(self):
-        return await modal.Client.from_credentials.aio(self.settings.modal_token_id, self.settings.modal_token_secret)
+        return await self.modal_clients.get(self.settings)
 
     def submit(self, run):
         if self.closing or run["id"] in self.jobs:

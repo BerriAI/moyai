@@ -31,9 +31,9 @@ def next_month(day):
     return (day.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
-async def modal_costs(settings, start, end):
+async def modal_costs(settings, start, end, *, clients):
     """Daily, pre-credit costs for an exact app ID plus explicitly allocated objects."""
-    client = await modal.Client.from_credentials.aio(settings.modal_token_id, settings.modal_token_secret)
+    client = await clients.get(settings)
     app = await modal.App.lookup.aio(settings.modal_app_name, create_if_missing=False, client=client)
     objects = {app.app_id, *settings.modal_billing_object_ids.split(',')} - {''}
     workspace = modal.Workspace.from_context(client=client)

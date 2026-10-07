@@ -2,10 +2,10 @@
 from .modal import ModalProvider
 
 
-def provider(settings, name=None):
+def provider(settings, name=None, *, modal_clients=None):
     name = name or settings.sandbox_provider
     if name == 'modal':
-        return ModalProvider(settings)
+        return ModalProvider(settings, modal_clients)
     if name == 'substrate':
         from .substrate import SubstrateProvider
         return SubstrateProvider(settings)

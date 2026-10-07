@@ -5,6 +5,22 @@
 > This guide retains the detailed reference material from the original README.
 > Dated acceptance reports describe past checks, not a current deployment or test result.
 
+## Control-plane memory
+
+Moyai shares Modal clients across workspace monitoring, billing, and connection
+checks. Modal 1.6.0 retains factory-created clients through SDK shutdown hooks;
+creating a client on every poll steadily increases the control plane's memory.
+The application reuses one client per explicit credential pair and closes them
+after its consumers stop. Changed credentials select a different client without
+closing handles still used by existing operations. SDK shutdown hooks retain
+those distinct credential identities until process exit.
+
+This prevents polling from accumulating clients. It does not make in-flight
+inference durable across server restarts; interrupted inference remains a
+separate recovery concern. Compare Render memory with process-start timestamps
+when investigating a broker failure, rather than attributing every interruption
+to a model or tool error.
+
 ## Agent Traces in LiteLLM
 
 Moyai can send the same sanitized spans to **LiteLLM Lens, Raindrop, Langfuse,

@@ -166,6 +166,7 @@ def create_app(settings: Settings | None = None):
     manager.environments = environments
     spend = Spend(store, settings, security, checkpoints)
     infrastructure = spend.infrastructure
+    sandbox_settings.modal_clients = infrastructure.modal_clients = manager.modal_clients
     coordinator = AgentCoordinator(store, settings, manager)
     tracing = AgentTracing(store, settings)
     store.tracing = tracing
@@ -220,7 +221,10 @@ def create_app(settings: Settings | None = None):
             await environments.close()
             await identities.close()
             await slack.shutdown()
-            await manager.shutdown()
+            try:
+                await manager.shutdown()
+            finally:
+                await manager.modal_clients.close()
             await tracing.close()
             if watcher:
                 watcher.cancel()

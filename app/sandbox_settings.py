@@ -10,6 +10,7 @@ from typing import Literal
 
 from .config import Settings
 from .sandboxes import provider
+from .modal_clients import ModalClients
 
 FIELDS = {
     'modal': ('modal_token_id', 'modal_token_secret', 'modal_app_name', 'modal_vm_runtime'),
@@ -30,6 +31,7 @@ class SandboxSettings:
     def __init__(self, store, settings, security):
         self.store, self.settings, self.security = store, settings, security
         self.lock = asyncio.Lock()
+        self.modal_clients = ModalClients()
         store.execute('CREATE TABLE IF NOT EXISTS sandbox_settings (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, encrypted TEXT NOT NULL)')
         rows = store.rows('SELECT * FROM sandbox_settings WHERE id=1')
         if rows:
@@ -106,7 +108,7 @@ class SandboxSettings:
                 candidate = self.candidate(body)
                 try:
                     async with asyncio.timeout(180):
-                        message = await provider(candidate).check()
+                        message = await provider(candidate, modal_clients=self.modal_clients).check()
                 except Exception:
                     raise HTTPException(502, 'Connection test failed. Check credentials, endpoints, worker capacity, and the Moyai actor template. Your saved connection was not changed.') from None
                 for key in FIELDS[body.provider]:

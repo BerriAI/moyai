@@ -107,10 +107,12 @@ async def test_modal_uses_exact_app_and_allocated_resources_only(workspace,monke
     rows = [SimpleNamespace(object_id=key,cost=cost,interval_start=datetime(2026,9,1,tzinfo=timezone.utc))
             for key,cost in [('ap-moyai','1.00001'),('ap-other','999'),('vo-moyai','0.01')]]
     lookup = AsyncMock(return_value=SimpleNamespace(app_id='ap-moyai'))
-    monkeypatch.setattr(billing_sources.modal.Client,'from_credentials',SimpleNamespace(aio=AsyncMock(return_value='client')))
+    clients = SimpleNamespace(get=AsyncMock(return_value='client'))
     monkeypatch.setattr(billing_sources.modal.App,'lookup',SimpleNamespace(aio=lookup))
     monkeypatch.setattr(billing_sources.modal.Workspace,'from_context',lambda **kw: SimpleNamespace(billing=SimpleNamespace(report=SimpleNamespace(aio=AsyncMock(return_value=rows)))))
-    assert await billing_sources.modal_costs(app.state.settings,date(2026,9,1),date(2026,9,2)) == {'2026-09-01':Decimal('1.01001')}
+    assert await billing_sources.modal_costs(app.state.settings,date(2026,9,1),date(2026,9,2),
+        clients=clients) == {'2026-09-01':Decimal('1.01001')}
+    clients.get.assert_awaited_once_with(app.state.settings)
     assert lookup.call_args.kwargs['create_if_missing'] is False
 
 

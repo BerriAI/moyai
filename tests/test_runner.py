@@ -11,6 +11,144 @@ from app.db import Store
 from app.runner import RunManager, refresh_sandbox_files
 
 
+async def test_repeated_workspace_checks_retain_one_real_modal_client(tmp_path, monkeypatch):
+    import gc
+    from modal._utils import async_utils, grpc_utils
+    from modal.client import _Client
+    from app.temporal_runtime import TemporalRunManager
+
+    async def channel(server_url, metadata):
+        # Real SDK clients, TLS channels, stubs and shutdown hooks; no cloud I/O.
+        return grpc_utils.create_channel('https://localhost:443', metadata)
+
+    monkeypatch.setattr(grpc_utils, 'create_channel_with_fallbacks', channel)
+    settings = Settings(_env_file=None, data_dir=tmp_path, modal_token_id='test-id', modal_token_secret='test-secret')
+    manager = TemporalRunManager(Store(tmp_path), settings)
+    before = len(async_utils._shutdown_tasks)
+    retained = sum(type(item) is _Client for item in gc.get_objects())
+    clients = await asyncio.gather(*(manager.provider(name='modal').client() for _ in range(100)))
+    assert len({id(client) for client in clients}) == 1
+    assert len(async_utils._shutdown_tasks) - before == 1
+    del clients
+    gc.collect()
+    assert sum(type(item) is _Client for item in gc.get_objects()) - retained == 1
+    client = await manager.client()
+    await manager.modal_clients.close()
+    assert client.is_closed()
+
+
+async def test_modal_client_initialization_survives_cancelled_waiter_and_rotation(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, call
+    import modal
+    from app.modal_clients import ModalClients
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    original, replacement = (SimpleNamespace(__aexit__=AsyncMock()) for _ in range(2))
+
+    async def create(token_id, secret):
+        entered.set()
+        await release.wait()
+        return original if secret == 'first' else replacement
+
+    factory = AsyncMock(side_effect=create)
+    monkeypatch.setattr(modal.Client, 'from_credentials', aio(factory))
+    owner = ModalClients()
+    settings = Settings(_env_file=None, data_dir=tmp_path, modal_token_id='id', modal_token_secret='first')
+    cancelled = asyncio.create_task(owner.get(settings))
+    await entered.wait()
+    survivor = asyncio.create_task(owner.get(settings))
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    release.set()
+    assert await survivor is original
+    settings.modal_token_secret = 'second'
+    assert await owner.get(settings) is replacement
+    assert factory.await_args_list == [call('id', 'first'), call('id', 'second')]
+    original.__aexit__.assert_not_awaited()
+    await owner.close()
+    original.__aexit__.assert_awaited_once()
+    replacement.__aexit__.assert_awaited_once()
+    with pytest.raises(RuntimeError, match='shutting down'):
+        await owner.get(settings)
+
+
+async def test_failed_modal_initialization_can_retry_and_shutdown_drains_pending(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    import modal
+    from app.modal_clients import ModalClients
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    client = SimpleNamespace(__aexit__=AsyncMock())
+
+    async def create(*credentials):
+        entered.set()
+        await release.wait()
+        return client
+
+    factory = AsyncMock(side_effect=RuntimeError('connection failed'))
+    monkeypatch.setattr(modal.Client, 'from_credentials', aio(factory))
+    owner = ModalClients()
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    with pytest.raises(RuntimeError, match='connection failed'):
+        await owner.get(settings)
+    factory.side_effect = create
+    lookup = asyncio.create_task(owner.get(settings))
+    await entered.wait()
+    closing = asyncio.create_task(owner.close())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release.set()
+    assert await lookup is client
+    await closing
+    assert factory.await_count == 2
+    client.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.parametrize('temporal', [False, True])
+def test_app_shares_modal_clients_and_closes_after_consumers_stop(tmp_path, monkeypatch, temporal):
+    from datetime import date
+    from unittest.mock import AsyncMock
+    from fastapi.testclient import TestClient
+    import modal
+    from app.main import create_app
+    from app import billing_sources
+    from app.temporal_runtime import TemporalRunManager
+
+    # Keep external Temporal services out of this application-lifecycle test.
+    monkeypatch.setattr(TemporalRunManager, 'recover', AsyncMock())
+    settings = Settings(_env_file=None, data_dir=tmp_path, public_url='http://127.0.0.1:8787',
+                        temporal_enabled=temporal, modal_token_id='test-id', modal_token_secret='test-secret')
+    app = create_app(settings)
+
+    async def close(*args):
+        assert app.state.manager.closing
+
+    connection = SimpleNamespace(__aexit__=AsyncMock(side_effect=close))
+    factory = AsyncMock(return_value=connection)
+    lookup = AsyncMock(return_value=SimpleNamespace(app_id='ap-test'))
+    monkeypatch.setattr(modal.Client, 'from_credentials', aio(factory))
+    monkeypatch.setattr(modal.App, 'lookup', aio(lookup))
+    monkeypatch.setattr(modal.Workspace, 'from_context', lambda **kw:
+        SimpleNamespace(billing=SimpleNamespace(report=aio(AsyncMock(return_value=[])))))
+    with TestClient(app, base_url=settings.public_url, client=('127.0.0.1', 50000)) as http:
+        session = http.get('/api/session').json()
+        response = http.put('/api/settings/sandboxes', json={'provider': 'modal', 'revision': 0, 'values': {}},
+                            headers={'Origin': settings.public_url, 'X-CSRF-Token': session['csrf']})
+        assert response.status_code == 200
+
+        async def use_connections():
+            assert await app.state.manager.client() is connection
+            await billing_sources.modal_costs(settings, date(2026, 10, 1), date(2026, 10, 2),
+                                             clients=app.state.spend.infrastructure.modal_clients)
+
+        http.portal.call(use_connections)
+        factory.assert_awaited_once_with('test-id', 'test-secret')
+        assert all(call.kwargs['client'] is connection for call in lookup.await_args_list)
+        connection.__aexit__.assert_not_awaited()
+    connection.__aexit__.assert_awaited_once()
+
+
 def aio(function):
     return SimpleNamespace(aio=function)
 
