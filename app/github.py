@@ -20,6 +20,7 @@ from sandbox.github_limits import MAX_FILE, MAX_TOTAL
 
 from .connector_errors import ConnectorError
 from .db import now
+from .github_repositories import GitHubRepositories
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
@@ -40,6 +41,7 @@ class Args(BaseModel):
 
 
 class Repository(Args):
+    repository_id: int | None = Field(default=None, gt=0, strict=True, description='Permanent GitHub repository ID returned by github_repositories.')
     repository: str = Field(default='', pattern='^(?:' + REPOSITORY + ')?$',
                             description='An allowed owner/repository. Defaults to the session repository, then the first connected repository.')
 
@@ -68,7 +70,7 @@ class RequiredReviewer(Args):
 
 
 class RulesetReviewers(Ruleset):
-    repository: str = Field(pattern='^' + REPOSITORY + '$')
+    repository: str = Field(default='', pattern='^(?:' + REPOSITORY + ')?$')
     revision: str = Field(pattern=r'^[0-9a-f]{64}$', description='Revision returned by github_ruleset. Read again after a conflict or uncertain result.')
     required_reviewers: list[RequiredReviewer] = Field(max_length=100, description='Complete replacement for required_reviewers only. Preserve narrower entries the user did not ask to change; [] removes all entries from this ruleset.')
 
@@ -114,14 +116,16 @@ class Change(Args):
         return content
 
 
-class Changes(Args):
-    repository: str = Field(pattern='^' + REPOSITORY + '$')
+class Changes(Repository):
+    repository: str = Field(default='', pattern='^(?:' + REPOSITORY + ')?$')
     base_sha: str = Field(pattern='^' + SHA + '$')
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
     files: list[Change] = Field(min_length=1, max_length=100)
 
     @model_validator(mode='after')
     def bounded_changes(self):
+        if not self.repository and self.repository_id is None:
+            raise ValueError('Choose a repository ID before publishing changes.')
         paths = [f.path for f in self.files]
         if len(set(paths)) != len(paths) or len({p.lower() for p in paths}) != len(paths):
             raise ValueError('Duplicate file paths are not allowed.')
@@ -133,9 +137,9 @@ class Changes(Args):
         return self
 
 
-class Publish(Args):
+class Publish(Repository):
     # Keep field order stable for receipts from the original publisher.
-    repository: str = Field(pattern='^' + REPOSITORY + '$')
+    repository: str = Field(default='', pattern='^(?:' + REPOSITORY + ')?$')
     base_sha: str = Field(pattern='^' + SHA + '$')
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
     title: str = Field(min_length=3, max_length=250)
@@ -156,7 +160,7 @@ TOOLS = {
     'github_rulesets': ('github', False, Rulesets, 'List repository and inherited organization rulesets, including disabled rules. Use this to investigate automatic reviewer requests even when CODEOWNERS and workflows have no matching rule. Follow next_page until null.'),
     'github_ruleset': ('github', False, Ruleset, 'Read a ruleset, its branch conditions, required reviewers and other rules, plus a revision for editing. Inspection only needs Metadata read access; it does not need Administration permission.'),
     'github_update_ruleset_reviewers': ('github', True, RulesetReviewers, 'Change required reviewing teams/file patterns in one repository branch ruleset when requested by the user. Read github_ruleset first and pass its revision. Preserves approval count, code owner review, status checks and all other rules/settings. Requires GitHub Administration write access. Cannot edit inherited organization rulesets. On an uncertain result, read the ruleset before retrying; never retry blindly.'),
-    'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Use the exact owner/repository in checkout and PR tools.'),
+    'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Pass an entry’s id as repository_id in checkout and PR tools. Names are display labels.'),
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
     'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
@@ -167,13 +171,14 @@ TOOLS = {
 }
 
 
-class GitHub:
+class GitHub(GitHubRepositories):
     def __init__(self, store, security, settings, connectors):
         self.store, self.security, self.settings, self.connectors = store, security, settings, connectors
         self.write_lock = asyncio.Lock()
         self.token_lock = asyncio.Lock()
         self.setup_lock = asyncio.Lock()
         self.tokens = {}
+        self.init_repositories()
         store.execute('CREATE TABLE IF NOT EXISTS github_app (id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL)')
         store.execute('''CREATE TABLE IF NOT EXISTS github_publications (
             id TEXT PRIMARY KEY, run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
@@ -198,37 +203,6 @@ class GitHub:
                            (self.security.encrypt(json.dumps(config)),))
         self.tokens.clear()
 
-    def targets(self):
-        return self.settings.allowed_github_repositories()
-
-    def target(self, repository=''):
-        requested = repository or self.targets()[0]
-        for target in self.targets():
-            if target.lower() == requested.lower():
-                return target
-        raise ConnectorError('This repository is outside the organization GitHub allowlist.')
-
-    def connected_targets(self, credentials):
-        if credentials.get('kind') != 'github_app':
-            raise ConnectorError('Connect the organization GitHub App first.')
-        recorded = credentials.get('repositories', [credentials.get('repository', '')])
-        if not isinstance(recorded, list) or not recorded or any(not isinstance(repo, str) for repo in recorded):
-            raise ConnectorError('Reconnect the GitHub installation to confirm its repositories.')
-        # Changing configuration alone never grants an existing connection more access.
-        return [repo for repo in self.targets() if repo.lower() in {value.lower() for value in recorded}]
-
-    async def selected_target(self, run, repository=''):
-        connected = self.connected_targets(await self.connectors.credentials('github'))
-        if not connected:
-            raise ConnectorError('Reconnect GitHub to confirm the allowed repositories.')
-        if not repository:
-            requested = (run.get('repo_url') or '').removeprefix('https://github.com/').removesuffix('.git')
-            repository = next((repo for repo in connected if repo.lower() == requested.lower()), connected[0])
-        target = self.target(repository)
-        if target not in connected:
-            raise ConnectorError('Reconnect GitHub to grant this repository access.')
-        return target
-
     def app_jwt(self, config=None):
         config = config or self.app_config()
         if not config.get('pem') or not config.get('id'):
@@ -239,7 +213,7 @@ class GitHub:
         except Exception:
             raise ConnectorError('The GitHub App signing key is invalid. An administrator must reconnect it.') from None
 
-    async def request(self, method, path, *, token='', missing=False, **kwargs):
+    async def request(self, method, path, *, token='', missing=False, repository_redirect=False, **kwargs):
         # Every caller below constructs a fixed GitHub API path; no user URL.
         headers = {'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
         if token:
@@ -247,6 +221,11 @@ class GitHub:
         try:
             async with httpx.AsyncClient(timeout=45, follow_redirects=False) as client:
                 response = await client.request(method, API + path, headers=headers, **kwargs)
+                if repository_redirect and method == 'GET' and response.status_code in (301, 302, 307, 308):
+                    location = response.headers.get('location', '')
+                    if not re.fullmatch(re.escape(API) + r'/repositories/[1-9][0-9]*', location):
+                        raise ConnectorError('GitHub returned an unexpected repository redirect.')
+                    response = await client.get(location, headers=headers)
                 if missing and response.status_code == 404:
                     return None
                 if not 200 <= response.status_code < 300:
@@ -256,29 +235,24 @@ class GitHub:
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
 
     async def verify(self, credentials):
-        targets = self.connected_targets(credentials)
-        if targets != self.targets():
-            raise ConnectorError('Reconnect GitHub to confirm every configured repository.')
-        installation = await self.request('GET', f"/app/installations/{int(credentials['installation_id'])}", token=self.app_jwt())
-        if (installation.get('account', {}).get('login', '').lower() != self.target().split('/')[0].lower()
-                or installation.get('account', {}).get('type') != 'Organization' or installation.get('suspended_at')
-                or not supports_permissions(installation.get('permissions'))):
-            raise ConnectorError('Use the organization installation with Contents and Pull requests write access, plus Metadata read access. Additional permissions are supported.')
-        for target in targets:
+        await self.installation(credentials)
+        for target in self.connected_ids(credentials):
             token = await self.installation_token(credentials, repository=target, fresh=True)
             repositories = await self.request('GET', '/installation/repositories', token=token)
-            if [r['full_name'].lower() for r in repositories.get('repositories', [])] != [target.lower()]:
-                raise ConnectorError('A selected repository is not accessible to this installation.')
-        return ', '.join(targets)
+            items = repositories.get('repositories', [])
+            if [r.get('id') for r in items] != [target]:
+                raise ConnectorError('A selected repository ID is not accessible to this installation.')
+            self.remember_repository(items[0], credentials)
+        return ', '.join(self.repository_name(i, credentials) for i in self.connected_ids(credentials))
 
     async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False):
-        credentials = credentials or await self.connectors.credentials('github')
-        target = self.target(repository)
-        if target not in self.connected_targets(credentials):
+        credentials = credentials if credentials is not None else await self.ensure_connection()
+        target = self.target(repository, credentials)
+        if target not in self.connected_ids(credentials):
             raise ConnectorError('The GitHub installation does not match the configured repository.')
         installation = int(credentials['installation_id'])
         config = self.app_config()
-        key = (config.get('id'), installation, target.lower(), write, rules)
+        key = (config.get('id'), installation, target, write, rules)
         async with self.token_lock:
             cached = self.tokens.get(key)
             if not fresh and cached and cached[0] > time.time():
@@ -289,12 +263,12 @@ class GitHub:
             if rules and write:
                 installed = await self.request('GET', f'/app/installations/{installation}', token=self.app_jwt(config))
                 if (installed.get('suspended_at') or installed.get('account', {}).get('type') != 'Organization'
-                        or installed.get('account', {}).get('login', '').lower() != target.split('/')[0].lower()):
+                        or installed.get('account', {}).get('id') != credentials.get('account_id')):
                     raise ConnectorError('The GitHub installation is suspended or belongs to another organization. Reconnect GitHub.')
                 if not supports_permissions(installed.get('permissions'), {'administration': 'write'}):
                     raise ConnectorError('Ruleset inspection is available, but editing requires Administration: read and write on the organization GitHub App. An organization owner must enable and approve that permission for this installation, then retry. Existing code and PR access still works.')
             result = await self.request('POST', f'/app/installations/{installation}/access_tokens', token=self.app_jwt(config),
-                                        json={'repositories': [target.split('/')[1]], 'permissions': permissions})
+                                        json={'repository_ids': [target], 'permissions': permissions})
             from datetime import datetime
             expiry = datetime.fromisoformat(result['expires_at'].replace('Z', '+00:00')).timestamp() - 90
             self.tokens[key] = (expiry, result['token'])
@@ -302,12 +276,13 @@ class GitHub:
 
     async def repository(self, token, repository=''):
         target = self.target(repository)
-        repo = await self.request('GET', '/repos/' + target, token=token)
-        if repo.get('full_name', '').lower() != target.lower():
+        repo = await self.request('GET', f'/repositories/{target}', token=token)
+        if repo.get('id') != target:
             raise ConnectorError('GitHub returned a different repository; ask an administrator to reconnect it.')
+        self.remember_repository(repo, self.saved_credentials())
         branch = repo['default_branch']
-        ref = await self.request('GET', f'/repos/{target}/git/ref/heads/{quote(branch, safe="")}', token=token)
-        return {'repository': repo['full_name'], 'default_branch': branch, 'base_sha': ref['object']['sha'],
+        ref = await self.request('GET', f'/repositories/{target}/git/ref/heads/{quote(branch, safe="")}', token=token)
+        return {'repository_id': target, 'repository': repo['full_name'], 'default_branch': branch, 'base_sha': ref['object']['sha'],
                 'url': repo['html_url'], 'private': repo['private']}
 
     async def call(self, run, name, arguments):
@@ -324,32 +299,33 @@ class GitHub:
                     return await self.update(run, Update.model_validate(arguments))
                 return await self.comment(run, Comment.model_validate(arguments))
         if name == 'github_repositories':
-            return {'repositories': self.connected_targets(await self.connectors.credentials('github'))}
-        target = await self.selected_target(run, arguments.get('repository', ''))
+            await self.refresh_connection()
+            return {'repositories': self.repository_options()}
+        target = await self.selected_target(run, arguments.get('repository', ''), arguments.get('repository_id'))
         if name in {'github_rulesets', 'github_ruleset'}:
             token = await self.installation_token(repository=target, rules=True)
             if name == 'github_rulesets':
                 args = Rulesets.model_validate(arguments)
-                items = await self.request('GET', f'/repos/{target}/rulesets', token=token,
+                items = await self.request('GET', f'/repositories/{target}/rulesets', token=token,
                                            params={'includes_parents': 'true', 'per_page': 30, 'page': args.page})
-                return {'repository': target, 'rulesets': items, 'next_page': args.page + 1 if len(items) == 30 else None}
+                return {'repository_id': target, 'repository': self.repository_name(target), 'rulesets': items, 'next_page': args.page + 1 if len(items) == 30 else None}
             args = Ruleset.model_validate(arguments)
-            data = await self.request('GET', f'/repos/{target}/rulesets/{args.ruleset_id}', token=token,
+            data = await self.request('GET', f'/repositories/{target}/rulesets/{args.ruleset_id}', token=token,
                                       params={'includes_parents': 'true'})
             return self.ruleset_result(target, data)
         token = await self.installation_token(repository=target)
         if name in {'github_repository', 'github_checkout'}:
-            repo = {**await self.repository(token, target), 'git_path': '/github/' + target + '.git'}
+            repo = {**await self.repository(token, target), 'git_path': f'/github/repositories/{target}.git'}
             if name == 'github_checkout' and arguments.get('number'):
                 number = Checkout.model_validate(arguments).number
-                pr = await self.request('GET', f'/repos/{target}/pulls/{number}', token=token)
+                pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
                 repo.update(base_sha=pr['head']['sha'], number=number, checkout_ref=f'refs/pull/{number}/head')
             return repo
         if name == 'github_pull_request_comments':
             args = Feedback.model_validate(arguments)
             suffix = {'discussion': f'issues/{args.number}/comments', 'inline': f'pulls/{args.number}/comments',
                       'reviews': f'pulls/{args.number}/reviews'}[args.kind]
-            items = await self.request('GET', f'/repos/{target}/{suffix}', token=token,
+            items = await self.request('GET', f'/repositories/{target}/{suffix}', token=token,
                                        params={'per_page': 30, 'page': args.page})
             return {'kind': args.kind, 'items': [{
                 **{k: item.get(k) for k in ('id', 'html_url', 'state', 'path', 'line', 'in_reply_to_id', 'commit_id')},
@@ -357,7 +333,7 @@ class GitHub:
                 'body_truncated': len(item.get('body') or '') > 20000} for item in items],
                 'next_page': args.page + 1 if len(items) == 30 else None}
         number = PullRequest.model_validate(arguments).number
-        prefix = f'/repos/{target}/pulls/{number}'
+        prefix = f'/repositories/{target}/pulls/{number}'
         pr = await self.request('GET', prefix, token=token)
         files = await self.request('GET', prefix + '/files', token=token, params={'per_page': 100})
         remaining = 160000
@@ -382,19 +358,23 @@ class GitHub:
         return hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
     def ruleset_result(self, target, data):
-        return {'repository': target, 'ruleset': data, 'revision': self.ruleset_revision(data),
+        return {'repository_id': target, 'repository': self.repository_name(target), 'ruleset': data, 'revision': self.ruleset_revision(data),
                 'reviewers_editable': data.get('source_type') == 'Repository'
-                    and data.get('source', '').lower() == target.lower() and data.get('target') == 'branch',
+                    and data.get('source', '').lower() == self.repository_name(target).lower() and data.get('target') == 'branch',
                 'edit_permission': 'Administration: write'}
 
     async def update_ruleset_reviewers(self, run, args):
+        if not args.repository and args.repository_id is None:
+            raise ConnectorError('Choose a repository ID before editing its ruleset.')
+        await self.ensure_connection()
         name = 'github_update_ruleset_reviewers'
         version = run.get('github_connection_version', self.connection_version())
         self.ensure_publish_allowed(run, version, name)
-        target = await self.selected_target(run, args.repository)
+        target = await self.selected_target(run, args.repository, args.repository_id)
         token = await self.installation_token(repository=target, write=True, rules=True, fresh=True)
-        path = f'/repos/{target}/rulesets/{args.ruleset_id}'
+        path = f'/repositories/{target}/rulesets/{args.ruleset_id}'
         before = await self.request('GET', path, token=token, params={'includes_parents': 'true'})
+        self.ensure_publish_allowed(run, version, name)
         if before.get('id') != args.ruleset_id or not self.ruleset_result(target, before)['reviewers_editable']:
             raise ConnectorError('Only a branch ruleset owned by this repository can be edited. Inherited organization rulesets must be managed at their source.')
         if self.ruleset_revision(before) != args.revision:
@@ -418,11 +398,36 @@ class GitHub:
             raise ConnectorError('The ruleset update could not be verified exactly. Read its current state before making another change; no automatic retry was sent.')
         return {**self.ruleset_result(target, after), 'changed': True}
 
+    def arguments_hash(self, args, target):
+        value = args.model_dump()
+        value.pop('repository', None)
+        value['repository_id'] = target
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+    def upgrade_receipt_hash(self, table, row, args, fingerprint):
+        # Only completed receipts and the exact original payload can be upgraded.
+        if row['arguments_hash'] != fingerprint and row['result']:
+            legacy = args.model_dump(exclude={'repository_id'})
+            legacy['repository'] = json.loads(row['result']).get('repository', args.repository)
+            if hashlib.sha256(json.dumps(legacy).encode()).hexdigest() == row['arguments_hash']:
+                self.store.execute(f'UPDATE {table} SET arguments_hash=? WHERE id=?', (fingerprint, row['id']))
+                row['arguments_hash'] = fingerprint
+
+    def receipt(self, saved, target):
+        value = json.loads(saved)
+        previous = 'https://github.com/' + value.get('repository', '')
+        current = 'https://github.com/' + self.repository_name(target)
+        if value.get('url', '').startswith(previous + '/'):
+            value['url'] = current + value['url'][len(previous):]
+        return {**value, 'repository_id': target, 'repository': self.repository_name(target)}
+
     def connection_version(self):
         rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'")
-        app = self.store.rows('SELECT encrypted FROM github_app WHERE id=1')
-        return hashlib.sha256(((rows[0]['encrypted'] if rows else '') + (app[0]['encrypted'] if app else '')
-                              + json.dumps(self.targets())).encode()).hexdigest()
+        # Hash authorization, not mutable names or labels. Legacy migration
+        # enriches the app owner before upgrading completed publication receipts.
+        config = self.app_config()
+        app_identity = json.dumps({k: config.get(k) for k in ('id', 'pem', 'owner_id')}, sort_keys=True)
+        return hashlib.sha256(((rows[0]['encrypted'] if rows else '') + app_identity).encode()).hexdigest()
 
     def ensure_publish_allowed(self, run, connection_version, tool='github_create_pull_request'):
         current = self.store.run(run['id'])
@@ -438,7 +443,7 @@ class GitHub:
         cache = {}
         async def entries(sha):
             if sha not in cache:
-                tree = await self.request('GET', f'/repos/{self.target(repository)}/git/trees/{sha}', token=token)
+                tree = await self.request('GET', f'/repositories/{self.target(repository)}/git/trees/{sha}', token=token)
                 if tree.get('truncated'):
                     raise ConnectorError('A repository directory is too large to verify safely.')
                 cache[sha] = {entry['path']: entry for entry in tree['tree']}
@@ -460,26 +465,29 @@ class GitHub:
                 raise ConnectorError('Cannot delete a file that does not exist in the checkout base.')
 
     async def publish(self, run, args):
-        target = await self.selected_target(run, args.repository)
+        if run.get('github_connection_version'):
+            self.ensure_publish_allowed(run, run['github_connection_version'])
+        target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version)
         # Stable across chat turns so a lost ACK can be resolved on a follow-up.
         identity = hashlib.sha256(f"{run['id']}:{args.request_key}".encode()).hexdigest()
-        fingerprint = hashlib.sha256(args.model_dump_json().encode()).hexdigest()
+        fingerprint = self.arguments_hash(args, target)
         branch = f"moyai/{run['id'][:12]}/{identity[:16]}"
         self.store.execute('''INSERT OR IGNORE INTO github_publications
             (id,run_id,message_id,arguments_hash,branch,connection_version,created_at) VALUES(?,?,?,?,?,?,?)''',
             (identity, run['id'], run['active_message_id'] or 0, fingerprint, branch, version, now()))
         row = self.store.rows('SELECT * FROM github_publications WHERE id=?', (identity,))[0]
+        self.upgrade_receipt_hash('github_publications', row, args, fingerprint)
         if row['arguments_hash'] != fingerprint:
             raise ConnectorError('That request_key already describes different changes. Use a new key.')
         if row['connection_version'] != version:
             raise ConnectorError('The GitHub installation changed since this publication. Inspect the existing branch before continuing.')
         if row['result']:
-            return json.loads(row['result'])
+            return self.receipt(row['result'], target)
         token = await self.installation_token(repository=target, write=True)
         repo = await self.repository(token, target)
-        prefix = '/repos/' + target
+        prefix = f'/repositories/{target}'
         commit = row['commit_sha']
         if not commit:
             if repo['base_sha'] != args.base_sha:
@@ -501,22 +509,22 @@ class GitHub:
             if not isinstance(head, dict) or not isinstance(base, dict):
                 raise ConnectorError('The PR response has no valid head and base.')
             def repository_name(value):
-                return value.get('full_name') if isinstance(value, dict) else None
+                return value.get('id') if isinstance(value, dict) else None
             number = pr.get('number')
             if (type(number) is not int or number <= 0
-                    or pr.get('html_url') != f'https://github.com/{target}/pull/{number}'
+                    or pr.get('html_url') != f'https://github.com/{self.repository_name(target)}/pull/{number}'
                     or type(pr.get('draft')) is not bool or pr.get('state') not in ('open', 'closed')
                     or head.get('ref') != branch or head.get('sha') != commit
                     or repository_name(head.get('repo')) != target
                     or repository_name(base.get('repo')) != target or base.get('ref') != repo['default_branch']):
                 raise ConnectorError('The PR response does not match the expected publication.')
             return {'number': number, 'url': pr['html_url'], 'branch': branch, 'commit': commit,
-                    'draft': pr['draft'], 'state': pr['state'], 'repository': target, 'title': args.title}
+                    'draft': pr['draft'], 'state': pr['state'], 'repository_id': target, 'repository': self.repository_name(target), 'title': args.title}
 
         async def lookup():
             self.ensure_publish_allowed(run, version)
             pulls = await self.request('GET', prefix + '/pulls', token=token,
-                                       params={'state': 'all', 'head': target.split('/')[0] + ':' + branch, 'base': repo['default_branch']})
+                                       params={'state': 'all', 'head': self.repository_name(target).split('/')[0] + ':' + branch, 'base': repo['default_branch']})
             self.ensure_publish_allowed(run, version)
             if not isinstance(pulls, list) or len(pulls) > 1:
                 raise ConnectorError('Readback did not return a unique PR list.')
@@ -550,7 +558,7 @@ class GitHub:
         return result
 
     async def create_change_commit(self, run, args, token, target, version, tool):
-        prefix = '/repos/' + target
+        prefix = f'/repositories/{target}'
         base = await self.request('GET', prefix + '/git/commits/' + args.base_sha, token=token)
         await self.validate_tree_paths(token, base['tree']['sha'], args.files, target)
         tree = []
@@ -574,26 +582,27 @@ class GitHub:
     def owned_publication(self, run, target, number, version):
         for row in self.store.rows('SELECT * FROM github_publications WHERE run_id=? AND result!=?', (run['id'], '')):
             result = json.loads(row['result'])
-            if result.get('repository', '').lower() == target.lower() and result.get('number') == number:
+            if result.get('repository_id') == target and result.get('number') == number:
                 if row['connection_version'] != version:
                     raise ConnectorError('The GitHub installation changed since this PR was published.')
                 return row
         raise ConnectorError('Only PRs published by this session can be updated or commented on.')
 
     async def owned_pr(self, token, target, number, publication):
-        pr = await self.request('GET', f'/repos/{target}/pulls/{number}', token=token)
+        pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
         head = pr.get('head', {})
         if (pr.get('state') != 'open' or pr.get('merged') or head.get('ref') != publication['branch']
-                or (head.get('repo') or {}).get('full_name', '').lower() != target.lower()):
+                or (head.get('repo') or {}).get('id') != target):
             raise ConnectorError('The published PR is closed, merged or no longer points to its original Moyai branch.')
         return pr
 
-    def followup(self, run, tool, args, version):
+    def followup(self, run, tool, args, version, target):
         identity = hashlib.sha256(f"{run['id']}:{tool}:{args.request_key}".encode()).hexdigest()
-        fingerprint = hashlib.sha256(args.model_dump_json().encode()).hexdigest()
+        fingerprint = self.arguments_hash(args, target)
         self.store.execute('INSERT OR IGNORE INTO github_followups(id,arguments_hash,connection_version) VALUES(?,?,?)',
                            (identity, fingerprint, version))
         row = self.store.rows('SELECT * FROM github_followups WHERE id=?', (identity,))[0]
+        self.upgrade_receipt_hash('github_followups', row, args, fingerprint)
         if row['arguments_hash'] != fingerprint:
             raise ConnectorError('That request_key already describes different changes. Use a new key.')
         if row['connection_version'] != version:
@@ -602,13 +611,15 @@ class GitHub:
 
     async def update(self, run, args):
         tool = 'github_update_pull_request'
-        target = await self.selected_target(run, args.repository)
+        if run.get('github_connection_version'):
+            self.ensure_publish_allowed(run, run['github_connection_version'], tool)
+        target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
         publication = self.owned_publication(run, target, args.number, version)
-        row = self.followup(run, tool, args, version)
+        row = self.followup(run, tool, args, version, target)
         if row['result']:
-            return json.loads(row['result'])
+            return self.receipt(row['result'], target)
         token = await self.installation_token(repository=target, write=True)
         pr = await self.owned_pr(token, target, args.number, publication)
         commit = row['commit_sha']
@@ -617,7 +628,7 @@ class GitHub:
         if not commit:
             commit = await self.create_change_commit(run, args, token, target, version, tool)
             self.store.execute('UPDATE github_followups SET commit_sha=? WHERE id=?', (commit, row['id']))
-        prefix = '/repos/' + target
+        prefix = f'/repositories/{target}'
         ref = await self.request('GET', prefix + '/git/ref/heads/' + publication['branch'], token=token)
         if ref['object']['sha'] != commit:
             if ref['object']['sha'] != args.base_sha:
@@ -626,22 +637,24 @@ class GitHub:
             self.ensure_publish_allowed(run, version, tool)
             await self.request('PATCH', prefix + '/git/refs/heads/' + publication['branch'], token=token,
                                json={'sha': commit, 'force': False})
-        result = {**json.loads(publication['result']), 'commit': commit, 'state': pr['state'], 'draft': pr['draft']}
+        result = {**self.receipt(publication['result'], target), 'commit': commit, 'state': pr['state'], 'draft': pr['draft']}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
         return result
 
     async def comment(self, run, args):
         tool = 'github_comment_pull_request'
-        target = await self.selected_target(run, args.repository)
+        if run.get('github_connection_version'):
+            self.ensure_publish_allowed(run, run['github_connection_version'], tool)
+        target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
         publication = self.owned_publication(run, target, args.number, version)
-        row = self.followup(run, tool, args, version)
+        row = self.followup(run, tool, args, version, target)
         if row['result']:
-            return json.loads(row['result'])
+            return self.receipt(row['result'], target)
         token = await self.installation_token(repository=target, write=True)
         await self.owned_pr(token, target, args.number, publication)
-        path = f'/repos/{target}/issues/{args.number}/comments'
+        path = f'/repositories/{target}/issues/{args.number}/comments'
         marker = '<!-- moyai-comment:' + row['id'] + ' -->'
         comment = None
         if row['sent']:
@@ -656,6 +669,6 @@ class GitHub:
             self.ensure_publish_allowed(run, version, tool)
             self.store.execute('UPDATE github_followups SET sent=1 WHERE id=?', (row['id'],))
             comment = await self.request('POST', path, token=token, json={'body': args.body + '\n\n' + marker})
-        result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number, 'repository': target}
+        result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number, 'repository_id': target, 'repository': self.repository_name(target)}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
         return result

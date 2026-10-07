@@ -100,13 +100,11 @@ Keep the chosen harness for the session; start a new session to change it. You c
 Set or add:
 
 ```dotenv
-# Replace this with a repository belonging to YOUR GitHub organization.
-GITHUB_REPOSITORY=your-org/your-repo
 # Avoid requiring the separate default title model during initial setup.
 SESSION_TITLES_ENABLED=false
 ```
 
-Replace `your-org/your-repo` before connecting GitHub. You can run the file-writing check without GitHub. For several repositories in one organization, set `GITHUB_REPOSITORIES=your-org/repo-a,your-org/repo-b`; this overrides `GITHUB_REPOSITORY`. Use an organization-owned GitHub App. Moyai does not support personal-account installations in this flow.
+Choose repositories in **Connections → GitHub → Manage → Choose repositories** after installing your organization-owned GitHub App. Moyai stores permanent repository IDs; no repository environment variable or redeploy is required. You can run the file-writing check without GitHub. Personal-account installations are not supported.
 
 Leave Google OAuth, Slack, tracing, and Temporal disabled for now. You do not need their credentials to run an agent. The copied Google domain/admin examples are BerriAI-specific; replace them before enabling Google SSO for your own team.
 

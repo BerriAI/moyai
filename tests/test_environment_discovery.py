@@ -18,14 +18,25 @@ from test_durable import durable, drive, aio  # noqa: F401
 
 
 def connections():
-    repos = ['BerriAI/litellm', 'BerriAI/agentchat']
-    async def selected(run, repository):
-        if repository not in repos:
-            raise ConnectorError('Repository access was removed.')
-        return repository
+    repos = {101: 'BerriAI/litellm', 202: 'BerriAI/agentchat'}
+    def target(repository):
+        if isinstance(repository, int) and repository in repos:
+            return repository
+        for i, name in repos.items():
+            if name.lower() == repository.lower():
+                return i
+        raise ConnectorError('Repository access was removed.')
+    async def selected(run, repository='', repository_id=None):
+        return target(repository_id or repository or run.get('github_repository_id') or run.get('repo_url', '').removeprefix('https://github.com/'))
+    async def public(repository, repository_id=None):
+        identity = target(repository_id or repository)
+        return {'id': identity, 'full_name': repos[identity], 'private': False}
     return SimpleNamespace(list=lambda: [{'id': 'github', 'connected': True, 'enabled': True}],
                            credentials=AsyncMock(return_value={}),
-                           github=SimpleNamespace(connected_targets=lambda _: repos, selected_target=AsyncMock(side_effect=selected)))
+                           github=SimpleNamespace(ensure_connection=AsyncMock(return_value={}),
+                               repository_options=lambda _: [{'id': i, 'full_name': n} for i,n in repos.items()],
+                               target=target, repository_name=lambda i: repos[i], public_repository=public,
+                               selected_target=AsyncMock(side_effect=selected)))
 
 
 @pytest.fixture

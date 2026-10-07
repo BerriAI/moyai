@@ -78,7 +78,7 @@ async function editAutomation(existing,template) {
   form.onsubmit=async event=>{
     event.preventDefault();const button=form.querySelector('[type="submit"]');button.disabled=true;
     try {
-      const f=new FormData(form),body={revision:existing?.revision||0,definition:{name:f.get('name'),prompt:f.get('prompt'),repo_url:f.get('repo_url'),model:f.get('model'),harness:f.get('harness'),mode:d.mode,plugins:f.getAll('plugin'),environment_id:f.get('environment_id'),triggers:[...form.querySelector('[data-triggers]').children].map(readAutomationTrigger),max_runs_per_hour:f.get('max_runs_per_hour')===''?null:Number(f.get('max_runs_per_hour'))}};
+      const f=new FormData(form),body={revision:existing?.revision||0,definition:{name:f.get('name'),prompt:f.get('prompt'),repo_url:f.get('repo_url'),github_repository_id:f.get('repo_url')===d.repo_url?d.github_repository_id:null,model:f.get('model'),harness:f.get('harness'),mode:d.mode,plugins:f.getAll('plugin'),environment_id:f.get('environment_id'),triggers:[...form.querySelector('[data-triggers]').children].map(readAutomationTrigger),max_runs_per_hour:f.get('max_runs_per_hour')===''?null:Number(f.get('max_runs_per_hour'))}};
       await api('/api/automations'+(existing?'/'+existing.id:''),{method:existing?'PUT':'POST',body:JSON.stringify(body)});dialog.close();if(state.pageVersion===version)await renderAutomations();toast('Saved paused. Review connections and test before enabling.');
     }
     catch(e){form.querySelector('[data-error]').textContent=e.message;button.disabled=false;}

@@ -22,6 +22,7 @@ from .connector_errors import ConnectorError
 class Recipe(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     name: str = Field(min_length=2, max_length=80)
+    repository_id: int | None = Field(default=None, gt=0, strict=True)
     repository: str = Field(pattern=r'^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$')
     ref: str = Field(default='main', min_length=1, max_length=200, pattern=r'^[A-Za-z0-9][A-Za-z0-9_./-]*$')
     clone_access: Literal['public', 'github'] = 'public'
@@ -88,24 +89,38 @@ class Environments:
             return
         if not any(c['id'] == 'github' and c['connected'] and c['enabled'] for c in self.connectors.list()):
             return
-        repositories = self.connectors.github.connected_targets(await self.connectors.credentials('github'))
+        credentials = await self.connectors.github.ensure_connection()
+        repositories = self.connectors.github.repository_options(credentials)
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             existing = list(conn.execute('SELECT id,recipe FROM environments'))
-            for repository in repositories:
-                identity = uuid5(NAMESPACE_URL, 'moyai-environment:' + repository.lower()).hex
-                if any(r['id'] == identity or json.loads(r['recipe'])['repository'].lower() == repository.lower() for r in existing):
+            for option in repositories:
+                repository, repository_id = option['full_name'], option['id']
+                identity = uuid5(NAMESPACE_URL, 'moyai-github-environment:' + str(repository_id)).hex
+                if any(r['id'] == identity or json.loads(r['recipe']).get('repository_id') == repository_id for r in existing):
                     continue
                 if repository.lower() == 'berriai/litellm':
-                    recipe = Recipe.model_validate({**TEMPLATES[0], 'repository': repository, 'ref': 'HEAD', 'clone_access': 'github'})
+                    recipe = Recipe.model_validate({**TEMPLATES[0], 'repository': repository, 'repository_id': repository_id, 'ref': 'HEAD', 'clone_access': 'github'})
                 else:
-                    recipe = Recipe(name=repository.split('/')[1][:68] + ' development', repository=repository,
+                    recipe = Recipe(name=repository.split('/')[1][:68] + ' development', repository=repository, repository_id=repository_id,
                                     ref='HEAD', clone_access='github', setup_mode='detect', verify='git rev-parse --verify HEAD')
                 conn.execute('''INSERT OR IGNORE INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
                     VALUES(?,?,1,1,?,?)''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
 
     async def prepare(self, run_id):
         run = self.store.run(run_id)
+        if run.get('repo_url') and self.connectors:
+            try:
+                if 'github' in run['plugins']:
+                    identity = await self.connectors.github.selected_target(run)
+                    name = self.connectors.github.repository_name(identity)
+                else:
+                    repo = await self.connectors.github.public_repository(run['repo_url'].removeprefix('https://github.com/').removesuffix('.git'), run.get('github_repository_id'))
+                    identity, name = repo['id'], repo['full_name']
+                self.store.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?', (identity, 'https://github.com/' + name, run_id))
+                run = self.store.run(run_id)
+            except ConnectorError as exc:
+                raise HTTPException(409, str(exc)) from None
         if (run.get('environment_build_id') or run.get('snapshot_id') or run.get('parent_run_id')
                 or run.get('environment_id') == 'none' or self.store.rows(
                     "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))):
@@ -113,13 +128,13 @@ class Environments:
         try:
             if run.get('repo_url') or run.get('environment_id') not in {'auto', 'none', ''}:
                 await self.sync_repositories()
-            selected = self.choose(run.get('environment_id', 'auto'), run['repo_url'])
+            selected = self.choose(run.get('environment_id', 'auto'), run['repo_url'], run.get('github_repository_id'))
             if selected:
                 recipe = json.loads(self.build(selected['active_build'])['recipe'] if selected['active_build'] else selected['recipe'])
                 if recipe.get('clone_access') == 'github':
                     if not self.connectors or not any(c['id']=='github' and c['connected'] and c['enabled'] for c in self.connectors.list()):
                         raise ConnectorError('Enable the GitHub connection to use this repository environment.')
-                    await self.connectors.github.selected_target(run, recipe['repository'])
+                    await self.connectors.github.selected_target(run, repository_id=recipe.get('repository_id'), repository='' if recipe.get('repository_id') else recipe['repository'])
                 if not selected['active_build']:
                     if not self.settings.modal_token_id or not self.settings.modal_token_secret:
                         raise HTTPException(503, 'Configure Modal before preparing this repository.')
@@ -156,6 +171,14 @@ class Environments:
             if admin or row['activate_on_ready'] or (row['enabled'] and row['active_build']):
                 items.append(value)
         return items
+
+    async def identify_recipe(self, recipe):
+        if recipe.clone_access == 'github':
+            identity = await self.connectors.github.selected_target({}, recipe.repository, recipe.repository_id)
+            recipe.repository_id, recipe.repository = identity, self.connectors.github.repository_name(identity)
+        else:
+            repo = await self.connectors.github.public_repository(recipe.repository, recipe.repository_id)
+            recipe.repository_id, recipe.repository = repo['id'], repo['full_name']
 
     def save_recipe(self, identity, body, actor):
         import re
@@ -204,7 +227,19 @@ class Environments:
     def progress(self, identity, **fields):
         return self.store.execute('UPDATE environment_builds SET ' + ','.join(k + '=?' for k in fields) + " WHERE id=? AND phase!='cancelling'", (*fields.values(), identity))
 
-    def choose(self, selection, repo_url):
+    def choose(self, selection, repo_url, repository_id=None):
+        repository = repo_url.removeprefix('https://github.com/').removesuffix('.git').lower()
+        if repository_id is None and repository and self.connectors:
+            try:
+                repository_id = self.connectors.github.target(repository)
+            except ConnectorError:
+                pass
+
+        def matches(recipe):
+            if repository_id and recipe.get('repository_id'):
+                return repository_id == recipe['repository_id']
+            # Unmigrated public recipes are bound before a build is allocated.
+            return bool(repository and not recipe.get('repository_id') and repository == recipe['repository'].lower())
         if selection == 'none':
             return None
         if selection and selection != 'auto':
@@ -212,20 +247,20 @@ class Environments:
             if (not row['enabled'] or not row['active_build']) and not row['activate_on_ready']:
                 raise HTTPException(409, 'Build and enable this environment before starting a session.')
             recipe = json.loads(self.build(row['active_build'])['recipe'] if row['active_build'] else row['recipe'])
-            if repo_url and repo_url.removeprefix('https://github.com/').removesuffix('.git').lower() != recipe['repository'].lower():
+            if (repo_url or repository_id) and not matches(recipe):
                 raise HTTPException(422, 'The repository does not match the selected environment.')
             return row
         rows = self.store.rows("SELECT * FROM environments WHERE (enabled=1 AND active_build!='') OR activate_on_ready=1 ORDER BY is_default DESC,updated_at DESC,id")
         repository = repo_url.removeprefix('https://github.com/').removesuffix('.git').lower()
         for row in rows:
             recipe = json.loads(self.build(row['active_build'])['recipe'] if row['active_build'] else row['recipe'])
-            if (repository and repository == recipe['repository'].lower()) or (not repository and row['is_default']):
+            if matches(recipe) or (not repository and not repository_id and row['is_default']):
                 return row
         return None
 
-    def setup_blocker(self, selection, repo_url):
+    def setup_blocker(self, selection, repo_url, repository_id=None):
         """Check shared setup without starting a build or discarding a good one."""
-        selected = self.choose(selection, repo_url)
+        selected = self.choose(selection, repo_url, repository_id)
         if not selected or selected['active_build']:
             return ''
         recent = self.store.rows('SELECT phase FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY rowid DESC LIMIT 1',
@@ -243,7 +278,7 @@ class Environments:
         if not run.get('environment_build_id'):
             previous = run.get('snapshot_id') or run.get('parent_run_id') or self.store.rows(
                 "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
-            row = None if previous else self.choose(run.get('environment_id', 'auto'), run['repo_url'])
+            row = None if previous else self.choose(run.get('environment_id', 'auto'), run['repo_url'], run.get('github_repository_id'))
             if row and not row['active_build']:
                 raise HTTPException(409, 'This repository environment is still being prepared.')
             identity = row['active_build'] if row else 'none'
@@ -258,7 +293,10 @@ class Environments:
         if not identity or identity == 'none':
             return {}
         build = self.build(identity)
-        return {**json.loads(build.get('resolved_recipe') or build['recipe']), 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
+        recipe = json.loads(build.get('resolved_recipe') or build['recipe'])
+        stored = json.loads(build['recipe'])
+        recipe['repository_id'] = recipe.get('repository_id') or stored.get('repository_id')
+        return {**recipe, 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
 
     async def rpc(self, sandbox, action, *, token=''):
         proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/environment_build.py', action,
@@ -293,14 +331,19 @@ class Environments:
                 timeout=3600, cpu=2, memory=8192)
         self.update(identity, sandbox_id=sandbox.object_id)
         if build['phase'] == 'queued':
-            await sandbox.filesystem.write_text.aio(json.dumps(recipe), '/tmp/moyai-environment.json')
             token = ''
             # Use a narrowly scoped read token only for the clone subprocess.
             if recipe.get('clone_access') == 'github':
                 if not any(c['id'] == 'github' and c['connected'] and c['enabled'] for c in self.connectors.list()):
                     raise ConnectorError('Enable the shared GitHub connection before building this private repository.')
-                target = await self.connectors.github.selected_target({'repo_url': 'https://github.com/' + recipe['repository']}, recipe['repository'])
+                target = await self.connectors.github.selected_target({}, repository_id=recipe.get('repository_id'), repository='' if recipe.get('repository_id') else recipe['repository'])
+                recipe.update(repository_id=target, repository=self.connectors.github.repository_name(target))
                 token = await self.connectors.github.installation_token(repository=target)
+            else:
+                repo = await self.connectors.github.public_repository(recipe['repository'], recipe.get('repository_id'))
+                recipe.update(repository_id=repo['id'], repository=repo['full_name'])
+            self.update(identity, recipe=json.dumps(recipe))
+            await sandbox.filesystem.write_text.aio(json.dumps(recipe), '/tmp/moyai-environment.json')
             await self.rpc(sandbox, 'start', token=token)
             if not self.progress(identity, phase='building'):
                 return
@@ -319,7 +362,7 @@ class Environments:
             await sandbox.terminate.aio()
             return
         if any(getattr(resolved, k) != recipe.get(k, 'manual' if k == 'setup_mode' else None)
-               for k in ('repository', 'ref', 'clone_access', 'setup_mode')):
+               for k in ('repository_id', 'repository', 'ref', 'clone_access', 'setup_mode')):
             self.update(identity, phase='failed', error='Resolved setup did not match the requested repository.', finished_at=now())
             await sandbox.terminate.aio()
             return
@@ -409,12 +452,15 @@ class Environments:
 
         @router.post('/api/admin/environments', status_code=201)
         async def create(body: SaveRecipe, request: Request):
-            return self.save_recipe(uuid4().hex, body, actor(request))
+            who = actor(request)
+            await self.identify_recipe(body.recipe)
+            return self.save_recipe(uuid4().hex, body, who)
 
         @router.put('/api/admin/environments/{identity}')
         async def save(identity: str, body: SaveRecipe, request: Request):
             who = actor(request)
             self.get(identity)
+            await self.identify_recipe(body.recipe)
             return self.save_recipe(identity, body, who)
 
         @router.post('/api/admin/environments/{identity}/build', status_code=202)

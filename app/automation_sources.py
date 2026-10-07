@@ -50,6 +50,7 @@ class EventTrigger(BaseModel):
     session_id: str = Field(default='', max_length=32)
     event: str = Field(default='*', min_length=1, max_length=80)
     repository: str = Field(default='', max_length=200)
+    repository_id: int | None = Field(default=None, gt=0, strict=True)
     team_id: str = Field(default='', max_length=36)
     assignee_id: str = Field(default='', max_length=128)
     label_id: str = Field(default='', max_length=36)
@@ -85,7 +86,7 @@ class EventTrigger(BaseModel):
         legacy_github = self.provider == 'github' and self.event.split('.')[0] in supported
         if self.provider != 'webhook' and self.event not in supported and not legacy_github:
             raise ValueError('Choose a supported event for this integration.')
-        if self.provider in {'github','gitlab'} and not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+', self.repository):
+        if (self.provider == 'gitlab' or self.provider == 'github' and self.repository_id is None) and not re.fullmatch(r'[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+', self.repository):
             raise ValueError('Choose an exact repository or GitLab project path.')
         if self.provider == 'linear':
             if not re.fullmatch(UUID, self.team_id):
@@ -126,7 +127,7 @@ def normalize(t, payload, event_header=''):
                                  for m in items(p.get('conversation'))[:10]],
                  'context_truncated':bool(p.get('context_truncated'))}
     elif t.provider == 'github':
-        if text(obj(p.get('repository')).get('full_name')).lower() != t.repository.lower():
+        if t.repository_id is None or type(obj(p.get('repository')).get('id')) is not int or obj(p.get('repository'))['id'] != t.repository_id:
             return None
         action, event = text(p.get('action')), event_header
         bot = obj(p.get('sender')).get('type') == 'Bot'
@@ -156,8 +157,8 @@ def normalize(t, payload, event_header=''):
         title = data.get('title') or data.get('name') or ('Push to ' + branch)
         body = detail.get('body') or data.get('body') or obj(p.get('head_commit')).get('message') or obj(data.get('output')).get('summary')
         url = detail.get('html_url') or data.get('html_url') or data.get('details_url') or p.get('compare')
-        item = t.repository + ':' + scalar(data.get('number') or data.get('id') or p.get('after'))
-        extra = {'repository':t.repository,'sha':text(data.get('head_sha') or p.get('after'),80)}
+        item = str(t.repository_id) + ':' + scalar(data.get('number') or data.get('id') or p.get('after'))
+        extra = {'repository_id':t.repository_id,'repository':text(obj(p.get('repository')).get('full_name')), 'sha':text(data.get('head_sha') or p.get('after'),80)}
         if '.' in t.event:
             event += '.' + action
     elif t.provider == 'gitlab':
@@ -292,7 +293,7 @@ def example(t):
             'pull_request_review_comment':'created', 'check_run':'completed'}.get(kind,'opened')
         content = t.text_starts_with or t.text_contains or 'Example context'
         issue = {'number':123,'title':'Example issue','body':content,'labels':[{'name':t.label}]}
-        payload = {'action':action,'repository':{'full_name':t.repository},
+        payload = {'action':action,'repository':{'id':t.repository_id,'full_name':t.repository},
             'sender':{'type':'Bot' if t.sender_type == 'bot' else 'User'}}
         if kind in {'issues','issue_comment'}:
             payload['issue'] = issue

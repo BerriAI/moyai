@@ -14,6 +14,25 @@ from app.security import digest
 from test_workspace import workspace, cloud_capability
 from test_spend import sign_in
 
+REPO_IDS = {'BerriAI/litellm': 101, 'BerriAI/moyai': 202}
+OWNER_ID = 44
+
+
+def credentials(ids=(101,)):
+    return {'kind': 'github_app', 'installation_id': 10, 'account_id': OWNER_ID, 'repository_ids': list(ids)}
+
+
+def repository_data(name):
+    return {'id': REPO_IDS[name], 'full_name': name, 'owner': {'id': OWNER_ID}, 'default_branch': 'main', 'html_url': 'https://github.com/' + name, 'private': True}
+
+
+def select(app, ids=(101,)):
+    github = app.state.connectors.github
+    for name, identity in REPO_IDS.items():
+        github.remember_repository(repository_data(name), credentials(ids))
+    app.state.connectors.save('github', credentials(ids), 'Selected repositories')
+
+
 BASE = 'a' * 40
 CURRENT = 'b' * 40
 TREE = 'c' * 40
@@ -25,14 +44,17 @@ PAYLOAD = {'repository': 'BerriAI/litellm', 'base_sha': BASE, 'request_key': 'fi
 
 def connected(app):
     run_id, headers = cloud_capability(app, ['github'])
-    app.state.connectors.github.save_app({'id': 123, 'slug': 'moyai-test', 'pem': 'private-signing-key'})
-    app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 10, 'repository': 'BerriAI/litellm'}, 'BerriAI/litellm')
+    app.state.connectors.github.save_app({'id': 123, 'slug': 'moyai-test', 'pem': 'private-signing-key', 'owner_id': OWNER_ID})
+    select(app)
     return run_id, headers
 
 
 class GitHubAPI:
     def __init__(self, github, monkeypatch, repository="BerriAI/litellm"):
         self.github, self.calls, self.repository = github, [], repository
+        self.repository_id = REPO_IDS[repository]
+        self.token_repository = self.repository_id
+        monkeypatch.setattr(github, 'app_jwt', lambda config=None: 'jwt')
         self.branch = None
         self.pr = None
         self.tree = []
@@ -41,6 +63,7 @@ class GitHubAPI:
         self.on_call = None
         monkeypatch.setattr(github, 'request', self.request)
         async def token(*args, **kwargs):
+            self.token_repository = github.target(kwargs.get('repository', ''))
             return 'installation-secret-never-in-sandbox'
         monkeypatch.setattr(github, 'installation_token', token)
 
@@ -48,9 +71,16 @@ class GitHubAPI:
         self.calls.append((method, path, kwargs))
         if self.on_call:
             self.on_call(method, path)
-        prefix = '/repos/' + self.repository
+        prefix = '/repositories/' + str(self.repository_id)
+        if path == '/app/installations/10':
+            return {'account': {'id': OWNER_ID, 'type': 'Organization'}, 'permissions': PERMISSIONS}
+        if path == '/installation/repositories':
+            name = next(n for n, i in REPO_IDS.items() if i == self.token_repository)
+            return {'repositories': [repository_data(name)]}
         if path == prefix:
-            return {'full_name': self.repository, 'default_branch': 'main', 'html_url': 'https://github.com/' + self.repository, 'private': True}
+            return {**repository_data(self.repository), 'id': self.repository_id}
+        if path in ['/repositories/' + str(i) for i in REPO_IDS.values()]:
+            return repository_data(next(n for n, i in REPO_IDS.items() if path == '/repositories/' + str(i)))
         if path == prefix + '/git/ref/heads/main':
             return {'object': {'sha': CURRENT}}
         if '/compare/' in path:
@@ -78,8 +108,8 @@ class GitHubAPI:
                 return [self.pr] if self.pr else []
             assert kwargs['json']['draft'] is False
             self.pr = {'number': 100, 'html_url': 'https://github.com/' + self.repository + '/pull/100', 'draft': False, 'state': 'open'}
-            self.pr.update(head={'ref': kwargs['json']['head'], 'sha': self.branch, 'repo': {'full_name': self.repository}},
-                           base={'ref': kwargs['json']['base'], 'repo': {'full_name': self.repository}})
+            self.pr.update(head={'ref': kwargs['json']['head'], 'sha': self.branch, 'repo': {'id': self.repository_id, 'full_name': self.repository}},
+                           base={'ref': kwargs['json']['base'], 'repo': {'id': self.repository_id, 'full_name': self.repository}})
             if self.lose == 'pr':
                 self.lose = ''
                 raise ConnectorError('Lost response')
@@ -172,13 +202,13 @@ def test_revocation_during_publication_stops_further_mutations(workspace, monkey
         if change == 'disconnect':
             app.state.store.execute("DELETE FROM connections WHERE provider='github'")
         elif change == 'replace':
-            app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 20, 'repository': 'BerriAI/litellm'}, 'Changed')
+            app.state.connectors.save('github', {**credentials(), 'installation_id': 20}, 'Changed')
         elif change == 'stop':
             app.state.store.update_run(run_id, status='cancelled')
         elif change == 'rotate':
             app.state.store.update_run(run_id, token_hash=digest('new-token'))
         elif change == 'allowlist':
-            app.state.connectors.settings.github_repositories = 'BerriAI/moyai'
+            select(app, (202,))
         else:
             app.state.store.execute("INSERT INTO connection_policies(provider,read_only) VALUES('github',1)")
     api.on_call = mutate
@@ -280,7 +310,7 @@ def test_reconnect_after_admission_before_write_lock_cannot_substitute_installat
     github = app.state.connectors.github
     api = GitHubAPI(github, monkeypatch)
     admitted_run = {**app.state.store.run(run_id), 'github_connection_version': github.connection_version()}
-    app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 20, 'repository': 'BerriAI/litellm'}, 'Reconnected')
+    app.state.connectors.save('github', {**credentials(), 'installation_id': 20}, 'Reconnected')
     with pytest.raises(ConnectorError, match='changed'):
         asyncio.run(github.publish(admitted_run, Publish.model_validate(PAYLOAD)))
     assert not api.calls
@@ -288,14 +318,17 @@ def test_reconnect_after_admission_before_write_lock_cannot_substitute_installat
 
 def test_manifest_state_is_bound_expiring_single_use_and_admin_only(workspace, monkeypatch):
     app, client = workspace
-    start = client.post('/api/connections/github/oauth').json()['url']
+    async def organization(*args, **kwargs):
+        return {'id': OWNER_ID, 'login': 'BerriAI', 'type': 'Organization'}
+    monkeypatch.setattr(app.state.connectors.github, 'request', organization)
+    start = client.post('/api/connections/github/oauth', json={'organization': 'BerriAI'}).json()['url']
     state = parse_qs(urlparse(start).query)['state'][0]
     page = client.get(start)
-    assert page.status_code == 200 and 'BerriAI/litellm' in page.text
+    assert page.status_code == 200 and 'BerriAI' in page.text
     assert 'https://github.com' in page.headers['content-security-policy']
     assert client.get('/auth/github/register?state=unknown').status_code == 400
     async def convert(*args, **kwargs):
-        return {'owner': {'login': 'BerriAI'}, 'permissions': PERMISSIONS, 'id': 123, 'slug': 'moyai-test', 'pem': 'secret-key'}
+        return {'owner': {'id': OWNER_ID, 'login': 'BerriAI', 'type': 'Organization'}, 'permissions': PERMISSIONS, 'id': 123, 'slug': 'moyai-test', 'pem': 'secret-key'}
     github = app.state.connectors.github
     monkeypatch.setattr(github, 'request', convert)
     monkeypatch.setattr(github, 'app_jwt', lambda config=None: 'app-jwt')
@@ -322,16 +355,16 @@ def test_installation_scope_validation(workspace, monkeypatch, bad):
     monkeypatch.setattr(github, 'app_jwt', lambda config=None: 'jwt')
     async def response(method, path, **kwargs):
         if path.startswith('/app/installations/') and not path.endswith('/access_tokens'):
-            return {'account': {'login': 'wrong' if bad == 'owner' else 'BerriAI', 'type': 'Organization'},
+            return {'account': {'id': 999 if bad == 'owner' else OWNER_ID, 'login': 'BerriAI', 'type': 'Organization'},
                     'permissions': {**PERMISSIONS, **({'contents': 'read'} if bad == 'permissions' else {})},
                     'suspended_at': '2026-01-01' if bad == 'suspended' else None}
         if path.endswith('/access_tokens'):
-            assert kwargs['json'] == {'repositories': ['litellm'], 'permissions': {'contents': 'read', 'pull_requests': 'read'}}
+            assert kwargs['json'] == {'repository_ids': [101], 'permissions': {'contents': 'read', 'pull_requests': 'read'}}
             return {'token': 'token', 'expires_at': '2099-01-01T00:00:00Z'}
-        return {'repositories': [{'full_name': 'BerriAI/other' if bad == 'repository' else 'BerriAI/litellm'}]}
+        return {'repositories': [{**repository_data('BerriAI/litellm'), 'id': 999 if bad == 'repository' else 101}]}
     monkeypatch.setattr(github, 'request', response)
     with pytest.raises(ConnectorError):
-        asyncio.run(github.verify({'kind': 'github_app', 'installation_id': 10, 'repository': 'BerriAI/litellm'}))
+        asyncio.run(github.verify(credentials()))
 
 
 def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypatch):
@@ -341,6 +374,9 @@ def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypa
     async def token(*args, **kwargs):
         return 'installation-secret'
     monkeypatch.setattr(github, 'installation_token', token)
+    async def metadata(*args, **kwargs):
+        return repository_data('BerriAI/litellm')
+    monkeypatch.setattr(github, 'request', metadata)
     captured, redirect = [], [False]
     class Stream(httpx.AsyncByteStream):
         async def __aiter__(self):
@@ -379,9 +415,7 @@ def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypa
 
 
 def connect_multiple(app):
-    app.state.connectors.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai'
-    app.state.connectors.save('github', {'kind': 'github_app', 'installation_id': 10,
-        'repositories': ['BerriAI/litellm', 'BerriAI/moyai']}, 'Both repositories')
+    select(app, (101, 202))
 
 
 def test_self_repository_pr_is_created_directly_without_approval(workspace, monkeypatch):
@@ -397,7 +431,7 @@ def test_self_repository_pr_is_created_directly_without_approval(workspace, monk
     result = response.json()
     assert result['repository'] == 'BerriAI/moyai' and not result['draft']
     assert not app.state.store.approvals(run_id)
-    assert all(path.startswith('/repos/BerriAI/moyai') for _, path, _ in api.calls)
+    assert all(path.startswith('/repositories/202') for _, path, _ in api.calls)
     assert all(method == 'GET' or (method == 'POST' and path.rsplit('/', 1)[-1] in {'blobs', 'trees', 'commits', 'refs', 'pulls'}) for method, path, _ in api.calls)
 
 
@@ -405,29 +439,29 @@ def test_repository_routing_and_no_implicit_access_expansion(workspace, monkeypa
     app, client = workspace
     run_id, headers = connected(app)
     github = app.state.connectors.github
-    github.settings.github_repositories = 'BerriAI/litellm,BerriAI/moyai'
-    with pytest.raises(ConnectorError, match='Reconnect'):
+    GitHubAPI(github, monkeypatch)
+    with pytest.raises(ConnectorError, match='not selected'):
         asyncio.run(github.selected_target({}, 'BerriAI/moyai'))
-    assert asyncio.run(github.selected_target({})) == 'BerriAI/litellm'
+    assert asyncio.run(github.selected_target({})) == 101
     connect_multiple(app)
     api = GitHubAPI(github, monkeypatch, 'BerriAI/moyai')
     run = {**app.state.store.run(run_id), 'repo_url': 'https://github.com/BerriAI/moyai.git'}
     result = asyncio.run(github.call(run, 'github_checkout', {}))
     assert result['repository'] == 'BerriAI/moyai'
-    assert result['git_path'] == '/github/BerriAI/moyai.git'
-    assert asyncio.run(github.call(run, 'github_repositories', {}))['repositories'] == github.targets()
+    assert result['git_path'] == '/github/repositories/202.git'
+    assert asyncio.run(github.call(run, 'github_repositories', {}))['repositories'] == github.repository_options()
     api.calls.clear()
     for target in ['BerriAI/other', 'OtherOrg/moyai', '../moyai']:
         with pytest.raises(ConnectorError):
             asyncio.run(github.call(run, 'github_checkout', {'repository': target}))
         response = client.get(f'/broker/{run_id}/github/{target}.git/info/refs?service=git-upload-pack', headers=headers)
         assert response.status_code in {403, 404}
-    assert not api.calls
+    assert all(method == 'GET' for method, _, _ in api.calls)
     approved = {**run, 'github_connection_version': github.connection_version()}
-    github.settings.github_repositories = 'BerriAI/litellm'
+    select(app, (101,))
     with pytest.raises(ConnectorError):
         asyncio.run(github.publish(approved, Publish.model_validate({**PAYLOAD, 'repository': 'BerriAI/moyai'})))
-    assert not api.calls
+    assert all(method == 'GET' for method, _, _ in api.calls)
 
 
 def test_installation_tokens_are_scoped_cached_and_verified_per_repository(workspace, monkeypatch):
@@ -439,21 +473,21 @@ def test_installation_tokens_are_scoped_cached_and_verified_per_repository(works
     async def request(method, path, **kwargs):
         if path.endswith('/access_tokens'):
             requests.append(kwargs['json'])
-            repo = kwargs['json']['repositories'][0]
-            return {'token': repo + '-' + kwargs['json']['permissions']['contents'], 'expires_at': '2099-01-01T00:00:00Z'}
+            repo = kwargs['json']['repository_ids'][0]
+            return {'token': str(repo) + '-' + kwargs['json']['permissions']['contents'], 'expires_at': '2099-01-01T00:00:00Z'}
         if path == '/installation/repositories':
             repo = kwargs['token'].removesuffix('-read')
-            return {'repositories': [{'full_name': 'BerriAI/' + repo}]}
-        return {'account': {'login': 'BerriAI', 'type': 'Organization'}, 'permissions': PERMISSIONS, 'suspended_at': None}
+            return {'repositories': [repository_data(next(n for n, i in REPO_IDS.items() if i == int(repo)))]}
+        return {'account': {'id': OWNER_ID, 'login': 'BerriAI', 'type': 'Organization'}, 'permissions': PERMISSIONS, 'suspended_at': None}
     monkeypatch.setattr(github, 'request', request)
-    credentials = {'kind': 'github_app', 'installation_id': 10, 'repositories': github.targets()}
-    assert asyncio.run(github.verify(credentials)) == 'BerriAI/litellm, BerriAI/moyai'
-    assert [r['repositories'] for r in requests] == [['litellm'], ['moyai']]
-    assert asyncio.run(github.installation_token(repository='berriai/MOYAI')) == 'moyai-read'
+    saved = github.saved_credentials()
+    assert asyncio.run(github.verify(saved)) == 'BerriAI/litellm, BerriAI/moyai'
+    assert [r['repository_ids'] for r in requests] == [[101], [202]]
+    assert asyncio.run(github.installation_token(repository='berriai/MOYAI')) == '202-read'
     assert len(requests) == 2
-    assert asyncio.run(github.installation_token(repository='BerriAI/moyai', write=True)) == 'moyai-write'
-    assert requests[-1] == {'repositories': ['moyai'], 'permissions': {'contents': 'write', 'pull_requests': 'write'}}
-    assert asyncio.run(github.installation_token(repository='BerriAI/litellm')) == 'litellm-read'
+    assert asyncio.run(github.installation_token(repository='BerriAI/moyai', write=True)) == '202-write'
+    assert requests[-1] == {'repository_ids': [202], 'permissions': {'contents': 'write', 'pull_requests': 'write'}}
+    assert asyncio.run(github.installation_token(repository='BerriAI/litellm')) == '101-read'
     with pytest.raises(ConnectorError):
         asyncio.run(github.installation_token(repository='BerriAI/unlisted', write=True))
     assert len(requests) == 3
@@ -464,6 +498,9 @@ def test_specific_git_route_cannot_change_repo_or_allow_push(workspace, monkeypa
     run_id, headers = connected(app); connect_multiple(app)
     github = app.state.connectors.github
     tokens, paths = [], []
+    async def metadata(method, path, **kwargs):
+        return repository_data(next(n for n,i in REPO_IDS.items() if path == '/repositories/' + str(i)))
+    monkeypatch.setattr(github, 'request', metadata)
     async def token(*args, **kwargs):
         assert not kwargs.get('write')
         tokens.append(kwargs['repository'])
@@ -478,12 +515,12 @@ def test_specific_git_route_cannot_change_repo_or_allow_push(workspace, monkeypa
     for repo in ['BerriAI/litellm', 'BerriAI/moyai']:
         base = f'/broker/{run_id}/github/{repo}.git/'
         assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).content == b'0000'
-        assert paths[-1] == '/' + repo + '.git/info/refs' and tokens[-1] == repo
+        assert paths[-1] == '/' + repo + '.git/info/refs' and tokens[-1] == REPO_IDS[repo]
         for suffix in ['info/refs?service=git-receive-pack', 'info/refs?service=git-upload-pack&repository=other', 'config']:
             assert client.get(base + suffix, headers=headers).status_code == 403
         assert client.post(base + 'git-receive-pack', headers=headers).status_code == 403
     assert len(paths) == 2
-    github.settings.github_repositories = 'BerriAI/litellm'
+    select(app, (101,))
     assert client.get(f'/broker/{run_id}/github/BerriAI/moyai.git/info/refs?service=git-upload-pack', headers=headers).status_code == 403
     assert len(paths) == 2
 
@@ -501,7 +538,7 @@ def test_existing_app_recovery_verifies_before_saving_and_keeps_key_private(work
     async def request(method, path, **kwargs):
         assert method == 'GET' and path == '/app' and kwargs['token'] == 'signed-jwt'
         return {'id': 1 if invalid == 'id' else 123, 'slug': 'moyai-test',
-                'owner': {'login': 'Other' if invalid == 'owner' else 'BerriAI', 'type': 'User' if invalid == 'type' else 'Organization'},
+                'owner': {'id': None if invalid == 'owner' else OWNER_ID, 'login': 'BerriAI', 'type': 'User' if invalid == 'type' else 'Organization'},
                 'permissions': {**PERMISSIONS, **({'pull_requests': 'read'} if invalid == 'permission' else {})}}
     monkeypatch.setattr(github, 'request', request)
     result = client.post('/api/connections/github/app', json={'app_id': 123, 'private_key': secret})

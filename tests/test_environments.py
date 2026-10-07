@@ -17,7 +17,7 @@ from test_durable import durable, drive, aio  # noqa: F401
 
 
 def recipe(**fields):
-    return Recipe(name='Test project', repository='BerriAI/litellm', verify='true', **fields)
+    return Recipe(repository_id=101, name='Test project', repository='BerriAI/litellm', verify='true', **fields)
 
 
 def prepared(env, *, default=True, identity='e' * 32):
@@ -28,7 +28,8 @@ def prepared(env, *, default=True, identity='e' * 32):
     return build['id']
 
 
-def test_admin_recipe_api_and_csrf(workspace):
+def test_admin_recipe_api_and_csrf(workspace, monkeypatch):
+    monkeypatch.setattr('app.github.GitHub.public_repository', AsyncMock(return_value={'id': 101, 'full_name': 'BerriAI/litellm', 'private': False}))
     app, client = workspace
     body = {'recipe': recipe().model_dump()}
     assert client.post('/api/admin/environments', json=body, headers={'X-CSRF-Token': ''}).status_code == 403
@@ -78,7 +79,7 @@ def test_selection_matches_repository_and_rejects_mismatch(workspace):
     env = app.state.environments
     prepared(env, default=False)
     assert env.choose('auto', '') is None
-    assert env.choose('auto', 'https://github.com/berriai/litellm')['id'] == 'e' * 32
+    assert env.choose('auto', 'https://github.com/berriai/litellm', 101)['id'] == 'e' * 32
     assert env.choose('auto', 'https://github.com/BerriAI/another') is None
     with pytest.raises(HTTPException) as exc:
         env.choose('e' * 32, 'https://github.com/BerriAI/another')

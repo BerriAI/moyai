@@ -52,8 +52,10 @@ def metadata(directory):
     return data
 
 
-def checkout(broker, remote, token, directory='', repository='', number=None):
+def checkout(broker, remote, token, directory='', repository='', number=None, repository_id=None):
     arguments = {'repository': repository} if repository else {}
+    if repository_id is not None:
+        arguments['repository_id'] = repository_id
     if number is not None:
         arguments['number'] = number
     repo = broker('/tools/call', {'name': 'github_checkout', 'arguments': arguments})
@@ -63,16 +65,23 @@ def checkout(broker, remote, token, directory='', repository='', number=None):
     target.parent.mkdir(parents=True, exist_ok=True)
     canonical = 'https://github.com/' + repo['repository'] + '.git'
     git_path = repo.get('git_path', '/github.git')
-    if git_path not in {'/github.git', '/github/' + repo['repository'] + '.git'}:
+    if type(repo.get('repository_id')) is not int or repo['repository_id'] <= 0 or git_path != f"/github/repositories/{repo['repository_id']}.git":
         raise GitHubToolError('The shared GitHub checkout path is invalid.')
     if target.exists():
         if (target / '.git/moyai.json').exists():
             data = metadata(target)
-            if data['repository'].lower() != repo['repository'].lower():
+            if not data.get('repository_id'):
+                # Resolve legacy metadata through the authorized broker, never from a redirecting Git URL.
+                old = broker('/tools/call', {'name': 'github_repository', 'arguments': {'repository': data['repository']}})
+                data['repository_id'] = old.get('repository_id')
+            if data.get('repository_id') != repo['repository_id']:
                 raise GitHubToolError('This directory belongs to another repository. Choose an empty directory.')
             if number is not None and (data.get('number') != number or data['base_sha'] != repo['base_sha']):
                 raise GitHubToolError('Choose a fresh directory to check out the current PR head; local files were preserved.')
             git(target, 'cat-file', '-e', data['base_sha'] + '^{commit}')
+            data['repository'] = repo['repository']
+            (target / '.git/moyai.json').write_text(json.dumps(data))
+            git(target, 'remote', 'set-url', 'origin', canonical)
             return {**data, 'directory': str(target), 'reused': True, 'instruction': 'Existing files and local changes were preserved.'}
         if not (target / '.git').is_dir() or (target / '.git').is_symlink():
             raise GitHubToolError('The destination already exists. Choose an empty directory; files will not be overwritten.')
@@ -80,7 +89,11 @@ def checkout(broker, remote, token, directory='', repository='', number=None):
             raise GitHubToolError('Choose a fresh directory for a PR checkout; local files were preserved.')
         origin = git(target, 'remote', 'get-url', 'origin').decode().strip().removesuffix('.git')
         if origin.lower() != canonical.removesuffix('.git').lower():
-            raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
+            if not origin.startswith('https://github.com/'):
+                raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
+            old = broker('/tools/call', {'name': 'github_repository', 'arguments': {'repository': origin.removeprefix('https://github.com/')}})
+            if old.get('repository_id') != repo['repository_id']:
+                raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
         base = git(target, 'rev-parse', '--verify', 'refs/remotes/origin/' + repo['default_branch']).decode().strip()
     else:
         # Capability is sent in a temporary environment, never in argv, URL or Git config.
@@ -99,7 +112,7 @@ def checkout(broker, remote, token, directory='', repository='', number=None):
                 '--', remote.rstrip('/') + git_path, str(target), env=env)
         git(target, 'remote', 'set-url', 'origin', canonical)
         base = git(target, 'rev-parse', 'HEAD').decode().strip()
-    data = {'repository': repo['repository'], 'base_sha': base, 'default_branch': repo['default_branch']}
+    data = {'repository_id': repo['repository_id'], 'repository': repo['repository'], 'base_sha': base, 'default_branch': repo['default_branch']}
     if number is not None:
         data['number'] = number
     (target / '.git/moyai.json').write_text(json.dumps(data))
@@ -168,7 +181,7 @@ def collect(directory, title, body, request_key):
         files.append({'path': name, 'content': content, 'executable': bool(mode & 0o111)})
     if not 1 <= len(files) <= 100:
         raise GitHubToolError('A publication must contain between 1 and 100 changed text files.')
-    return {'repository': data['repository'], 'base_sha': data['base_sha'], 'request_key': request_key,
+    return {**({'repository_id': data['repository_id']} if data.get('repository_id') else {'repository': data['repository']}), 'base_sha': data['base_sha'], 'request_key': request_key,
             'title': title, 'body': body, 'files': files}
 
 
@@ -179,6 +192,7 @@ def advertised_tools(tools):
             properties = {'directory': {'type': 'string', 'description': 'Repository directory inside /workspace; defaults to /workspace/repo.'}}
             required = []
             if tool['name'] == 'github_checkout':
+                properties['repository_id'] = {'type': 'integer', 'minimum': 1, 'description': 'Permanent ID from github_repositories. Preferred over a repository name.'}
                 properties['repository'] = {'type': 'string', 'description': 'Allowed owner/repository, such as BerriAI/moyai. Use github_repositories to list choices; defaults to the session repository.'}
                 properties['number'] = {'type': 'integer', 'minimum': 1, 'description': 'Optional PR number; use a fresh directory to check out its current head.'}
             if tool['name'] in {'github_create_pull_request', 'github_update_pull_request'}:
@@ -199,7 +213,7 @@ def advertised_tools(tools):
 
 def call(name, args, broker, remote, token):
     if name == 'github_checkout':
-        if set(args) - {'directory', 'repository', 'number'}:
+        if set(args) - {'directory', 'repository', 'repository_id', 'number'}:
             raise GitHubToolError('Checkout accepts only a directory, repository and optional PR number.')
         return checkout(broker, remote, token, **args)
     if name in {'github_create_pull_request', 'github_update_pull_request'}:
@@ -220,14 +234,14 @@ def call(name, args, broker, remote, token):
 
 def sync_publication(target, result, remote, token):
     data = metadata(target)
-    if not re.fullmatch(r'[0-9a-f]{40}', result.get('commit', '')) or result.get('repository') != data['repository']:
+    if not re.fullmatch(r'[0-9a-f]{40}', result.get('commit', '')) or not result.get('repository_id') or (data.get('repository_id') and result['repository_id'] != data['repository_id']):
         raise GitHubToolError('Invalid publication receipt.')
     env = dict(os.environ)
     env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraHeader',
                GIT_CONFIG_VALUE_0='Authorization: Bearer ' + token)
-    git(target, 'fetch', '--no-tags', '--', remote.rstrip('/') + '/github/' + data['repository'] + '.git',
+    git(target, 'fetch', '--no-tags', '--', remote.rstrip('/') + f"/github/repositories/{result['repository_id']}.git",
         result['commit'], env=env)
-    data.update(base_sha=result['commit'], number=result['number'])
+    data.update(base_sha=result['commit'], number=result['number'], repository_id=result['repository_id'], repository=result['repository'])
     path = target / '.git/moyai.json'
     temporary = path.with_suffix('.json.tmp')
     temporary.write_text(json.dumps(data))

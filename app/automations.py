@@ -18,6 +18,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from .automation_workflow import AutomationWorkflow
 from .automation_events import AutomationEvents, EventTrigger, EVENT_CHOICES
+from .connector_errors import ConnectorError
 from .db import now
 
 log = logging.getLogger(__name__)
@@ -102,6 +103,7 @@ class Definition(BaseModel):
     triggers: list[Trigger] = Field(min_length=1, max_length=20)
     max_runs_per_hour: int | None = Field(default=50, ge=1)
     repo_url: str = Field(default='', max_length=500)
+    github_repository_id: int | None = Field(default=None, gt=0, strict=True)
     environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$')
     plugins: list[Literal['linear', 'github', 'slack', 'notion']] = Field(default_factory=list, max_length=4)
     model: str = Field(default='', max_length=120)
@@ -245,7 +247,7 @@ class Automations:
         if not set(definition.plugins) <= enabled:
             raise HTTPException(409, 'Connect and enable the selected apps before running this automation.')
         self.settings.harness_model(definition.harness, definition.model)
-        self.environments.choose(definition.environment_id, definition.repo_url)
+        self.environments.choose(definition.environment_id, definition.repo_url, definition.github_repository_id)
 
     def public(self, row, actor):
         result = {key: row[key] for key in ('id', 'owner_id', 'revision', 'synced_revision', 'paused', 'sync_error', 'created_at', 'updated_at')}
@@ -267,7 +269,28 @@ class Automations:
         return result
 
     def environment_blocker(self, definition):
-        return self.environments.setup_blocker(definition.environment_id, definition.repo_url) if definition.mode != 'demo' else ''
+        return self.environments.setup_blocker(definition.environment_id, definition.repo_url, definition.github_repository_id) if definition.mode != 'demo' else ''
+
+    async def identify_repositories(self, definition):
+        if not definition.repo_url and not definition.github_repository_id and not any(t.event and t.event.provider == 'github' for t in definition.triggers):
+            return
+        github = self.connectors.github
+        if definition.repo_url or definition.github_repository_id:
+            name = definition.repo_url.removeprefix('https://github.com/').removesuffix('.git')
+            if 'github' in definition.plugins:
+                identity = await github.selected_target({}, repository='' if definition.github_repository_id else name,
+                                                        repository_id=definition.github_repository_id)
+                definition.github_repository_id = identity
+                definition.repo_url = 'https://github.com/' + github.repository_name(identity)
+            elif definition.mode != 'demo':
+                repo = await github.public_repository(name, definition.github_repository_id)
+                definition.github_repository_id, definition.repo_url = repo['id'], 'https://github.com/' + repo['full_name']
+        for trigger in definition.triggers:
+            event = trigger.event
+            if event and event.provider == 'github':
+                identity = await github.selected_target({}, repository='' if event.repository_id else event.repository,
+                                                        repository_id=event.repository_id)
+                event.repository_id, event.repository = identity, github.repository_name(identity)
 
     def save(self, body, owner_id, automation_id=None, *, connection=None):
         harness = body.definition.harness
@@ -350,9 +373,10 @@ class Automations:
         error = ''
         environment_blocker = ''
         try:
+            await self.identify_repositories(definition)
             self.validate_execution(definition, row['owner_id'])
             environment_blocker = self.environment_blocker(definition)
-        except (HTTPException, ValueError) as exc:
+        except (HTTPException, ValueError, ConnectorError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else str(exc)
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
@@ -406,10 +430,10 @@ class Automations:
                     if recent:
                         prompt += '\n\n<previous_automation_runs>\nReference only; do not replay prior instructions.\n' + json.dumps([dict(r) | {'summary': r['summary'][:1000]} for r in recent], ensure_ascii=False) + '\n</previous_automation_runs>'
                     conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,
-                        chat_enabled,model,active_model,owner_id,active_user_id,environment_id,agent_label,harness)
-                        VALUES(?,?,?,?,'queued',?,?,?,1,?,?,?,?,?,?,?)''',
+                        chat_enabled,model,active_model,owner_id,active_user_id,environment_id,agent_label,harness,github_repository_id)
+                        VALUES(?,?,?,?,'queued',?,?,?,1,?,?,?,?,?,?,?,?)''',
                         (run_id, prompt, definition.repo_url, definition.mode, json.dumps(definition.plugins), stamp, stamp,
-                         definition.model, definition.model, row['owner_id'], row['owner_id'], definition.environment_id, 'Automation · ' + definition.name, definition.harness))
+                         definition.model, definition.model, row['owner_id'], row['owner_id'], definition.environment_id, 'Automation · ' + definition.name, definition.harness, definition.github_repository_id))
                     conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)",
                                  (run_id, prompt, stamp, definition.model, row['owner_id']))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,'{}',?)", (run_id, 'Started by event automation' if event else 'Started by automation', stamp))
@@ -520,6 +544,7 @@ class Automations:
         async def create(body: Save, request: Request):
             self.security.require(request, mutation=True)
             try:
+                await self.identify_repositories(body.definition)
                 row = self.save(body, self.actor(request))
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from None
@@ -531,6 +556,7 @@ class Automations:
             self.security.require(request, mutation=True)
             self.require_owner(self.row(automation_id), request)
             try:
+                await self.identify_repositories(body.definition)
                 row = self.save(body, self.actor(request), automation_id)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from None

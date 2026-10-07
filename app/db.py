@@ -131,6 +131,8 @@ class Store:
                 for name in names:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            if 'github_repository_id' not in {r['name'] for r in conn.execute('PRAGMA table_info(runs)')}:
+                conn.execute('ALTER TABLE runs ADD COLUMN github_repository_id INTEGER')
             for name, default in [('environment_id', 'auto'), ('environment_build_id', ''), ('harness', 'hermes')]:
                 if name not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
@@ -249,7 +251,7 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes'):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None):
         run_id = uuid4().hex
         stamp = now()
         model = model or self.default_model
@@ -258,9 +260,9 @@ class Store:
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
-                    if (previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or previous['repo_url'] != repo_url
+                    if (previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
@@ -284,8 +286,8 @@ class Store:
             if pending >= self.max_pending_runs:
                 raise ValueError('The session queue is full. Wait for a task to finish.')
             conn.execute(
-                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id, harness),
+                "INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,active_model,owner_id,active_user_id,environment_id,harness,github_repository_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, prompt, repo_url, mode, "queued", json.dumps(plugins), stamp, stamp, chat_enabled, model, model, user_id, user_id, environment_id, harness, github_repository_id),
             )
             if side_chat_of:
                 conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))

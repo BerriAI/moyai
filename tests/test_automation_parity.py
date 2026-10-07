@@ -21,7 +21,7 @@ from test_slack import slack_app, signed as slack_signed, event as slack_event
 
 
 def event_trigger(provider, event, **kwargs):
-    defaults = {'github':{'repository':'BerriAI/litellm'}, 'gitlab':{'repository':'group/project'},
+    defaults = {'github':{'repository':'BerriAI/litellm','repository_id':101}, 'gitlab':{'repository':'group/project'},
                 'linear':{'team_id':TEAM}, 'slack':{'channel_id':'C12345678','reaction':'eyes'}}
     return EventTrigger(provider=provider,event=event,**(defaults.get(provider,{})|kwargs))
 
@@ -54,8 +54,12 @@ def test_defaults_null_cap_and_legacy_upgrade():
     with pytest.raises(ValueError):Definition(**base,triggers=[{'schedule':{},'event':{'provider':'webhook'}}])
 
 
-async def test_or_matching_queues_once_and_cap_is_shared_with_manual_and_schedule(workspace):
+async def test_or_matching_queues_once_and_cap_is_shared_with_manual_and_schedule(workspace, monkeypatch):
     app,client=workspace
+    from test_github import select, GitHubAPI
+    app.state.connectors.github.save_app({'id': 123, 'pem': 'test', 'owner_id': 44})
+    select(app)
+    GitHubAPI(app.state.connectors.github, monkeypatch)
     a=configure(app,client,[{'id':'daily','schedule':{}},
         {'id':'first','event':{'provider':'webhook','text_contains':'bug'}},
         {'id':'second','event':{'provider':'webhook'}},
@@ -70,7 +74,7 @@ async def test_or_matching_queues_once_and_cap_is_shared_with_manual_and_schedul
     complete(app,run['id'])
     assert (await service.launch(a['id'],a['revision'],'tick',trigger_id='daily'))['outcome']=='skipped'
     assert client.post(f"/api/automations/{a['id']}/run",json={'revision':a['revision'],'client_id':'manual-new'}) .json()['outcome']=='skipped'
-    github={'action':'opened','repository':{'full_name':'BerriAI/litellm'},'issue':{'number':123,'title':'Investigate'}}
+    github={'action':'opened','repository':{'id':101,'full_name':'BerriAI/litellm'},'issue':{'number':123,'title':'Investigate'}}
     assert client.post(f"/hooks/automations/{a['id']}/github",**signed('github',github)).json()['status']=='accepted'
     await service.events.dispatch()
     assert len(app.state.store.rows('SELECT * FROM runs'))==1
@@ -267,7 +271,7 @@ def test_one_time_needs_future_timezone_and_old_delivery_does_not_consume_new_tr
 
 def test_ci_check_filters_use_native_check_run_fields():
     trigger=event_trigger('github','check_run',conclusion='failure',branch='main',text_contains='test failed')
-    payload={'action':'completed','repository':{'full_name':'BerriAI/litellm'},'check_run':{'id':42,'name':'CI',
+    payload={'action':'completed','repository':{'id':101,'full_name':'BerriAI/litellm'},'check_run':{'id':42,'name':'CI',
         'conclusion':'failure','status':'completed','check_suite':{'head_branch':'main'},'output':{'summary':'test failed'}}}
     assert normalize(trigger,payload,'check_run')
     assert normalize(trigger,example(trigger),'check_run')

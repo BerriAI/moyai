@@ -22,7 +22,7 @@ class FollowupAPI(GitHubAPI):
         self.next_commit = NEXT
 
     async def request(self, method, path, **kwargs):
-        prefix = '/repos/' + self.repository
+        prefix = '/repositories/' + str(self.repository_id)
         if path in {prefix + '/pulls/100', prefix + '/git/commits/' + COMMIT} or (
                 path.endswith('/comments') or path.endswith('/reviews') or method == 'PATCH'
                 or (method == 'POST' and path.endswith('/git/commits') and self.pr)):
@@ -61,7 +61,7 @@ def published(workspace, monkeypatch):
     api = FollowupAPI(github, monkeypatch)
     run = app.state.store.run(run_id)
     receipt = asyncio.run(github.publish(run, Publish.model_validate(PAYLOAD)))
-    api.pr.update(head={'ref': receipt['branch'], 'sha': COMMIT, 'repo': {'full_name': api.repository}})
+    api.pr.update(head={'ref': receipt['branch'], 'sha': COMMIT, 'repo': {'id': 101, 'full_name': api.repository}})
     api.calls.clear()
     return app, client, run, headers, github, api
 
@@ -117,7 +117,7 @@ def test_followup_boundaries_prevent_writes(published, operation, restriction):
     elif restriction == 'foreign_branch':
         api.pr['head']['ref'] = 'main'
     elif restriction == 'fork':
-        api.pr['head']['repo']['full_name'] = 'someone/litellm'
+        api.pr['head']['repo']['id'] = 999
     elif restriction == 'read_only':
         app.state.store.execute("INSERT INTO connection_policies(provider,read_only) VALUES('github',1)")
     elif restriction == 'revoked':

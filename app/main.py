@@ -57,6 +57,7 @@ class NewRun(BaseModel):
     harness: str | None = Field(default=None, min_length=1, max_length=80)
     prompt: str = Field(default="", max_length=16000)
     repo_url: str = Field(default="", max_length=500)
+    github_repository_id: int | None = Field(default=None, gt=0, strict=True)
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
@@ -432,12 +433,20 @@ def create_app(settings: Settings | None = None):
             connected = {item["id"] for item in connectors.list() if item["connected"] and item["enabled"]}
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
+        if body.mode == 'modal' and (body.repo_url or body.github_repository_id):
+            if 'github' in body.plugins:
+                identity = await connectors.github.selected_target({}, body.repo_url.removeprefix('https://github.com/').removesuffix('.git'), body.github_repository_id)
+                body.repo_url = 'https://github.com/' + connectors.github.repository_name(identity)
+            else:
+                repo = await connectors.github.public_repository(body.repo_url.removeprefix('https://github.com/').removesuffix('.git'), body.github_repository_id)
+                identity, body.repo_url = repo['id'], 'https://github.com/' + repo['full_name']
+            body.github_repository_id = identity
         if body.mode == "modal":
-            environments.choose(body.environment_id, body.repo_url)
+            environments.choose(body.environment_id, body.repo_url, body.github_repository_id)
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -564,6 +573,11 @@ def create_app(settings: Settings | None = None):
     @app.get("/api/connections")
     async def connections(request: Request):
         security.require(request)
+        if connectors.github.saved_credentials():
+            try:
+                await connectors.github.ensure_connection()
+            except ConnectorError:
+                connectors.record_check('github', 'needs_attention')
         return connectors.list()
 
     @app.post("/api/connections/{provider}")
@@ -604,7 +618,11 @@ def create_app(settings: Settings | None = None):
     async def check_connection(provider: Provider, request: Request):
         security.require(request, mutation=True, admin=True)
         try:
-            label = await connectors.verify(provider, await connectors.credentials(provider))
+            if provider == 'github':
+                await connectors.github.refresh_connection()
+                label = ', '.join(connectors.github.targets())
+            else:
+                label = await connectors.verify(provider, await connectors.credentials(provider))
         except ConnectorError:
             connectors.record_check(provider, "needs_attention")
             raise
@@ -774,7 +792,11 @@ def create_app(settings: Settings | None = None):
         if not connectors.allowed(body.name):
             raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
         if provider == 'github':
-            run = {**run, 'github_connection_version': connectors.github.connection_version()}
+            try:
+                await connectors.github.ensure_connection()
+            except ConnectorError as exc:
+                return {'error': str(exc)}
+            run = {**store.run(run_id), 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)

@@ -311,6 +311,9 @@ class AutomationEvents:
         # signed event itself so changing an unsigned ID cannot bypass dedup.
         stable = {k:v for k,v in payload.items() if provider != 'linear' or k != 'webhookTimestamp'}
         delivery = provider + ':' + (signed_id or hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest())
+        if provider == 'github':
+            await self.automations.connectors.github.ensure_connection()
+            row = self.automations.row(automation_id)
         context = self.match(row, provider, payload, headers.get('x-github-event', ''))
         return await self.accept(row, delivery, context)
 

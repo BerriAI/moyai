@@ -139,21 +139,22 @@ def test_turn_revision_scope_and_execution_checks(workspace):
     assert read['definition']['triggers'][0]['schedule']['time'] == '10:30'
 
 
-def test_repository_must_be_in_both_configuration_and_installation(workspace):
+def test_repository_must_be_selected_in_saved_connection(workspace, monkeypatch):
+    from test_github import select, GitHubAPI
     app, client = workspace
     sign_in(app, client)
     run = active(app)
     app.state.store.execute('UPDATE runs SET plugins=? WHERE id=?', ('["github"]', run['id']))
-    app.state.connectors.save('github', {'kind': 'github_app', 'repositories': ['BerriAI/litellm']}, 'Test installation')
-    args = {'request_key': 'skills-repo-check', 'definition': definition(plugins=['github'], repo_url='https://github.com/BerriAI/litellm-skills')}
-    assert call(client, run, 'automation_create', **args).status_code == 409
-    app.state.settings.github_repositories = 'BerriAI/litellm,BerriAI/litellm-skills'
+    app.state.connectors.github.save_app({'id': 123, 'pem': 'test', 'owner_id': 44})
+    select(app)
+    GitHubAPI(app.state.connectors.github, monkeypatch)
+    args = {'request_key': 'skills-repo-check', 'definition': definition(plugins=['github'], repo_url='https://github.com/BerriAI/moyai')}
     assert call(client, run, 'automation_create', **args).status_code == 409
     assert not app.state.store.rows('SELECT * FROM automations')
-    app.state.connectors.save('github', {'kind': 'github_app', 'repositories': ['BerriAI/litellm', 'BerriAI/litellm-skills']}, 'Test installation')
+    select(app, (101, 202))
     saved = call(client, run, 'automation_create', **args).json()
     assert saved['status'] == 'paused'
-    app.state.settings.github_repositories = 'BerriAI/litellm'
+    select(app)
     runtime(app)
     assert call(client, run, 'automation_enable', automation_id=saved['id'], revision=1, request_key='repo-revoked').status_code == 409
 
@@ -162,7 +163,7 @@ def test_requester_or_cancellation_during_access_check_prevents_write(workspace,
     app, client = workspace
     sign_in(app, client)
     run = active(app)
-    async def cancel(*args):
+    async def cancel(*args, **kwargs):
         app.state.store.update_run(run['id'], status='cancelled', token_hash='')
     monkeypatch.setattr(app.state.automation_tools, 'check_scope', cancel)
     assert call(client, run, 'automation_create', request_key='cancelled-request', definition=definition()).status_code == 403

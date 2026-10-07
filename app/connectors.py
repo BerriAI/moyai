@@ -108,7 +108,7 @@ class Connectors:
                            "oauth_configured": self.configured_oauth(provider),
                            "label": row.get("label", ""), "updated_at": row.get("updated_at"),
                            "identity": identity if row else "Not connected", **self.policy(provider),
-                           **({'repositories': self.github.targets(), 'app_registered': bool(self.github.app_config())} if provider == 'github' else {}),
+                           **({'repositories': self.github.repository_options(), 'app_registered': bool(self.github.app_config())} if provider == 'github' else {}),
                            "tools": [{"name": name, "write": spec[1], "requires_approval": False, "description": spec[3]}
                                      for name, spec in TOOLS.items() if spec[0] == provider]})
         return result

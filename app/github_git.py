@@ -14,7 +14,8 @@ def routes(github, require_run):
 
     @router.api_route('/broker/{run_id}/github.git/{operation:path}', methods=['GET', 'POST'])
     @router.api_route('/broker/{run_id}/github/{owner}/{repository}.git/{operation:path}', methods=['GET', 'POST'])
-    async def git(run_id: str, operation: str, request: Request, owner: str = '', repository: str = ''):
+    @router.api_route('/broker/{run_id}/github/repositories/{repository_id:int}.git/{operation:path}', methods=['GET', 'POST'])
+    async def git(run_id: str, operation: str, request: Request, owner: str = '', repository: str = '', repository_id: int | None = None):
         def authorize():
             run = require_run(run_id, request)
             if 'github' not in run['plugins'] or not github.connectors.allowed('github_checkout'):
@@ -27,7 +28,7 @@ def routes(github, require_run):
         if not (advertisement or pack):
             raise HTTPException(403, 'Only read-only Git fetch is available. Use github_create_pull_request to publish changes.')
         try:
-            target = await github.selected_target(run, f'{owner}/{repository}' if owner else '')
+            target = await github.selected_target(run, f'{owner}/{repository}' if owner else '', repository_id)
         except ConnectorError as exc:
             raise HTTPException(403, str(exc)) from None
         data = bytearray()
@@ -53,7 +54,7 @@ def routes(github, require_run):
             headers['Git-Protocol'] = 'version=2'
         if pack:
             headers.update({'Content-Type': 'application/x-git-upload-pack-request', 'Content-Encoding': encoding})
-        url = f'https://github.com/{target}.git/{operation}'
+        url = f'https://github.com/{github.repository_name(target)}.git/{operation}'
         if advertisement:
             url += '?service=git-upload-pack'
         client = httpx.AsyncClient(timeout=httpx.Timeout(180, connect=20), follow_redirects=False)

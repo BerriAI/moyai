@@ -105,11 +105,10 @@ class AutomationTools:
             raise HTTPException(403, 'Select the required connections for this chat before scheduling work with them.')
         if definition.mode != run['mode']:
             raise HTTPException(403, 'Use the current chat’s execution mode for its automation.')
-        if 'github' in definition.plugins and definition.repo_url:
-            try:
-                await self.service.connectors.github.selected_target(run, definition.repo_url.removeprefix('https://github.com/').removesuffix('.git'))
-            except ConnectorError as exc:
-                raise HTTPException(409, str(exc)) from None
+        try:
+            await self.service.identify_repositories(definition)
+        except ConnectorError as exc:
+            raise HTTPException(409, str(exc)) from None
 
     async def result(self, row, *, synchronize=False):
         """Only Temporal's describe response may supply a confirmed next run."""
@@ -185,7 +184,19 @@ class AutomationTools:
             definition = args.definition if hasattr(args, 'definition') else Definition.model_validate_json(row['definition'])
             await self.check_scope(run, definition)
         # Hash supplied fields, not generated trigger IDs; identical create retries must match.
-        digest = hashlib.sha256(json.dumps({'name': name, 'arguments': {k: v for k, v in arguments.items() if k != 'turn_id'}},
+        fingerprint = json.loads(json.dumps({k: v for k, v in arguments.items() if k != 'turn_id'}))
+        if hasattr(args, 'definition'):
+            saved = fingerprint['definition']
+            if args.definition.github_repository_id:
+                saved['github_repository_id'] = args.definition.github_repository_id
+                saved.pop('repo_url', None)
+            supplied_events = ([saved['event']] if saved.get('event') else
+                               [t.get('event') for t in saved.get('triggers', [])])
+            for supplied, resolved in zip(supplied_events, args.definition.triggers):
+                if supplied and resolved.event and resolved.event.provider == 'github':
+                    supplied['repository_id'] = resolved.event.repository_id
+                    supplied.pop('repository', None)
+        digest = hashlib.sha256(json.dumps({'name': name, 'arguments': fingerprint},
                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')

@@ -117,9 +117,6 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
-    github_repository: str = Field(default="BerriAI/litellm", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-    # Explicit allowlist; empty preserves the original single-repository setting.
-    github_repositories: str = ""
 
     @field_validator('modal_billing_object_ids')
     @classmethod
@@ -163,15 +160,6 @@ class Settings(BaseSettings):
             raise ValueError('Use project_id:<id> or project_name:<name> for Braintrust traces.')
         return value
 
-    @field_validator('github_repositories')
-    @classmethod
-    def validate_github_repositories(cls, value):
-        repositories = [repo.strip() for repo in value.split(',') if repo.strip()]
-        if (len(repositories) > 20 or any(not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*', repo) for repo in repositories)
-                or len({repo.split('/')[0].lower() for repo in repositories}) > 1):
-            raise ValueError('Choose at most 20 GitHub owner/repository names from one organization.')
-        return ','.join(dict((repo.lower(), repo) for repo in repositories).values())
-
     def trace_destinations(self) -> list[tuple[str, str, dict[str, str]]]:
         """(outbox table, endpoint, headers) for each configured trace receiver."""
         destinations = []
@@ -196,9 +184,6 @@ class Settings(BaseSettings):
                                  {'Authorization': 'Bearer ' + self.braintrust_api_key,
                                   'x-bt-parent': self.braintrust_parent}))
         return destinations
-
-    def allowed_github_repositories(self) -> list[str]:
-        return self.github_repositories.split(',') if self.github_repositories else [self.github_repository]
 
     @field_validator('run_timeout_seconds')
     @classmethod

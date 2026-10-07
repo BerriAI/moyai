@@ -93,8 +93,12 @@ def test_custom_signature_covers_delivery_id_and_expiring_timestamp(workspace):
     assert client.post(path, **oversized).status_code == 413
 
 
-def test_github_repository_label_bots_and_unsigned_delivery_header(workspace):
+def test_github_repository_label_bots_and_unsigned_delivery_header(workspace, monkeypatch):
     app, client = workspace
+    from test_github import select, GitHubAPI
+    app.state.connectors.github.save_app({'id': 123, 'pem': 'test', 'owner_id': 44})
+    select(app)
+    GitHubAPI(app.state.connectors.github, monkeypatch)
     a = configured(app, client, provider='github', event='issues.labeled', repository='BerriAI/litellm', label='moyai', sender_type='human')
     trigger = EventTrigger.model_validate(a['definition']['triggers'][0]['event'])
     payload = example(trigger)
@@ -192,7 +196,7 @@ async def test_receipt_is_recoverable_after_checkpoint_and_dispatch_failure(work
     assert service.store.rows('SELECT run_id FROM automation_runs')[0]['run_id'] == first['id']
 
 
-def test_owner_access_and_webhook_secret_rotation(workspace):
+def test_owner_access_and_webhook_secret_rotation(workspace, monkeypatch):
     app, client = workspace
     owner = sign_in(app, client)
     a = configured(app, client)
@@ -209,6 +213,10 @@ def test_owner_access_and_webhook_secret_rotation(workspace):
     assert client.post(f"/api/automations/{a['id']}/webhook", json={'revision': 3, 'secret': SECRET+'-rotated'}).status_code == 200
     assert app.state.automations.row(a['id'])['paused']
     assert client.post('/hooks/automations/' + a['id'], **signed('webhook', {'event':'benchmark.ready'})).status_code == 401
+    from test_github import select, GitHubAPI
+    app.state.connectors.github.save_app({'id': 123, 'pem': 'test', 'owner_id': 44})
+    select(app)
+    GitHubAPI(app.state.connectors.github, monkeypatch)
     # Switching providers discards the previous provider's credential.
     definition = a['definition'] | {'triggers':[{'id':'new','event': {'provider':'github','event':'issues.opened','repository':'BerriAI/litellm'}}]}
     assert client.put('/api/automations/' + a['id'], json={'revision':4,'definition':definition}).status_code == 200

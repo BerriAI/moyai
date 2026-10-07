@@ -55,6 +55,7 @@ function editEnvironment(data,item) {
   dialog.addEventListener('close',()=>{dialog.remove();if(state.view==='environments')renderEnvironments().catch(showError);});
   dialog.querySelector('form').onsubmit=async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;
     const recipe={};for(const key of ['name','repository','ref','setup','startup','verify','shutdown','instructions'])recipe[key]=dialog.querySelector('#env-'+key).value;
+    recipe.repository_id=recipe.repository===item?.recipe?.repository?item.recipe.repository_id:null;
     recipe.apt_packages=dialog.querySelector('#env-packages').value.split(/\s+/).filter(Boolean);recipe.clone_access=dialog.querySelector('#env-access').value;recipe.setup_mode=dialog.querySelector('#env-mode').value;
     try{await api('/api/admin/environments'+(item?'/'+item.id:''),{method:item?'PUT':'POST',body:JSON.stringify({recipe,revision:item?.revision||0})});dialog.close();toast('Recipe saved. Build it to validate the environment.');}
     catch(error){const box=dialog.querySelector('#env-form-error');box.hidden=false;box.textContent=error.message;b.disabled=false;}

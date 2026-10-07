@@ -20,7 +20,7 @@ services:
       - key: DATA_DIR
         value: /var/data/moyai
       - key: LITELLM_TRACE_ENDPOINT
-        value: https://gateway-dev.litellm-sandbox.ai/v1/traces
+        sync: false
       - key: LITELLM_TRACE_API_KEY
         sync: false
       - key: RAINDROP_WRITE_KEY
@@ -48,7 +48,7 @@ services:
       - key: BRAINTRUST_API_URL
         value: https://api.braintrust.dev
       - key: BRAINTRUST_PARENT
-        value: project_id:03def8d1-b4cf-431e-8907-828a0ae42f97
+        sync: false
       - key: BRAINTRUST_API_KEY
         sync: false
       - key: RENDER_MIGRATION_STAGE

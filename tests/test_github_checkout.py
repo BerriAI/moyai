@@ -17,7 +17,7 @@ def git(directory, *args):
 @pytest.fixture
 def checkout(tmp_path, monkeypatch, request):
     repository = getattr(request, 'param', '')
-    git_path = '/github/' + repository + '.git' if repository else '/github.git'
+    git_path = '/github/repositories/101.git'
     source = tmp_path / 'source'
     source.mkdir()
     git(source, 'init', '-b', 'main')
@@ -67,7 +67,7 @@ def checkout(tmp_path, monkeypatch, request):
     thread.start()
     def broker(path, body):
         assert path == '/tools/call' and body == {'name': 'github_checkout', 'arguments': {'repository': repository} if repository else {}}
-        return {'repository': repository or 'BerriAI/litellm', 'default_branch': 'main', 'base_sha': base, 'git_path': git_path}
+        return {'repository_id': 101, 'repository': repository or 'BerriAI/litellm', 'default_branch': 'main', 'base_sha': base, 'git_path': git_path}
     try:
         result = local.checkout(broker, f'http://127.0.0.1:{server.server_port}', 'current-capability', repository=repository)
         yield root / 'repo', result, requests, broker, server
@@ -80,7 +80,7 @@ def test_real_git_checkout_preserves_files_and_never_stores_capability(checkout)
     assert (repo / 'edit.py').read_text() == 'before = 1\n'
     assert result['repository'] == 'BerriAI/litellm'
     assert all(auth == 'Bearer current-capability' for _, auth in requests)
-    assert {path.split('?')[0] for path, _ in requests} == {'/github.git/info/refs', '/github.git/git-upload-pack'}
+    assert {path.split('?')[0] for path, _ in requests} == {'/github/repositories/101.git/info/refs', '/github/repositories/101.git/git-upload-pack'}
     config = (repo / '.git/config').read_text()
     assert 'current-capability' not in config and 'extraHeader' not in config
     assert 'https://github.com/BerriAI/litellm.git' in config
@@ -140,12 +140,12 @@ def test_specific_repository_real_checkout_and_publication_payload(checkout):
     repo, result, requests, broker, server = checkout
     target = result['repository']
     assert {path.split('?')[0] for path, _ in requests} == {
-        '/github/' + target + '.git/info/refs', '/github/' + target + '.git/git-upload-pack'}
+        '/github/repositories/101.git/info/refs', '/github/repositories/101.git/git-upload-pack'}
     assert 'current-capability' not in (repo / '.git/config').read_text()
     (repo / 'new.py').write_text('answer = 42\n')
-    assert local.collect(str(repo), 'Change this repository', 'Verified checkout', 'repo-test-123')['repository'] == target
+    assert local.collect(str(repo), 'Change this repository', 'Verified checkout', 'repo-test-123')['repository_id'] == 101
     def different(path, body):
-        return {'repository': 'BerriAI/other', 'default_branch': 'main', 'base_sha': result['base_sha']}
+        return {'repository_id': 999, 'git_path': '/github/repositories/999.git', 'repository': 'BerriAI/other', 'default_branch': 'main', 'base_sha': result['base_sha']}
     with pytest.raises(local.GitHubToolError, match='another repository'):
         local.checkout(different, f'http://127.0.0.1:{server.server_port}', 'current-capability', str(repo))
     assert (repo / 'new.py').read_text() == 'answer = 42\n'
@@ -155,7 +155,7 @@ def test_specific_repository_real_checkout_and_publication_payload(checkout):
 def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(checkout):
     repo, initial, _, _, server = checkout
     source = repo.parent.parent / 'source'
-    upstream = repo.parent.parent / 'upstream/github/BerriAI/litellm.git'
+    upstream = repo.parent.parent / 'upstream/github/repositories/101.git'
     calls = []
 
     def broker(path, body):
@@ -163,7 +163,7 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
         args = body['arguments']
         if body['name'] == 'github_checkout':
             return {**initial, 'base_sha': git(source, 'rev-parse', 'HEAD'), 'number': 100,
-                    'checkout_ref': 'refs/pull/100/head', 'git_path': '/github/BerriAI/litellm.git'}
+                    'checkout_ref': 'refs/pull/100/head', 'git_path': '/github/repositories/101.git'}
         calls.append(body)
         for change in args['files']:
             target = source / change['path']
@@ -175,7 +175,7 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
         git(source, 'commit', '-m', args['title'])
         commit = git(source, 'rev-parse', 'HEAD')
         git(source, 'push', str(upstream), 'HEAD:refs/heads/moyai/test', 'HEAD:refs/pull/100/head')
-        return {'repository': 'BerriAI/litellm', 'number': 100, 'commit': commit, 'branch': 'moyai/test',
+        return {'repository_id': 101, 'repository': 'BerriAI/litellm', 'number': 100, 'commit': commit, 'branch': 'moyai/test',
                 'url': 'https://github.com/BerriAI/litellm/pull/100'}
 
     remote = f'http://127.0.0.1:{server.server_port}'

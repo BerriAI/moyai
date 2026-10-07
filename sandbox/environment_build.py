@@ -40,7 +40,7 @@ def build(recipe):
     subprocess.run(['git', '-C', str(REPO), 'checkout', '--detach', 'FETCH_HEAD'], check=True)
     sha = subprocess.check_output(['git', '-C', str(REPO), 'rev-parse', 'HEAD'], text=True).strip()
     # Publication still rechecks live repository access and ancestry on the server.
-    (REPO / '.git/moyai.json').write_text(json.dumps({'repository': recipe['repository'],
+    (REPO / '.git/moyai.json').write_text(json.dumps({'repository_id': recipe.get('repository_id'), 'repository': recipe['repository'],
         'base_sha': sha, 'default_branch': recipe['ref']}))
     if recipe.get('setup_mode') == 'detect':
         recipe = detect(REPO, recipe)

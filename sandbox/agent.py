@@ -103,20 +103,19 @@ def run_agent(spec, relay):
     artifacts.mkdir(exist_ok=True)
     if spec["repo_url"]:
         requested_repo = spec['repo_url'].removeprefix('https://github.com/').removesuffix('.git').lower()
-        github_repositories = spec.get('github_repositories', [spec.get('github_repository', '')])
-        if requested_repo in {repository.lower() for repository in github_repositories}:
+        if spec.get('github_enabled'):
             def broker(path, body):
                 request = urllib.request.Request(relay.url + path, data=json.dumps(body).encode(),
                     headers={'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN'], 'Content-Type': 'application/json'})
                 with urllib.request.urlopen(request, timeout=90) as response:
                     return json.load(response)
             emit('tool', 'Preparing the shared GitHub repository')
-            checked_out = github_checkout(broker, spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], repository=requested_repo)
+            checked_out = github_checkout(broker, spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], **({'repository_id': spec['github_repository_id']} if spec.get('github_repository_id') else {'repository': requested_repo}))
             if checked_out.get('error'):
                 raise RuntimeError('The shared GitHub checkout was not confirmed')
         elif not (workspace / "repo").exists():
             emit("tool", "Cloning the repository", {"command": f"git clone --depth 1 {spec['repo_url']}"})
-            subprocess.run(["git", "clone", "--depth", "1", "--", spec["repo_url"], str(workspace / "repo")], check=True, timeout=120)
+            subprocess.run(["git", "-c", "http.followRedirects=false", "clone", "--depth", "1", "--", spec["repo_url"], str(workspace / "repo")], check=True, timeout=120)
         workspace /= "repo"
     try:
         prepare_project(spec, emit)
@@ -267,7 +266,7 @@ def run_agent(spec, relay):
                "After resuming, collect worker artifacts and combine results; count failed and missing cases accurately. "
                "Child work is isolated and cannot create further child agents. Gateway and connected-app credentials stay on the server. ") +
             "For issue follow-ups, read its status and comments first; if a fix PR already exists, give its link and state instead of creating a duplicate. "
-            "When GitHub tools are available, use github_repositories to list allowed repositories and github_checkout with the requested owner/repository to prepare it without overwriting local files. "
+            "When GitHub tools are available, use github_repositories to list allowed repositories and github_checkout with its permanent repository_id to prepare it without overwriting local files. "
             "When the task requests a PR, use github_create_pull_request to package actual changed files and open a normal ready-for-review PR directly in an authorized repository. Do not ask for an extra administrator approval to create it. Use github_update_pull_request for follow-up fixes to this session’s published PR; use github_comment_pull_request for requested review-bot commands and github_pull_request_comments to read feedback. "
             "Use a stable request_key for the same publication, even across follow-up turns. Never retry an uncertain write automatically. "
             "Git push, updates to branches outside this session’s published PRs, PR reviews/approvals, merging, auto-merge, and workflow/access-control changes are unavailable. "

@@ -15,6 +15,7 @@ from test_workspace import workspace  # noqa: F401
 def blocked(workspace, monkeypatch):
     app, client = workspace
     settings, env = app.state.settings, app.state.environments
+    monkeypatch.setattr(app.state.connectors.github, 'public_repository', AsyncMock(return_value={'id': 202, 'full_name': 'BerriAI/moyai', 'private': False}))
     settings.modal_token_id = settings.modal_token_secret = settings.litellm_api_key = 'test-placeholder'
     settings.litellm_api_base = 'https://unused.invalid/v1'
     monkeypatch.setattr(env, 'advance', AsyncMock())

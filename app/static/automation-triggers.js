@@ -49,6 +49,7 @@ function readAutomationTrigger(card) {
   }
   const event={provider,event:get('event')||'*'};
   for(const [key] of automationEventFields[provider]||[])if(get(key)!==''&&get(key)!==undefined)event[key]=key==='priority'?Number(get(key)):get(key);
+  if(provider==='github'&&event.repository===card.dataset.repositoryName&&card.dataset.repositoryId)event.repository_id=Number(card.dataset.repositoryId);
   if(get('sender_type'))event.sender_type=get('sender_type');
   if(provider==='slack')event.include_thread_replies=!card.querySelector('[name=include_thread_replies]').disabled&&card.querySelector('[name=include_thread_replies]').checked;
   return {id,event};
@@ -64,7 +65,7 @@ function bindAutomationTrigger(form,d) {
     if(!capEdited)cap.value=cards.some(c=>c.querySelector('[name=source]').value==='slack'&&c.querySelector('[name=event]')?.value==='message.posted')?150:50;
   }
   function add(t={id:crypto.randomUUID(),schedule:automationDefaultSchedule()}) {
-    const card=document.createElement('section');card.className='automation-trigger-card';card.dataset.triggerId=t.id;
+    const card=document.createElement('section');card.className='automation-trigger-card';card.dataset.triggerId=t.id;card.dataset.repositoryName=t.event?.repository||'';card.dataset.repositoryId=t.event?.repository_id||'';
     const provider=t.event?.provider||'schedule';
     card.innerHTML=`<header><strong data-trigger-title></strong><button type="button" class="quiet" data-remove-trigger>Remove</button></header><label>Source<select name="source">${Object.entries(automationSources).map(([key,label])=>`<option value="${key}" ${key===provider?'selected':''}>${label}</option>`).join('')}</select></label><div data-source-fields></div>`;
     const fields=card.querySelector('[data-source-fields]'),source=card.querySelector('[name=source]');

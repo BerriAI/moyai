@@ -9,7 +9,7 @@ import pytest
 
 from app.github import PERMISSIONS, MANIFEST_PERMISSIONS, supports_permissions
 from app.security import digest
-from test_github import connected
+from test_github import connected, repository_data
 from test_workspace import workspace
 
 REPO = 'BerriAI/litellm'
@@ -50,14 +50,16 @@ class Provider:
         path, method = request.url.path, request.method
         body = json.loads(request.content) if request.content else None
         self.calls.append((method, path, body))
+        if path == '/orgs/BerriAI':
+            return httpx.Response(200, json={'id': 44, 'login': 'BerriAI', 'type': 'Organization'})
         if path == '/app':
             return httpx.Response(200, json={'id': 123, 'slug': 'moyai-test',
-                'owner': {'login': 'BerriAI', 'type': 'Organization'}, 'permissions': self.permissions})
+                'owner': {'id': 44, 'login': 'BerriAI', 'type': 'Organization'}, 'permissions': self.permissions})
         if path == '/app/installations/10':
-            return httpx.Response(200, json={'account': {'login': 'BerriAI', 'type': 'Organization'},
+            return httpx.Response(200, json={'account': {'id': 44, 'login': 'BerriAI', 'type': 'Organization'},
                                            'permissions': self.permissions, 'suspended_at': None})
         if path.endswith('/access_tokens'):
-            assert body['repositories'] == ['litellm']
+            assert body['repository_ids'] == [101]
             assert supports_permissions(self.permissions, body['permissions'])
             token = f'server-token-{len(self.tokens)}'
             self.tokens[token] = body['permissions']
@@ -65,13 +67,15 @@ class Provider:
             return httpx.Response(201, json={'token': token, 'expires_at': '2099-01-01T00:00:00Z'})
         permissions = self.tokens[request.headers['authorization'].removeprefix('Bearer ')]
         if path == '/installation/repositories':
-            return httpx.Response(200, json={'repositories': [{'full_name': REPO}]})
-        if path == f'/repos/{REPO}/rulesets':
+            return httpx.Response(200, json={'repositories': [repository_data(REPO)]})
+        if path == '/repositories/101':
+            return httpx.Response(200, json=repository_data(REPO))
+        if path == '/repositories/101/rulesets':
             assert request.url.params['includes_parents'] == 'true'
             assert request.url.params['per_page'] == '30'
             org_rule = {**self.ruleset, 'id': 43, 'source': 'BerriAI', 'source_type': 'Organization'}
             return httpx.Response(200, json=[self.ruleset] * 30 if self.many else [self.ruleset, org_rule])
-        assert path == f'/repos/{REPO}/rulesets/42'
+        assert path == '/repositories/101/rulesets/42'
         if method == 'PUT':
             assert permissions == {'administration': 'write'}
             assert list(body) == ['rules']
@@ -120,7 +124,7 @@ def edit_args(call):
 
 def test_extra_app_permissions_accepted_without_changing_pr_tokens(rules):
     app, client, _, _, github, provider, _ = rules
-    assert asyncio.run(github.verify({'kind': 'github_app', 'installation_id': 10, 'repository': REPO})) == REPO
+    assert asyncio.run(github.verify(github.saved_credentials())) == REPO
     result = client.post('/api/connections/github/app', json={'app_id': 123, 'private_key': 'local-fixture-key' * 20})
     assert result.status_code == 200
     asyncio.run(github.installation_token(repository=REPO, write=True))
@@ -131,13 +135,16 @@ def test_extra_app_permissions_accepted_without_changing_pr_tokens(rules):
 
 def test_new_manifest_requests_administration_and_accepts_broader_conversion(workspace, monkeypatch):
     app, client = workspace
-    start = client.post('/api/connections/github/oauth').json()['url']
+    async def organization(*args, **kwargs):
+        return {'id': 44, 'login': 'BerriAI', 'type': 'Organization'}
+    monkeypatch.setattr(app.state.connectors.github, 'request', organization)
+    start = client.post('/api/connections/github/oauth', json={'organization': 'BerriAI'}).json()['url']
     page = client.get(start)
     assert 'administration' in page.text and 'Administration write access' in page.text
     github = app.state.connectors.github
     monkeypatch.setattr(github, 'app_jwt', lambda config=None: 'fixture-jwt')
     async def convert(*args, **kwargs):
-        return {'owner': {'login': 'BerriAI'}, 'permissions': {**MANIFEST_PERMISSIONS, 'issues': 'write'},
+        return {'owner': {'id': 44, 'login': 'BerriAI'}, 'permissions': {**MANIFEST_PERMISSIONS, 'issues': 'write'},
                 'id': 123, 'slug': 'moyai-test', 'pem': 'fixture-key'}
     monkeypatch.setattr(github, 'request', convert)
     state = parse_qs(urlparse(start).query)['state'][0]
