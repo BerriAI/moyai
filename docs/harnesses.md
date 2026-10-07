@@ -76,8 +76,23 @@ concurrency, model-request limits and spend accounting apply as usual. Summaries
 are model-generated reference data, not higher-priority instructions or proof
 that an action succeeded. Check original records before repeating external writes.
 
-A failed summary leaves the last good summary, cursor and all receipts intact.
-Before the next task invocation, compaction must catch up; failure pauses work
+The summary request does not impose an output-token cap. Generation uses the
+selected model's gateway configuration; the saved summary's byte budget is
+separate. Normal Messages, Responses and Chat Completions requests preserve an
+explicit runtime output limit, and leave an omitted limit to the gateway. Moyai
+does not inject an 8,192-token default or clamp requests to 16,000 tokens.
+
+An oversized, empty or incomplete summary is regenerated from the same original
+records with a more concise target, for up to three attempts. The code never
+cuts off a summary to fit. Transient gateway failures can also retry; refusals
+and permanent upstream rejections cannot. Every attempt rechecks authorization,
+counts toward request limits and records usage. Activity records include the
+failure category, attempt, request ID and summary byte count when available,
+without storing rejected text or private reasoning. These retries only generate
+summaries; they cannot restart a runtime or replay a task action.
+
+A failed recovery leaves the last good summary, cursor and all receipts intact.
+Before the next task invocation, compaction must catch up; exhausted recovery pauses work
 with a retry message instead of silently dropping older context. Unfinished tool
 calls block automatic continuation. Missing, corrupt, mismatched or invalid
 checkpoint state is not silently treated as an empty conversation. A fresh child

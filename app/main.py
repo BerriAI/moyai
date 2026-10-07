@@ -913,11 +913,8 @@ def create_app(settings: Settings | None = None):
         payload["model"] = selected_model
         for field in ("max_tokens", "max_completion_tokens"):
             if field in payload:
-                if not isinstance(payload[field], int) or payload[field] < 1:
+                if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
-                payload[field] = min(payload[field], 16000)
-        if not ({"max_tokens", "max_completion_tokens"} & payload.keys()):
-            payload["max_tokens"] = 8192
         request_id = spend.begin(run, selected_model)
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.
@@ -941,7 +938,7 @@ def create_app(settings: Settings | None = None):
                     if upstream.status_code >= 400:
                         status = 'failed'
                         raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.')
-                    # Bound memory even if a provider ignores our output limit.
+                    # Bound transport memory independently of model token limits.
                     raw_response = bytearray()
                     async for chunk in upstream.aiter_bytes():
                         raw_response.extend(chunk)

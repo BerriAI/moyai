@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -18,6 +19,37 @@ CODE = '''Repro: curl -s localhost:4100/openapi.json | python3 -c "import json,s
 Router already in sys.modules; check /v1/mcp/server/{server_id}/user-env-vars.
 Fix merged: https://github.com/BerriAI/litellm/pull/38416
 '''
+
+
+def test_compaction_waits_for_unbilled_admission_with_fresh_envelopes(monkeypatch):
+    requests, envelopes = [], []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            envelope = self.rfile.read(int(self.headers['Content-Length']))
+            envelopes.append(envelope)
+            requests.append(json.loads(unseal('token', self.path, envelope)))
+            self.send_response(429 if len(requests) in {1, 3} else 200)
+            if len(requests) == 1:
+                self.send_header('X-Moyai-Model-Queue', '1')
+            self.end_headers()
+            self.wfile.write(b'{"summary":"Complete saved summary"}')
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', 'token').start()
+    relay.before_model = lambda: pytest.fail('Compaction restarted the stopped runtime')
+    monkeypatch.setattr('sandbox.broker_relay.time.sleep', lambda seconds: None)
+    entries = [{'seq': 1, 'excerpt': 'Already completed action receipt'}]
+    try:
+        assert relay.compact('', entries) == 'Complete saved summary'
+        assert requests == [{'summary': '', 'entries': entries}] * 2
+        assert envelopes[0] != envelopes[1]
+        with pytest.raises(urllib.error.HTTPError) as error:
+            relay.compact('', entries)
+        assert error.value.code == 429 and len(requests) == 3
+    finally:
+        relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 
 def test_envelopes_are_bound_to_turn_capability_route_age_and_size():

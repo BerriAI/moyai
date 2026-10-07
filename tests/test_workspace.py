@@ -286,7 +286,7 @@ def test_model_proxy_pins_model_and_drops_gateway_overrides(workspace, monkeypat
     result = client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": [{"role": "user", "content": "Hello"}], "model": "expensive-model", "api_base": "https://evil.example", "api_key": "evil", "n": 100, "max_tokens": 999999})
     assert result.status_code == 200
     assert captured[0]["model"] == "approved-model"
-    assert captured[0]["max_tokens"] == 16000
+    assert captured[0]["max_tokens"] == 999999
     assert not {"api_base", "api_key", "n"} & captured[0].keys()
     app.state.store.execute("UPDATE runs SET model_calls=? WHERE id=?", (app.state.settings.max_agent_iterations * 3, run_id))
     limited = client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []})
@@ -298,6 +298,7 @@ def test_model_proxy_pins_model_and_drops_gateway_overrides(workspace, monkeypat
     app.state.settings.max_agent_iterations = 0
     app.state.store.execute("UPDATE runs SET model_calls=100000,turn_model_calls=100000 WHERE id=?", (run_id,))
     assert client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []}).status_code == 200
+    assert not {'max_tokens', 'max_completion_tokens'} & captured[-1].keys()
     assert app.state.store.run(run_id)['model_calls'] == 100001
     app.state.store.update_run(run_id, status='cancelled', token_hash='')
     assert client.post(f"/broker/{run_id}/v1/chat/completions", headers=headers, json={"messages": []}).status_code == 401

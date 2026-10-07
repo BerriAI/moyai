@@ -211,14 +211,28 @@ class BrokerRelay:
     def compact(self, summary, entries):
         """Tool-free maintenance outside the runtime's next-model checkpoint hook.
 
-        Use the same run capability and encrypted transport. A failed request is
-        not retried here and cannot restart the stopped SDK or execute tools.
+        Use the same run capability and encrypted transport. The server can
+        recover rejected summaries without restarting the SDK or executing tools.
         """
         route = '/context/compact'
-        request = urllib.request.Request(self.remote.rstrip('/') + route,
-            data=seal(self.token, route, json.dumps({'summary': summary, 'entries': entries}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
-        with urllib.request.urlopen(request, timeout=330) as response:
+        body = json.dumps({'summary': summary, 'entries': entries}).encode()
+        # Allow the server's three accounted, tool-free recovery attempts. Queue
+        # rejection happens before inference and can safely wait for admission.
+        deadline = time.monotonic() + 940
+        while True:
+            request = urllib.request.Request(self.remote.rstrip('/') + route,
+                data=seal(self.token, route, body),
+                headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+            try:
+                response = urllib.request.urlopen(request, timeout=max(1, deadline - time.monotonic()))
+                break
+            except urllib.error.HTTPError as exc:
+                if (exc.code != 429 or exc.headers.get('X-Moyai-Model-Queue') != '1'
+                        or time.monotonic() + 3 >= deadline):
+                    raise
+                exc.close()
+                time.sleep(3)
+        with response:
             raw = response.read(64_001)
             if len(raw) > 64_000:
                 raise ValueError('Context summary response exceeded the limit.')

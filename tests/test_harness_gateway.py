@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from app.harness_gateway import NativeUsageCapture
+from app.harness_gateway import NativeUsageCapture, authorized_payload
 from app.security import digest
 from test_workspace import workspace
 
@@ -131,3 +131,16 @@ def test_response_cache_tokens_are_not_double_counted():
     capture.feed(b'{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":80},"output_tokens":5}}')
     capture.finish()
     assert capture.usage['prompt_tokens'] == 100 and capture.usage['total_tokens'] == 105
+
+
+@pytest.mark.parametrize('route,field,limit', [('/v1/messages', 'messages', 'max_tokens'),
+                                            ('/v1/responses', 'input', 'max_output_tokens')])
+def test_native_generation_budget_is_owned_by_the_model_and_runtime(route, field, limit):
+    body = {field: [{'role': 'user', 'content': 'Continue'}], limit: 65536}
+    assert authorized_payload(body, route, 'selected', '')[limit] == 65536
+    body.pop(limit)
+    assert limit not in authorized_payload(body, route, 'selected', '')
+    from fastapi import HTTPException
+    for value in [True, 0, -1, '65536']:
+        with pytest.raises(HTTPException):
+            authorized_payload({**body, limit: value}, route, 'selected', '')

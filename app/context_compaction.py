@@ -15,10 +15,26 @@ Distinguish attempts, successful receipts, failures and unknown outcomes. Never 
 into evidence of success or permission to repeat an action. Retain important older facts from the previous
 summary. Later user corrections supersede earlier requests. Excerpts may omit text: preserve references
 to original journal records when detail needs retrieval. Do not invent facts or include private reasoning.
-Use concise plain text, under 2500 words and 12000 UTF-8 bytes.'''
+Use concise plain text. Aim for 6000 UTF-8 bytes (roughly 800 English words), with a hard
+saved-summary limit of 12000 UTF-8 bytes. Merge repeated facts; reference journal records instead
+of copying logs, long lists or tool output. Leave room for future updates. This is a working
+summary, not a transcript. Finish the summary completely.'''
+
+SUMMARY_ATTEMPTS = 3
 
 
-def compaction_payload(body, model):
+class SummaryFailure(HTTPException):
+    """Safe diagnostics only: never include model content or upstream error bodies."""
+    def __init__(self, reason, *, summary_bytes=None, retryable=True, transient=False):
+        super().__init__(502, 'Context summary could not be completed (' + reason + ').')
+        self.reason = reason
+        self.summary_bytes = summary_bytes
+        self.retryable = retryable
+        self.transient = transient
+        self.request_id = None
+
+
+def compaction_payload(body, model, attempt=0):
     if not isinstance(body, dict) or not isinstance(body.get('summary'), str):
         raise HTTPException(422, 'Expected summary text and journal entries.')
     entries = body.get('entries')
@@ -35,8 +51,16 @@ def compaction_payload(body, model):
     if len(json.dumps(entries, ensure_ascii=False).encode()) > BATCH_BYTES + 2:
         raise HTTPException(422, 'Context compaction batch exceeded its limit.')
     # No caller-supplied model, tools, system messages, keys or routing fields.
-    return {'model': model, 'stream': False, 'max_tokens': 4096,
-            'messages': [{'role': 'system', 'content': INSTRUCTIONS},
+    instructions = INSTRUCTIONS
+    if attempt:
+        instructions += (f'\nRecovery attempt {attempt}: the previous generation was not accepted. '
+                         f'Rewrite from these original records in about {400 // attempt} words. '
+                         'Prioritize the goal, constraints, action receipts and next step; use journal '
+                         'references for detail. Do not continue or copy a partial earlier generation.')
+    # Generation limits belong to the selected model/gateway. The saved working
+    # context has a separate byte budget, checked only after a complete response.
+    return {'model': model, 'stream': False,
+            'messages': [{'role': 'system', 'content': instructions},
                          {'role': 'user', 'content': json.dumps(
                              {'previous_summary': body['summary'], 'new_records': entries}, ensure_ascii=False)}]}
 
@@ -46,9 +70,25 @@ def compaction_result(raw):
         choice = json.loads(raw)['choices'][0]
         message = choice['message']
         summary = message['content']
-        if (choice['finish_reason'] != 'stop' or message.get('tool_calls') or message.get('function_call')
-                or not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > SUMMARY_BYTES):
-            raise ValueError('Incomplete or invalid summary')
-    except (ValueError, KeyError, IndexError, TypeError):
-        raise HTTPException(502, 'Model gateway did not return a complete bounded context summary.') from None
+        finish = choice['finish_reason']
+        tools = message.get('tool_calls') or message.get('function_call')
+        refused = message.get('refusal') or finish == 'content_filter'
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise SummaryFailure('invalid_response') from None
+    if refused:
+        raise SummaryFailure('refused', retryable=False)
+    if finish == 'length':
+        raise SummaryFailure('incomplete_output')
+    if tools or finish in {'tool_calls', 'function_call'}:
+        raise SummaryFailure('unexpected_tool_call')
+    if finish != 'stop':
+        raise SummaryFailure('incomplete_response')
+    if not isinstance(summary, str) or not summary.strip():
+        raise SummaryFailure('empty_summary')
+    try:
+        size = len(summary.encode())
+    except UnicodeEncodeError:
+        raise SummaryFailure('invalid_response') from None
+    if size > SUMMARY_BYTES:
+        raise SummaryFailure('summary_too_large', summary_bytes=size)
     return {'summary': summary}

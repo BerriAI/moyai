@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 from .spend import UsageCapture
-from .context_compaction import compaction_payload, compaction_result
+from .context_compaction import compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -37,10 +37,8 @@ def authorized_payload(body, route, model, context):
         raise HTTPException(422, 'Use full conversation input, not previous_response_id.')
     payload['model'] = model
     limit = 'max_tokens' if route == '/v1/messages' else 'max_output_tokens'
-    value = payload.get(limit, 8192)
-    if type(value) is not int or value < 1:
+    if limit in payload and (type(payload[limit]) is not int or payload[limit] < 1):
         raise HTTPException(422, 'Invalid output limit.')
-    payload[limit] = min(value, 16000)
     if context:
         if route == '/v1/messages':
             existing = payload.get('system', [])
@@ -98,6 +96,39 @@ class HarnessGateway:
         self.tracing = tracing
 
     async def forward(self, run_id, request, route):
+        if route != '/context/compact':
+            return await self._forward_once(run_id, request, route)
+        self.require_run(run_id, request)
+        # Decrypt once while the transport envelope is fresh. A valid recovery
+        # can outlive its five-minute envelope TTL; authorization is still
+        # rechecked for every inference attempt below.
+        body = await self.read_body(request, route)
+        # Only tool-free maintenance is retried. Each attempt goes through run
+        # authorization, admission, usage accounting and cleanup independently.
+        for attempt in range(SUMMARY_ATTEMPTS):
+            try:
+                return await self._forward_once(run_id, request, route, attempt, body)
+            except SummaryFailure as exc:
+                retry = exc.retryable and attempt + 1 < SUMMARY_ATTEMPTS
+                labels = {
+                    'summary_too_large': 'The context summary exceeded its saved size budget.',
+                    'incomplete_output': 'The model stopped before finishing the context summary.',
+                    'upstream_unavailable': 'The summary service is temporarily unavailable.',
+                    'gateway_unreachable': 'The summary service could not be reached.',
+                }
+                message = labels.get(exc.reason, 'The model did not return a usable context summary.')
+                message += ' Retrying the summary; task actions will not be repeated.' if retry else ' Saved records are preserved.'
+                self.store.event(run_id, 'context', message, {
+                    'reason': exc.reason, 'attempt': attempt + 1, 'request_id': exc.request_id,
+                    'summary_bytes': exc.summary_bytes, 'retrying': retry,
+                })
+                await self.checkpoints.flush()
+                if not retry:
+                    raise
+                if exc.transient:
+                    await asyncio.sleep(attempt + 1)
+
+    async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None):
         compact = route == '/context/compact'
         if route not in NATIVE_ROUTES and not compact:
             raise HTTPException(404, 'Unsupported model endpoint.')
@@ -138,11 +169,11 @@ class HarnessGateway:
                 model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
-            body = await self.read_body(request, route)
+            body = compaction_body if compact else await self.read_body(request, route)
             if compact:
                 # Persistable summaries must never receive requester-private
                 # memory, skills, attachments or the native SDK transcript.
-                payload = compaction_payload(body, model)
+                payload = compaction_payload(body, model, attempt)
             else:
                 context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
                 payload = authorized_payload(body, route, model, context)
@@ -175,6 +206,10 @@ class HarnessGateway:
             upstream = await client.send(client.build_request('POST', url, json=payload, headers=headers), stream=True)
             self.spend.headers(request_id, upstream, capture.streaming)
             if upstream.status_code >= 400:
+                if compact:
+                    transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
+                    raise SummaryFailure('upstream_unavailable' if transient else 'upstream_rejected',
+                                         retryable=transient, transient=transient)
                 raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}).')
             if not capture.streaming:
                 raw = bytearray()
@@ -190,7 +225,15 @@ class HarnessGateway:
                 return result
         except httpx.HTTPError:
             await finish()
+            if compact:
+                error = SummaryFailure('gateway_unreachable', transient=True)
+                error.request_id = request_id
+                raise error from None
             raise HTTPException(502, 'Model gateway could not be reached.') from None
+        except SummaryFailure as exc:
+            exc.request_id = request_id
+            await finish()
+            raise
         except BaseException:
             await finish()
             raise
