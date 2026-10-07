@@ -609,7 +609,7 @@ def create_app(settings: Settings | None = None):
         if not body.enabled or body.read_only:
             connectors.expire_approvals(provider)
         action = ("Paused for all sessions" if not body.enabled else "Enabled: read only" if body.read_only
-                  else "Enabled: create and maintain session-owned pull requests" if provider == 'github'
+                  else "Enabled: create and maintain session-owned pull requests, create and comment on issues" if provider == 'github'
                   else "Enabled: read and write without approval")
         connectors.audit(provider, action)
         return connectors.policy(provider)
