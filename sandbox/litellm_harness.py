@@ -42,7 +42,8 @@ class LiteLLMAgent(HarnessAgent):
         self.validate()
         self.stopped.clear()
         self.journal = TurnJournal(conversation_history, prompt)
-        return asyncio.run(self._run(self.journal.prompt(prompt, conversation_history), system_message))
+        reference_dir = self.context.spec.get('history_reference_dir', self.context.cwd)
+        return asyncio.run(self._run(self.journal.prompt(prompt, conversation_history, cwd=reference_dir), system_message))
 
     async def _run(self, prompt, system_message):
         import litellm

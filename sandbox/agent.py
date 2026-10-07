@@ -169,10 +169,14 @@ def run_agent(spec, relay):
         if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
     harness_activity = SimpleNamespace(start=activity.start, complete=tool_complete, commentary=activity.commentary)
-    agent = create_agent(harness, spec=spec, relay=relay, config=config, activity=harness_activity, step=step,
+    # Keep restored history outside every repository and downloadable artifact.
+    # Otherwise an agent's `git add -A` could commit the private conversation.
+    history_path = Path("/session/conversation.json")
+    history_path.parent.mkdir(exist_ok=True, mode=0o700)
+    agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
+                         relay=relay, config=config, activity=harness_activity, step=step,
                          cwd=str(workspace))
     result = {}
-    history_path = Path("/session/conversation.json")
     history = spec.get("history_fallback", [])
     if spec.get("chat_enabled") and history_path.exists() and not spec.get("workspace_warning") and not spec.get('fresh_child'):
         history = json.loads(history_path.read_text())
@@ -203,6 +207,7 @@ def run_agent(spec, relay):
         steering.listen(agent, steering_update)
         system_message = (
             "You are Moyai, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
+            "You may read saved conversation references under /session when the current prompt points to them. "
             "The conversation and filesystem are saved between responses. Answer follow-ups in that context. "
             "When the current user asks to switch models or use a model for a task (for example, 'use GLM 5.3 and summarize this'), "
             "discover model_list and model_switch, list enabled models, then switch before doing the remaining task. "

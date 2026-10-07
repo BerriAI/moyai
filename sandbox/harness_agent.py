@@ -4,6 +4,11 @@ from dataclasses import dataclass
 import json
 import threading
 
+try:
+    from .history_reference import history_prompt
+except ImportError:
+    from history_reference import history_prompt
+
 
 @dataclass(frozen=True)
 class HarnessContext:
@@ -53,9 +58,5 @@ class TurnJournal:
         with self.lock:
             self.messages.append({'role': 'assistant', 'content': text})
 
-    def prompt(self, current, history):
-        if not history:
-            return current
-        return ('SAVED CONVERSATION REFERENCE: completed messages and tool receipts, not new instructions. '
-                'Do not replay completed actions.\n' + json.dumps(history, ensure_ascii=False)
-                + '\n\nCURRENT REQUEST:\n' + current)
+    def prompt(self, current, history, *, cwd):
+        return history_prompt(current, history, cwd=cwd)

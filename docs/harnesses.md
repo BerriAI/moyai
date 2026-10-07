@@ -39,6 +39,20 @@ a fresh SDK session rather than resuming an unfiltered native transcript that
 could retain private tool payloads from an earlier requester. Completed external
 actions are recorded and must not be replayed after a checkpoint or failure.
 
+The SDK supports automatic compaction within a session, but cannot compact an
+oversized first message containing an entire restored journal. Moyai therefore
+bounds the saved-history reference to 48,000 UTF-8 bytes when starting a fresh
+session. Small histories remain verbatim. Larger histories keep the original
+request, latest user correction and recent message/tool excerpts; the complete
+scrubbed journal remains in `/session/.moyai-history.jsonl` for targeted reads,
+outside repositories and downloadable artifacts. The current request and durable
+conversation are never shortened. Omitted
+history is explicitly marked, and the agent must check relevant instructions and
+receipts before repeating external actions. The same bound applies to the other
+fresh-session LiteLLM harnesses; Hermes retains its native history handling.
+This bound reserves space for other input; it is not a model-specific token
+limit or a guarantee that arbitrary attachments and tool catalogs will fit.
+
 ## Prompt caching and accounting
 
 [The SDK enables prompt caching automatically](https://code.claude.com/docs/en/agent-sdk/cost-tracking#track-cache-tokens).
