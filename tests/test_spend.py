@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
+import pytest
 from fastapi.responses import JSONResponse
 
 from app.db import Store
@@ -111,6 +112,35 @@ def test_stream_parser_handles_split_utf8_and_final_usage_without_storing_text()
     for value in ('NaN','Infinity','-1',True,'garbage'):
         assert money(value) is None
     assert money('0') == '0'
+
+
+@pytest.mark.parametrize('raw,expected', [
+    (b'0.01234567890123456789', '0.01234567890123456789'),
+    (b'"0.01234567890123456789"', '0.01234567890123456789'),
+    (b'0', '0'), (b'null', None), (b'true', None), (b'-1', None),
+    (b'"NaN"', None), (b'"Infinity"', None), (b'"garbage"', None),
+    (b'{}', None), (b'[]', None),
+])
+def test_stream_usage_cost_validation_and_precision(raw: bytes, expected: str | None) -> None:
+    capture = UsageCapture(True)
+    wire = b'data: {"usage":{"total_tokens":14,"cost":' + raw + b'}}\n\ndata: [DONE]\n\n'
+    for byte in wire:
+        capture.feed(bytes([byte]))
+    capture.finish()
+    assert capture.done and capture.cost == expected and capture.usage['total_tokens'] == 14
+
+
+def test_stream_cost_precedence_and_cumulative_events() -> None:
+    capture = UsageCapture(True)
+    capture.feed(b'data: {"x_litellm_response_cost":2,"usage":{"x_litellm_response_cost":1}}\n\n')
+    assert capture.cost == '1'
+    capture.feed(b'data: {"x_litellm_response_cost":2,"usage":{"x_litellm_response_cost":1,"cost":0}}\n\n')
+    assert capture.cost == '0'
+    for _ in range(2):
+        capture.feed(b'data: {"usage":{"cost":0.125}}\n\n')
+    capture.feed(b'data: {"cost":99,"usage":{"total_tokens":14}}\n\ndata: [DONE]\n\n')
+    capture.finish()
+    assert capture.done and capture.cost == '0.125'
 
 
 def test_broker_buffers_gateway_to_obtain_final_cost_for_streaming_clients(workspace, monkeypatch):
@@ -228,7 +258,7 @@ def test_header_is_authoritative_and_accounting_is_persistent(workspace):
     rid = app.state.spend.begin(run, run['model'])
     app.state.spend.headers(rid, httpx.Response(200, headers={'x-litellm-response-cost':'0.123456789012345678'}), False)
     capture = UsageCapture(False)
-    capture.feed(b'{"usage":{"total_tokens":100,"x_litellm_response_cost":0.1}}')
+    capture.feed(b'{"usage":{"total_tokens":100,"cost":0.1}}')
     capture.finish()
     app.state.spend.finish(rid, capture, 'interrupted')
     app.state.spend.finish(rid, capture, 'interrupted')

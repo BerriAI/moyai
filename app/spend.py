@@ -70,9 +70,11 @@ class UsageCapture:
                     self.usage['reasoning_tokens'] = details['reasoning_tokens']
         # LiteLLM's optional final streaming cost extension. Token prices are
         # never guessed when the gateway does not expose a final cost.
-        for source in (value, value.get('usage', {})):
+        for source, field in ((value, 'x_litellm_response_cost'),
+                              (value.get('usage'), 'x_litellm_response_cost'),
+                              (value.get('usage'), 'cost')):
             if isinstance(source, dict):
-                cost = money(source.get('x_litellm_response_cost'))
+                cost = money(source.get(field))
                 if cost is not None:
                     self.cost = cost
 
@@ -98,7 +100,7 @@ class UsageCapture:
             self.done = True
             return
         try:
-            self.consume(json.loads(data))
+            self.consume(json.loads(data, parse_float=Decimal))
         except (ValueError, UnicodeDecodeError):
             pass
 

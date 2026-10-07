@@ -40,10 +40,10 @@ def test_native_gateway_preserves_discovered_tool_references(workspace, monkeypa
 @pytest.mark.parametrize('route,body,wire', [
     ('messages', {'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': 'hello'}]}],
                   'tools': [{'name': 'Read', 'input_schema': {'type': 'object'}}]},
-     b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","usage":{"input_tokens":11,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":3}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n'),
+     b'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_test","usage":{"input_tokens":11,"output_tokens":0}}}\n\nevent: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":3,"cost":0.01234567890123456789}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n'),
     ('responses', {'input': [{'type': 'function_call_output', 'call_id': 'one', 'output': 'receipt'}],
                    'tools': [{'type': 'custom', 'name': 'apply_patch', 'format': {'type': 'text'}}]},
-     b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":11,"output_tokens":3}}}\n\n'),
+     b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":11,"output_tokens":3,"cost":0.01234567890123456789}}}\n\n'),
 ])
 @pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'openai/gpt-6.1-sol', 'anthropic/claude-opus-5-5', 'fireworks_ai/glm-5p3'])
 def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, monkeypatch, route, body, wire, model):
@@ -74,6 +74,7 @@ def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, mon
     assert response.status_code == 200 and response.content == wire
     row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
     assert row['status'] == 'completed'
+    assert row['cost'] == '0.01234567890123456789' and row['cost_source'] == 'response_usage'
     assert (row['prompt_tokens'], row['completion_tokens'], row['total_tokens']) == (11, 3, 14)
     app.state.store.update_run(run['id'], status='stopping', token_hash='')
     assert client.post(url, json=payload, headers={'Authorization': 'Bearer cap'}).status_code == 401
