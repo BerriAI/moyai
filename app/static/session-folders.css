@@ -15,3 +15,25 @@
 @media(max-width:850px){#session-title-name{font-size:16px}#session-actions button{min-height:44px}}
 
 .session-link[draggable="true"]{cursor:grab}.session-link.session-dragging{opacity:.45;cursor:grabbing}.session-folder,.unfiled-sessions{border-radius:8px}.folder-drop-target{background:#eee7f6;outline:2px solid #a68aba;outline-offset:-2px}.folder-drop-target .folder-heading{color:#644080}.unfiled-empty{display:none}.session-list-dragging .unfiled-empty{display:block;min-height:68px}.session-list-dragging .unfiled-heading{padding-top:10px}.session-list[aria-busy="true"] .session-link[draggable="true"]{cursor:progress}
+
+/* Keep session actions clear of overlay scrollbars when sections overflow. */
+.session-list{padding-inline-end:8px}
+/* Personal sections share the existing session rows and folder behavior. */
+.session-personal-section{margin:4px 0 16px}
+.session-section-heading{display:flex;align-items:center;gap:8px;width:100%;padding:8px 6px;border:0;background:transparent;color:var(--muted);font-size:13px;font-weight:400;text-align:left}
+.session-section-heading:hover{background:var(--soft)}
+.session-section-heading>.ui-icon{flex-shrink:0}
+.session-section-count{font-size:12px;font-variant-numeric:tabular-nums}
+.session-section-heading>.icon-chevron{margin-left:auto;opacity:0}
+.session-section-heading:hover>.icon-chevron,.session-section-heading:focus-visible>.icon-chevron{opacity:1}
+.session-section-heading[aria-expanded="false"]>.icon-chevron{transform:rotate(-90deg);opacity:1}
+.session-link-meta .session-pr-count{display:inline-flex;align-items:center;gap:3px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.session-link-meta:has(.session-pr-count,.session-slack-logo){gap:3px 6px}
+.session-link-meta .pr-open{color:#287644}
+.session-link-meta .pr-merged{color:var(--purple)}
+.session-link-meta .pr-closed{color:#b33c46}
+.session-link-meta .pr-review{color:#97600a}
+.session-link-meta .pr-unknown,.session-link-meta .is-stale{color:var(--muted)}
+.session-pr-label{white-space:nowrap}
+.session-meta-separator{color:var(--muted)}
+.session-slack-logo{display:block;flex-shrink:0}

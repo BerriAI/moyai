@@ -1,10 +1,10 @@
-"""Personal sidebar organization; session visibility and execution are unchanged."""
+"""Personal sidebar organization for shared workspace sessions."""
 import sqlite3
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from .db import now
 
@@ -37,6 +37,11 @@ class FolderMove(BaseModel):
     folder_id: FolderId | None
 
 
+class PinSession(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    pinned: StrictBool
+
+
 class SessionFolders:
     def __init__(self, store, security, checkpoints):
         self.store, self.security, self.checkpoints = store, security, checkpoints
@@ -64,6 +69,24 @@ class SessionFolders:
             SELECT m.run_id,m.folder_id FROM session_folder_memberships m
             JOIN runs r ON r.id=m.run_id WHERE m.owner_id=? AND r.deleted_at=''
             ORDER BY r.updated_at DESC,r.created_at DESC,r.id DESC''', (owner,))}
+
+    def pins(self, owner):
+        return {row['run_id'] for row in self.store.rows('''SELECT p.run_id FROM session_pins p
+            JOIN runs r ON r.id=p.run_id WHERE p.owner_id=? AND r.deleted_at='' ''', (owner,))}
+
+    def pin(self, owner, run_id, pinned):
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            run = conn.execute("SELECT parent_run_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
+            if not run:
+                raise HTTPException(404, 'Session not found.')
+            if run['parent_run_id']:
+                raise HTTPException(422, 'Pin the parent session to keep its agents together.')
+            if pinned:
+                conn.execute('INSERT OR IGNORE INTO session_pins VALUES(?,?,?)', (owner, run_id, now()))
+            else:
+                conn.execute('DELETE FROM session_pins WHERE owner_id=? AND run_id=?', (owner, run_id))
+        return {'id': run_id, 'pinned': pinned}
 
     def listing(self, owner):
         return self.store.rows('''SELECT f.id,f.name,f.revision,COUNT(r.id) AS session_count
@@ -154,6 +177,12 @@ class SessionFolders:
         @router.put('/api/runs/{run_id}/folder')
         async def move(run_id: str, body: FolderMove, request: Request):
             result = self.move(self.actor(request, True), run_id, body.folder_id)
+            await self.checkpoints.flush()
+            return result
+
+        @router.put('/api/runs/{run_id}/pin')
+        async def pin(run_id: str, body: PinSession, request: Request):
+            result = self.pin(self.actor(request, True), run_id, body.pinned)
             await self.checkpoints.flush()
             return result
 

@@ -122,21 +122,44 @@ function sidebarGroups(runs,search){
     return {...parent,children:visible,totalChildren:children.length,visible:parentMatch||visible.length>0};
   }).filter(parent=>parent.visible);
 }
+function sessionPRMetadata(run){
+  const pr=run.pr_summary;
+  if(!pr)return {html:'',label:''};
+  const counts=[['open','Open','pull-request'],['merged','Merged','git-merge'],['closed','Closed','pull-request-closed'],['unknown','Status unavailable','pull-request']]
+    .filter(([key])=>Number.isInteger(pr[key])&&pr[key]>0);
+  const label=!pr.stale&&!pr.unknown&&['PR is ready','Review PR'].includes(pr.label)?pr.label:'';
+  const description=counts.map(([key,name])=>`${pr[key]} ${name.toLowerCase()} PR${pr[key]===1?'':'s'}`).join(', ');
+  const html=counts.map(([key,name,icon])=>`<span class="session-pr-count pr-${key}${pr.stale?' is-stale':''}" title="${esc(`${name}: ${pr[key]}${pr.stale?' · last known status; refresh unavailable':''}`)}">${globalThis.MoyaiIcon?.(icon,14)||''}<span>${pr[key]}</span><span class="sr-only"> ${esc(name.toLowerCase())} PR${pr[key]===1?'':'s'}</span></span>`).join('');
+  return {html,label,description:description+(pr.stale?' · Last known PR status':'')};
+}
 function sidebarRow(run,child=false){
   const selected=state.selected===run.id,title=sessionTitle(run),label=sessionStatus(run),repo=sessionRepository(run);
   const date=run.updated_at||run.created_at,time=date&&Number.isFinite(Date.parse(date))?relative(date):'';
   const unread=sessionCompletion(run)&&sessionReadMarker(run)!==sessionCompletion(run);
   const context=[child?'Agent':run.side_chat_of?'Side chat':'',run.mode==='demo'?'Demo':'',repo].filter(Boolean).join(' · ');
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',context,time].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-title-row"><span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:''}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
+  const pr=sessionPRMetadata(run);
+  const progress=pr.label?`<span class="session-pr-label ${pr.label==='Review PR'?'pr-review':'pr-open'}" title="${pr.label==='Review PR'?'Reviewers requested on GitHub':'Open pull request ready for review on GitHub'}">${pr.label}</span>`:time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:'';
+  const slack=run.slack_connected?'<img class="session-slack-logo" src="/static/slack-logo.svg" width="14" height="14" alt="Slack conversation" title="Conversation linked to Slack">':'';
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',run.pinned?'Pinned':'',context,time,pr.label,pr.description,run.slack_connected?'Slack conversation':''].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-title-row"><span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${[progress,pr.html,slack].filter(Boolean).join('<span class="session-meta-separator" aria-hidden="true">·</span>')}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
+  // Personal pins and folders take precedence over automatic grouping.
+  const pinned=state.sessionArchived?[]:sidebarGroups(runs.filter(run=>run.pinned).sort((a,b)=>String(b.updated_at||'').localeCompare(String(a.updated_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||''))||b.id.localeCompare(a.id)),search);
+  const remaining=state.sessionArchived?runs:runs.filter(run=>!run.pinned);
   const sections=folders.map(folder=>{
-    const members=runs.filter(run=>run.folder_id===folder.id);
+    const members=remaining.filter(run=>run.folder_id===folder.id);
     return {...folder,groups:sidebarGroups(members,folder.name.toLowerCase().includes(search)?'':search)};
   }).filter(folder=>!search||folder.groups.length||folder.name.toLowerCase().includes(search));
-  const recent=sidebarGroups(runs.filter(run=>!ids.has(run.folder_id)),search);
-  return {folders:sections,recent};
+  const unfiled=remaining.filter(run=>!ids.has(run.folder_id));
+  const participated=state.sessionArchived?[]:sidebarGroups(unfiled.filter(run=>run.participated),search);
+  const recent=sidebarGroups(unfiled.filter(run=>state.sessionArchived||!run.participated),search);
+  return {pinned,folders:sections,participated,recent};
+}
+function sidebarPersonalSection(id,label,icon,groups,search){
+  if(!groups.length)return '';
+  const expanded=!!search||!state.closedFolders.has(id);
+  return `<section class="session-personal-section"><button class="session-section-heading" data-toggle-folder="${id}" aria-expanded="${expanded}" aria-controls="section-${id}">${globalThis.MoyaiIcon?.(icon,16)||''}<span>${label}</span><span class="session-section-count">${groups.length}</span>${globalThis.MoyaiIcon?.('chevron',12)||''}</button><div id="section-${id}" ${expanded?'':'hidden'}>${sidebarRenderSessions(groups,search)}</div></section>`;
 }
 function sidebarRenderSessions(groups,search){return groups.map(parent=>{
     const hasChildren=parent.totalChildren>0,expanded=!!search||state.expandedParents.has(parent.id);
@@ -161,11 +184,11 @@ function renderSidebar(){
   const list=$('#session-list'),scroll=list.scrollTop;
   const focusAttrs=['data-toggle-agents','data-toggle-folder','data-edit-folder','data-session-actions','data-run'];
   const focused=focusAttrs.map(attr=>[attr,document.activeElement?.getAttribute(attr)]).find(([,value])=>value);
-  list.innerHTML=sections.folders.map(folder=>{
+  list.innerHTML=sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
     return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
-  }).join('')+(!state.sessionArchived&&state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:sidebarRenderSessions(sections.recent,search));
-  if(!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':state.sessionArchived?'No archived sessions.':'Your conversations will appear here.'}</p>`;
+  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(!state.sessionArchived&&state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search)));
+  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':state.sessionArchived?'No archived sessions.':'Your conversations will appear here.'}</p>`;
   list.scrollTop=scroll;
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
 }

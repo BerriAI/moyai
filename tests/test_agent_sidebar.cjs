@@ -165,3 +165,55 @@ test('a removed or stale folder leaves its sessions in Recent',()=>{
   assert.equal(sections.folders.length,0);
   assert.equal(sections.recent[0].id,'parent');
 });
+
+test('pins, personal folders and participation partition parents without duplicate rows',()=>{
+  const h=helpers(),rows=[
+    {...runs[0],pinned:true,participated:true,folder_id:'today'},
+    {id:'filed',participated:true,folder_id:'today'},
+    {id:'joined',participated:true},
+    {id:'created'},
+  ],folders=[{id:'today',name:'Today'}];
+  const grouped=h.sidebarSections(rows,folders,'');
+  assert.deepEqual(Array.from(grouped.pinned,row=>row.id),['parent']);
+  assert.deepEqual(Array.from(grouped.folders[0].groups,row=>row.id),['filed']);
+  assert.deepEqual(Array.from(grouped.participated,row=>row.id),['joined']);
+  assert.deepEqual(Array.from(grouped.recent,row=>row.id),['created']);
+  const found=h.sidebarSections(rows,folders,'21–40');
+  assert.equal(found.pinned[0].children[0].id,'worker-b');
+  assert.equal(found.pinned[0].totalChildren,2);
+  h.state.sessionArchived=true;
+  const archived=h.sidebarSections(rows,[],'');
+  assert.equal(archived.pinned.length,0);assert.equal(archived.participated.length,0);
+  assert.equal(archived.recent.length,4);
+});
+test('PR metadata distinguishes open, merged, closed and unknown without inventing readiness',()=>{
+  const h=helpers(),run={id:'pr',status:'idle',pr_summary:{open:1,merged:2,closed:3,unknown:0,label:'Review PR'},slack_connected:true};
+  const html=h.sidebarRow(run);
+  assert.match(html,/Review PR/);assert.match(html,/Reviewers requested on GitHub/);
+  for(const kind of ['open','merged','closed'])assert.match(html,new RegExp('pr-'+kind));
+  assert.match(html,/Slack conversation/);assert.match(html,/slack-logo.svg/);
+  for(const changes of [{stale:true},{unknown:1},{label:'<img onerror=bad()>'}]){
+    const metadata=h.sessionPRMetadata({...run,pr_summary:{...run.pr_summary,...changes}});
+    assert.equal(metadata.label,'');assert.doesNotMatch(metadata.html,/onerror/);
+  }
+  assert.match(h.sessionPRMetadata({...run,pr_summary:{unknown:1}}).html,/Status unavailable/);
+  assert.doesNotMatch(h.sidebarRow({id:'web',status:'idle',plugins:['slack']}),/slack-logo/);
+});
+
+test('pin success invalidates older reads and updates distinct sidebar and header records',async()=>{
+  const h=helpers(),requests=[],saved=[];
+  Object.assign(h.state,{userId:'alice',runs:[{id:'p',pinned:false}],chatRun:{id:'p',pinned:false},sessionHeaderRun:{id:'p',pinned:false},runsRefresh:4,chatRefresh:2,closedFolders:new Set(['pinned'])});
+  Object.assign(h,{api:async(path,options)=>requests.push([path,JSON.parse(options.body)]),renderSidebar:()=>saved.push(h.state.runs[0].pinned),refreshRuns:async()=>{},saveSessionFolderView:()=>{},toast:()=>{},CSS:{escape:s=>s},$:()=>({querySelector:()=>null})});
+  vm.runInContext(readFileSync('app/static/session-folders.js','utf8'),h);
+  h.saveSessionFolderView=()=>{};
+  await h.changeSessionPin({id:'p',pinned:false});
+  assert.equal(requests[0][0],'/api/runs/p/pin');assert.equal(requests[0][1].pinned,true);
+  assert.equal(h.state.runsRefresh,5);assert.equal(h.state.chatRefresh,3);
+  for(const row of [h.state.runs[0],h.state.chatRun,h.state.sessionHeaderRun])assert.equal(row.pinned,true);
+  assert.equal(h.state.closedFolders.has('pinned'),false);assert.deepEqual(saved,[true]);
+  assert.equal(h.state.sessionMutation,null);
+  h.api=async()=>{throw Error('Unavailable');};
+  await assert.rejects(h.changeSessionPin(h.state.runs[0]),/Unavailable/);
+  assert.equal(h.state.runs[0].pinned,true);assert.equal(h.state.runsRefresh,5);
+  assert.equal(h.state.sessionMutation,null);
+});

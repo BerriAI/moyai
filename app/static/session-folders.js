@@ -164,6 +164,10 @@ function showSessionActions(run,button){
   menu.innerHTML=(typeof renameSession==='function'?'<button type="button" data-rename-session>Rename</button>':'')+'<button type="button" data-move-to-folder>Move to folder</button>';
   menu.querySelector('[data-rename-session]')?.addEventListener('click',()=>{menu.hidePopover();renameSession(run);});
   menu.querySelector('[data-move-to-folder]').onclick=()=>{menu.hidePopover();moveSessionToFolder(run);};
+  if(!run.parent_run_id){
+    menu.insertAdjacentHTML('afterbegin',`<button type="button" data-pin-session ${state.sessionMutation?'disabled':''}>${globalThis.MoyaiIcon?.('pin',16)||''}${run.pinned?'Unpin session':'Pin session'}</button>`);
+    menu.querySelector('[data-pin-session]').onclick=()=>{menu.hidePopover();changeSessionPin(run).catch(showError);};
+  }
   if(typeof bindSessionLifecycleActions==='function')bindSessionLifecycleActions(menu,run);
   menu.onkeydown=e=>{
     if(e.key==='Escape'){e.stopPropagation();menu.hidePopover();button.focus();}
@@ -210,4 +214,26 @@ function renameSession(run){
     finally{saving=false;controls.forEach(control=>control.disabled=false);dialog.oncancel=null;}
   };
   input.focus();input.select();
+}
+
+async function changeSessionPin(run){
+  if(state.sessionMutation)return;
+  state.sessionMutation=run.id;
+  const actor=state.userId,pinned=!run.pinned;
+  try{
+    await api('/api/runs/'+run.id+'/pin',{method:'PUT',body:JSON.stringify({pinned})});
+    if(actor!==state.userId)return;
+    // A list/detail read started before this write must not undo its result.
+    state.runsRefresh++;
+    state.chatRefresh=(state.chatRefresh||0)+1;
+    state.sessionEdits=(state.sessionEdits||0)+1;
+    for(const item of [run,...state.runs,state.chatRun,state.sessionHeaderRun]){
+      if(item?.id===run.id)item.pinned=pinned;
+    }
+    if(pinned){state.closedFolders.delete('pinned');saveSessionFolderView();}
+    renderSidebar();
+    toast(pinned?'Session pinned for you.':'Session unpinned.');
+    await refreshRuns();
+    $('#session-list').querySelector(`[data-session-actions="${CSS.escape(run.id)}"]`)?.focus();
+  }finally{state.sessionMutation=null;}
 }

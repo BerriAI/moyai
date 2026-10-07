@@ -29,9 +29,14 @@ def test_my_sessions_created_or_participated_not_viewed_or_assistant(workspace, 
     assert mine(client, focus=other, user_id='google:alice') == {own}
     assert client.post('/api/runs/'+other+'/messages', json={'content': 'Joining via shared link', 'client_id': 'joining-shared'}).status_code == 202
     assert mine(client) == {own, other}
+    listing = {row['id']: row for row in client.get('/api/runs?scope=mine').json()}
+    assert listing[own]['participated'] is False and listing[other]['participated'] is True
+    assert listing[own]['pinned'] is False and listing[other]['slack_connected'] is False
+    assert client.get('/api/runs/'+other).json()['participated'] is True
     store.execute("UPDATE messages SET status='deleted' WHERE run_id=? AND user_id='google:bob'", (other,))
     store.execute("UPDATE runs SET active_user_id='google:alice' WHERE id=?", (other,))
     assert mine(client) == {own, other}
+    assert client.get('/api/runs/'+other).json()['participated'] is True
     assert {r['id'] for r in client.get('/api/runs').json()} == {own, other}
     assert client.get('/api/runs?scope=all').status_code == 403
     sign_in(app, client, 'alice', 'alice@berri.ai')
@@ -98,6 +103,12 @@ def test_my_sessions_child_participant_includes_parent(workspace, monkeypatch):
     assert mine(client) == {parent}
     row = client.get('/api/runs?scope=mine').json()[0]
     assert row['children'][0]['id'] == child
+    assert row['participated'] is True
+    store = app.state.store
+    store.execute("DELETE FROM messages WHERE run_id=? AND user_id='google:bob'", (child,))
+    store.execute("UPDATE runs SET owner_id='google:bob' WHERE id=?", (child,))
+    assert mine(client) == {parent}  # A directly owned child also contributes to its parent.
+    assert client.get('/api/runs?scope=mine').json()[0]['participated'] is True
 
 
 def test_my_sessions_slack_participation_follows_persisted_identity_links(slack_app):
@@ -112,6 +123,8 @@ def test_my_sessions_slack_participation_follows_persisted_identity_links(slack_
     assert mine(client) == set()  # Unresolved Slack profiles cannot guess identity.
     store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:bob', 'slack:T12345678:U87654321'))
     assert mine(client) == {run_id}
+    row = client.get('/api/runs?scope=mine').json()[0]
+    assert row['participated'] is True and row['slack_connected'] is True
     store.execute('UPDATE users SET linked_user_id=NULL WHERE id=?', ('slack:T12345678:U87654321',))
     assert mine(client) == set()
     # The creator qualifies even without any messages (e.g. control-only creation).
@@ -119,6 +132,21 @@ def test_my_sessions_slack_participation_follows_persisted_identity_links(slack_
     store.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:bob', creator))
     store.execute('DELETE FROM messages WHERE run_id=?', (run_id,))
     assert mine(client) == {run_id}
+    assert client.get('/api/runs?scope=mine').json()[0]['participated'] is False
+
+
+def test_slack_source_metadata_covers_legacy_events_and_live_bindings(workspace):
+    app, client = workspace
+    store = app.state.store
+    legacy = store.create_slack_run('legacy-source', 'Old Slack session', [], 'COLD', '1.0', 'UOLD', team_id='TOLD')
+    live = store.create_run('Bound session', '', 'demo', [])
+    merely_enabled = store.create_run('Slack tools enabled', '', 'demo', ['slack'])
+    store.execute('INSERT INTO slack_threads(team_id,channel,thread_ts,run_id,started_ts) VALUES(?,?,?,?,?)',
+                  ('TNEW', 'CNEW', '2.0', live['id'], '2.0'))
+    rows = {row['id']: row for row in client.get('/api/runs?scope=all').json()}
+    assert rows[legacy['id']]['slack_connected'] is True
+    assert rows[live['id']]['slack_connected'] is True
+    assert rows[merely_enabled['id']]['slack_connected'] is False
 
 
 

@@ -40,6 +40,7 @@ from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from .session_lifecycle import SessionLifecycle
 from .session_metadata import is_session_id_request
+from .session_pull_requests import SessionPullRequests
 from sandbox.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
@@ -157,6 +158,7 @@ def create_app(settings: Settings | None = None):
     from .sandbox_settings import SandboxSettings
     sandbox_settings = SandboxSettings(store, settings, security)
     connectors = Connectors(store, security, settings)
+    session_pull_requests = SessionPullRequests(connectors.github)
     if settings.temporal_enabled:
         from .temporal_runtime import TemporalRunManager
         manager = TemporalRunManager(store, settings)
@@ -218,6 +220,7 @@ def create_app(settings: Settings | None = None):
             yield
         finally:
             await computer.close()
+            await session_pull_requests.close()
             await session_titles.close()
             await infrastructure.close()
             await automations.close()
@@ -238,6 +241,7 @@ def create_app(settings: Settings | None = None):
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
                   dependencies=[Depends(session_lifecycle.require_live_api)])
     app.state.session_lifecycle = session_lifecycle
+    app.state.session_pull_requests = session_pull_requests
     app.include_router(session_lifecycle.routes())
     app.state.sandbox_settings = sandbox_settings
     app.include_router(sandbox_settings.routes())
@@ -428,18 +432,26 @@ def create_app(settings: Settings | None = None):
         if scope is None:
             scope = 'all' if security.role(request) == 'admin' else 'mine'
         memberships = session_folders.memberships(owner)
+        pins = session_folders.pins(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
-        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, parent_id], archive_owner=owner, archived=archived)
+        ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, *pins, parent_id],
+                                    archive_owner=owner, archived=archived, pin_owner=owner)
+        sidebar_metadata = store.sidebar_metadata(owner, ids)
+        pr_summaries = session_pull_requests.summaries(ids)
         archives = session_lifecycle.archives(owner)
         admin = security.role(request) == 'admin'
         runs = {}
         for run_id in ids:
             run = store.run(run_id)
-            runs[run_id] = {**public_run(run), **session_lifecycle.metadata(run, owner, admin, archives),
-                           'folder_id': memberships.get(run_id), 'children': []}
-        if ids:
-            children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in ids) + ') ORDER BY created_at,id', ids)
+            if not run or run['deleted_at']:
+                continue
+            runs[run_id] = {**public_run(run), **session_lifecycle.metadata(run, owner, admin, archives), **sidebar_metadata.get(run_id, {}),
+                           'pr_summary': pr_summaries[run_id], 'folder_id': memberships.get(run_id), 'children': []}
+        visible_ids = list(runs)
+        for offset in range(0, len(visible_ids), 500):
+            batch = visible_ids[offset:offset + 500]
+            children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in batch) + ') ORDER BY created_at,id', batch)
             for child in children:
                 runs[child['parent_run_id']]['children'].append({**child, 'archived': archived, 'can_delete': False})
         return list(runs.values())
@@ -509,7 +521,10 @@ def create_app(settings: Settings | None = None):
         messages = public_messages(run, store.messages(run_id))
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
+        sidebar_id = run['parent_run_id'] or run_id
         return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
+                **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
+                'pr_summary': session_pull_requests.summaries([run_id])[run_id],
                 "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),

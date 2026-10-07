@@ -123,13 +123,16 @@ def test_folders_survive_restart_and_database_checkpoint(users_app, tmp_path):
     checkpoints.commit = commit
     item, saved = run(app), folder(client, 'Persistent')
     assert client.put('/api/runs/'+item['id']+'/folder', json={'folder_id': saved['id']}).status_code == 200
-    assert len(commits) == 2
+    assert client.put('/api/runs/'+item['id']+'/pin', json={'pinned': True}).status_code == 200
+    assert len(commits) == 3
     restored_settings = checkpoints.settings.model_copy(update={'data_dir': tmp_path/'restored'})
     restore_checkpoint(restored_settings)
     reopened = Store(restored_settings.data_dir)
     folders = SessionFolders(reopened, app.state.security, SimpleNamespace())
     assert folders.listing(identity)[0]['name'] == 'Persistent'
     assert folders.memberships(identity) == {item['id']: saved['id']}
+    assert folders.pins(identity) == {item['id']}
+    assert reopened.sidebar_metadata(identity, [item['id']])[item['id']]['pinned'] is True
 
 
 def test_archive_is_personal_keeps_running_session_and_folder(users_app):
@@ -231,3 +234,91 @@ def test_viewer_can_find_and_restore_archived_shared_link(users_app):
     assert client.post(url + '/archive', json={'archived': False}).status_code == 200
     assert client.get('/api/runs?archived=true').json() == []
     assert client.get('/api/runs').json() == []  # Viewing/archiving never adds participation.
+
+
+def test_pins_retain_shared_links_personally_without_creating_participation(users_app):
+    app, client = users_app
+    item = run(app)
+    url = '/api/runs/' + item['id']
+    assert client.put(url + '/pin', json={'pinned': True}).status_code == 401
+    sign_as(app, client, 'viewer@berri.ai')
+    original = app.state.store.run(item['id'])
+    assert client.get('/api/runs', params={'focus': item['id']}).json() == []
+    for invalid in ('true', 1, None):
+        assert client.put(url + '/pin', json={'pinned': invalid}).status_code == 422
+    assert client.put(url + '/pin', json={'pinned': True, 'owner_id': 'google:maya'}).status_code == 422
+    assert client.put(url + '/pin', json={'pinned': True}, headers={'X-CSRF-Token': ''}).status_code == 403
+    assert client.put(url + '/pin', json={'pinned': True}, headers={'Origin': 'https://other.example'}).status_code == 403
+    for _ in range(2):
+        assert client.put(url + '/pin', json={'pinned': True}).json() == {'id': item['id'], 'pinned': True}
+    rows = client.get('/api/runs').json()
+    assert [row['id'] for row in rows] == [item['id']]
+    assert rows[0]['pinned'] is True and rows[0]['participated'] is False
+    assert client.get(url).json()['pinned'] is True
+    assert app.state.store.run(item['id']) == original
+    sign_as(app, client, 'other@berri.ai')
+    assert client.get('/api/runs').json() == []
+    assert client.get(url).json()['pinned'] is False
+    assert client.put(url + '/pin', json={'pinned': False}).status_code == 200
+    sign_as(app, client, 'viewer@berri.ai')
+    assert client.get(url).json()['pinned'] is True
+    assert client.put(url + '/pin', json={'pinned': False}).status_code == 200
+    assert client.get('/api/runs', params={'focus': item['id']}).json() == []
+
+
+def test_pins_survive_recent_limit_archive_restore_and_hide_deleted_sessions(users_app):
+    app, client = users_app
+    store = app.state.store
+    parent, child, removed = run(app, 'Pinned parent'), run(app, 'Child'), run(app, 'Deleted pin')
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (parent['id'], child['id']))
+    for index in range(101):
+        run(app, f'Newer {index}')
+    sign_as(app, client, 'maya@berri.ai')
+    assert parent['id'] not in {row['id'] for row in client.get('/api/runs').json()}
+    url = '/api/runs/' + parent['id']
+    assert client.put(url + '/pin', json={'pinned': True}).status_code == 200
+    rows = client.get('/api/runs').json()
+    assert len(rows) == 101 and next(row for row in rows if row['id'] == parent['id'])['pinned'] is True
+    assert client.put('/api/runs/' + child['id'] + '/pin', json={'pinned': True}).status_code == 422
+    assert client.put('/api/runs/missing/pin', json={'pinned': True}).status_code == 404
+    assert client.post(url + '/archive', json={'archived': True}).status_code == 200
+    assert parent['id'] not in {row['id'] for row in client.get('/api/runs').json()}
+    assert client.get('/api/runs?archived=true').json()[0]['pinned'] is True
+    assert client.post(url + '/archive', json={'archived': False}).status_code == 200
+    assert next(row for row in client.get('/api/runs').json() if row['id'] == parent['id'])['pinned'] is True
+    removed_url = '/api/runs/' + removed['id']
+    assert client.put(removed_url + '/pin', json={'pinned': True}).status_code == 200
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (removed['id'],))
+    store.update_run(removed['id'], status='idle')
+    assert client.delete(removed_url).status_code == 200
+    assert removed['id'] not in {row['id'] for row in client.get('/api/runs').json()}
+    assert client.put(removed_url + '/pin', json={'pinned': True}).status_code == 404
+
+
+def test_shared_link_pins_do_not_displace_recent_personal_sessions(users_app):
+    app, client = users_app
+    sign_as(app, client, 'maya@berri.ai')
+    personal = {run(app, f'Personal {index}')['id'] for index in range(100)}
+    shared = app.state.store.create_run('Newer teammate session', '', 'demo', [], user_id='google:teammate')['id']
+    assert {row['id'] for row in client.get('/api/runs').json()} == personal
+    url = '/api/runs/' + shared + '/pin'
+    assert client.put(url, json={'pinned': True}).status_code == 200
+    rows = {row['id']: row for row in client.get('/api/runs').json()}
+    assert set(rows) == personal | {shared}
+    assert rows[shared]['pinned'] is True and rows[shared]['participated'] is False
+    assert client.put(url, json={'pinned': False}).status_code == 200
+    assert {row['id'] for row in client.get('/api/runs').json()} == personal
+
+
+def test_pin_schema_upgrade_is_idempotent_and_preserves_legacy_sessions(users_app):
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    item = run(app)
+    app.state.store.execute('DROP TABLE session_pins')
+    for _ in range(2):
+        reopened = Store(app.state.settings.data_dir)
+        assert reopened.run(item['id'])['prompt'] == item['prompt']
+        assert reopened.sidebar_metadata(actor, [item['id']])[item['id']]['pinned'] is False
+    assert client.put('/api/runs/' + item['id'] + '/pin', json={'pinned': True}).status_code == 200
+    reopened = Store(app.state.settings.data_dir)
+    assert reopened.sidebar_metadata(actor, [item['id']])[item['id']]['pinned'] is True

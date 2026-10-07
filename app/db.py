@@ -128,6 +128,11 @@ class Store:
                     run_id TEXT NOT NULL REFERENCES runs(id), archived_at TEXT NOT NULL,
                     PRIMARY KEY(owner_id, run_id)
                 );
+                CREATE TABLE IF NOT EXISTS session_pins (
+                    owner_id TEXT NOT NULL REFERENCES users(id),
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    pinned_at TEXT NOT NULL, PRIMARY KEY(owner_id, run_id)
+                );
             """)
             if 'metadata' not in {row['name'] for row in conn.execute('PRAGMA table_info(slack_outbox)')}:
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
@@ -218,39 +223,63 @@ class Store:
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params)]
 
-    def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False):
+    @staticmethod
+    def sidebar_scope(user_id: str) -> tuple[str, list[str]]:
+        """The one identity/contribution definition for sidebar views and labels."""
+        return """WITH identities AS (
+            SELECT ? AS id WHERE ? != ''
+            UNION SELECT id FROM users WHERE kind='slack' AND linked_user_id=?
+        ), contributed AS (
+            SELECT id FROM runs WHERE owner_id IN (SELECT id FROM identities)
+            UNION SELECT run_id FROM messages
+                WHERE role='user' AND user_id IN (SELECT id FROM identities)
+        ), mine AS (
+            SELECT CASE WHEN parent_run_id='' THEN id ELSE parent_run_id END AS id
+            FROM runs WHERE id IN (SELECT id FROM contributed)
+        ) """, [user_id, user_id, user_id]
+
+    def sidebar_metadata(self, user_id: str, run_ids: list[str]) -> dict[str, dict[str, bool]]:
+        prefix, params = self.sidebar_scope(user_id)
+        result = {}
+        for offset in range(0, len(run_ids), 500):
+            batch = run_ids[offset:offset + 500]
+            rows = self.rows(prefix + '''SELECT r.id,
+                EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=r.id AND p.owner_id=?) AS pinned,
+                (r.id IN (SELECT id FROM mine) AND r.owner_id NOT IN (SELECT id FROM identities)) AS participated,
+                (EXISTS(SELECT 1 FROM slack_events e WHERE e.run_id=r.id)
+                    OR EXISTS(SELECT 1 FROM slack_threads t WHERE t.run_id=r.id)) AS slack_connected
+                FROM runs r WHERE r.deleted_at='' AND r.id IN (''' + ','.join('?' for _ in batch) + ')',
+                [*params, user_id, *batch])
+            result.update({row['id']: {key: bool(row[key]) for key in ('pinned', 'participated', 'slack_connected')} for row in rows})
+        return result
+
+    def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False, pin_owner=None):
         """Filter before the recent limit and apply the same scope to filed/focused runs.
 
         Identity links affect this shared-workspace view only, never authorization.
         A submission remains participation even when subsequently soft-deleted.
         """
-        prefix, params, predicate = '', [], "parent_run_id='' AND deleted_at=''"
+        prefix, params, predicate, scope = '', [], "parent_run_id='' AND deleted_at=''", ''
         # Explicit personal archive membership remains discoverable even when
         # the viewer reached a shared session by link without participating.
         if user_id is not None and not (archived and archive_owner is not None):
-            prefix = """WITH identities AS (
-                SELECT ? AS id WHERE ? != ''
-                UNION SELECT id FROM users WHERE kind='slack' AND linked_user_id=?
-            ), contributed AS (
-                SELECT id FROM runs WHERE owner_id IN (SELECT id FROM identities)
-                UNION SELECT run_id FROM messages
-                    WHERE role='user' AND user_id IN (SELECT id FROM identities)
-            ), mine AS (
-                SELECT CASE WHEN parent_run_id='' THEN id ELSE parent_run_id END AS id
-                FROM runs WHERE id IN (SELECT id FROM contributed)
-            ) """
-            params = [user_id, user_id, user_id]
-            predicate += ' AND id IN (SELECT id FROM mine)'
+            prefix, params = self.sidebar_scope(user_id)
+            scope = ' AND id IN (SELECT id FROM mine)'
         if archive_owner is not None:
             predicate += ' AND ' + ('' if archived else 'NOT ') + 'EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=runs.id AND a.owner_id=?)'
             params.append(archive_owner)
         query = prefix + 'SELECT id FROM runs WHERE ' + predicate
-        ids = [row['id'] for row in self.rows(query + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100', params)]
+        ids = [row['id'] for row in self.rows(query + scope + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100', params)]
+        # Explicit pins expand reachability only after the personal recent limit.
+        # A newer shared-link pin must not displace a contributed session.
+        if scope and pin_owner is not None:
+            scope = ' AND (id IN (SELECT id FROM mine) OR EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=runs.id AND p.owner_id=?))'
+            params.append(pin_owner)
         # Bound placeholders even for accounts with many personally filed sessions.
         extras = list(dict.fromkeys(extra_ids))
         for offset in range(0, len(extras), 500):
             batch = extras[offset:offset + 500]
-            ids.extend(row['id'] for row in self.rows(query + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *batch]))
+            ids.extend(row['id'] for row in self.rows(query + scope + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *batch]))
         return list(dict.fromkeys(ids))
 
     def run(self, run_id: str):
