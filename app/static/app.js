@@ -54,7 +54,7 @@ function sessionTitle(run={}){
 }
 function sessionMatches(run,search){
   const term=search.trim().toLowerCase();
-  return [sessionTitle(run),run.agent_label,run.display_title,run.prompt].some(value=>typeof value==='string'&&value.toLowerCase().includes(term));
+  return (run.search_query===term&&run.search_match)||[sessionTitle(run),run.agent_label,run.display_title,run.prompt].some(value=>typeof value==='string'&&value.toLowerCase().includes(term));
 }
 function sessionStatus(run){
   return ({idle:'Ready',completed:'Completed',running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
@@ -137,10 +137,11 @@ function sidebarRow(run,child=false){
   const date=run.updated_at||run.created_at,time=date&&Number.isFinite(Date.parse(date))?relative(date):'';
   const unread=sessionCompletion(run)&&sessionReadMarker(run)!==sessionCompletion(run);
   const context=[child?'Agent':run.side_chat_of?'Side chat':'',run.mode==='demo'?'Demo':'',repo].filter(Boolean).join(' · ');
+  const snippet=run.search_query===state.sessionSearch&&run.search_snippet?`<span class="session-search-snippet" title="${esc(run.search_snippet)}">${esc(run.search_snippet)}</span>`:'';
   const pr=sessionPRMetadata(run);
   const progress=pr.label?`<span class="session-pr-label ${pr.label==='Review PR'?'pr-review':'pr-open'}" title="${pr.label==='Review PR'?'Reviewers requested on GitHub':'Open pull request ready for review on GitHub'}">${pr.label}</span>`:time?`<span class="session-updated" data-session-time="${esc(run.id)}" title="${esc('Updated '+new Date(date).toLocaleString())}">${esc(time)}</span>`:'';
   const slack=run.slack_connected?'<img class="session-slack-logo" src="/static/slack-logo.svg" width="14" height="14" alt="Slack conversation" title="Conversation linked to Slack">':'';
-  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',run.pinned?'Pinned':'',context,time,pr.label,pr.description,run.slack_connected?'Slack conversation':''].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-title-row"><span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${[progress,pr.html,slack].filter(Boolean).join('<span class="session-meta-separator" aria-hidden="true">·</span>')}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}</span></button>`;
+  return `<button class="session-link ${child?'child-session ':''}${selected?'selected':''}" data-run="${esc(run.id)}" ${child?'':`draggable="true" data-drag-session="${esc(run.id)}"`} ${selected?'aria-current="page"':''} aria-label="${esc([title,label,unread?'Unread completion':'',run.pinned?'Pinned':'',context,time,pr.label,pr.description,run.slack_connected?'Slack conversation':''].filter(Boolean).join(' · '))}" title="${esc(title)}">${child?'<span class="child-mark" aria-hidden="true">·</span>':''}<span class="session-link-body"><span class="session-title-row"><span class="session-link-title">${esc(title)}</span>${sessionIndicator(run)}</span><span class="session-link-meta">${[progress,pr.html,slack].filter(Boolean).join('<span class="session-meta-separator" aria-hidden="true">·</span>')}</span>${context?`<span class="session-link-context" title="${esc(context)}">${esc(context)}</span>`:''}${snippet}</span></button>`;
 }
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
@@ -178,17 +179,29 @@ function renderSidebar(){
   const sections=sidebarSections(state.runs,state.folders,search);
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
-  const signature=JSON.stringify([state.selected,search,[...state.expandedParents],[...state.closedFolders],sections]);
+  const signature=JSON.stringify([state.selected,search,[...state.expandedParents],[...state.closedFolders],state.sessionSearchLoading,state.sessionSearchError,sections]);
   if(state.sidebarSignature===signature)return;
   state.sidebarSignature=signature;
   const list=$('#session-list'),scroll=list.scrollTop;
   const focusAttrs=['data-toggle-agents','data-toggle-folder','data-edit-folder','data-session-actions','data-run'];
   const focused=focusAttrs.map(attr=>[attr,document.activeElement?.getAttribute(attr)]).find(([,value])=>value);
+  if(state.sessionSearchLoading){
+    list.innerHTML=`<p class="sidebar-empty" role="status">${search?'Searching sessions and messages…':'Loading sessions…'}</p>`;
+    return;
+  }
   list.innerHTML=sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
     return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
   }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search)));
   if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`;
+  if(search&&!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length){
+    list.innerHTML='<p class="sidebar-empty" role="status">No matching folders, sessions or messages. <button class="quiet" data-search-clear>Clear search</button></p>';
+    list.querySelector('[data-search-clear]').onclick=()=>{$('#session-search').value='';changeSessionSearch();$('#session-search').focus();};
+  }
+  if(state.sessionSearchError){
+    list.innerHTML=`<p class="sidebar-empty" role="status">Sessions could not ${state.runs.length?'refresh':'load'}. <button class="quiet" data-search-retry>Retry</button></p>`+(state.runs.length?list.innerHTML:'');
+    list.querySelector('[data-search-retry]').onclick=()=>refreshRuns().catch(()=>{});
+  }
   list.scrollTop=scroll;
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
 }
@@ -244,7 +257,27 @@ async function navigate(view) {
     if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
   }
 }
-async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
+async function refreshRuns(){
+  const refresh=++state.runsRefresh,search=state.sessionSearch||'',focus=state.selected||parseSessionLink(location.hash)?.runId||'';
+  const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});
+  if(focus)params.set('focus',focus);if(search)params.set('search',search);
+  try{
+    const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);
+    if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
+    state.runs=runs;state.folders=folders.folders;state.sessionSearchLoading=false;state.sessionSearchError=false;renderSidebar();
+  }catch(error){
+    if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
+    state.sessionSearchLoading=false;state.sessionSearchError=true;renderSidebar();throw error;
+  }
+}
+function changeSessionSearch(){
+  const search=($('#session-search').value||'').trim().toLowerCase();
+  clearTimeout(state.sessionSearchTimer);
+  // Invalidate immediately: an old response can arrive during the debounce.
+  state.sessionSearch=search;state.runsRefresh++;state.runs=[];
+  state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
+  state.sessionSearchTimer=setTimeout(()=>refreshRuns().catch(()=>{}),search?200:0);
+}
 function restoreSessionScope(){
   const canViewAll=state.authenticated&&state.role==='admin';
   state.sessionScope='mine';
@@ -259,7 +292,7 @@ async function changeSessionScope(){
   state.sessionScope=state.role==='admin'&&$('#session-scope').value==='all'?'all':'mine';
   $('#session-scope').value=state.sessionScope;
   try{localStorage.setItem(state.sessionScopeKey,state.sessionScope);}catch{}
-  state.runs=[];renderSidebar();
+  state.runs=[];state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
   try{await refreshRuns();}catch(error){showError(error);}
 }
 async function renderHome(){
@@ -614,8 +647,8 @@ bindSessionFolderDragDrop($('#session-list'));
 $('#session-scope').onchange=changeSessionScope;
 $('#search-sessions').setAttribute('aria-controls','session-search-field');
 $('#search-sessions').setAttribute('aria-expanded','false');
-$('#session-search').oninput=renderSidebar;
-$('#session-search').onkeydown=e=>{if(e.key==='Escape'){e.stopPropagation();$('#session-search').value='';renderSidebar();closeSessionSearch();$('#search-sessions').focus();}};
+$('#session-search').oninput=changeSessionSearch;
+$('#session-search').onkeydown=e=>{if(e.key==='Escape'){e.stopPropagation();$('#session-search').value='';changeSessionSearch();closeSessionSearch();$('#search-sessions').focus();}};
 const wideRail=()=>!matchMedia('(max-width:850px)').matches;$('#open-sidebar').onclick=()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);};$('#search-sessions').onclick=()=>{if(!wideRail())setSidebar(true);openSessionSearch();};$('#session-search').onblur=closeSessionSearch;$('#close-sidebar').onclick=()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);};$('#sidebar-scrim').onclick=()=>setSidebar(false);
 window.addEventListener('keydown',e=>{if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();$('#new-task').click();}});
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();

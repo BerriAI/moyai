@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -428,7 +428,8 @@ def create_app(settings: Settings | None = None):
         return {"name": body.name}
 
     @app.get("/api/runs")
-    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None, archived: bool = False):
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None, archived: bool = False,
+                   search: str = Query(default='', max_length=200)):
         owner = session_folders.actor(request)
         if scope == 'all':
             security.require(request, admin=True)
@@ -438,8 +439,11 @@ def create_app(settings: Settings | None = None):
         pins = session_folders.pins(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
         parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
+        search = search.strip().lower()
         ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, *pins, parent_id],
-                                    archive_owner=owner, archived=archived, pin_owner=owner)
+                                    archive_owner=owner, archived=archived, pin_owner=owner,
+                                    search=(search,) if search else (), search_folders=True)
+        matches = store.sidebar_search_matches(search, ids) if search else {}
         sidebar_metadata = store.sidebar_metadata(owner, ids)
         pr_summaries = session_pull_requests.summaries(ids)
         archives = session_lifecycle.archives(owner)
@@ -457,6 +461,10 @@ def create_app(settings: Settings | None = None):
             children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at,active_message_id,pending_result FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in batch) + ') ORDER BY created_at,id', batch)
             for child in children:
                 runs[child['parent_run_id']]['children'].append({**public_run(child), 'archived': archived, 'can_delete': False})
+        if search:
+            for parent in runs.values():
+                for row in [parent, *parent['children']]:
+                    row.update(search_query=search, search_match=row['id'] in matches, search_snippet=matches.get(row['id'], ''))
         return list(runs.values())
 
     @app.post("/api/runs", status_code=201)

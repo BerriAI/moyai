@@ -1,6 +1,10 @@
 import json
 from uuid import uuid4
 
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 from app.db import now
 from test_workspace import workspace
 from test_spend import sign_in
@@ -242,3 +246,133 @@ def test_authenticated_direct_chat_wakes_only_child_and_preserves_legacy_results
     assert client.post('/api/runs/'+child+'/messages', json=body).status_code == 409
     client.headers['X-CSRF-Token'] = 'incorrect'
     assert client.post('/api/runs/'+child+'/messages', json={**body,'client_id':'bad-csrf-new'}).status_code == 403
+
+
+def test_session_search_finds_saved_conversation_before_recent_limit(workspace: tuple[FastAPI, TestClient]) -> None:
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    old = store.create_run('A neutral title', '', 'demo', [], chat_enabled=True, user_id='google:bob')['id']
+    initial = store.claim_message(old)
+    store.finish_message(old, initial['id'], 'Before ' * 100 + 'Cobalt checksum validated.' + ' After' * 100)
+    store.enqueue_message(old, 'Follow up on the violet migration', 'search-followup', user_id='google:bob')
+    for i in range(101):
+        store.create_run(f'New unrelated task {i}', '', 'demo', [], user_id='google:bob')
+    assert old not in mine(client)
+    for term in ('  COBALT checksum  ', 'violet migration'):
+        rows = client.get('/api/runs', params={'scope': 'mine', 'search': term}).json()
+        assert [row['id'] for row in rows] == [old]
+        assert rows[0]['search_match'] is True
+        assert rows[0]['search_query'] == term.strip().lower()
+        assert term.strip().lower() in rows[0]['search_snippet'].lower()
+        assert len(rows[0]['search_snippet']) <= 240
+        assert 'messages' not in rows[0]
+
+
+def test_session_search_preserves_titles_and_legacy_results_without_private_context(workspace: tuple[FastAPI, TestClient]) -> None:
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    root = store.create_run('Original request', '', 'demo', [], chat_enabled=True, user_id='google:bob')['id']
+    store.execute('UPDATE runs SET display_title=?,agent_label=? WHERE id=?', ('Renamed discussion', 'Custom assignment', root))
+    store.update_run(root, summary='Saved public summary', pending_result=json.dumps({'private_protocol': 'Hidden protocol'}))
+    for role in ('system', 'tool'):
+        store.execute('INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,?,?,?,?)',
+                      (root, role, role+' hidden material', 'completed', now()))
+    legacy = store.create_run('Legacy task', '', 'demo', [], user_id='google:bob')['id']
+    store.update_run(legacy, summary='Legacy answer text')
+    side = store.create_run('Side topic', '', 'demo', [], chat_enabled=True, user_id='google:bob', side_chat_of=root)['id']
+    store.enqueue_message(side, 'Separate side conversation', 'side-search', user_id='google:bob')
+    for term in ('original request', 'renamed discussion', 'custom assignment'):
+        assert mine(client, search=term) == {root}
+    assert mine(client, search='legacy answer') == {legacy}
+    assert mine(client, search='separate side conversation') == {side}
+    assert mine(client, search='saved public summary') == {root}  # Public saved summary remains searchable.
+    for term in ('hidden protocol', 'system hidden material', 'tool hidden material'):
+        assert mine(client, search=term) == set()
+    assert mine(client, search='   ') == mine(client)
+
+
+def test_session_search_scopes_folder_matches_and_focused_results(workspace: tuple[FastAPI, TestClient]) -> None:
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    own = store.create_run('Personal task', '', 'demo', [], user_id='google:bob')['id']
+    foreign = store.create_run('Foreign needle', '', 'demo', [], user_id='google:alice')['id']
+    store.create_run('Another personal task', '', 'demo', [], user_id='google:bob')
+    folder = client.post('/api/session-folders', json={'name': 'Research collection'}).json()['id']
+    for run_id in (own, foreign):
+        assert client.put('/api/runs/'+run_id+'/folder', json={'folder_id': folder}).status_code == 200
+    assert mine(client, search='research collection') == {own}
+    assert mine(client, search='foreign needle', focus=foreign) == set()
+    assert mine(client, search='unmatched', focus=own) == set()
+    assert client.put('/api/runs/'+foreign+'/pin', json={'pinned': True}).status_code == 200
+    assert mine(client, search='foreign needle') == {foreign}
+    assert mine(client, search='unmatched') == set()
+    assert client.get('/api/runs', params={'search': 'foreign needle', 'scope': 'all'}).status_code == 403
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    assert {row['id'] for row in client.get('/api/runs', params={'search': 'foreign needle', 'scope': 'all'}).json()} == {foreign}
+    assert client.get('/api/runs', params={'search': 'research collection', 'scope': 'all'}).json() == []
+
+
+def test_session_search_tracks_queue_edits_archives_and_retained_deletion(workspace: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch) -> None:
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    def submit(run: dict[str, object]) -> None:
+        pass
+    monkeypatch.setattr(app.state.manager, 'submit', submit)
+    run_id = store.create_run('Neutral discussion', '', 'demo', [], chat_enabled=True, user_id='google:bob')['id']
+    url = '/api/runs/' + run_id
+    message = client.post(url+'/messages', json={'content': 'First needle', 'client_id': 'editable-search'}).json()['id']
+    assert mine(client, search='first needle') == {run_id}
+    assert client.patch(f'{url}/messages/{message}', json={'action': 'edit', 'revision': 0, 'content': 'Second needle'}).status_code == 200
+    assert mine(client, search='first needle') == set()
+    assert mine(client, search='second needle') == {run_id}
+    assert client.patch(f'{url}/messages/{message}', json={'action': 'delete', 'revision': 1}).status_code == 200
+    assert mine(client, search='second needle') == set()
+    store.enqueue_message(run_id, 'Archive conversation token', 'archive-search', user_id='google:bob')
+    assert client.post(url+'/archive', json={'archived': True}).status_code == 200
+    assert mine(client, search='archive conversation token') == set()
+    assert mine(client, search='archive conversation token', archived=True) == {run_id}
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=? AND status!='deleted'", (run_id,))
+    store.update_run(run_id, status='idle')
+    assert client.delete(url).status_code == 200
+    assert store.run(run_id)['deleted_at']
+    for archived in (False, True):
+        assert mine(client, search='archive conversation token', archived=archived, focus=run_id) == set()
+
+
+def test_session_search_keeps_matching_agents_under_their_parent(workspace: tuple[FastAPI, TestClient]) -> None:
+    app, client = workspace
+    store = app.state.store
+    parent, child, _ = seeded_group(app)
+    _, sibling, _ = seeded_group(app)
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (parent, sibling))
+    store.execute("UPDATE messages SET content='Agent transcript needle' WHERE run_id=?", (child,))
+    rows = client.get('/api/runs', params={'search': 'TRANSCRIPT needle', 'scope': 'all'}).json()
+    assert [row['id'] for row in rows] == [parent]
+    assert rows[0]['search_match'] is False
+    children = {row['id']: row for row in rows[0]['children']}
+    assert children[child]['search_match'] is True and children[sibling]['search_match'] is False
+    assert children[child]['search_query'] == 'transcript needle'
+    assert 'transcript needle' in children[child]['search_snippet'].lower()
+    assert 'prompt' not in children[child] and 'messages' not in children[child]
+    store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), child))
+    assert client.get('/api/runs', params={'search': 'transcript needle', 'scope': 'all'}).json() == []
+
+
+def test_session_search_treats_sql_characters_literally_and_bounds_input(workspace: tuple[FastAPI, TestClient]) -> None:
+    app, client = workspace
+    store = app.state.store
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    matching = store.create_run('Literal text', '', 'demo', [], chat_enabled=True, user_id='google:bob')['id']
+    store.enqueue_message(matching, "100% user_name O'Reilly München <script>display text</script>", 'literal-search', user_id='google:bob')
+    store.create_run('1000 userXname OReilly', '', 'demo', [], user_id='google:bob')
+    for term in ('100%', 'user_name', "O'Reilly", 'MÜNCHEN', '<script>'):
+        assert mine(client, search=term) == {matching}
+    assert mine(client, search="' OR 1=1 --") == set()
+    assert client.get('/api/runs', params={'search': 'x' * 200}).status_code == 200
+    assert client.get('/api/runs', params={'search': 'x' * 201}).status_code == 422
+    client.cookies.clear()
+    assert client.get('/api/runs', params={'search': 'user_name'}).status_code == 401

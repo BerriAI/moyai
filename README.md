@@ -6,6 +6,8 @@
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
+Search sessions by title, original request, or words inside saved user and assistant messages. Matching excerpts appear in the sidebar, including agent conversations and side chats. Search covers older sessions beyond the recent list and follows your selected My sessions/All sessions view. Archived sessions remain recoverable by asking Moyai in chat.
+
 Ask **“What is this session’s ID?”** or send **`/session-id`** in web chat or Slack
 thread chat to get the current Moyai session ID directly. These standalone requests
 use no model calls, tool searches, or sandbox startup, and leave active work alone.

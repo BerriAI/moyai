@@ -9,6 +9,25 @@ from .attachments import Attachments
 from .slack_mentions import SlackMentions
 
 
+# Shared by scoped selection (before LIMIT) and the returned match excerpts.
+# Read canonical messages so edits and deletion need no index synchronization.
+SESSION_SEARCH_CTE = """WITH search_input(term) AS (VALUES {terms}),
+    searchable_sessions AS (
+        SELECT r.id,r.parent_run_id,term,
+            instr(unicode_lower(r.display_title || ' ' || r.agent_label || ' ' || r.prompt || ' ' || r.summary),term)>0 AS title_match,
+            (SELECT substr(m.content,max(1,instr(unicode_lower(m.content),term)-50),200)
+             FROM messages m WHERE m.run_id=r.id AND m.status!='deleted'
+                AND m.role IN ('user','assistant') AND instr(unicode_lower(m.content),term)>0
+             ORDER BY m.id DESC LIMIT 1) AS message_match,
+            CASE WHEN instr(unicode_lower(r.summary),term)>0
+                 THEN substr(r.summary,max(1,instr(unicode_lower(r.summary),term)-50),200) END AS summary_match
+        FROM runs r CROSS JOIN search_input WHERE r.deleted_at=''
+    ), session_matches AS (
+        SELECT id,parent_run_id,term,coalesce(message_match,summary_match,'') AS search_snippet
+        FROM searchable_sessions WHERE title_match OR message_match IS NOT NULL OR summary_match IS NOT NULL
+    )"""
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -211,6 +230,7 @@ class Store:
     def connect(self):
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
+        conn.create_function('unicode_lower', 1, str.lower, deterministic=True)
         conn.execute("PRAGMA foreign_keys=ON")
         try:
             with conn:
@@ -267,7 +287,7 @@ class Store:
         return linked['id'] if linked else user_id
 
     def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False, pin_owner=None,
-                        search=(), limit=100, exclude_id=''):
+                        search=(), limit=100, exclude_id='', search_folders=False):
         """Filter before the recent limit and apply the same scope to filed/focused runs.
 
         Identity links affect this shared-workspace view only, never authorization.
@@ -292,16 +312,20 @@ class Store:
         if exclude_id:
             predicate += ' AND id!=?'
             params.append(exclude_id)
-        for term in search:
-            # Search the saved family before applying the recent limit. Literal
-            # substrings avoid treating user-entered % and _ as SQL wildcards.
-            predicate += """ AND EXISTS(SELECT 1 FROM runs family
-                WHERE (family.id=runs.id OR family.parent_run_id=runs.id) AND family.deleted_at=''
-                AND (instr(lower(family.display_title || ' ' || family.agent_label || ' ' || family.prompt || ' ' || family.summary),lower(?))>0
-                    OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=family.id
-                        AND m.role IN ('user','assistant') AND m.status!='deleted'
-                        AND instr(lower(m.content),lower(?))>0)))"""
-            params.extend((term, term))
+        if search:
+            search_cte = SESSION_SEARCH_CTE.format(terms=','.join('(?)' for _ in search))
+            prefix = search_cte + (', ' + prefix.removeprefix('WITH ') if prefix else ' ')
+            params = [*(term.lower() for term in search), *params]
+            # Each keyword may match any conversation in the family. The
+            # sidebar passes one phrase; the chat tool keeps its keyword AND.
+            missing = """NOT EXISTS(SELECT 1 FROM session_matches m WHERE m.term=needle.term
+                AND (m.id=runs.id OR m.parent_run_id=runs.id))"""
+            if search_folders and archive_owner is not None and archived is False:
+                missing += """ AND NOT EXISTS(SELECT 1 FROM session_folder_memberships m
+                    JOIN session_folders f ON f.id=m.folder_id AND f.owner_id=m.owner_id
+                    WHERE m.run_id=runs.id AND m.owner_id=? AND instr(unicode_lower(f.name),needle.term)>0)"""
+                params.append(archive_owner)
+            predicate += ' AND NOT EXISTS(SELECT 1 FROM search_input needle WHERE ' + missing + ')'
         query = prefix + 'SELECT id FROM runs WHERE ' + predicate
         scope = ' AND (' + ' OR '.join(scopes) + ')' if scopes else ''
         ids = [row['id'] for row in self.rows(query + scope + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT ?', [*params, *scope_params, limit])]
@@ -317,6 +341,16 @@ class Store:
             batch = extras[offset:offset + 500]
             ids.extend(row['id'] for row in self.rows(query + scope + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *scope_params, *batch]))
         return list(dict.fromkeys(ids))
+
+    def sidebar_search_matches(self, search: str, root_ids: list[str]) -> dict[str, str]:
+        matches = {}
+        for offset in range(0, len(root_ids), 400):
+            batch = root_ids[offset:offset + 400]
+            slots = ','.join('?' for _ in batch)
+            rows = self.rows(SESSION_SEARCH_CTE.format(terms='(?)') + f' SELECT id,search_snippet FROM session_matches WHERE id IN ({slots}) OR parent_run_id IN ({slots})',
+                             [search.lower(), *batch, *batch])
+            matches.update({row['id']: row['search_snippet'] for row in rows})
+        return matches
 
     def run(self, run_id: str):
         rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,))

@@ -92,7 +92,7 @@ test('failed filter change clears foreign rows and preserves selected chat',asyn
 
 test('normal sidebar always requests active sessions, even with obsolete cached archive state',async()=>{
   const {context:c}=scopeHelpers(),paths=[];
-  c.state.sessionArchived=true;
+
   c.api=async path=>{paths.push(path);return path==='/api/session-folders'?{folders:[]}:[];};
   await c.refreshRuns();
   assert.equal(new URL(paths[0],'http://local').searchParams.has('archived'),false);
@@ -196,4 +196,81 @@ test('pin success invalidates older reads and updates distinct sidebar and heade
   await assert.rejects(h.changeSessionPin(h.state.runs[0]),/Unavailable/);
   assert.equal(h.state.runs[0].pinned,true);assert.equal(h.state.runsRefresh,5);
   assert.equal(h.state.sessionMutation,null);
+});
+
+test('content matches retain their parent and folder with escaped message excerpts',()=>{
+  const c=helpers();c.state.sessionSearch='needle';
+  const rows=[{id:'parent',prompt:'Gateway investigation',folder_id:'work',search_query:'needle',search_match:false,children:[
+    {id:'match',agent_label:'Worker',search_query:'needle',search_match:true,search_snippet:'The needle <img src=x onerror=bad()> is here'},
+    {id:'other',agent_label:'Another worker',search_query:'needle',search_match:false}
+  ]}];
+  const sections=c.sidebarSections(rows,[{id:'work',name:'Work'}],'needle');
+  assert.equal(sections.folders[0].groups[0].id,'parent');
+  assert.equal(sections.folders[0].groups[0].children.length,1);
+  const html=c.sidebarRow(sections.folders[0].groups[0].children[0],true);
+  assert.match(html,/session-search-snippet/);assert.match(html,/&lt;img/);assert.doesNotMatch(html,/<img/);
+  assert.equal(c.sidebarGroups(rows,'another query').length,0);
+  assert.equal(c.sessionMatches({prompt:'Original tab title'},'original'),true);
+});
+
+test('typing invalidates old responses before debounce and clearing reloads the recent list',async()=>{
+  const {context:c,element}=scopeHelpers(),pending=[],timers=new Map();let timer=0;
+  c.clearTimeout=id=>timers.delete(id);c.setTimeout=fn=>{timers.set(++timer,fn);return timer;};
+  c.api=path=>path==='/api/session-folders'?Promise.resolve({folders:[]}):new Promise((resolve,reject)=>pending.push({path,resolve,reject}));
+  const recent=c.refreshRuns();
+  element.value=' Copper Lighthouse ';c.changeSessionSearch();
+  assert.equal(c.state.sessionSearch,'copper lighthouse');assert.equal(c.state.sessionSearchLoading,true);
+  pending[0].resolve([{id:'late-recent'}]);await recent;
+  assert.equal(c.state.runs.length,0);
+  timers.get(timer)();
+  assert.equal(new URL(pending[1].path,'http://local').searchParams.get('search'),'copper lighthouse');
+  element.value='new query';c.changeSessionSearch();
+  pending[1].reject(Error('Old query failed'));await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(c.state.runs.length,0);assert.equal(c.state.sessionSearchLoading,true);assert.equal(c.state.sessionSearchError,false);
+  timers.get(timer)();pending[2].resolve([{id:'current-result'}]);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(c.state.runs[0].id,'current-result');assert.equal(c.state.sessionSearchLoading,false);
+  element.value='';c.changeSessionSearch();timers.get(timer)();
+  assert.equal(new URL(pending[3].path,'http://local').searchParams.has('search'),false);
+  pending[3].resolve([{id:'recent-again'}]);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(c.state.runs[0].id,'recent-again');
+});
+
+test('search failure is distinct from empty results and retry uses the current query and scope',async()=>{
+  const {context:c}=scopeHelpers();c.state.sessionSearch='answer';c.state.sessionSearchLoading=true;
+  c.api=async()=>{throw Error('Unavailable');};
+  await assert.rejects(c.refreshRuns(),/Unavailable/);
+  assert.equal(c.state.sessionSearchLoading,false);assert.equal(c.state.sessionSearchError,true);
+  const paths=[];c.state.sessionScope='all';
+  c.api=async path=>{paths.push(path);return path==='/api/session-folders'?{folders:[]}:[];};
+  await c.refreshRuns();
+  assert.equal(c.state.sessionSearchError,false);assert.equal(c.state.runs.length,0);
+  const query=new URL(paths[0],'http://local').searchParams;
+  assert.equal(query.get('search'),'answer');assert.equal(query.get('scope'),'all');assert.equal(query.has('archived'),false);
+});
+
+test('refresh failures keep rendered sessions and retry while scope changes discard old rows',async()=>{
+  for(const search of ['', 'answer'])for(const failedPath of ['/api/runs','/api/session-folders']){
+    const {context:c,element}=scopeHelpers(),retry={};
+    const list={innerHTML:'',scrollTop:12,querySelector:()=>retry};
+    const elements={'#session-list':list,'#session-search':{value:search},'#session-scope':element,'#task-count':{},'#workspace-name':{}};
+    Object.assign(c,{document:{activeElement:null},$:selector=>elements[selector]});
+    Object.assign(c.state,{sessionSearch:search,folders:[],organization:{},expandedParents:new Set(),closedFolders:new Set()});
+    vm.runInContext(script.slice(script.indexOf('const esc ='),script.indexOf('const state ='))+
+      script.slice(script.indexOf('function sessionTitle('),script.indexOf('function modelName('))+
+      script.slice(script.indexOf('function sidebarGroups('),script.indexOf('function setView(')),c);
+    let failing=false;
+    c.api=async path=>{
+      if(failing&&path.startsWith(failedPath))throw Error('Temporary failure');
+      return path==='/api/session-folders'?{folders:[]}:[{id:'kept',display_title:'Existing session',search_query:search,search_match:true}];
+    };
+    await c.refreshRuns();assert.match(list.innerHTML,/data-run="kept"/);
+    failing=true;await assert.rejects(c.refreshRuns(),/Temporary failure/);
+    assert.match(list.innerHTML,/data-run="kept"/);assert.match(list.innerHTML,/could not refresh/);
+    assert.match(list.innerHTML,/data-search-retry/);assert.equal(list.scrollTop,12);
+    failing=false;await retry.onclick();assert.match(list.innerHTML,/data-run="kept"/);
+    assert.doesNotMatch(list.innerHTML,/data-search-retry/);
+    failing=true;element.value='all';await c.changeSessionScope();
+    assert.doesNotMatch(list.innerHTML,/data-run="kept"|No matching/);
+    assert.match(list.innerHTML,/could not load/);assert.match(list.innerHTML,/data-search-retry/);
+  }
 });

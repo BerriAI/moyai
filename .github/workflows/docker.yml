@@ -15,7 +15,12 @@ jobs:
       - name: Test startup and migration guards
         run: uv run --python 3.13 pytest -q tests/test_docker_start.py tests/test_render.py tests/test_workspace_image.py
       - name: Test instant session metadata and chat routing
-        run: uv run --python 3.13 pytest -q tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test session search and sidebar interactions
+        run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs
       - name: Test persistent context and real SDK continuation
         run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_claude_native_compaction.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_goals.py tests/test_continuation.py
       - name: Build production image
