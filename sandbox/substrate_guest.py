@@ -6,6 +6,7 @@ accepting work; on the original actor, resume them. This preserves the root
 filesystem without replaying a parent's tools or copying its live capabilities.
 """
 import base64
+from contextlib import contextmanager
 import hmac
 import json
 import os
@@ -19,13 +20,18 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 try:
+    from . import computer
     from .substrate_protocol import VERSION, MAX_BODY, CHUNK, canonical, public_key
 except ImportError:
+    import computer
     from substrate_protocol import VERSION, MAX_BODY, CHUNK, canonical, public_key
 
 ROOT = Path('/var/lib/moyai-runtime')
 IDENTITY = Path('/run/moyai/uid')
 LOCK = threading.RLock()
+COMPUTER_IDLE = threading.Condition(LOCK)
+COMPUTER_PENDING = 0
+COMPUTER_FREEZING = False
 NONCES = {}
 BOOT_ID = os.urandom(16).hex()
 
@@ -84,6 +90,18 @@ def restart_guest():
 
 
 def freeze():
+    global COMPUTER_FREEZING
+    with COMPUTER_IDLE:
+        COMPUTER_FREEZING = True
+        try:
+            if not COMPUTER_IDLE.wait_for(lambda: COMPUTER_PENDING == 0, timeout=10):
+                raise RuntimeError('Computer action is still running; try the checkpoint again.')
+            freeze_processes()
+        finally:
+            COMPUTER_FREEZING = False
+
+
+def freeze_processes():
     marker = ROOT / 'frozen.json'
     if marker.exists():
         return
@@ -117,6 +135,28 @@ def job_path(value):
     if len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
         raise ValueError('Invalid execution ID')
     return ROOT / 'jobs' / value
+
+
+@contextmanager
+def computer_operation(uid, body):
+    global COMPUTER_PENDING
+    if (not isinstance(body, dict) or set(body) - {'action', 'actor', 'args'} or
+            not isinstance(body.get('action'), str) or
+            not isinstance(body.get('args', {}), dict) or
+            not isinstance(body.get('actor', ''), str) or len(json.dumps(body).encode()) > 65536):
+        raise ValueError('Invalid Computer request')
+    with COMPUTER_IDLE:
+        if not hmac.compare_digest(uid, IDENTITY.read_text().strip()):
+            raise PermissionError('Actor identity changed')
+        if COMPUTER_FREEZING or (ROOT / 'frozen.json').exists():
+            raise RuntimeError('Workspace checkpoint in progress')
+        COMPUTER_PENDING += 1
+    try:
+        yield
+    finally:
+        with COMPUTER_IDLE:
+            COMPUTER_PENDING -= 1
+            COMPUTER_IDLE.notify_all()
 
 
 def dispatch(path, body):
@@ -203,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= MAX_BODY:
+            if not 0 < size <= (65536 if self.path == '/computer' else MAX_BODY):
                 return self.reply(413, {'error': 'Request too large'})
             self.connection.settimeout(30)
             data = self.rfile.read(size)
@@ -224,12 +264,25 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             return self.reply(401, {'error': 'Authentication failed'})
         try:
+            body = json.loads(data)
+            if self.path == '/computer':
+                # Do not journal typed text or hold the guest-wide lock while
+                # the desktop acts. Freeze still waits through the reply.
+                with computer_operation(uid, body):
+                    result = computer.request(body, start=body['action'] not in {'state', 'finish', 'release'})
+                    with LOCK:
+                        if not hmac.compare_digest(uid, IDENTITY.read_text().strip()):
+                            return self.reply(401, {'error': 'Authentication failed'})
+                        self.reply(200, result)
+                return
             with LOCK:
                 # A request authenticated before a snapshot may have waited for
                 # the lock. Recheck the projected UID after restoring a clone.
                 if not hmac.compare_digest(uid, IDENTITY.read_text().strip()):
                     return self.reply(401, {'error': 'Authentication failed'})
-                self.reply(200, dispatch(self.path, json.loads(data)))
+                self.reply(200, dispatch(self.path, body))
+        except PermissionError:
+            self.reply(401, {'error': 'Authentication failed'})
         except FileNotFoundError:
             self.reply(404, {'error': 'File or execution not found'})
         except Exception:

@@ -59,7 +59,7 @@
     function menu(open){q('.panel-menu').hidden=!open;q('[data-add]').setAttribute('aria-expanded',String(open));if(open){q('.panel-menu input').value='';drawMenu();q('.panel-menu input').focus();}}
     function drawMenu(){
       const search=q('.panel-menu input').value.toLowerCase();
-      const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
+      const items=[...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.map(c=>({kind:'chat',title:c.prompt,detail:'Saved side chat',chatId:c.id}))].filter(i=>i.title.toLowerCase().includes(search));
       q('[data-menu-items]').innerHTML=items.map((item,i)=>`<button type="button" data-item="${i}"><span class="panel-tab-icon">${ico(glyph[item.kind],16)}</span><span><strong>${esc(item.title)}</strong><small>${esc(item.detail)}</small></span></button>`).join('')||'<p class="panel-empty">No matching tabs.</p>';
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
@@ -184,7 +184,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox browser'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.

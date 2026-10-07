@@ -187,15 +187,16 @@ async def test_checkpoint_blocks_other_handle_requests_until_thawed():
     assert read.is_set()
 
 
-async def test_actor_identity_and_signing_key_are_enforced(transport):
+@pytest.mark.parametrize('path', ['/activate', '/computer'])
+async def test_actor_identity_and_signing_key_are_enforced(transport, path):
     sandbox, _ = transport
     sandbox.actor.metadata.uid = 'other-actor'
     with pytest.raises(RuntimeError, match='401'):
-        await sandbox.request('/activate', {})
+        await sandbox.request(path, {})
     sandbox.actor.metadata.uid = 'actor-one'
     _, sandbox.provider.settings.substrate_signing_key = key()
     with pytest.raises(RuntimeError, match='401'):
-        await sandbox.request('/activate', {})
+        await sandbox.request(path, {})
 
 
 def test_clone_activation_kills_frozen_processes_and_erases_parent_capabilities(tmp_path, monkeypatch):
@@ -372,3 +373,107 @@ async def test_control_tls_negotiates_http2_and_verifies_private_ca(tmp_path):
         with pytest.raises(StreamTerminatedError):
             await SubstrateProvider(settings).rpc('GetActorTemplate', {'actor_template': {'atespace':'tests','name':'one'}}, timeout=5)
         assert await negotiated == 'h2'
+
+
+async def test_computer_rpc_uses_signed_transport_without_execution_journals(transport, monkeypatch):
+    sandbox, tmp = transport
+    calls = []
+    def request(body, *, start):
+        calls.append((body, start))
+        return {'surface': 'desktop', 'controller': body.get('actor', '')}
+    monkeypatch.setattr(guest.computer, 'request', request)
+    assert (await sandbox.computer_request({'action': 'state'}))['surface'] == 'desktop'
+    body = {'action': 'input', 'actor': 'test-person', 'args': {'events': [{'type': 'text', 'text': 'test input'}]}}
+    assert (await sandbox.computer_request(body))['controller'] == 'test-person'
+    assert calls == [({'action': 'state'}, False), (body, True)]
+    assert not (tmp / 'runtime' / 'jobs').exists()
+
+
+async def test_computer_rpc_does_not_replay_an_unconfirmed_input(transport, monkeypatch):
+    import httpx
+    sandbox, _ = transport
+    calls = []
+    monkeypatch.setattr(guest.computer, 'request', lambda body, **kwargs: calls.append(body) or {})
+    def drop_reply(handler, code, value):
+        handler.close_connection = True
+    monkeypatch.setattr(guest.Handler, 'reply', drop_reply)
+    with pytest.raises(httpx.TransportError):
+        await sandbox.computer_request({'action': 'input', 'actor': 'person', 'args': {'events': []}})
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('status', [404, 409])
+async def test_legacy_computer_route_requires_restart_without_fallback(transport, monkeypatch, status):
+    sandbox, _ = transport
+    calls = []
+    def legacy(handler):
+        calls.append(handler.path)
+        handler.reply(status, {'error': 'Unknown operation'})
+    monkeypatch.setattr(guest.Handler, 'do_POST', legacy)
+    with pytest.raises(RuntimeError, match='Restart this workspace'):
+        await sandbox.computer_request({'action': 'input', 'args': {'events': []}})
+    assert calls == ['/computer']
+
+
+async def test_computer_rpc_bounds_and_uid_recheck_prevent_forwarding(transport, monkeypatch):
+    sandbox, _ = transport
+    calls = []
+    monkeypatch.setattr(guest.computer, 'request', lambda body, **kwargs: calls.append(body) or {})
+    for body, status in [({'action': 'input', 'args': {'text': 'x' * 65536}}, '413'),
+                         ({'action': 'state', 'unexpected': True}, 'Restart this workspace')]:
+        with pytest.raises(RuntimeError, match=status):
+            await sandbox.computer_request(body)
+    assert calls == []
+    def replaced(body, **kwargs):
+        guest.IDENTITY.write_text('replacement-actor')
+        calls.append(body)
+        return {}
+    monkeypatch.setattr(guest.computer, 'request', replaced)
+    with pytest.raises(RuntimeError, match='401'):
+        await sandbox.computer_request({'action': 'state'})
+    assert len(calls) == 1 and guest.COMPUTER_PENDING == 0
+
+
+async def test_computer_rpc_allows_guest_reads_but_freeze_waits_for_completion(transport, monkeypatch):
+    sandbox, tmp = transport
+    entered, release, waiting, frozen = (threading.Event() for _ in range(4))
+    def request(body, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return {'surface': 'desktop'}
+    original_wait = guest.COMPUTER_IDLE.wait_for
+    def wait(predicate, timeout):
+        waiting.set()
+        return original_wait(predicate, timeout)
+    def freeze_processes():
+        frozen.set()
+        guest.atomic(guest.ROOT / 'frozen.json', {'uid': 'actor-one', 'processes': {}})
+    monkeypatch.setattr(guest.computer, 'request', request)
+    monkeypatch.setattr(guest.COMPUTER_IDLE, 'wait_for', wait)
+    monkeypatch.setattr(guest, 'freeze_processes', freeze_processes)
+    action = asyncio.create_task(sandbox.computer_request({'action': 'input', 'args': {'events': []}}))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        # Another server worker has its own provider lock but shares this guest.
+        result = await asyncio.wait_for(sandbox._request_once('/file/stat', {'path': str(tmp / 'identity')}), 2)
+        assert result['size'] > 0
+        checkpoint = asyncio.create_task(sandbox._request_once('/freeze', {}))
+        assert await asyncio.to_thread(waiting.wait, 3)
+        assert not frozen.is_set()
+        with pytest.raises(RuntimeError, match='Restart this workspace'):
+            await sandbox._request_once('/computer', {'action': 'state'})
+    finally:
+        release.set()
+    await action
+    await checkpoint
+    assert frozen.is_set() and guest.COMPUTER_PENDING == 0 and not guest.COMPUTER_FREEZING
+
+
+def test_busy_computer_aborts_freeze_before_stopping_processes(monkeypatch):
+    calls = []
+    monkeypatch.setattr(guest, 'COMPUTER_PENDING', 1)
+    monkeypatch.setattr(guest.COMPUTER_IDLE, 'wait_for', lambda predicate, timeout: False)
+    monkeypatch.setattr(guest, 'freeze_processes', lambda: calls.append('stopped'))
+    with pytest.raises(RuntimeError, match='Computer action is still running'):
+        guest.freeze()
+    assert not calls and not guest.COMPUTER_FREEZING

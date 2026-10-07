@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import time
+from contextlib import asynccontextmanager
 
 import modal
 from fastapi import APIRouter, HTTPException, Request
@@ -14,8 +15,53 @@ from . import captures
 
 class Command(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    action: Literal['claim', 'release', 'open', 'click', 'type', 'key', 'scroll', 'back', 'screenshot', 'record_start', 'record_stop']
+    action: Literal['claim', 'release', 'input', 'open', 'click', 'type', 'key', 'scroll', 'back', 'screenshot', 'record_start', 'record_stop']
     args: dict = Field(default_factory=dict)
+
+
+class DesktopConnection:
+    """Private, ordered command channel; a failed write is never replayed."""
+    def __init__(self, sandbox, identity):
+        self.sandbox, self.identity = sandbox, identity
+        self.process = self.reader = None
+        self.created = self.used = time.monotonic()
+        self.active = self.failed = False
+
+    async def close(self):
+        process, self.process = self.process, None
+        self.reader = None
+        if process:
+            try:
+                process.stdin.write_eof()
+                await asyncio.wait_for(process.stdin.drain.aio(), 2)
+            except Exception:
+                pass  # The private bridge also exits on EOF, idle or exec timeout.
+
+    async def request(self, body):
+        try:
+            async with asyncio.timeout(530):
+                native = getattr(self.sandbox, 'computer_request', None)
+                if native:
+                    return await native(body)
+                if self.process is None:
+                    self.process = await self.sandbox.exec.aio('/usr/local/bin/python',
+                        '/opt/workspace-runner/computer.py', 'bridge', timeout=3600, bufsize=1)
+                    self.reader = self.process.stdout.__aiter__()
+                self.process.stdin.write((json.dumps(body)+'\n').encode())
+                await self.process.stdin.drain.aio()
+                line = await self.reader.__anext__()
+                if len(line) > 2 * 1024 * 1024:
+                    raise ValueError('Computer response too large.')
+                result = json.loads(line)
+                if not isinstance(result, dict):
+                    raise ValueError('Invalid Computer response.')
+                return result
+        except BaseException as exc:
+            self.failed = True
+            await self.close()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(503, 'Computer connection interrupted. Check the desktop before resuming control. Restart the workspace if it is running an older version.') from None
 
 
 class Computer:
@@ -26,6 +72,8 @@ class Computer:
         self.locks = {}
         self.slots = asyncio.Semaphore(4)
         self.capture_locks = {}
+        self.connections = {}
+        self.connection_lock = asyncio.Lock()
         store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')
 
     def touched(self, run_id):
@@ -49,6 +97,39 @@ class Computer:
             return None
         sandbox = await self.manager.provider(run).get(run['sandbox_id'])
         return sandbox if await sandbox.poll.aio() is None else None
+
+    @asynccontextmanager
+    async def connection(self, run):
+        async with self.connection_lock:
+            key, identity = run['id'], run.get('sandbox_id')
+            connection = self.connections.get(key)
+            now = time.monotonic()
+            if connection and (connection.identity != identity or connection.failed or
+                               now-connection.used > 20 or now-connection.created > 3000):
+                self.connections.pop(key)
+                await connection.close()
+                connection = None
+            if connection is None:
+                sandbox = await self.sandbox(run)
+                if sandbox:
+                    if len(self.connections) >= 32:
+                        idle = [(entry.used, rid) for rid, entry in self.connections.items() if not entry.active]
+                        if not idle:
+                            raise HTTPException(503, 'Computer connections are busy. Try again shortly.')
+                        await self.connections.pop(min(idle)[1]).close()
+                    connection = self.connections[key] = DesktopConnection(sandbox, identity)
+            if connection:
+                connection.active = True
+        try:
+            yield connection
+        finally:
+            if connection:
+                connection.active = False
+                connection.used = time.monotonic()
+
+    async def close(self):
+        connections, self.connections = list(self.connections.values()), {}
+        await asyncio.gather(*(connection.close() for connection in connections))
 
     async def execute(self, sandbox, *args, timeout=45):
         async with self.slots:
@@ -115,16 +196,16 @@ class Computer:
             run, actor = self.authorize(request, run_id)
             async with self.locks.setdefault(run_id, asyncio.Lock()):
                 stamp, sid, value = self.cache.get(run_id, (0, None, None))
-                if time.monotonic() - stamp >= 1 or sid != run.get('sandbox_id'):
+                if time.monotonic() - stamp >= .08 or sid != run.get('sandbox_id'):
                     try:
-                        sandbox = await self.sandbox(run)
-                        value = await self.execute(sandbox, 'request', '{"action":"state"}') if sandbox else {'available': False}
-                        value['has_sandbox'] = sandbox is not None
-                        if sandbox:
-                            try:
-                                await self.sync(sandbox, run_id, value.get('media', []))
-                            except Exception:
-                                value['notice'] = 'A capture could not be saved to the app yet. Keeping the workspace copy and retrying.'
+                        async with self.connection(run) as connection:
+                            value = await connection.request({'action':'state'}) if connection else {'available': False}
+                            value['has_sandbox'] = connection is not None
+                            if connection:
+                                try:
+                                    await self.sync(connection.sandbox, run_id, value.get('media', []))
+                                except Exception:
+                                    value['notice'] = 'A capture could not be saved to the app yet. Keeping the workspace copy and retrying.'
                     except Exception:
                         value = {'available': False, 'notice': 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.'}
                     if len(self.cache) >= 32:
@@ -138,19 +219,19 @@ class Computer:
             run, actor = self.authorize(request, run_id, mutation=True)
             if len(json.dumps(body.args)) > 16000:
                 raise HTTPException(413, 'Computer command too large.')
-            async with self.locks.setdefault(run_id, asyncio.Lock()):
-                sandbox = await self.sandbox(run)
-                if not sandbox:
+            async with self.locks.setdefault(run_id, asyncio.Lock()), self.connection(run) as connection:
+                if not connection:
                     raise HTTPException(409, 'This workspace is asleep. Send a message to Moyai to start it again.')
                 try:
-                    result = await self.execute(sandbox, 'request', json.dumps({**body.model_dump(), 'actor': actor}), timeout=530)
+                    result = await connection.request({**body.model_dump(), 'actor': actor})
                     if result.get('error'):
                         raise HTTPException(409, result['error'])
                     if body.action != 'release':
                         self.store.execute('INSERT INTO computer_activity VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET touched=excluded.touched', (run_id, time.time()))
                     if body.action in {'screenshot', 'record_stop'}:
-                        await self.sync(sandbox, run_id)
-                    return {'ok': True, 'captures': captures.listing(self.settings, run_id)}
+                        await self.sync(connection.sandbox, run_id)
+                    return {**result, 'ok': True, 'actor': actor, 'has_sandbox': True,
+                            'captures': captures.listing(self.settings, run_id)}
                 finally:
                     self.cache.pop(run_id, None)
 

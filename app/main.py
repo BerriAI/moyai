@@ -215,6 +215,7 @@ def create_app(settings: Settings | None = None):
         try:
             yield
         finally:
+            await computer.close()
             await session_titles.close()
             await infrastructure.close()
             await automations.close()
