@@ -1,6 +1,6 @@
 """Real bundled SDK process and real MCP transport; inference is a local fixture.
 
-No provider calls or generated shell commands. The sole tool echoes test data.
+No provider calls or generated shell commands. Tools read and echo synthetic data.
 """
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,8 +42,17 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                 return self.reply({'type': 'error', 'error': {'type': 'invalid_request_error',
                     'message': 'Prompt is too long'}}, status=400)
             done = bool(calls)
-            block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
-                     {'type': 'tool_use', 'id': 'tool_echo', 'name': 'mcp__moyai__echo', 'input': {'text': 'sdk-transport-ok'}})
+            receipt = next((block for message in data['messages'] for block in message.get('content', [])
+                            if isinstance(block, dict) and block.get('tool_use_id') == 'history_read'), None)
+            if resumed and receipt is None:
+                block = {'type': 'tool_use', 'id': 'history_read', 'name': 'Read', 'input': {
+                    'file_path': str(session / '.moyai-history.jsonl'), 'offset': 1, 'limit': 1}}
+            else:
+                if resumed:
+                    assert not receipt.get('is_error'), receipt
+                    assert 'Continue the searchable dropdown task' in json.dumps(receipt)
+                block = ({'type': 'text', 'text': 'sdk-transport-ok'} if done else
+                         {'type': 'tool_use', 'id': 'tool_echo', 'name': 'mcp__moyai__echo', 'input': {'text': 'sdk-transport-ok'}})
             message = {'id': 'msg_' + str(len(requests)), 'type': 'message', 'role': 'assistant',
                        'model': 'claude-sonnet-4-5', 'content': [block], 'stop_reason': 'end_turn' if done else 'tool_use',
                        'stop_sequence': None, 'usage': {'input_tokens': 50, 'output_tokens': 10}}
@@ -93,7 +102,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         assert result['completed'], result['final_response']
         assert result['final_response'] == 'sdk-transport-ok'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
-        assert [kind for kind, _ in events] == ['start', 'complete']
+        assert [kind for kind, _ in events] == ['start', 'complete'] * (2 if resumed else 1)
         assert not agent.journal.pending
         assert any(m.get('role') == 'tool' and 'sdk-transport-ok' in m['content'] for m in result['messages'])
         assert any('cache_control' in json.dumps(body) for body in requests)
