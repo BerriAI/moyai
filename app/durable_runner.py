@@ -119,6 +119,12 @@ class DurableRunner(RunManager):
                 self.fail(run_id, state, 'This response cannot run with the current workspace configuration. '
                           'An administrator must check the selected model and runtime settings.')
                 return True
+            except modal.exception.ImageBuildError:
+                # Retrying the same broken image leaves the UI provisioning
+                # forever. Finish this turn without exposing provider logs.
+                self.fail(run_id, state, 'The workspace image could not be built. '
+                          'An administrator must fix the image build and redeploy before you retry.')
+                return True
             except HTTPException as exc:
                 # A disabled/deleted selection is a configuration failure, not
                 # a transient provider error for Temporal to retry indefinitely.

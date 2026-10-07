@@ -139,6 +139,47 @@ async def drive(manager, run_id, *, phase='idle', steps=40):
     pytest.fail(f'Never reached {phase}: {manager.state(run_id)}')
 
 
+async def test_image_build_failure_finishes_once_without_exposing_provider_logs(durable, monkeypatch):
+    manager, cloud, run_id = durable
+    attempts = 0
+
+    async def broken_image(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise modal.exception.ImageBuildError('private-build-log token=do-not-publish', 'im-broken')
+
+    monkeypatch.setattr('app.durable_runner.modal.Sandbox.create', aio(broken_image))
+    manager.store.enqueue_message(run_id, 'Queued follow-up', 'queued-input')
+    await drive(manager, run_id)
+    row = manager.store.run(run_id)
+    assert row['status'] == 'failed'
+    assert 'workspace image could not be built' in row['error']
+    assert row['token_hash'] == ''
+    assert not cloud.launches and attempts == 1
+    messages = manager.store.messages(run_id)
+    assert not [m for m in messages if m['status'] in {'running', 'queued'}]
+    assert 'private-build-log' not in json.dumps(messages + manager.store.events(run_id))
+    assert await manager.advance(run_id) is False
+    assert attempts == 1
+
+
+async def test_transient_provision_error_remains_retryable(durable, monkeypatch):
+    manager, cloud, run_id = durable
+
+    async def disconnected(**kwargs):
+        raise ConnectionError('Temporary network failure')
+
+    monkeypatch.setattr('app.durable_runner.modal.Sandbox.create', aio(disconnected))
+    await drive(manager, run_id, phase='provision')
+    with pytest.raises(ConnectionError):
+        await manager.advance(run_id)
+    assert manager.store.run(run_id)['status'] == 'provisioning'
+    monkeypatch.setattr('app.durable_runner.modal.Sandbox.create', aio(cloud.create))
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'idle'
+    assert len(cloud.launches) == 1
+
+
 async def test_every_step_can_lose_worker_and_launch_ack_without_repeating_work(durable):
     manager, cloud, run_id = durable
     cloud.lose_launch_ack = True

@@ -5,12 +5,19 @@ with the complete upstream Python package at an immutable revision, avoiding
 an unrelated Rust wheel build in the sandbox. No source files are vendored.
 """
 from pathlib import Path
+import importlib.util
 import subprocess
 import sys
 import shutil
 
 LITELLM_REVISION = '2cee61626d9581bc22bbdeefb1924f854f50d427'
 LITELLM_SOURCE = Path('/opt/litellm-harness')
+
+
+def ensure_pip() -> None:
+    if importlib.util.find_spec('pip') is None:
+        subprocess.run([sys.executable, '-m', 'ensurepip', '--upgrade'],
+                       check=True, timeout=60)
 
 
 def prepare_binary(binding):
@@ -35,6 +42,9 @@ def prepare_runtime():
         return
     except ImportError:
         pass
+    # Hermes creates its isolated environment without pip. Bootstrap the
+    # installer in that interpreter, including when restoring older snapshots.
+    ensure_pip()
     subprocess.run([sys.executable, '-m', 'pip', 'install', 'litellm==1.104.0',
                     'claude-agent-sdk==0.2.163', 'mcp<2', 'starlette', 'uvicorn',
                     'deepagents==0.7.22', 'langchain-litellm==0.11.0'],

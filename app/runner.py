@@ -276,22 +276,8 @@ class RunManager:
         self.store.update_run(run_id, status="completed", summary=steps[-1][1])
 
     def image(self):
-        revision = self.settings.hermes_revision
-        if not re.fullmatch(r"[0-9a-f]{40}", revision):
-            raise ValueError("HERMES_REVISION must be a full commit SHA")
-        return (modal.Image.debian_slim(python_version="3.14")
-                .apt_install("git", "chromium", "xvfb", "ffmpeg", "ca-certificates", "build-essential", "libffi-dev", "ripgrep", "nodejs", "npm")
-                .pip_install("playwright==1.58.0")
-                .env({"HERMES_RUNTIME_DIR": "/opt/hermes-tools", "PYTHONPATH": "/opt/hermes"})
-                .run_commands(f"git init /opt/hermes && cd /opt/hermes && git remote add origin https://github.com/NousResearch/hermes-agent.git && git fetch --depth 1 origin {revision} && git checkout --detach FETCH_HEAD",
-                              "cd /opt/hermes && python -m pm.build_env --source /opt/hermes --out /opt/hermes-env --no-install-project --extra mcp",
-                              "/opt/hermes-env/bin/python -m pip install claude-agent-sdk==0.2.163 'mcp<2'",
-                              "cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; from cryptography.fernet import Fernet'")
-                .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
-                .run_commands("python /opt/workspace-runner/hermes_compat.py")
-                .run_commands("python /opt/workspace-runner/install_access_tools.py",
-                              "/opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py")
-                .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
+        from .workspace_image import workspace_image
+        return workspace_image(self.settings)
 
     def is_active(self, run_id):
         return run_id in self.jobs

@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: 1c-2g
     numInstances: 1
-    buildCommand: pip install uv==0.11.17 && uv sync --frozen --no-dev
+    buildCommand: pip install uv==0.11.17 && uv sync --frozen --no-dev && .venv/bin/python build_workspace_image.py
     startCommand: .venv/bin/python render_start.py
     healthCheckPath: /health
     autoDeployTrigger: "off"
