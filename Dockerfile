@@ -7,9 +7,11 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY app ./app
 COPY sandbox ./sandbox
+COPY render_start.py build_workspace_image.py docker_start.py docker_healthcheck.py ./
 RUN useradd --uid 10001 --create-home workspace && mkdir /data && chown workspace:workspace /data
-USER workspace
+# The entrypoint adopts the mounted data tree, then drops to workspace before
+# importing application code. A build-time chown cannot fix a mounted disk.
 ENV DATA_DIR=/data PYTHONUNBUFFERED=1
 EXPOSE 8787
-HEALTHCHECK --interval=30s --timeout=5s CMD /app/.venv/bin/python -c "import os,urllib.request,urllib.parse; host=urllib.parse.urlparse(os.environ['PUBLIC_URL']).netloc; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8787/health', headers={'Host':host}), timeout=3)"
-CMD ["/app/.venv/bin/uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8787", "--workers", "1"]
+HEALTHCHECK --interval=30s --timeout=5s CMD /app/.venv/bin/python /app/docker_healthcheck.py
+ENTRYPOINT ["/app/.venv/bin/python", "/app/docker_start.py"]

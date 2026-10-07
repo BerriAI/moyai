@@ -1,12 +1,13 @@
 services:
   - type: web
     name: moyai-devin-litellm
-    runtime: python
+    runtime: docker
     region: oregon
     plan: 1c-2g
     numInstances: 1
-    buildCommand: pip install uv==0.11.17 && uv sync --frozen --no-dev && .venv/bin/python build_workspace_image.py
-    startCommand: .venv/bin/python render_start.py
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    preDeployCommand: /app/.venv/bin/python /app/build_workspace_image.py
     healthCheckPath: /health
     autoDeployTrigger: "off"
     disk:
@@ -14,8 +15,6 @@ services:
       mountPath: /var/data
       sizeGB: 1
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.13.7
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: DATA_DIR

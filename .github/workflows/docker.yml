@@ -1,0 +1,26 @@
+name: Docker startup
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Test startup and migration guards
+        run: uv run --python 3.13 pytest -q tests/test_docker_start.py tests/test_render.py tests/test_workspace_image.py
+      - name: Build production image
+        run: docker build -t moyai-docker-smoke .
+      - name: Exercise mounted disk migration and restart
+        run: python scripts/docker_smoke.py moyai-docker-smoke --output /tmp/docker-evidence
+      - name: Save real execution recording
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-startup-evidence
+          path: /tmp/docker-evidence
