@@ -1,12 +1,14 @@
 """Real Agents SDK requests with a mocked HTTP boundary, not fake SDK results."""
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from openai import AsyncOpenAI
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -14,6 +16,7 @@ from app.db import Store
 from app.main import create_app, public_run
 from app.session_titles import SessionTitles, clean_title
 from test_slack import slack_app, event, signed
+from test_user_roles import sign_as, users_app
 
 
 def config(tmp_path, **extra):
@@ -171,3 +174,88 @@ def test_slack_lifecycle(slack_app,monkeypatch,thread_chat):
     client.post('/hooks/slack/events',**signed(payload))
     client.portal.call(drain,app.state.session_titles)
     assert len(requests)==1
+
+
+@pytest.mark.parametrize('kind', ['session', 'side-chat', 'automation'])
+def test_manual_title_persists_without_changing_session(users_app: tuple[FastAPI, TestClient], kind: str) -> None:
+    app, client = users_app
+    owner = sign_as(app, client, 'maya@berri.ai')['user_id']
+    store = app.state.store
+    parent = store.create_run('Original task', '', 'demo', [], chat_enabled=True, user_id=owner)
+    run = store.create_run('Original side question', '', 'demo', [], chat_enabled=True,
+                           user_id=owner, side_chat_of=parent['id']) if kind == 'side-chat' else parent
+    if kind == 'automation':
+        store.execute('UPDATE runs SET agent_label=? WHERE id=?', ('Automation - Daily report', run['id']))
+    before, messages = store.run(run['id']), store.messages(run['id'])
+    sign_as(app, client, 'sam@berri.ai')  # Sessions are shared with other workspace members.
+    title = '<b>Release [v2]</b> #7'
+    response = client.put('/api/runs/'+run['id']+'/title', json={'title': '  '+title+'  ', 'expected_title': ''})
+    assert response.status_code == 200, response.text
+    assert response.json() == {'id': run['id'], 'display_title': title}
+    reopened = Store(app.state.settings.data_dir)
+    assert reopened.run(run['id']) == {**before, 'display_title': title}
+    assert reopened.messages(run['id']) == messages
+    sign_as(app, client, 'maya@berri.ai')
+    assert client.get('/api/runs/'+run['id']).json()['display_title'] == title
+    assert next(row for row in client.get('/api/runs').json() if row['id'] == run['id'])['display_title'] == title
+    if kind == 'side-chat':
+        assert client.get('/api/runs/'+parent['id']+'/side-chats').json()[0]['display_title'] == title
+
+
+def test_manual_title_auth_validation_and_conflicts(users_app: tuple[FastAPI, TestClient]) -> None:
+    app, client = users_app
+    store = app.state.store
+    run = store.create_run('Original task', '', 'demo', [], chat_enabled=True)
+    url, body = '/api/runs/'+run['id']+'/title', {'title': 'My name', 'expected_title': ''}
+    assert client.put(url, json=body).status_code == 401
+    sign_as(app, client, 'maya@berri.ai')
+    assert client.put(url, json=body, headers={'X-CSRF-Token': ''}).status_code == 403
+    assert client.put(url, json=body, headers={'Origin': 'https://other.example'}).status_code == 403
+    for title in ('', '   ', 'x'*81, 'two\nlines', 'two\rlines', 'two\tlines', 'bad\x00', 'bad\x7f', 'two\u2028lines'):
+        assert client.put(url, json={**body, 'title': title}).status_code == 422
+    for invalid in ({'title': 'Name'}, {**body, 'expected_title': 'x'*81}, {**body, 'owner_id': 'other'}):
+        assert client.put(url, json=invalid).status_code == 422
+    assert client.put('/api/runs/missing/title', json=body).status_code == 404
+    child = store.create_run('Worker task', '', 'demo', [], chat_enabled=True)
+    store.execute('UPDATE runs SET parent_run_id=?,agent_label=? WHERE id=?', (run['id'], 'Worker', child['id']))
+    assert client.put('/api/runs/'+child['id']+'/title', json=body).status_code == 422
+    assert store.run(child['id'])['display_title'] == ''
+    assert store.run(run['id']) == run
+    assert client.put(url, json=body).status_code == 200
+    assert client.put(url, json={**body, 'title': 'Stale name'}).status_code == 409
+    assert store.run(run['id'])['display_title'] == 'My name'
+    maximum = 'x'*80
+    assert client.put(url, json={'title': maximum, 'expected_title': 'My name'}).status_code == 200
+    assert store.run(run['id'])['display_title'] == maximum
+
+
+def test_manual_title_wins_over_inflight_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    requests: list[httpx.Request] = []
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        entered.set()
+        await release.wait()
+        return completion('Automatic name')
+    def ignore_submit(run: dict[str, object]) -> None:
+        return None
+    gateway(monkeypatch, handler)
+    app = create_app(config(tmp_path, auto_prepare_repositories=False))
+    monkeypatch.setattr(app.state.manager, 'submit', ignore_submit)
+    with TestClient(app, base_url=app.state.settings.public_url, client=('127.0.0.1', 50000)) as client:
+        session = client.get('/api/session').json()
+        client.headers.update({'Origin': app.state.settings.public_url, 'X-CSRF-Token': session['csrf']})
+        response = client.post('/api/runs', json={'prompt': 'Plan the release', 'client_id': 'manual-title-race'})
+        assert response.status_code == 201
+        run_id = response.json()['id']
+        client.portal.call(asyncio.wait_for, entered.wait(), 2)
+        response = client.put('/api/runs/'+run_id+'/title', json={'title': 'My release plan', 'expected_title': ''})
+        assert response.status_code == 200
+        client.portal.call(release.set)
+        client.portal.call(drain, app.state.session_titles)
+        client.portal.call(app.state.session_titles.schedule, run_id)
+        client.portal.call(drain, app.state.session_titles)
+        assert client.get('/api/runs/'+run_id).json()['display_title'] == 'My release plan'
+        assert len(requests) == 1
+        assert json.loads(requests[0].content)['messages'][1]['content'] == 'Plan the release'
+    assert Store(tmp_path).run(run_id)['display_title'] == 'My release plan'

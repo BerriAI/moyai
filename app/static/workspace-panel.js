@@ -163,7 +163,7 @@
       stop.onclick=async()=>{stop.disabled=true;try{await api(`/api/runs/${t.chatId}/cancel`,{method:'POST'});await poll();}catch(e){status.textContent=e.message;}finally{stop.disabled=false;}};
       showEmpty();
     }
-    const {titleFor=(r)=>r.agent_label||r.display_title||r.prompt,matchesSession=(r,s)=>(r.prompt||'').toLowerCase().includes(s)}=arguments[0];
+    const {titleFor=(r)=>(r.parent_run_id?r.agent_label||r.display_title:r.display_title||r.agent_label)||r.prompt,matchesSession=(r,s)=>(r.prompt||'').toLowerCase().includes(s)}=arguments[0];
     // Extend the upstream tab menu without replacing its file-tree setup.
     drawMenu=function(){
       const items=menuItems(q('.panel-menu input').value.toLowerCase());

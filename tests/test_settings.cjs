@@ -72,6 +72,50 @@ test('a delayed Settings access check cannot overwrite a different page', async 
   assert.equal(elements.get('#content').innerHTML, 'The next page');
 });
 
+test('members can save immediate sending, reload it, and recover from a failed change', async () => {
+  const {context, elements} = setup({role:'member'});
+  let saved=false,fail=false;
+  context.api=async(url,options)=>{
+    if(url==='/api/session')return {authenticated:true,role:'member',user_id:'test-user',preferences:{send_immediately:saved}};
+    if(url==='/api/settings/preferences'){
+      if(fail)throw Error('Connection lost.');
+      saved=JSON.parse(options.body).send_immediately;
+      return {send_immediately:saved};
+    }
+    return {};
+  };
+  await context.renderSettings();
+  const input=elements.get('#send-immediately');
+  assert.equal(context.state.preferences.send_immediately,false);
+  input.checked=true;await input.onchange();
+  assert.equal(saved,true);
+  assert.equal(context.state.preferences.send_immediately,true);
+  assert.match(elements.get('#send-immediately-status').textContent,/Saved/);
+  await context.renderSettings();
+  assert.match(elements.get('#content').innerHTML,/id="send-immediately" type="checkbox" checked/);
+  fail=true;input.checked=false;await input.onchange();
+  assert.equal(input.checked,true);
+  assert.equal(input.disabled,false);
+  assert.equal(context.state.preferences.send_immediately,true);
+  assert.match(elements.get('#send-immediately-status').textContent,/Could not confirm.*Connection lost/);
+  fail=false;input.checked=false;await input.onchange();
+  assert.equal(context.state.preferences.send_immediately,false);
+});
+
+test('delayed preference save updates the account without overwriting a newly opened page', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  context.api=async()=>{
+    context.state.pageVersion++;
+    elements.get('#content').innerHTML='Another page';
+    return {send_immediately:true};
+  };
+  elements.get('#send-immediately').checked=true;
+  await elements.get('#send-immediately').onchange();
+  assert.equal(elements.get('#content').innerHTML,'Another page');
+  assert.equal(context.state.preferences.send_immediately,true);
+});
+
 test('settings navigation selects exactly one destination and respects member access', () => {
   const {context} = setup({automations: true});
   const member = context.settingsNavigation('skills', 'member');

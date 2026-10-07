@@ -116,6 +116,14 @@ async function renderSettings() {
   const admin = state.role === 'admin';
   $('#content').innerHTML = `<section class="settings-page">
     <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Make Moyai work the way your team does.</p></div></div>
+    <section class="settings-group" aria-labelledby="personal-preferences-title">
+      <h2 id="personal-preferences-title">Personal preferences</h2>
+      <div class="chat-preference">
+        <label for="send-immediately"><input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} aria-describedby="send-immediately-description send-immediately-status"><span>Send messages immediately</span></label>
+        <p id="send-immediately-description" class="subtext">While Moyai is working, send follow-ups into the active response instead of queueing them. Saved for your account across chats.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p>
+        <p id="send-immediately-status" class="subtext" role="status">${state.preferences.send_immediately?'On · Enter and the send button send immediately.':'Off · Follow-ups queue while Moyai is working.'}</p>
+      </div>
+    </section>
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
         <h2 id="settings-${group.id}">${group.title}${group.admin ? '<span>Admin</span>' : ''}</h2>
@@ -128,6 +136,22 @@ async function renderSettings() {
       </section>`).join('')}</div>
     <section class="card settings-form-section" id="title-model-settings"><div><h2>Session titles</h2><p class="subtext">Choose the model that names new chats. Existing titles and the chat model stay the same.</p></div><form id="title-model-form"><label for="title-model">Gateway model ID</label><input id="title-model" maxlength="200" required placeholder="openai/gpt-4.1-nano" aria-describedby="title-model-status" ${admin?'':'disabled'}><button type="submit" ${admin?'':'disabled'}>Save model</button><p id="title-model-status" role="status">Loading…</p></form></section>
   </section>`;
+  const preferenceInput=$('#send-immediately'),preferenceStatus=$('#send-immediately-status'),userId=state.userId;
+  preferenceInput.onchange=async()=>{
+    const previous=state.preferences.send_immediately;
+    preferenceInput.disabled=true;preferenceStatus.textContent='Saving…';
+    try{
+      const saved=await api('/api/settings/preferences',{method:'PUT',body:JSON.stringify({send_immediately:preferenceInput.checked})});
+      if(state.userId===userId)state.preferences=saved;
+      if(version!==state.pageVersion)return;
+      preferenceInput.checked=saved.send_immediately;
+      preferenceStatus.textContent=saved.send_immediately?'Saved · Messages now go straight into the active response.':'Saved · Follow-ups will queue while Moyai is working.';
+    }catch(error){
+      if(version!==state.pageVersion)return;
+      preferenceInput.checked=previous;
+      preferenceStatus.textContent='Could not confirm the change. '+error.message+' Reload settings to check, or try again.';
+    }finally{if(version===state.pageVersion)preferenceInput.disabled=false;}
+  };
   try{
     const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
     $('#title-model').value=saved.model;

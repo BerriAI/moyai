@@ -82,6 +82,7 @@ function sessionFolderDialog(title,body){
   const dialog=$('#session-folder-dialog');
   if(dialog.open)dialog.close();
   dialog.oncancel=null;
+  dialog.onclose=null;
   // Let Escape close only this dialog, keeping the mobile sidebar open.
   dialog.onkeydown=e=>{if(e.key==='Escape')e.stopPropagation();};
   dialog.innerHTML=`<form class="folder-form"><button type="button" class="dialog-close" aria-label="Close folder dialog">×</button><h2 id="session-folder-title">${esc(title)}</h2>${body}<p class="folder-error" role="alert"></p></form>`;
@@ -155,4 +156,58 @@ function moveSessionToFolder(run){
     };
     create.querySelector('input').focus();
   };
+}
+
+function showSessionActions(run,button){
+  const menu=$('#session-actions');
+  if(menu.matches(':popover-open'))menu.hidePopover();
+  menu.innerHTML=(typeof renameSession==='function'?'<button type="button" data-rename-session>Rename</button>':'')+'<button type="button" data-move-to-folder>Move to folder</button>';
+  menu.querySelector('[data-rename-session]')?.addEventListener('click',()=>{menu.hidePopover();renameSession(run);});
+  menu.querySelector('[data-move-to-folder]').onclick=()=>{menu.hidePopover();moveSessionToFolder(run);};
+  if(typeof bindSessionLifecycleActions==='function')bindSessionLifecycleActions(menu,run);
+  menu.onkeydown=e=>{
+    if(e.key==='Escape'){e.stopPropagation();menu.hidePopover();button.focus();}
+    if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){
+      e.preventDefault();const items=[...menu.querySelectorAll('button')],index=items.indexOf(document.activeElement);
+      items[e.key==='Home'?0:e.key==='End'?items.length-1:(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
+    }
+  };
+  const rect=button.getBoundingClientRect();
+  menu.showPopover({source:button});
+  menu.style.left=Math.max(8,Math.min(rect.right-menu.offsetWidth,innerWidth-menu.offsetWidth-8))+'px';
+  menu.style.top=Math.max(8,Math.min(rect.bottom+4,innerHeight-menu.offsetHeight-8))+'px';
+  menu.querySelector('button').focus();
+}
+
+function renameSession(run){
+  const dialog=sessionFolderDialog('Rename session',`
+    <div class="field"><label for="session-title-name">Session name</label><input id="session-title-name" name="title" value="${esc(sessionTitle(run))}" maxlength="80" required autocomplete="off"></div>
+    <div class="folder-dialog-actions"><button type="button" class="quiet" data-folder-cancel>Cancel</button><button type="submit" class="primary">Save</button></div>`);
+  const input=dialog.querySelector('input'),form=dialog.querySelector('form'),error=dialog.querySelector('.folder-error');
+  const expectedTitle=run.display_title||'';
+  let saving=false;
+  dialog.onclose=()=>$('#session-list').querySelector(`[data-session-actions="${CSS.escape(run.id)}"]`)?.focus();
+  form.onsubmit=async e=>{
+    e.preventDefault();if(saving)return;
+    const title=input.value.trim();
+    if(!title){error.textContent='Enter a session name.';input.focus();return;}
+    saving=true;error.textContent='';
+    const controls=[...form.querySelectorAll('button,input')];controls.forEach(control=>control.disabled=true);
+    dialog.oncancel=event=>event.preventDefault();
+    try{
+      const saved=await api('/api/runs/'+run.id+'/title',{method:'PUT',body:JSON.stringify({title,expected_title:expectedTitle})});
+      // Invalidate reads started before this save, then update all visible title consumers.
+      ++state.runsRefresh;state.chatRefresh=(state.chatRefresh||0)+1;
+      state.titleEdits=(state.titleEdits||0)+1;
+      if(state.chatRun?.id===saved.id)state.chatRun.display_title=saved.display_title;
+      syncRunSummary(saved);
+      dialog.close();toast('Session renamed.');
+    }catch(failure){
+      error.textContent=failure.message;
+      // Reopening after a conflict must start with the server's current title.
+      await refreshRuns().catch(()=>{});
+    }
+    finally{saving=false;controls.forEach(control=>control.disabled=false);dialog.oncancel=null;}
+  };
+  input.focus();input.select();
 }

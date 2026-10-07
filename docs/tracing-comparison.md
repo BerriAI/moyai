@@ -94,7 +94,7 @@ rather than expecting its displayed trace UUID to equal the OTLP trace ID.
 
 | Platform | Strengths and supported features | Setup pains and observed limitations |
 | --- | --- | --- |
-| Lens | Fits the existing LiteLLM gateway; agent trees, timing, errors, token usage, and automated investigations. Plain OTLP integrates with the existing capture code. | Requires ClickHouse for traces and a separate worker for investigations. Trace write access does not imply read access. Tool content needs GenAI tool argument/result attributes. This deployment's inference and trace gateways differ; cost was shown as not reported because this integration does not export authoritative cost/join data. |
+| Lens | Fits the existing LiteLLM gateway; agent trees, timing, errors, token usage, and automated investigations. Plain OTLP integrates with the existing capture code. | Requires ClickHouse for traces and a separate worker for investigations. Trace write access does not imply read access. Tool content needs GenAI tool argument/result attributes. This deployment's inference and trace gateways differ; recorded gateway cost requires receiver access to the matching owned spending records, and trace-based estimates require receiver-side pricing. |
 | Raindrop | Interaction/conversation views, tool errors, signals, issue clustering, and feedback workflows. Native SDKs can simplify interaction association. | Two ingestion paths are required: OTLP spans and interaction events with matching IDs. Write and Query API keys are separate; the supplied key succeeded for writes and returned 401 for Query API reads, so verification used the signed-in UI. Hosted event ingestion returned 200 with IDs despite docs describing 204; both are supported. Workflow/agent spans appeared with an `llm` badge in its tree. Issue quality needs representative production traffic; a smoke test cannot establish it. |
 | Langfuse | Explicit agent/tool/generation types, sessions, token/cost accounting, prompts, scores, and evals; supports cloud and self-hosting. Existing integration needed little deployment work. | Correct region plus public/secret key pair; v4 metadata must be carried on every observation. Legacy trace reads returned 410, so use Observations API v2 with explicit fields. Custom usage-detail keys can silently suppress price calculation; standard GenAI token fields correctly produced costs. |
 | LangSmith | Good thread/turn navigation, typed runs, token/cost estimates, datasets, annotation, evals, and tracing across frameworks. Key plus project header was sufficient. | Its GenAI importer required message `parts`; legacy `content` alone returned 200 but lost model text. An ERROR status without an exception event appeared successful. Both are now mapped correctly. Child spans need their exported parent, and UI IDs differ from OTLP IDs. |
@@ -109,7 +109,7 @@ SSO email, including Slack accounts linked to Google sign-in. Internal account
 IDs and authorization are unchanged. Accounts without an SSO email retain a
 stable hashed fallback; previously exported traces are not rewritten. Model JSON
 is bounded without cutting its syntax. Timing currently measures full requests,
-not time to first token. Cache/reasoning-token breakdowns, gateway billing,
+not time to first token. Separate reasoning-token breakdowns, gateway billing,
 feedback, online evaluators, and automated investigations are not configured by
 this tracing change. That shared capture policy bounds what any platform can
 show; missing private content is not a platform ingestion failure.
@@ -171,3 +171,18 @@ introduced by this tracing release.
 - [Braintrust OTLP](https://www.braintrust.dev/docs/integrations/sdk-integrations/opentelemetry/send-traces-and-logs),
   [attributes](https://www.braintrust.dev/docs/integrations/sdk-integrations/opentelemetry/attributes),
   [query request schema](https://braintrust.dev/docs/kb/btql-post-endpoint-payload-and-response-schema).
+
+
+## Model usage and cost correlation
+
+Moyai exports [OpenTelemetry GenAI attributes](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/registry/attributes/gen-ai.md) for observed input/output tokens and cache-read/cache-write tokens. Input totals include cached tokens: native Anthropic input, cache reads and cache writes are summed; OpenAI Chat Completions and Responses totals already include cached input. Unknown counters are omitted and explicit zero is preserved. These fields are pricing inputs, not an invoice amount.
+
+`gen_ai.response.id` and `gen_ai.response.model` contain observed provider response values. `litellm.call_id` contains the gateway's `x-litellm-call-id` response header when present; a local Moyai request UUID is never substituted. Receivers can correlate gateway charges using these IDs under their own ownership rules.
+
+OpenAI tier uses the [standard `openai.response.service_tier` attribute](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/registry/attributes/openai.md). Anthropic billing details that do not yet have semantic conventions use these provider-specific extensions when returned:
+
+- `anthropic.response.service_tier`
+- `anthropic.usage.cache_creation.ephemeral_5m_input_tokens`
+- `anthropic.usage.cache_creation.ephemeral_1h_input_tokens`
+
+The same metadata is exported for Chat Completions, Responses and Messages, including streaming and context compaction. Native response content and private reasoning remain excluded from traces.

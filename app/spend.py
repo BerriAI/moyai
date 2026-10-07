@@ -43,16 +43,27 @@ class UsageCapture:
         self.buffer = b''
         self.usage = {}
         self.cost = None
-        self.response_id = ''
+        self.metadata = {}
         self.done = False
 
     def consume(self, value):
         if not isinstance(value, dict):
             return
-        if isinstance(value.get('id'), str):
-            self.response_id = value['id'][:200]
+        for key in ('id', 'model', 'service_tier'):
+            if isinstance(value.get(key), str) and value[key]:
+                self.metadata[key] = value[key][:200]
         if isinstance(value.get('usage'), dict):
-            self.usage = value['usage']
+            self.usage = dict(value['usage'])
+            for key in ('prompt_tokens_details', 'input_tokens_details'):
+                details = self.usage.get(key)
+                if isinstance(details, dict):
+                    for source, target in [('cached_tokens', 'cache_read_input_tokens'),
+                                           ('cache_write_tokens', 'cache_creation_input_tokens'),
+                                           ('cache_creation_tokens', 'cache_creation_input_tokens'),
+                                           ('cache_creation_input_tokens', 'cache_creation_input_tokens'),
+                                           ('cache_creation_token_details', 'cache_creation')]:
+                        if details.get(source) is not None and self.usage.get(target) is None:
+                            self.usage[target] = details[source]
         # LiteLLM's optional final streaming cost extension. Token prices are
         # never guessed when the gateway does not expose a final cost.
         for source in (value, value.get('usage', {})):
@@ -60,6 +71,11 @@ class UsageCapture:
                 cost = money(source.get('x_litellm_response_cost'))
                 if cost is not None:
                     self.cost = cost
+
+    @property
+    def response(self) -> dict[str, object]:
+        # Only observed billing metadata, never native content or reasoning.
+        return {**self.metadata, 'usage': self.usage}
 
     def feed(self, chunk):
         self.buffer += chunk
@@ -160,13 +176,14 @@ class Spend:
                            (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, now()))
         return request_id
 
-    def headers(self, request_id, upstream, streaming):
+    def headers(self, request_id, upstream, streaming) -> str:
         # Streaming headers arrive before generation ends and may report zero.
         # Only a final usage field can price a streamed response.
         cost = None if streaming else money(upstream.headers.get('x-litellm-response-cost'))
         gateway_id = upstream.headers.get('x-litellm-call-id', '')[:200]
         self.store.execute('UPDATE model_requests SET gateway_id=?,cost=?,cost_source=? WHERE id=?',
                            (gateway_id, cost, 'response_header' if cost is not None else '', request_id))
+        return gateway_id
 
     def finish(self, request_id, capture, status):
         usage = capture.usage if capture else {}

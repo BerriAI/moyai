@@ -15,9 +15,10 @@ function harness(){
   return {context,state,node,panelUpdates};
 }
 
-test('explicit labels win over persisted titles; malformed and blank values fall through',()=>{
+test('manual root titles win over labels; worker labels and blank fallbacks are preserved',()=>{
   const {context:h}=harness();
-  assert.equal(h.sessionTitle({agent_label:'  API\nworker  ',display_title:'Generated',prompt:'Raw'}),'API worker');
+  assert.equal(h.sessionTitle({parent_run_id:'parent',agent_label:'  API\nworker  ',display_title:'Generated',prompt:'Raw'}),'API worker');
+  assert.equal(h.sessionTitle({agent_label:'Side chat',display_title:'My investigation',prompt:'Raw'}),'My investigation');
   assert.equal(h.sessionTitle({agent_label:' \n ',display_title:'  Readable\n task ',prompt:'Raw'}),'Readable task');
   assert.equal(h.sessionTitle({agent_label:[],display_title:{},prompt:'- fix the test'}),'Fix the test');
   assert.equal(h.sessionTitle({}),'Untitled session');
@@ -147,7 +148,7 @@ test('background list poll updates header, sidebar, search and side tabs without
 
 test('detail refresh updates a title with unchanged status and retains child labels',()=>{
   const {context:h,state,node}=harness();
-  state.runs=[{id:'parent',prompt:'Old',status:'idle',children:[{id:'child',agent_label:'Worker assignment',status:'idle'}]}];
+  state.runs=[{id:'parent',prompt:'Old',status:'idle',children:[{id:'child',parent_run_id:'parent',agent_label:'Worker assignment',status:'idle'}]}];
   h.syncRunSummary({id:'parent',display_title:'New title',status:'idle'});
   assert.equal(node('#page-title').textContent,'New title');assert.match(node('#session-list').innerHTML,/New title/);
   state.selected='child';h.syncRunSummary({id:'child',display_title:'Generated child title',status:'idle'});

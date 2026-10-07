@@ -27,6 +27,7 @@ from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
+from .user_preferences import UserPreferences
 from .access_logging import configure_access_logging
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
@@ -158,6 +159,7 @@ def create_app(settings: Settings | None = None):
     else:
         manager = RunManager(store, settings)
     checkpoints = Checkpoints(store, settings)
+    user_preferences = UserPreferences(store, security, checkpoints)
     environments = Environments(store, settings, security, manager, connectors, checkpoints)
     manager.environments = environments
     spend = Spend(store, settings, security, checkpoints)
@@ -232,6 +234,8 @@ def create_app(settings: Settings | None = None):
     app.include_router(google.routes())
     app.include_router(user_roles.routes(security))
     app.state.user_roles = user_roles
+    app.include_router(user_preferences.routes())
+    app.state.user_preferences = user_preferences
     app.include_router(spend.routes())
     app.include_router(infrastructure.routes())
     app.include_router(identities.routes())
@@ -327,7 +331,7 @@ def create_app(settings: Settings | None = None):
         if info:
             user_id = store.identity(info)
         response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
-                                   "identity": info.get("identity"), "user_id": user_id, "google_enabled": settings.google_enabled(),
+                                   "identity": info.get("identity"), "user_id": user_id, "preferences": user_preferences.get(user_id), "google_enabled": settings.google_enabled(),
                                    "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
                                    "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}).encode()
         response.headers["content-length"] = str(len(response.body))
@@ -503,7 +507,11 @@ def create_app(settings: Settings | None = None):
         try:
             user_id = store.identity(security.session_info(request))
             enqueue = coordinator.enqueue_child if run['parent_run_id'] else slack.chat.enqueue_web
-            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id, body.attachment_ids, body.send_now)
+            # Resolve on every send so the saved choice also applies to other
+            # tabs and older clients. Explicit Send now remains available.
+            send_immediately = user_preferences.get(user_id)['send_immediately']
+            message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id,
+                                       body.attachment_ids, body.send_now, send_immediately=send_immediately)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
@@ -944,11 +952,12 @@ def create_app(settings: Settings | None = None):
         status = 'unknown'
         trace_started = time.time_ns()
         trace_response = {}
+        gateway_id = ''
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
                 async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
                                          json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
-                    spend.headers(request_id, upstream, False)
+                    gateway_id = spend.headers(request_id, upstream, False)
                     if upstream.status_code >= 400:
                         status = 'failed'
                         raw_error = bytearray()
@@ -983,7 +992,8 @@ def create_app(settings: Settings | None = None):
                 spend.finish(request_id, capture, status)
                 if status == 'completed':
                     context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
-                tracing.model(run, request_id, trace_started, body['messages'], trace_response, status)
+                tracing.model(run, request_id, trace_started, body['messages'],
+                              {**trace_response, **capture.response}, status, gateway_id=gateway_id)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:

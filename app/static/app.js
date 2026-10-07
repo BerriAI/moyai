@@ -28,7 +28,8 @@ function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new D
 function stopStream(){ if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; savedFiles.reset(); }
 function sessionTitle(run={}){
   const text=value=>typeof value==='string'?value.replace(/\s+/g,' ').trim():'';
-  for(const value of [run.agent_label,run.display_title]){const title=text(value);if(title)return title;}
+  const names=run.parent_run_id?[run.agent_label,run.display_title]:[run.display_title,run.agent_label];
+  for(const value of names){const title=text(value);if(title)return title;}
   // This is only a deterministic placeholder until the title agent finishes.
   // Keep the request's meaning; do not guess corrections, outcomes or PRs.
   const lines=(typeof run.prompt==='string'?run.prompt:'').split(/\r?\n/).map(line=>line
@@ -56,6 +57,7 @@ function sessionRepository(run){
 function syncSessionTitle(run){
   if(run?.id!==state.selected)return;
   const heading=$('#page-title');if(heading){heading.textContent=sessionTitle(run);heading.title=sessionTitle(run);}
+  document.title=sessionTitle(run)+' · Moyai';
 }
 function syncRunSummary(run){
   if(state.selected===run.id&&state.chatRun?.id===run.id&&!document.hidden)markSessionRead(run);
@@ -130,7 +132,7 @@ function sidebarSections(runs,folders,search){
 }
 function sidebarRenderSessions(groups,search){return groups.map(parent=>{
     const hasChildren=parent.totalChildren>0,expanded=!!search||state.expandedParents.has(parent.id);
-    return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent)}<button class="session-move" data-move-session="${esc(parent.id)}" title="Move to folder" aria-label="Move ${esc(sessionTitle(parent))} to folder">⋯</button></div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${parent.children.map(child=>sidebarRow(child,true)).join('')}</div>`:''}</div>`;
+    return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent)}<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button></div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${parent.children.map(child=>sidebarRow(child,true)).join('')}</div>`:''}</div>`;
   }).join('');}
 function renderSidebar(){
   const summaries=state.runs.flatMap(parent=>[parent,...(parent.children||[])]),selected=summaries.find(run=>run.id===state.selected);
@@ -149,7 +151,7 @@ function renderSidebar(){
   if(state.sidebarSignature===signature)return;
   state.sidebarSignature=signature;
   const list=$('#session-list'),scroll=list.scrollTop;
-  const focusAttrs=['data-toggle-agents','data-toggle-folder','data-edit-folder','data-move-session','data-run'];
+  const focusAttrs=['data-toggle-agents','data-toggle-folder','data-edit-folder','data-session-actions','data-run'];
   const focused=focusAttrs.map(attr=>[attr,document.activeElement?.getAttribute(attr)]).find(([,value])=>value);
   list.innerHTML=sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
@@ -269,7 +271,10 @@ async function submitTask(e){
   catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
 }
 async function openRun(id){
-  stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
+  const titleEdits=state.titleEdits||0;
+  stopStream();const version=++state.pageVersion;state.selected=id;const run=await api(`/api/runs/${id}`);if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;
+  if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
+  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'','#run='+id);
   if(run.chat_enabled){renderChat(run);return;}
   $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':'Modal sandbox'}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated Modal sandbox. Writes to connected apps require your approval.'}</div></aside></div>`;
@@ -312,7 +317,7 @@ function renderChat(run){
   if($('#chat-model'))$('#chat-model').onchange=()=>{state.modelDrafts[id]=$('#chat-model').value;};
   $('#followup').oninput=()=>{state.drafts[id]=$('#followup').value;};
   bindComposer($('#followup'),$('#message-form'));
-  state.messageQueue=MoyaiQueue.create({element:$('#message-queue'),runId:id,user:state.userId,role:state.role,api,refresh:refreshChat,toast,attachments:messageAttachments,preview:showAttachment,focusComposer:()=>{if(state.selected===id&&(document.activeElement===document.body||$('#message-queue')?.contains(document.activeElement)))$('#followup')?.focus();},drafts:state.queueDrafts[id]??=new Map(),useDraft:content=>{const input=$('#followup');input.value=[input.value,content].filter(Boolean).join('\n\n');input.dispatchEvent(new Event('input'));input.focus();}});
+  state.messageQueue=MoyaiQueue.create({element:$('#message-queue'),runId:id,user:state.userId,role:state.role,sendImmediately:()=>state.preferences?.send_immediately===true,api,refresh:refreshChat,toast,attachments:messageAttachments,preview:showAttachment,focusComposer:()=>{if(state.selected===id&&(document.activeElement===document.body||$('#message-queue')?.contains(document.activeElement)))$('#followup')?.focus();},drafts:state.queueDrafts[id]??=new Map(),useDraft:content=>{const input=$('#followup');input.value=[input.value,content].filter(Boolean).join('\n\n');input.dispatchEvent(new Event('input'));input.focus();}});
   const bottom=()=>{const box=$('#conversation');box.scrollTop=box.scrollHeight;};
   $('#jump-latest').onclick=bottom;
   $('#conversation').onscroll=()=>{const box=$('#conversation');$('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;};
@@ -365,8 +370,9 @@ function updateChatStatus(run){
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
-  const send=$('#message-form .send-button');if(send){send.title=busy?'Queue message':'Send message';send.setAttribute('aria-label',send.title);}if($('#followup'))$('#followup').placeholder=busy?'Queue a follow-up… (Ctrl/⌘ Enter to send now)':'Respond to Moyai or ask something else';
-  $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?'Enter to queue · Ctrl/⌘ Enter to send now.':'Your conversation and files stay here.';
+  const immediate=state.preferences?.send_immediately===true;
+  const send=$('#message-form .send-button');if(send){send.title=busy?(immediate?'Send now':'Queue message'):'Send message';send.setAttribute('aria-label',send.title);}if($('#followup'))$('#followup').placeholder=busy?(immediate?'Send a follow-up now…':'Queue a follow-up… (Ctrl/⌘ Enter to send now)'):'Respond to Moyai or ask something else';
+  $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?(immediate?'Enter to send now · Messages guide the active response.':'Enter to queue · Ctrl/⌘ Enter to send now.'):'Your conversation and files stay here.';
   if(state.activeParentId)$('#queue-note').textContent='Chatting with this agent directly. Results already sent to the parent stay saved.';
   renderChatWorking(run);
   syncRunSummary(run);
@@ -415,7 +421,7 @@ function updateChat(run,initial=false){
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
     const activitySlots=new Map([...box.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}<div id="credential-requests"></div></div>`;
+    box.innerHTML=`<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}<div id="credential-requests"></div></div>`;
     box.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=activitySlots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
     MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
@@ -546,7 +552,7 @@ function showError(error){toast(error.message);}
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view).catch(showError));
 $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
 $('#new-folder').onclick=()=>editSessionFolder();
-$('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const move=e.target.closest('[data-move-session]');if(move){const run=state.runs.find(r=>r.id===move.dataset.moveSession);if(run)moveSessionToFolder(run);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
+$('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
 bindSessionFolderDragDrop($('#session-list'));
 $('#session-scope').onchange=changeSessionScope;
 $('#search-sessions').setAttribute('aria-controls','session-search-field');

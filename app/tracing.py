@@ -263,7 +263,7 @@ class AgentTracing:
                    'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
 
     @best_effort
-    def model(self, run, request_id, start, messages, response, status):
+    def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = ''):
         # Keep images, system prompts, loaded skills and private reasoning out of traces.
         inputs = [{'role': 'user', 'content': m.get('content')}
                   for m in messages if isinstance(m, dict) and m.get('role') == 'user'][-5:]
@@ -281,19 +281,37 @@ class AgentTracing:
         attrs = {'gen_ai.operation.name': 'chat', 'openinference.span.kind': 'LLM',
                  'gen_ai.request.model': run.get('active_model') or run.get('model', ''),
                  'llm.model_name': run.get('active_model') or run.get('model', ''),
-                 'gen_ai.response.id': request_id, 'input.value': input_value,
+                 'input.value': input_value,
                  'output.value': output_value, 'moyai.status': status}
         model = attrs['gen_ai.request.model']
         provider = model.partition('/')[0] if '/' in model else 'openai'
         attrs.update({'gen_ai.system': provider, 'gen_ai.provider.name': provider,
-                      'gen_ai.response.model': self.content(response.get('model') or model),
                       'gen_ai.input.messages': input_messages,
                       'gen_ai.output.messages': output_messages,
                       'input.mime_type': 'application/json', 'output.mime_type': 'application/json'})
-        for source, target in [('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens')]:
-            value = response.get('usage', {}).get(source)
-            if isinstance(value, int):
+        for source, value in [('gen_ai.response.id', response.get('id')),
+                              ('gen_ai.response.model', response.get('model')), ('litellm.call_id', gateway_id)]:
+            if isinstance(value, str) and value:
+                attrs[source] = self.content(value)[:200]
+        usage = response.get('usage')
+        usage = usage if isinstance(usage, dict) else {}
+        for source, target in [('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens'),
+                               ('cache_read_input_tokens', 'cache_read.input_tokens'),
+                               ('cache_creation_input_tokens', 'cache_write.input_tokens')]:
+            value = usage.get(source)
+            if type(value) is int and value >= 0:
                 attrs['gen_ai.usage.' + target] = value
+        tier = response.get('service_tier') or usage.get('service_tier')
+        if provider in {'openai', 'anthropic'} and isinstance(tier, str) and tier:
+            attrs[provider + '.response.service_tier'] = self.content(tier)[:100]
+        # OTEL standardizes cache totals; Anthropic's TTL price split remains
+        # a provider-specific extension until semantic conventions cover it.
+        creation = usage.get('cache_creation')
+        if provider == 'anthropic' and isinstance(creation, dict):
+            for key in ('ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'):
+                value = creation.get(key)
+                if type(value) is int and value >= 0:
+                    attrs['anthropic.usage.cache_creation.' + key] = value
         if all('gen_ai.usage.' + key in attrs for key in ('input_tokens', 'output_tokens')):
             attrs['gen_ai.usage.total_tokens'] = attrs['gen_ai.usage.input_tokens'] + attrs['gen_ai.usage.output_tokens']
         # Let Langfuse map GenAI usage to its canonical input/output pricing
