@@ -25,7 +25,8 @@ def workspace_image(settings: Settings) -> modal.Image:
             .run_commands("/opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py")
             .add_local_file(SANDBOX_FILES / "install_access_tools.py", "/opt/workspace-runner/install_access_tools.py", copy=True)
             .run_commands("python /opt/workspace-runner/install_access_tools.py")
-            .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True)
+            .add_local_dir(SANDBOX_FILES, remote_path="/opt/workspace-runner", copy=True,
+                           ignore=["**/__pycache__/**", "**/*.pyc"])
             .run_commands("python /opt/workspace-runner/hermes_compat.py",
                           "cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; import claude_agent_sdk'")
             .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/opt/hermes", "HERMES_PYTHON": "/opt/hermes-env/bin/python", "HERMES_HOME": "/tmp/hermes-home", "GIT_TERMINAL_PROMPT": "0"}))
