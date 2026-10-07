@@ -24,6 +24,26 @@ def test_missing_checkpoint_context_stops_instead_of_forgetting_history(tmp_path
     assert not (tmp_path / 'context.sqlite3').exists()
 
 
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+def test_durable_harness_starts_new_turn_with_unknown_tool_outcome(tmp_path, monkeypatch, harness):
+    from sandbox.harness_registry import create_agent
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'assistant', 'tool_calls': [{'id': 'old', 'function': {'name': 'Edit'}}]}])
+    agent = create_agent(harness, spec={}, relay=SimpleNamespace(compact=lambda *_: 'Summary'),
+                         config={}, activity=None, step=lambda: None, cwd=str(tmp_path), context_store=store)
+    monkeypatch.setattr(agent, 'validate', lambda: None)
+    async def respond(prompt, system_message):
+        return prompt
+    monkeypatch.setattr(agent, '_run', respond)
+    try:
+        prompt = agent.run_conversation('What happened?', conversation_history=[], system_message='Investigate')
+        assert 'UNRESOLVED TOOL OUTCOMES' in prompt and 'CURRENT REQUEST:\nWhat happened?' in prompt
+        assert store.pending == {'old'} and not agent.journal.pending
+    finally:
+        agent.close()
+        store.close()
+
+
 @pytest.mark.parametrize('summary_failure', [False, True])
 def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path, monkeypatch, summary_failure):
     monkeypatch.chdir(tmp_path)
@@ -68,6 +88,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     session = tmp_path / 'session'
     session.mkdir()
     legacy = [{'role': 'user', 'content': 'Keep Escape support; do not deploy.'},
+              {'role': 'assistant', 'tool_calls': [{'id': 'call0', 'function': {'name': 'Edit', 'arguments': '{}'}}]},
               *[{'role': 'assistant', 'content': 'old log' * 1000} for i in range(80)]]
     legacy_path = session / 'conversation.json'
     legacy_path.write_text(json.dumps(legacy))
@@ -90,7 +111,9 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     assert actions == [0, 1]
     assert 'receipt-0' in prompts[1]
     assert all('Keep Escape support' in prompt and len(prompt.encode()) < 48_000 for prompt in prompts)
+    assert all('UNRESOLVED TOOL OUTCOMES' in prompt for prompt in prompts)
     store = ContextStore(session / 'context.sqlite3', 'run')
+    assert store.pending == {'call0'}
     assert store.db.execute('SELECT count(*) FROM journal').fetchone()[0] == count + 4
     assert 'SAVED WORKING CONTEXT' not in ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
     store.close()

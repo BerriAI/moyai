@@ -93,8 +93,15 @@ summaries; they cannot restart a runtime or replay a task action.
 
 A failed recovery leaves the last good summary, cursor and all receipts intact.
 Before the next task invocation, compaction must catch up; exhausted recovery pauses work
-with a retry message instead of silently dropping older context. Unfinished tool
-calls block automatic continuation. Missing, corrupt, mismatched or invalid
+with a retry message instead of silently dropping older context. An unresolved
+tool from a stopped invocation does not block a later turn: its unknown outcome
+is shown separately from the summary so the agent can answer and investigate.
+Original receipts and pending records are retained; the runtime does not replay
+the action or invent a completion. The agent must inspect original records,
+workspace state and external receipts before repeating an affected action.
+Saved tool IDs are scoped to each invocation so reused native IDs cannot settle
+older pending calls. Currently executing tools still block cooperative renewal.
+Missing, corrupt, mismatched or invalid
 checkpoint state is not silently treated as an empty conversation. A fresh child
 or an explicit stale-filesystem recovery starts from its own canonical fallback.
 Same-session requester/model changes keep only the public context; private memory
