@@ -317,3 +317,35 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .sessions-label #session-scope { font-size: 14px; font-weight: 500; color: #1f1f1f; padding: 2px 20px 2px 0; border-radius: 6px; }
 .sessions-label #session-scope:disabled { padding-right: 0; }
 .sessions-label #session-scope:not(:disabled):hover { background-color: #efefef; }
+
+/* Give the phone composer its own layout instead of shrinking the desktop hero. */
+@media (max-width: 600px) {
+  .home-view #content { align-items: flex-start; padding: 28px 16px 24px; }
+  .home-view .new-conversation { width: 100%; min-width: 0; max-width: 100%; margin: 0; }
+  .home-view .new-conversation h1, .home-view .welcome-note { overflow-wrap: anywhere; }
+  .workspace .composer { min-width: 0; max-width: 100%; }
+  .workspace .composer textarea { min-width: 0; max-width: 100%; font-size: 16px; }
+
+  /* The selectors share a row; input actions and Send stay on the row below. */
+  #task-form .composer-toolbar > .harness-picker {
+    order: -2; flex: 1 1 calc(55% - 2px); margin: 0;
+  }
+  #task-form .composer-toolbar > .harness-picker + .model-picker {
+    order: -1; flex: 1 1 calc(45% - 2px); margin: 0;
+  }
+  #task-form .composer-pickers { width: 100%; min-width: 0; max-width: 100%; }
+  #task-form .composer-pickers > .model-picker { flex: 1; min-width: 0; }
+  #task-form .composer-pickers > .harness-picker { flex: 1.2; }
+  #task-form .model-picker select { flex: 1; min-width: 0; max-width: 100%; }
+  #task-form .skill-picker-button { margin-right: auto; }
+  #task-form .record-button.is-idle { margin-left: 0; }
+}
+
+/* Keep the composer reachable when the phone has little vertical space. */
+@media (max-width: 600px) and (max-height: 500px) {
+  .home-view #content { padding-top: 12px; padding-bottom: 12px; }
+  .home-view .welcome-mark, .home-view .welcome-note,
+  .home-view .suggestions, .home-view .connected-note { display: none; }
+  .home-view .new-conversation h1 { font-size: 22px; margin-bottom: 12px; }
+  .workspace .composer textarea { max-height: min(200px, 30dvh); }
+}
