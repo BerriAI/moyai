@@ -159,12 +159,20 @@ class ContextStore:
             return None
         with self.lock:
             state = self.state()
-            latest = self.db.execute('SELECT total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
+            latest = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
             covered = self.db.execute('SELECT total_bytes FROM journal WHERE seq=?', (state['cursor'],)).fetchone()
-            size = len(state['summary'].encode()) + (latest[0] if latest else 0) - (covered[0] if covered else 0)
-            if size < input_budget * 0.6:
+            summary_size = len(state['summary'].encode())
+            threshold = input_budget * 0.6
+            size = summary_size + (latest['total_bytes'] if latest else 0) - (covered[0] if covered else 0)
+            if size < threshold or not latest:
                 return None
-            snapshot = self.snapshot()
+            # Prefer eight recent records, but shrink that suffix when it alone
+            # exceeds the budget. Indexed sequence bounds inspect at most nine
+            # cumulative byte counts; batch() still bounds each summary request.
+            cutoff = self.db.execute('SELECT seq FROM journal WHERE seq>=? AND total_bytes>? ORDER BY seq LIMIT 1',
+                (max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS),
+                 latest['total_bytes'] + summary_size - threshold)).fetchone()
+            snapshot = self.snapshot(cutoff[0] if cutoff else latest['seq'])
             return snapshot if snapshot['entries'] else None
 
     def maintain(self, relay, *, input_budget):

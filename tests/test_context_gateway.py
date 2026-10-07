@@ -394,3 +394,64 @@ def test_late_maintenance_admission_cannot_charge_a_new_turn(workspace, monkeypa
     assert current['active_message_id'] == next_message['id'] and current['turn_model_calls'] == 0
     assert not db.rows('SELECT * FROM model_requests')
     store.close()
+
+
+@pytest.mark.parametrize('cancel', [False, True], ids=['checkpoint-failure', 'cancelled-startup'])
+async def test_maintenance_startup_failure_can_retry_without_restart(tmp_path, cancel):
+    import asyncio
+    from fastapi.responses import JSONResponse
+    from app.config import Settings
+    from app.context_maintenance import ContextMaintenance
+    from app.db import Store
+    from app.model_slots import ModelSlots
+    from app.persistence import Checkpoints
+
+    settings = Settings(_env_file=None, data_dir=tmp_path / 'local', checkpoint_dir=tmp_path / 'volume')
+    db = Store(settings.data_dir)
+    run = db.create_run('Summarize public receipts', '', 'demo', [])
+    entered, release = asyncio.Event(), asyncio.Event()
+    attempts, calls = 0, []
+    async def commit():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            entered.set()
+            await release.wait()
+            raise OSError('Synthetic checkpoint failure')
+    checkpoints = Checkpoints(db, settings, commit=commit)
+    snapshot = {'epoch': 'a' * 32, 'cursor': 0, 'summary': '',
+                'entries': [{'seq': 1, 'excerpt': 'Completed receipt'}]}
+    body = {'snapshot': snapshot}
+    async def read_body(*args): return body
+    async def summarize(*args, **kwargs):
+        calls.append(True)
+        return JSONResponse({'summary': 'Completed receipt', 'through_seq': 1})
+    owner = ContextMaintenance(SimpleNamespace(store=db, checkpoints=checkpoints, model_slots=ModelSlots(1),
+        require_run=lambda *args: run, read_body=read_body, summarize=summarize))
+    pending = asyncio.create_task(owner.exchange(run['id'], None))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        job = owner.read(run['id'])
+        assert job['status'] == 'running' and not calls
+        assert await owner.exchange(run['id'], None) == job
+        if cancel:
+            pending.cancel()
+        else:
+            release.set()
+        with pytest.raises(asyncio.CancelledError if cancel else OSError):
+            await pending
+        interrupted = owner.read(run['id'])
+        assert interrupted['status'] == 'interrupted' and not owner.tasks and not calls
+        # A lost response is polled and acknowledged before one new admission.
+        assert await owner.exchange(run['id'], None) == interrupted
+        body['ack'] = job['id']
+        retry = await owner.exchange(run['id'], None)
+        assert retry['id'] != job['id']
+        await asyncio.gather(*owner.tasks.values())
+        assert owner.read(run['id'])['status'] == 'completed' and calls == [True]
+    finally:
+        release.set()
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await owner.close()

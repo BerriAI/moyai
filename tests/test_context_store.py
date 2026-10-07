@@ -251,6 +251,39 @@ def test_full_tail_and_budget_trigger_ignore_receipt_count(tmp_path):
     reset.close()
 
 
+@pytest.mark.parametrize('recent_rows,budget', [(1, 8_000), (2, 16_000), (8, 16_000), (12, 16_000)])
+@pytest.mark.parametrize('summarized', [False, True])
+def test_large_recent_tail_can_be_summarized_in_background(tmp_path, recent_rows, budget, summarized):
+    store = ContextStore(tmp_path / 'context.sqlite3', 'run')
+    store.initialize([{'role': 'assistant', 'content': 'Older completed work'}] if summarized else [])
+    if summarized:
+        store.compact(lambda *a, **k: 'Earlier receipts', force=True)
+    for i in range(recent_rows):
+        store.append({'role': 'user', 'content': f'Correction {i}: ' + 'detail ' * 1200})
+    original = list(store.db.execute('SELECT seq,message FROM journal ORDER BY seq'))
+    cursor = store.state()['cursor']
+    snapshot = store.maintenance_snapshot(budget)
+    assert snapshot is not None  # Even two large records require maintenance.
+    for _ in range(recent_rows):
+        if snapshot is None:
+            break
+        assert snapshot['entries'][0]['seq'] == cursor + 1
+        assert len(json.dumps(snapshot['entries'], ensure_ascii=False).encode()) <= BATCH_BYTES + 2
+        assert store.apply_summary(snapshot, 'Keep the corrections; original receipts remain available.')
+        assert store.state()['cursor'] > cursor
+        cursor = store.state()['cursor']
+        snapshot = store.maintenance_snapshot(budget)
+    assert snapshot is None
+    tail = store.db.execute('SELECT seq,preview FROM journal WHERE seq>?', (cursor,)).fetchall()
+    assert tail or recent_rows == 1
+    if tail:
+        assert f'Correction {recent_rows - 1}' in tail[-1]['preview']
+    assert len(store.state()['summary'].encode()) + len(json.dumps([
+        {'seq': row['seq'], 'excerpt': row['preview']} for row in tail]).encode()) < budget * .6
+    assert list(store.db.execute('SELECT seq,message FROM journal ORDER BY seq')) == original
+    store.close()
+
+
 def test_summary_network_call_does_not_lock_append_and_stale_result_loses(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     import threading
