@@ -25,7 +25,7 @@ Browser acceptance covered desktop and a 390px narrow viewport, session search, 
 
 **Live verification:** session `9d137408acbc4254a1c6fbbf7e86aa77` ran **Opus → Astra → Opus**. Opus remembered `copper lighthouse` and wrote `21`; Astra restored the conversation/file, incremented it to `22`, and a queued Opus turn read `22` and recalled the phrase. The picker changed to Opus while the active turn stayed on Astra. All three answers have model labels, connected apps were deselected, and all three sandboxes confirmed termination. The `@Moyai model opus` command was also verified in the existing #bot-spam test thread without starting compute.
 
-Use the model picker in the new-session composer or below an existing conversation to choose **GPT-6 Astra** (`openai/gpt-6-astra`), **Claude Opus 5.5** (`anthropic/claude-opus-5-5`), or **GLM-5.3** (`fireworks_ai/glm-5p3`). The choice applies when you send the next message and becomes that session's preference. Your conversation and saved workspace stay together across a model switch. Each new assistant answer records its model; old answers without a stored model are left unlabeled.
+Use the model picker in the new-session composer or below an existing conversation to choose **GPT-6 Astra** (`openai/gpt-6-astra`), **Claude Opus 5.5** (`anthropic/claude-opus-5-5`), **Claude Sonnet 5.5** (`anthropic/claude-sonnet-5-5`), or **GLM-5.3** (`fireworks_ai/glm-5p3`). The choice applies when you send the next message and becomes that session's preference. Your conversation and saved workspace stay together across a model switch. Each new assistant answer records its model; old answers without a stored model are left unlabeled.
 
 You can also ask in ordinary language in Slack or on the web: **“switch to GLM 5.3”** or **“use GLM 5.3 and summarize this thread.”** The agent discovers `model_list` and `model_switch`, validates the enabled choice with the broker, and switches before continuing the remaining task. The next inference uses that model with the same conversation and workspace; completed work is not restarted. The currently selected model handles the initial request to switch, so it must be reachable. If it is unavailable, use the picker or the explicit Slack command below to switch without inference. A successful switch confirms routing selection, not provider availability; gateway credentials still need access to the target model.
 
@@ -35,7 +35,7 @@ The picker and validation share `MODEL_CATALOG` in `app/config.py`. To add a mod
 
 Local routing demo: run `uv run python scripts/model_tools_demo.py` and open `http://127.0.0.1:8795/demo`. It exercises the real broker and a local HTTP provider stub, including the next inference and retry/queue behavior. Tool selection is scripted; it does not test live model intent recognition or production provider access.
 
-In Slack, mention the bot with `model opus`, `model astra`, or `model glm-5.3` to set the model for that thread's next messages. You can start with a model directive on the first line and the task on the next line, for example:
+In Slack, mention the bot with `model opus`, `model sonnet`, `model astra`, or `model glm-5.3` to set the model for that thread's next messages. You can start with a model directive on the first line and the task on the next line, for example:
 
 ```text
 @Moyai model opus

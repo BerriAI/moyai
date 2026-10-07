@@ -33,9 +33,27 @@ def test_stale_deployment_model_list_cannot_hide_code_models(tmp_path, monkeypat
     settings = Settings(_env_file=env_file, agent_model='openai/gpt-6-astra')
     assert {'id': 'fireworks_ai/glm-5p3', 'name': 'GLM-5.3'} in settings.model_choices()
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
+    assert {'id': 'anthropic/claude-sonnet-5-5', 'name': 'Claude Sonnet 5.5'} in settings.model_choices()
+    assert settings.resolve_model('sonnet') == 'anthropic/claude-sonnet-5-5'
     assert settings.resolve_model() == 'openai/gpt-6-astra'
     with pytest.raises(ValueError):
         settings.resolve_model('unapproved-model')
+
+
+@pytest.mark.parametrize('alias', [
+    'anthropic/claude-sonnet-5-5', 'Claude Sonnet 5.5', 'sonnet', 'sonnet-5-5',
+    'claude/sonnet-5-5', 'claude-sonnet-5-5', 'Sonnet 5.5', 'sonnet-5.5',
+])
+def test_sonnet_aliases_resolve_without_changing_default(alias):
+    settings = Settings(_env_file=None, agent_model='openai/gpt-6-astra')
+    assert settings.resolve_model(alias) == 'anthropic/claude-sonnet-5-5'
+    assert settings.resolve_model() == 'openai/gpt-6-astra'
+
+
+def test_sonnet_default_is_not_duplicated_in_picker():
+    settings = Settings(_env_file=None, agent_model='anthropic/claude-sonnet-5-5')
+    assert settings.resolve_model() == 'anthropic/claude-sonnet-5-5'
+    assert settings.allowed_models().count('anthropic/claude-sonnet-5-5') == 1
 
 
 def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
@@ -44,3 +62,5 @@ def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
     assert settings.resolve_model() == 'custom-gateway-model'
     assert settings.model_choices()[0] == {'id': 'custom-gateway-model', 'name': 'custom-gateway-model'}
     assert settings.resolve_model('glm') == 'fireworks_ai/glm-5p3'
+    assert {'id': 'anthropic/claude-sonnet-5-5', 'name': 'Claude Sonnet 5.5'} in settings.model_choices()
+    assert settings.resolve_model('sonnet') == 'anthropic/claude-sonnet-5-5'

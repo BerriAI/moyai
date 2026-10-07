@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MODEL_CATALOG: dict[str, str] = {
     'openai/gpt-6-astra': 'GPT-6 Astra',
     'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
+    'anthropic/claude-sonnet-5-5': 'Claude Sonnet 5.5',
     'fireworks_ai/glm-5p3': 'GLM-5.3',
 }
 
@@ -239,6 +240,9 @@ class Settings(BaseSettings):
             'openai/6-astra': 'openai/gpt-6-astra', 'gpt-6-astra': 'openai/gpt-6-astra',
             'opus': 'anthropic/claude-opus-5-5', 'opus-5-5': 'anthropic/claude-opus-5-5',
             'claude/opus-5-5': 'anthropic/claude-opus-5-5', 'claude-opus-5-5': 'anthropic/claude-opus-5-5',
+            'sonnet': 'anthropic/claude-sonnet-5-5', 'sonnet-5-5': 'anthropic/claude-sonnet-5-5',
+            'claude/sonnet-5-5': 'anthropic/claude-sonnet-5-5', 'claude-sonnet-5-5': 'anthropic/claude-sonnet-5-5',
+            'sonnet 5.5': 'anthropic/claude-sonnet-5-5', 'sonnet-5.5': 'anthropic/claude-sonnet-5-5',
             'glm': 'fireworks_ai/glm-5p3', 'glm-5.3': 'fireworks_ai/glm-5p3',
             'glm-5p3': 'fireworks_ai/glm-5p3',
             'glm 5.3': 'fireworks_ai/glm-5p3', 'glm 5p3': 'fireworks_ai/glm-5p3',
