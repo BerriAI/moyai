@@ -105,7 +105,7 @@ class SlackChat:
                 # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
             if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
@@ -310,7 +310,7 @@ class SlackChat:
                     if selected_model is None:
                         current = conn.execute('SELECT model FROM runs WHERE id=?', (run_id,)).fetchone()[0]
                         self.settings.resolve_model(fallback=current)
-                    message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id)
+                    message, submit = self.store.enqueue_message_in(conn, run_id, content, 'slack:' + digest(team + channel + ts), selected_model, actor_id, restore_archived=True)
                     message_id = message['id']
                     self.store.slack_mentions.queue_in(conn, message_id, team, prompt)
                     if file_ids:

@@ -44,7 +44,7 @@ test('archive invalidates earlier reads and updates only the selected session me
   assert.equal(state.runsRefresh,2);assert.equal(state.chatRefresh,2);
   assert.equal(state.sessionEdits,1);
   assert.equal(state.chatRun.archived,true);assert.equal(state.sessionMutation,null);
-  assert.match(notices[0],/archived for you/);
+  assert.match(notices[0],/Ask Moyai to find it/);
 });
 test('rejected archive retains the row and permits retry without false success', async () => {
   const {context:c,state,notices,detail,menu,button,archive} = menuHarness(true);

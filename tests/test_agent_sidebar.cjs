@@ -90,28 +90,12 @@ test('failed filter change clears foreign rows and preserves selected chat',asyn
   assert.deepEqual(errors,['List unavailable']);
 });
 
-test('archive view forwards its scope and discards a late active listing',async()=>{
-  const {context:c}=scopeHelpers(),pending=[];
-  c.document={querySelectorAll:()=>[]};
-  c.$=()=>({setAttribute:()=>{}});
-  c.api=path=>path==='/api/session-folders'?Promise.resolve({folders:[]}):new Promise(resolve=>pending.push({path,resolve}));
-  const active=c.refreshRuns(),archived=c.changeSessionView(true);
-  assert.equal(new URL(pending[1].path,'http://local').searchParams.get('archived'),'true');
-  pending[1].resolve([{id:'archived'}]);await archived;
-  pending[0].resolve([{id:'stale-active'}]);await active;
-  assert.equal(c.state.runs[0].id,'archived');
-});
-
-test('switching between empty active and archived lists refreshes the empty message',()=>{
-  const c=helpers(),elements=new Map();
-  for(const id of ['#session-search','#task-count','#workspace-name','#session-list'])
-    elements.set(id,{value:'',innerHTML:'',scrollTop:0});
-  Object.assign(c,{document:{activeElement:null},$:id=>elements.get(id)});
-  Object.assign(c.state,{runs:[],folders:[],organization:{},expandedParents:new Set(),closedFolders:new Set()});
-  vm.runInContext(script.slice(script.indexOf('function renderSidebar('),script.indexOf('function setView(')),c);
-  c.renderSidebar();assert.match(elements.get('#session-list').innerHTML,/conversations will appear/);
-  c.state.sessionArchived=true;c.renderSidebar();
-  assert.match(elements.get('#session-list').innerHTML,/No archived sessions/);
+test('normal sidebar always requests active sessions, even with obsolete cached archive state',async()=>{
+  const {context:c}=scopeHelpers(),paths=[];
+  c.state.sessionArchived=true;
+  c.api=async path=>{paths.push(path);return path==='/api/session-folders'?{folders:[]}:[];};
+  await c.refreshRuns();
+  assert.equal(new URL(paths[0],'http://local').searchParams.has('archived'),false);
 });
 
 const runs=[{id:'parent',prompt:'Benchmark models',children:[
@@ -181,10 +165,6 @@ test('pins, personal folders and participation partition parents without duplica
   const found=h.sidebarSections(rows,folders,'21–40');
   assert.equal(found.pinned[0].children[0].id,'worker-b');
   assert.equal(found.pinned[0].totalChildren,2);
-  h.state.sessionArchived=true;
-  const archived=h.sidebarSections(rows,[],'');
-  assert.equal(archived.pinned.length,0);assert.equal(archived.participated.length,0);
-  assert.equal(archived.recent.length,4);
 });
 test('PR metadata distinguishes open, merged, closed and unknown without inventing readiness',()=>{
   const h=helpers(),run={id:'pr',status:'idle',pr_summary:{open:1,merged:2,closed:3,unknown:0,label:'Review PR'},slack_connected:true};

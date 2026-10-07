@@ -571,7 +571,7 @@ class Credentials:
                    f"Continue the task that requested it: {row['reason']} "
                    "Inspect current state before retrying any external action.")
         enqueue = self.manager.coordinator.enqueue_child_in if run['parent_run_id'] else self.store.enqueue_message_in
-        enqueue(conn, row['run_id'], content, f"credential-{row['id']}-{row['generation']}", None, row['actor_id'])
+        enqueue(conn, row['run_id'], content, f"credential-{row['id']}-{row['generation']}", None, row['actor_id'], restore_archived=False)
         conn.execute("UPDATE credential_requests SET resolution_pending=0,resolution_error='' WHERE id=? AND generation=?",
                      (row['id'], row['generation']))
 

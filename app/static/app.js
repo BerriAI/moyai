@@ -145,15 +145,15 @@ function sidebarRow(run,child=false){
 function sidebarSections(runs,folders,search){
   const ids=new Set(folders.map(folder=>folder.id));
   // Personal pins and folders take precedence over automatic grouping.
-  const pinned=state.sessionArchived?[]:sidebarGroups(runs.filter(run=>run.pinned).sort((a,b)=>String(b.updated_at||'').localeCompare(String(a.updated_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||''))||b.id.localeCompare(a.id)),search);
-  const remaining=state.sessionArchived?runs:runs.filter(run=>!run.pinned);
+  const pinned=sidebarGroups(runs.filter(run=>run.pinned).sort((a,b)=>String(b.updated_at||'').localeCompare(String(a.updated_at||''))||String(b.created_at||'').localeCompare(String(a.created_at||''))||b.id.localeCompare(a.id)),search);
+  const remaining=runs.filter(run=>!run.pinned);
   const sections=folders.map(folder=>{
     const members=remaining.filter(run=>run.folder_id===folder.id);
     return {...folder,groups:sidebarGroups(members,folder.name.toLowerCase().includes(search)?'':search)};
   }).filter(folder=>!search||folder.groups.length||folder.name.toLowerCase().includes(search));
   const unfiled=remaining.filter(run=>!ids.has(run.folder_id));
-  const participated=state.sessionArchived?[]:sidebarGroups(unfiled.filter(run=>run.participated),search);
-  const recent=sidebarGroups(unfiled.filter(run=>state.sessionArchived||!run.participated),search);
+  const participated=sidebarGroups(unfiled.filter(run=>run.participated),search);
+  const recent=sidebarGroups(unfiled.filter(run=>!run.participated),search);
   return {pinned,folders:sections,participated,recent};
 }
 function sidebarPersonalSection(id,label,icon,groups,search){
@@ -175,10 +175,10 @@ function renderSidebar(){
   // Polling must not replace the source element during a native drag.
   if(state.draggedSessionId)return;
   const search=($('#session-search').value||'').trim().toLowerCase();
-  const sections=sidebarSections(state.runs,state.sessionArchived?[]:state.folders,search);
+  const sections=sidebarSections(state.runs,state.folders,search);
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
-  const signature=JSON.stringify([state.selected,state.sessionArchived,search,[...state.expandedParents],[...state.closedFolders],sections]);
+  const signature=JSON.stringify([state.selected,search,[...state.expandedParents],[...state.closedFolders],sections]);
   if(state.sidebarSignature===signature)return;
   state.sidebarSignature=signature;
   const list=$('#session-list'),scroll=list.scrollTop;
@@ -187,8 +187,8 @@ function renderSidebar(){
   list.innerHTML=sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
     return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
-  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(!state.sessionArchived&&state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search)));
-  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':state.sessionArchived?'No archived sessions.':'Your conversations will appear here.'}</p>`;
+  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search)));
+  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)list.innerHTML=`<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`;
   list.scrollTop=scroll;
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
 }
@@ -244,14 +244,7 @@ async function navigate(view) {
     if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
   }
 }
-async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(state.sessionArchived)params.set('archived','true');if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
-async function changeSessionView(archived){
-  state.sessionArchived=archived;state.runsRefresh++;state.runs=[];
-  document.querySelectorAll('[data-session-view]').forEach(button=>button.setAttribute('aria-pressed',String((button.dataset.sessionView==='archived')===archived)));
-  $('#session-list').setAttribute('aria-label',archived?'Archived sessions':'Recent sessions');
-  renderSidebar();
-  try{await refreshRuns();}catch(error){showError(error);}
-}
+async function refreshRuns(){const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});if(focus)params.set('focus',focus);const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);if(refresh!==state.runsRefresh)return;state.runs=runs;state.folders=folders.folders;renderSidebar();}
 function restoreSessionScope(){
   const canViewAll=state.authenticated&&state.role==='admin';
   state.sessionScope='mine';
@@ -384,7 +377,7 @@ function renderChat(run){
     const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);files.lock(true);
     const model=$('#chat-model')?.value||run.model||state.config.model;
     let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model||pending.send_now!==send_now||JSON.stringify(pending.attachment_ids)!==JSON.stringify(attachment_ids))pending=state.pendingMessages[id]={content,model,attachment_ids,send_now,client_id:crypto.randomUUID()};
-    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});files.clear(attachment_ids);delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===original){$('#followup').value='';$('#followup').dispatchEvent(new Event('input',{bubbles:true}));autoSize($('#followup'));}await refreshChat(id);if(state.selected===id)bottom();}
+    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});state.sessionEdits=(state.sessionEdits||0)+1;files.clear(attachment_ids);delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===original){$('#followup').value='';$('#followup').dispatchEvent(new Event('input',{bubbles:true}));autoSize($('#followup'));}await Promise.all([refreshChat(id),refreshRuns()]);if(state.selected===id)bottom();}
     catch(error){toast(error.message);}finally{state.sending.delete(id);files.lock(false);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
   };
   updateChat(run,true);
@@ -619,7 +612,6 @@ $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
 bindSessionFolderDragDrop($('#session-list'));
 $('#session-scope').onchange=changeSessionScope;
-document.querySelectorAll('[data-session-view]').forEach(button=>button.onclick=()=>changeSessionView(button.dataset.sessionView==='archived'));
 $('#search-sessions').setAttribute('aria-controls','session-search-field');
 $('#search-sessions').setAttribute('aria-expanded','false');
 $('#session-search').oninput=renderSidebar;

@@ -1,10 +1,20 @@
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from httpx import Response
 
-from app.db import Store
+from app.db import Store, now
 from app.persistence import restore_checkpoint
 from app.session_folders import SessionFolders
+from app.session_lifecycle import SessionLifecycle
+from app.temporal_runtime import TemporalRunManager
+from test_agents import launch
+from test_durable import Cloud, durable
+from test_slack import signed, slack_app
+from test_slack_chat import send, start
+from test_spend import active, sign_in
 from test_user_roles import sign_as, users_app
 
 
@@ -322,3 +332,270 @@ def test_pin_schema_upgrade_is_idempotent_and_preserves_legacy_sessions(users_ap
     assert client.put('/api/runs/' + item['id'] + '/pin', json={'pinned': True}).status_code == 200
     reopened = Store(app.state.settings.data_dir)
     assert reopened.sidebar_metadata(actor, [item['id']])[item['id']]['pinned'] is True
+
+
+def search_sessions(client: TestClient, run_id: str, **arguments: object) -> Response:
+    return client.post('/broker/' + run_id + '/tools/call', headers={'Authorization': 'Bearer capability'},
+                       json={'name': 'sessions_search', 'arguments': arguments})
+
+
+def test_session_search_finds_personal_archives_and_participation_without_restoring(
+    users_app: tuple[FastAPI, TestClient],
+) -> None:
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    store, lifecycle = app.state.store, app.state.session_lifecycle
+    archived, visible = run(app, 'Earlier work'), run(app, 'Copper active')
+    store.execute('UPDATE runs SET display_title=? WHERE id=?', ('Copper archived', archived['id']))
+    lifecycle.archive(archived['id'], actor, True)
+    shared = store.create_run('Copper shared link', '', 'demo', [], user_id='google:other')
+    pinned = store.create_run('Copper pinned shared link', '', 'demo', [], user_id='google:other')
+    assert client.put('/api/runs/' + pinned['id'] + '/pin', json={'pinned': True}).status_code == 200
+    participated = store.create_run('Copper participated', '', 'demo', [], chat_enabled=True, user_id='google:other')
+    store.enqueue_message(participated['id'], 'Joining this work', 'joined', user_id=actor)
+    unrelated = store.create_run('Copper unrelated', '', 'demo', [], user_id='google:other')
+    lifecycle.archive(shared['id'], actor, True)
+    sign_as(app, client, 'other@berri.ai')
+    lifecycle.archive(unrelated['id'], 'google:other', True)
+    assert client.put('/api/runs/' + unrelated['id'] + '/pin', json={'pinned': True}).status_code == 200
+    sign_as(app, client, 'maya@berri.ai')
+    store.execute('INSERT INTO users(id,kind,name,linked_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                  ('slack:T12345678:U12345678', 'slack', 'Maya', actor, now(), now()))
+    linked = store.create_run('Copper Slack work', '', 'demo', [], user_id='slack:T12345678:U12345678')
+    caller = active(app, actor)
+    store.execute('UPDATE runs SET prompt=?,owner_id=? WHERE id=?', ('Copper current search', 'google:other', caller['id']))
+    response = search_sessions(client, caller['id'], query='  COPPER  ')
+    assert response.status_code == 200, response.text
+    result = response.json()
+    rows = {row['id']: row for row in result['sessions']}
+    assert set(rows) == {item['id'] for item in (archived, visible, shared, pinned, participated, linked)}
+    assert result['has_more'] is False
+    assert rows[archived['id']]['archived'] is True and rows[visible['id']]['archived'] is False
+    assert set(rows[archived['id']]) == {'id', 'title', 'preview', 'status', 'archived', 'chat_enabled', 'updated_at', 'url'}
+    assert rows[archived['id']]['url'] == app.state.settings.public_url + '/#run=' + archived['id']
+    assert client.get('/api/runs/' + archived['id']).status_code == 200
+    assert lifecycle.archives(actor) == {archived['id'], shared['id']}
+    assert archived['id'] not in {row['id'] for row in client.get('/api/runs?scope=mine').json()}
+    reopened = Store(app.state.settings.data_dir)
+    assert reopened.rows('SELECT run_id FROM session_archives WHERE owner_id=? ORDER BY run_id', (actor,)) == [
+        {'run_id': run_id} for run_id in sorted((archived['id'], shared['id']))]
+    assert set(reopened.sidebar_run_ids(actor, archive_owner=actor, archived=None, pin_owner=actor,
+                                        search=['copper'], exclude_id=caller['id'])) == set(rows)
+    assert client.put('/api/runs/' + pinned['id'] + '/pin', json={'pinned': False}).status_code == 200
+    assert {row['id'] for row in search_sessions(client, caller['id'], query='Copper').json()['sessions']} == set(rows) - {pinned['id']}
+
+
+def test_session_search_matches_family_history_literal_terms_and_legacy_before_limit(
+    users_app: tuple[FastAPI, TestClient],
+) -> None:
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    store = app.state.store
+    parent, child = run(app, 'Copper recovery'), run(app, 'Worker')
+    store.execute('UPDATE runs SET parent_run_id=?,agent_label=? WHERE id=?', (parent['id'], 'Benchmark worker', child['id']))
+    message = store.claim_message(child['id'])
+    store.finish_message(child['id'], message['id'], 'Measured a 50% improvement for sample_name')
+    store.enqueue_message(child['id'], 'Check regression', 'regression-followup', user_id=actor)
+    app.state.session_lifecycle.archive(parent['id'], actor, True)
+    legacy = store.create_run('Older task', '', 'demo', [], user_id='google:other')
+    store.update_run(legacy['id'], summary='Copper benchmark regression 50% sample_name')
+    assert client.put('/api/runs/' + legacy['id'] + '/pin', json={'pinned': True}).status_code == 200
+    store.execute("UPDATE runs SET updated_at='2000-01-01T00:00:00+00:00' WHERE id=?", (parent['id'],))
+    store.execute("UPDATE runs SET updated_at='2000-01-02T00:00:00+00:00' WHERE id=?", (legacy['id'],))
+    deleted = run(app, 'Copper benchmark regression 50% sample_name')
+    store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), deleted['id']))
+    removed = run(app, 'Discarded draft')
+    store.enqueue_message(removed['id'], 'Copper benchmark regression 50% sample_name', 'removed', user_id=actor)
+    store.execute("UPDATE messages SET status='deleted' WHERE run_id=?", (removed['id'],))
+    store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'tool',?,'completed',?)",
+                  (removed['id'], 'Copper benchmark regression 50% sample_name', now()))
+    for index in range(101):
+        run(app, f'Copper benchmark regression 500 sampleXname unrelated {index}')
+    caller = active(app, actor)
+    query = 'copper benchmark regression 50% sample_name'
+    response = search_sessions(client, caller['id'], query=query, limit=1)
+    assert response.status_code == 200, response.text
+    assert [row['id'] for row in response.json()['sessions']] == [legacy['id']] and response.json()['has_more'] is True
+    result = search_sessions(client, caller['id'], query=query, limit=20).json()
+    rows = {row['id']: row for row in result['sessions']}
+    assert list(rows) == [legacy['id'], parent['id']] and result['has_more'] is False
+    assert rows[parent['id']]['chat_enabled'] and not rows[legacy['id']]['chat_enabled']
+    assert rows[parent['id']]['archived'] and rows[parent['id']]['title']
+    assert search_sessions(client, caller['id'], query=query + ' absent').json()['sessions'] == []
+
+
+@pytest.mark.parametrize('arguments', [{}, {'query': '  '}, {'query': 'x' * 201}, {'query': 'x', 'limit': 0},
+                                     {'query': 'x', 'limit': 21}, {'query': 'x', 'scope': 'all'},
+                                     {'query': 'x', 'owner_id': 'google:other'}])
+def test_session_search_rejects_invalid_or_caller_selected_scope(
+    users_app: tuple[FastAPI, TestClient], arguments: dict[str, object],
+) -> None:
+    app, client = users_app
+    caller = active(app, sign_as(app, client, 'maya@berri.ai')['user_id'])
+    assert search_sessions(client, caller['id'], **arguments).status_code == 422
+
+
+@pytest.mark.parametrize('change', ['child', 'automated', 'anonymous', 'no_turn', 'legacy', 'inactive', 'deleted', 'token'])
+def test_session_search_is_advertised_and_callable_only_for_live_direct_chat(
+    users_app: tuple[FastAPI, TestClient], change: str,
+) -> None:
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    caller = active(app, actor)
+    store, url = app.state.store, '/broker/' + caller['id'] + '/tools'
+    headers = {'Authorization': 'Bearer capability'}
+    tool = next(item for item in client.get(url, headers=headers).json() if item['name'] == 'sessions_search')
+    assert tool['annotations']['readOnlyHint'] is True
+    if change == 'automated':
+        store.execute("INSERT INTO automations(id,owner_id,definition,created_at,updated_at) VALUES('search-auto',?,'{}',?,?)",
+                      (actor, now(), now()))
+        store.execute("INSERT INTO automation_runs VALUES('search-tick','search-auto',1,?,'started','',?)", (caller['id'], now()))
+    else:
+        field, value = {'child': ('parent_run_id', 'parent'), 'anonymous': ('active_user_id', ''),
+                        'no_turn': ('active_message_id', None), 'legacy': ('chat_enabled', 0), 'inactive': ('status', 'idle'),
+                        'deleted': ('deleted_at', now()), 'token': ('token_hash', '')}[change]
+        store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, caller['id']))
+    listing = client.get(url, headers=headers)
+    assert listing.status_code == 401 or 'sessions_search' not in {item['name'] for item in listing.json()}
+    assert search_sessions(client, caller['id'], query='Copper').status_code in {401, 403}
+    assert client.get(url, headers={'Authorization': 'Bearer wrong'}).status_code == 401
+
+
+@pytest.mark.parametrize('field,value', [('active_user_id', 'google:other'), ('active_message_id', 999999)])
+def test_session_search_rechecks_requester_after_reading_broker_body(
+    users_app: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch, field: str, value: str | int,
+) -> None:
+    app, client = users_app
+    caller = active(app, sign_as(app, client, 'maya@berri.ai')['user_id'])
+    original = Request.body
+    async def changed_body(request: Request) -> bytes:
+        body = await original(request)
+        if request.url.path == '/broker/' + caller['id'] + '/tools/call':
+            app.state.store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, caller['id']))
+        return body
+    monkeypatch.setattr(Request, 'body', changed_body)
+    assert search_sessions(client, caller['id'], query='Copper').status_code == 409
+
+
+def test_resuming_archived_session_restores_only_sender_after_new_accepted_message(
+    users_app: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    other = sign_as(app, client, 'other@berri.ai')['user_id']
+    sign_as(app, client, 'maya@berri.ai')
+    store, lifecycle = app.state.store, app.state.session_lifecycle
+    item, saved = run(app), folder(client)
+    url = '/api/runs/' + item['id']
+    assert client.put(url + '/folder', json={'folder_id': saved['id']}).status_code == 200
+    assert client.put(url + '/pin', json={'pinned': True}).status_code == 200
+    for owner in (actor, other):
+        lifecycle.archive(item['id'], owner, True)
+    def submit(_: object) -> None:
+        pass
+    monkeypatch.setattr(app.state.manager, 'submit', submit)
+    lookup = client.post(url + '/messages', json={'content': '/session-id', 'client_id': 'archived-id-lookup'})
+    assert lookup.status_code == 202 and lookup.json()['status'] == 'completed'
+    assert lifecycle.archives(actor) == lifecycle.archives(other) == {item['id']}
+    body = {'content': 'Continue the saved task', 'client_id': 'resume-archived'}
+    store.update_run(item['id'], status='stopping')
+    assert client.post(url + '/messages', json=body).status_code == 409
+    assert lifecycle.archives(actor) == {item['id']}
+    store.update_run(item['id'], status='idle')
+    assert client.get(url).json()['archived'] is True
+    assert client.post(url + '/messages', json=body).status_code == 202
+    assert lifecycle.archives(actor) == set() and lifecycle.archives(other) == {item['id']}
+    restored = next(row for row in client.get('/api/runs').json() if row['id'] == item['id'])
+    assert restored['pinned'] is True and restored['folder_id'] == saved['id']
+    lifecycle.archive(item['id'], actor, True)
+    assert client.post(url + '/messages', json=body).json()['created'] is False
+    assert lifecycle.archives(actor) == {item['id']}
+    child = run(app, 'Worker continuation')
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (item['id'], child['id']))
+    store.enqueue_message(child['id'], 'Human continuation', 'human', user_id=actor)
+    assert lifecycle.archives(actor) == set() and lifecycle.archives(other) == {item['id']}
+
+
+async def test_agent_retry_keeps_parent_archived_for_the_requester(
+    durable: tuple[TemporalRunManager, Cloud, str],
+) -> None:
+    manager, _, root = durable
+    coordinator, group, _ = await launch(durable, count=1)
+    store = manager.store
+    actor = store.identity({'method': 'google', 'identity': {'sub': 'tin', 'email': 'tin@berri.ai'}})
+    lifecycle = SessionLifecycle(store, None, manager, None)
+    lifecycle.archive(root, actor, True)
+    child = coordinator.children(group['group_id'])[0]['id']
+    store.execute("UPDATE messages SET status='failed' WHERE run_id=?", (child,))
+    store.update_run(child, status='failed')
+    await coordinator.call(root, 'agents_retry', {'group_id': group['group_id'], 'child_ids': [child],
+        'request_key': 'archive-recovery', 'instructions': 'Retry the failed case from saved state.'})
+    assert store.messages(child)[-1]['status'] == 'queued'
+    assert lifecycle.archives(actor) == {root}
+
+
+def test_slack_session_search_follows_current_shared_view_link(
+    users_app: tuple[FastAPI, TestClient],
+) -> None:
+    app, client = users_app
+    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
+    other = sign_as(app, client, 'other@berri.ai')['user_id']
+    store, lifecycle = app.state.store, app.state.session_lifecycle
+    slack, sibling = 'slack:T12345678:U12345678', 'slack:T12345678:U87654321'
+    for identity in (slack, sibling):
+        store.execute('INSERT INTO users(id,kind,name,linked_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                      (identity, 'slack', 'Slack user', actor, now(), now()))
+    web = run(app, 'Copper web work')
+    shared = store.create_run('Copper shared link', '', 'demo', [], user_id=other)
+    unrelated = store.create_run('Copper other work', '', 'demo', [], user_id=other)
+    own = store.create_run('Copper Slack work', '', 'demo', [], user_id=slack)
+    linked = store.create_run('Copper second Slack account', '', 'demo', [], user_id=sibling)
+    for item in (web, shared):
+        lifecycle.archive(item['id'], actor, True)
+    lifecycle.archive(unrelated['id'], other, True)
+    caller = active(app, slack)
+    # These are shared-workspace view links, independent of private credential access.
+    assert not app.state.credentials.same_requester(actor, slack)
+    for owner, expected, archived in [
+        (actor, (web, shared, own, linked), (web, shared)),
+        (None, (own,), ()),
+        (sibling, (own,), ()),  # A malformed Slack-to-Slack link must not recurse.
+        (other, (shared, unrelated, own), (unrelated,)),
+    ]:
+        store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (owner, slack))
+        response = search_sessions(client, caller['id'], query='Copper')
+        assert response.status_code == 200, response.text
+        rows = response.json()['sessions']
+        assert {row['id'] for row in rows} == {item['id'] for item in expected}
+        assert {row['id'] for row in rows if row['archived']} == {item['id'] for item in archived}
+        assert store.run(caller['id'])['active_user_id'] == slack
+    assert lifecycle.archives(actor) == {web['id'], shared['id']}
+    assert lifecycle.archives(other) == {unrelated['id']}
+
+
+def test_slack_resume_restores_current_view_owner_without_rewriting_sender_or_replaying(
+    slack_app: tuple[FastAPI, TestClient, list[dict[str, object]], list[dict[str, object]]],
+) -> None:
+    app, client, root = start(slack_app)
+    actor = sign_in(app, client, 'maya', 'maya@berri.ai')
+    other = sign_in(app, client, 'other', 'other@berri.ai')
+    store, lifecycle = app.state.store, app.state.session_lifecycle
+    slack = store.run(root)['owner_id']
+    for owner in (actor, other):
+        lifecycle.archive(root, owner, True)
+    store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (actor, slack))
+    payload = send(client, 1, 'Continue the archived work')
+    assert lifecycle.archives(actor) == set() and lifecycle.archives(other) == {root}
+    assert store.messages(root)[-1]['user_id'] == slack
+    sign_in(app, client, 'maya', 'maya@berri.ai')
+    assert root in {row['id'] for row in client.get('/api/runs?scope=mine').json()}
+    lifecycle.archive(root, actor, True)
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert lifecycle.archives(actor) == {root} and len(store.messages(root)) == 2
+    store.execute('UPDATE users SET linked_user_id=NULL WHERE id=?', (slack,))
+    send(client, 2, 'Continue while unlinked')
+    assert lifecycle.archives(actor) == lifecycle.archives(other) == {root}
+    store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (other, slack))
+    send(client, 3, 'Continue after the link changes')
+    assert lifecycle.archives(actor) == {root} and lifecycle.archives(other) == set()
+    assert all(message['user_id'] == slack for message in store.messages(root))

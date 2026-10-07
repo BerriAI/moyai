@@ -253,33 +253,64 @@ class Store:
             result.update({row['id']: {key: bool(row[key]) for key in ('pinned', 'participated', 'slack_connected')} for row in rows})
         return result
 
-    def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False, pin_owner=None):
+    @staticmethod
+    def session_view_owner_in(conn: sqlite3.Connection, user_id: str) -> str:
+        """Resolve shared-workspace view links, never authentication or authorship."""
+        linked = conn.execute("""SELECT target.id FROM users source JOIN users target
+            ON target.id=source.linked_user_id AND target.kind='google'
+            WHERE source.id=? AND source.kind='slack'""", (user_id,)).fetchone()
+        return linked['id'] if linked else user_id
+
+    def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False, pin_owner=None,
+                        search=(), limit=100, exclude_id=''):
         """Filter before the recent limit and apply the same scope to filed/focused runs.
 
         Identity links affect this shared-workspace view only, never authorization.
         A submission remains participation even when subsequently soft-deleted.
         """
-        prefix, params, predicate, scope = '', [], "parent_run_id='' AND deleted_at=''", ''
-        # Explicit personal archive membership remains discoverable even when
-        # the viewer reached a shared session by link without participating.
+        prefix, params, predicate = '', [], "parent_run_id='' AND deleted_at=''"
+        scopes, scope_params = [], []
         if user_id is not None and not (archived and archive_owner is not None):
             prefix, params = self.sidebar_scope(user_id)
-            scope = ' AND id IN (SELECT id FROM mine)'
-        if archive_owner is not None:
+            scopes.append('id IN (SELECT id FROM mine)')
+            # Search explicit personal memberships before its result limit.
+            if archived is None:
+                if archive_owner is not None:
+                    scopes.append('EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=runs.id AND a.owner_id=?)')
+                    scope_params.append(archive_owner)
+                if pin_owner is not None:
+                    scopes.append('EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=runs.id AND p.owner_id=?)')
+                    scope_params.append(pin_owner)
+        if archive_owner is not None and archived is not None:
             predicate += ' AND ' + ('' if archived else 'NOT ') + 'EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=runs.id AND a.owner_id=?)'
             params.append(archive_owner)
+        if exclude_id:
+            predicate += ' AND id!=?'
+            params.append(exclude_id)
+        for term in search:
+            # Search the saved family before applying the recent limit. Literal
+            # substrings avoid treating user-entered % and _ as SQL wildcards.
+            predicate += """ AND EXISTS(SELECT 1 FROM runs family
+                WHERE (family.id=runs.id OR family.parent_run_id=runs.id) AND family.deleted_at=''
+                AND (instr(lower(family.display_title || ' ' || family.agent_label || ' ' || family.prompt || ' ' || family.summary),lower(?))>0
+                    OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=family.id
+                        AND m.role IN ('user','assistant') AND m.status!='deleted'
+                        AND instr(lower(m.content),lower(?))>0)))"""
+            params.extend((term, term))
         query = prefix + 'SELECT id FROM runs WHERE ' + predicate
-        ids = [row['id'] for row in self.rows(query + scope + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT 100', params)]
-        # Explicit pins expand reachability only after the personal recent limit.
+        scope = ' AND (' + ' OR '.join(scopes) + ')' if scopes else ''
+        ids = [row['id'] for row in self.rows(query + scope + ' ORDER BY updated_at DESC,created_at DESC,id DESC LIMIT ?', [*params, *scope_params, limit])]
+        # Sidebar pins expand reachability only after the personal recent limit.
         # A newer shared-link pin must not displace a contributed session.
-        if scope and pin_owner is not None:
-            scope = ' AND (id IN (SELECT id FROM mine) OR EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=runs.id AND p.owner_id=?))'
-            params.append(pin_owner)
+        if scopes and pin_owner is not None and archived is not None:
+            scopes.append('EXISTS(SELECT 1 FROM session_pins p WHERE p.run_id=runs.id AND p.owner_id=?)')
+            scope_params.append(pin_owner)
+            scope = ' AND (' + ' OR '.join(scopes) + ')'
         # Bound placeholders even for accounts with many personally filed sessions.
         extras = list(dict.fromkeys(extra_ids))
         for offset in range(0, len(extras), 500):
             batch = extras[offset:offset + 500]
-            ids.extend(row['id'] for row in self.rows(query + scope + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *batch]))
+            ids.extend(row['id'] for row in self.rows(query + scope + ' AND id IN (' + ','.join('?' for _ in batch) + ')', [*params, *scope_params, *batch]))
         return list(dict.fromkeys(ids))
 
     def run(self, run_id: str):
@@ -433,12 +464,12 @@ class Store:
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=True)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, restore_archived):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row and row['deleted_at']:
@@ -478,6 +509,9 @@ class Store:
         validate_harness(row['harness'], model)
         message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?)", (run_id, content, client_id, stamp, model, user_id, send_immediately)).lastrowid
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
+        if restore_archived:
+            conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?',
+                         (self.session_view_owner_in(conn, user_id), row['parent_run_id'] or run_id))
         conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
         if send_now or send_immediately:
             # Automatic follow-ups retain their own steering intent. Preserve

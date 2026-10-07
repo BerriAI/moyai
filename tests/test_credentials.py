@@ -10,6 +10,7 @@ from pydantic import SecretStr
 from app.credentials import CredentialRequest, Credentials, Invoke, Materialize, ReportFailure, Resolve, SaveSecret
 from app.db import Store, now
 from app.security import Security
+from app.session_lifecycle import SessionLifecycle
 from app.temporal_runtime import TemporalRunManager
 from sandbox.continuation import AgentWait
 from test_durable import durable, drive
@@ -631,14 +632,18 @@ def test_historical_resolution_queues_once_under_original_actor(workspace,monkey
     if not handoff:
         vault.store.finish_message(run['id'],run['active_message_id'],'Access is still needed')
         vault.store.update_run(run['id'],status='idle')
+    lifecycle=app.state.session_lifecycle
+    lifecycle.archive(original['id'],'google:alice',True)
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     body={'decision':decision,'generation':0}
     if decision=='provide':
         body.update(scope='personal',lifetime='session',value=generic_value('env'))
     endpoint='/api/credentials/requests/'+request['request_id']
     assert client.post(endpoint,json=body).status_code==200
+    assert lifecycle.archives('google:alice')=={original['id']}
     vault.store=Store(app.state.settings.data_dir)
     assert client.post(endpoint,json=body).status_code==200
+    assert lifecycle.archives('google:alice')=={original['id']}
     queued=vault.store.rows("SELECT * FROM messages WHERE run_id=? AND status='queued'",(run['id'],))
     assert len(queued)==1 and queued[0]['user_id']=='google:alice'
     assert vault.store.run(run['id'])['active_user_id']==('google:bob' if handoff else 'google:alice')
@@ -1132,6 +1137,9 @@ async def test_deferred_child_delivery_retains_parent_admission_and_snapshot_tra
     await drive(manager, child, phase='monitor')
     run = manager.store.run(child)
     request = vault.request(run, CredentialRequest(provider='fireworks', reason='Check worker access', request_key='worker'))
+    actor = manager.store.identity({'method': 'google', 'identity': {'sub': 'tin', 'email': 'tin@berri.ai'}})
+    lifecycle = SessionLifecycle(manager.store, None, manager, None)
+    lifecycle.archive(root, actor, True)
     vault.resolve(request['request_id'], Resolve(scope='personal', lifetime='session', value=SecretStr(KEY)), 'google:tin', False)
     manager.store.finish_message(child, run['active_message_id'], 'Frozen worker answer', 'completed')
     manager.store.update_run(child, status='idle', summary='Frozen worker answer')
@@ -1147,12 +1155,15 @@ async def test_deferred_child_delivery_retains_parent_admission_and_snapshot_tra
     assert vault.row(request['request_id'])['resolution_pending'] == 1
     assert not continuations(manager, child)
     assert not coordinator.group(root, result['group_id'])['result_snapshot']
+    assert lifecycle.archives(actor) == {root}
     if blocked == 'parent_stop':
         manager.store.update_run(root, status='idle')
     else:
         manager.store.execute("UPDATE messages SET status='deleted' WHERE run_id=? AND client_id='prior-0'", (child,))
     vault.reconcile_resolutions(child)
+    vault.reconcile_resolutions(child)
     queued = continuations(manager, child)
     assert len(queued) == 1 and queued[0]['user_id'] == 'google:tin'
+    assert lifecycle.archives(actor) == {root}
     manager.store.update_run(child, summary='Later worker answer')
     assert coordinator.results(root, result['group_id'])['children'][0]['summary'] == 'Frozen worker answer'

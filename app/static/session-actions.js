@@ -22,7 +22,7 @@ async function changeSessionArchive(run) {
       if (item?.id === run.id) item.archived = archived;
     }
     renderSidebar();
-    toast(archived ? 'Session archived for you. Find it under Archived.' : 'Session restored to your sidebar.');
+    toast(archived ? 'Session archived. Ask Moyai to find it when you need it.' : 'Session restored to your sidebar.');
     await refreshRuns();
   } finally { state.sessionMutation = null; }
 }
