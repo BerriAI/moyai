@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 480" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,Helvetica,Arial,sans-serif">
+<defs>
+<filter id="sh" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0f172a" flood-opacity="0.10"/></filter>
+<filter id="glow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#facc15" flood-opacity="0.35"/></filter>
+<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#f8fafc"/></linearGradient>
+<linearGradient id="px" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient>
+<linearGradient id="chg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fffbeb"/><stop offset="1" stop-color="#fef3c7"/></linearGradient>
+<marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1.5L8 5L1 8.5" fill="none" stroke="#94a3b8" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<marker id="ara" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1.5L8 5L1 8.5" fill="none" stroke="#d97706" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></marker>
+</defs>
+<rect x="1" y="1" width="918" height="478" rx="20" fill="url(#bg)" stroke="#e2e8f0"/>
+<g filter="url(#sh)"><rect x="40" y="152" width="210" height="96" rx="16" fill="#fff" stroke="#e2e8f0"/></g>
+<rect x="58" y="176.0" width="48" height="48" rx="12" fill="#f1f5f9"/>
+<g transform="translate(58 176.0)"><path d="M13 15h22a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H22l-6 5v-5h-3a3 3 0 0 1-3-3V18a3 3 0 0 1 3-3z" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="120" y="196.0" font-size="16" font-weight="600" fill="#0f172a">You</text>
+<text x="120" y="217.0" font-size="12.5" fill="#64748b">Browser or Slack</text>
+<g filter="url(#sh)"><rect x="338" y="152" width="222" height="96" rx="16" fill="#fff" stroke="#e2e8f0"/></g>
+<rect x="356" y="176.0" width="48" height="48" rx="12" fill="#eef2ff"/>
+<g transform="translate(356 176.0)"><rect x="12" y="13" width="24" height="9" rx="2.5" fill="none" stroke="#1d4ed8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="12" y="26" width="24" height="9" rx="2.5" fill="none" stroke="#1d4ed8" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="17" cy="17.5" r="1.3" fill="#1d4ed8"/><circle cx="17" cy="30.5" r="1.3" fill="#1d4ed8"/></g>
+<text x="418" y="196.0" font-size="16" font-weight="600" fill="#0f172a">Moyai</text>
+<text x="418" y="217.0" font-size="12.5" fill="#64748b">Control plane on Render</text>
+<g filter="url(#sh)"><rect x="636" y="36" width="264" height="88" rx="16" fill="#fff" stroke="#e2e8f0"/></g>
+<rect x="654" y="56.0" width="48" height="48" rx="12" fill="#eef2f7"/>
+<g transform="translate(654 56.0)"><ellipse cx="24" cy="15" rx="10" ry="4" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><path d="M14 15v18c0 2.2 4.5 4 10 4s10-1.8 10-4V15M14 24c0 2.2 4.5 4 10 4s10-1.8 10-4" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="716" y="76.0" font-size="16" font-weight="600" fill="#0f172a">SQLite</text>
+<text x="716" y="97.0" font-size="12.5" fill="#64748b">sessions, history, approvals</text>
+<g filter="url(#sh)"><rect x="636" y="196" width="264" height="88" rx="16" fill="#fff" stroke="#e2e8f0"/></g>
+<rect x="654" y="216.0" width="48" height="48" rx="12" fill="#eef2ff"/>
+<g transform="translate(654 216.0)"><g transform="translate(8 8) scale(0.0862)" fill="#0117be"><path d="M296.11,254.16c7.79-1.07,7.43-12.43.39-13.28-6.58-.79-14.5.86-21.17-.23l-50.86.37c-7.25,2.25-6.45,12.27,1.1,13.28l70.54-.14Z"/><path d="M309.42,196.83c-35.23-15.22-72.84-26.08-109.96-35.87-33.05-8.71-69.92-16.92-103.8-21.32-31.89-4.14-63.43-3.41-95.51-3.23v6.54c36.23-.59,71.45.42,107.34,5.91,48.38,7.41,99.06,19.56,145.78,33.98,27.15,8.38,53.59,18.79,79.2,31.01l.1,67.98c12.46-2,31.2-8.81,39.28-20.3l-.04-24.63c-10.86-17.17-45.21-32.66-62.4-40.09Z"/><path d="M14.79,115.72c-.07.12-.14.23-.21.35,23.36.36,46.79,1.59,69.97,4.75,36.98,5.04,75.62,13.61,111.4,24.06,17.99,5.25,35.13,13.22,54.25,12.22,4.13-.22,8.25-1.11,12.36-1.52l-.56-.73c-22.47-16.17-52.91-34.43-91.33-48.5C101.55,81.06,39.38,81.29.08,85.13l.05,31.74c3.47-.28,6.94-.56,10.39-.99,1.4-.02,2.84-.06,4.28-.16Z"/><path d="M333.75-.37L37.67.08C16.84.11-.03,17.02,0,37.85l.06,39.13c27.48-4.04,66.25-6.26,112.14,2.78,1.52.3,6.38,1.29,12.73,2.77,54.99,12.83,104.51,41.22,151.11,71.93,22.76,14.99,46.61,30.85,68.19,47.42,8.92,6.85,19.82,15.04,27.57,24.61l-.29-189.2c-.03-20.83-16.94-37.69-37.77-37.66Z"/><path d="M92.09,245.59h6.39s0,.03,0,.03l57.07-.09-48.14-66.6c-.53-.87-3.85-2.78-4.61-2.78h-4.75s0,.18,0,.18h-6.06s0-.09,0-.09l-91.76.14.11,69.62,91.76-.14v-.28Z"/><path d="M.4,298.26l.05,35.68c.03,20.83,16.94,37.69,37.77,37.66l296.08-.45c20.83-.03,37.69-16.94,37.66-37.77l-.09-59.31c-17.35,19.08-52.22,22.16-75.65,23.75l-295.82.45Z"/><path d="M159.06,253.3c-20.19.1-40.38.04-60.58.04v.26s-42.72.07-42.72.07c-.83.12-1.69.18-2.17,0l-53.25.08v9.76s166.32-.25,166.32-.25c-1.47-1.7-5.76-9.61-7.6-9.96Z"/></g></g>
+<text x="716" y="236.0" font-size="16" font-weight="600" fill="#0f172a">LiteLLM</text>
+<text x="716" y="257.0" font-size="12.5" fill="#64748b">model gateway</text>
+<g filter="url(#sh)"><rect x="636" y="356" width="264" height="88" rx="16" fill="#fff" stroke="#e2e8f0"/></g>
+<rect x="654" y="376.0" width="48" height="48" rx="12" fill="#f1f5f9"/>
+<g transform="translate(654 376.0)"><rect x="12" y="12" width="10" height="10" rx="2.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="26" y="12" width="10" height="10" rx="2.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="12" y="26" width="10" height="10" rx="2.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="26" y="26" width="10" height="10" rx="2.5" fill="none" stroke="#475569" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="716" y="396.0" font-size="16" font-weight="600" fill="#0f172a">Connected apps</text>
+<text x="716" y="417.0" font-size="12.5" fill="#64748b">Linear, Slack, Notion, GitHub</text>
+<g filter="url(#glow)"><rect x="325" y="340" width="248" height="100" rx="16" fill="url(#chg)" stroke="#fcd34d"/></g>
+<rect x="343" y="366.0" width="48" height="48" rx="12" fill="#fde68a"/>
+<g transform="translate(343 366.0)"><rect x="10" y="13" width="28" height="22" rx="4" fill="none" stroke="#b45309" stroke-width="2.2"/><path d="M16 21l4 3-4 3M23 28h7" fill="none" stroke="#b45309" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></g>
+<text x="405" y="386.0" font-size="16" font-weight="600" fill="#0f172a">Modal sandbox</text>
+<text x="405" y="407.0" font-size="12.5" fill="#92400e">Hermes Agent + Chromium</text>
+<rect x="456.5" y="329" width="102.5" height="22" rx="11" fill="#d97706"/>
+<text x="507.75" y="344" font-size="11" font-weight="700" fill="#fff" text-anchor="middle" letter-spacing="0.8">PER SESSION</text>
+<path d="M252 200H332" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<text x="292" y="190" font-size="12" fill="#64748b" text-anchor="middle">tasks</text>
+<path d="M562 186C604 186 606 80 632 80" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<path d="M562 200C600 200 610 240 632 240" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<path d="M562 214C604 214 606 400 632 400" stroke="#94a3b8" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<path d="M449 254V332" stroke="#d97706" stroke-width="2.4" fill="none" marker-start="url(#ara)" marker-end="url(#ara)"/>
+<text x="434" y="290" font-size="12" fill="#92400e" text-anchor="end">model + tool calls over HTTPS</text>
+<text x="434" y="308" font-size="12" fill="#64748b" text-anchor="end">run-scoped token, no provider keys</text>
+</svg>

@@ -6,19 +6,15 @@ Hosted at [moyai-devin-litellm.onrender.com](https://moyai-devin-litellm.onrende
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  S[Slack mention] --> C[FastAPI control plane]
-  U[Browser workspace] --> C
-  C --> D[(SQLite: sessions, events, approvals)]
-  C --> M[Modal sandbox per session]
-  M --> H[Hermes Agent + terminal + Chromium]
-  H --> B[Run-scoped model and tool broker]
-  B --> L[LiteLLM gateway]
-  B --> A[Linear / Slack / Notion / GitHub]
-```
+![Moyai architecture: you send tasks from the browser or Slack to the Moyai control plane on Render, which stores sessions in SQLite, calls models through LiteLLM, and talks to connected apps. Each session runs a Hermes Agent in a Modal sandbox that sends model and tool calls back to the control plane with a run-scoped token](docs/images/architecture.svg)
 
-The control plane (`app/`) runs as a single process on Render. It serves the UI, stores history in SQLite, keeps app credentials encrypted, and brokers every model and tool call. The agent (`sandbox/`) runs on Modal and only gets a short-lived token scoped to its run, never the raw provider or Modal credentials. External writes need approval in the UI
+| Component | What it does | What we use |
+| --- | --- | --- |
+| Control plane | Serves the UI and Slack webhook, keeps app credentials encrypted, brokers every model and tool call, asks for approval before external writes | FastAPI on Render (`app/`) |
+| Sandbox | Runs the agent with a terminal and browser, one per session. Gets a short-lived run-scoped token, never provider or Modal credentials | Hermes Agent on Modal (`sandbox/`) |
+| Database | Sessions, messages, events, approvals | SQLite on the Render disk |
+| Model gateway | All model calls | LiteLLM |
+| Connected apps | Tools the agent can call through the broker | Linear, Slack, Notion, GitHub |
 
 ## Getting started
 
