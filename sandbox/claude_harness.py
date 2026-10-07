@@ -8,8 +8,10 @@ import threading
 
 try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from .context_recovery import run_with_context_recovery
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from context_recovery import run_with_context_recovery
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
@@ -23,6 +25,7 @@ class ClaudeAgent(HarnessAgent):
         self.journal = None
         self.pending_text = []
         relay.before_model = self.before_model
+        relay.context_recovery = True
 
     def validate(self):
         from importlib.metadata import PackageNotFoundError, version
@@ -97,14 +100,14 @@ class ClaudeAgent(HarnessAgent):
             self.context_store.compact(self.context.relay.compact)
             conversation_history = self.context_store.history()
         self.journal = TurnJournal(conversation_history, prompt, self.context_store)
-        reference_dir = self.context.spec.get('history_reference_dir', self.context.cwd)
-        return asyncio.run(self._run(self.journal.prompt(prompt, conversation_history, cwd=reference_dir), system_message))
+        return run_with_context_recovery(self, prompt, conversation_history,
+            lambda current: asyncio.run(self._run(current, system_message)))
 
     async def _run(self, prompt, system_message):
         from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage
         result = None
         try:
-            async with asyncio.timeout(self.context.spec.get('timeout') or None):
+            async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
                 async with ClaudeSDKClient(options=self.options(system_message)) as client:
                     await client.query(prompt)
                     async for message in client.receive_response():
@@ -128,3 +131,4 @@ class ClaudeAgent(HarnessAgent):
 
     def close(self):
         self.context.relay.before_model = None
+        self.context.relay.context_recovery = False

@@ -14,10 +14,20 @@ from app.security import digest
 
 
 @pytest.fixture
-def workspace(tmp_path):
+def workspace(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
                         modal_token_id="", modal_token_secret="", demo_step_seconds=0.01)
     app = create_app(settings)
+    # Existing endpoint tests use synthetic providers. Keep the real budget
+    # check, but supply fixture limits/counting instead of external metadata.
+    from app.context_budget import ModelContextLimits, counting_input
+    async def limits(model):
+        return ModelContextLimits(context_window=2_000_000, max_input_tokens=2_000_000,
+                                  max_output_tokens=1_000_000)
+    async def count(payload):
+        return counting_input(payload)[1], 'fixture_bytes'
+    monkeypatch.setattr(app.state.context_budget, 'limits', limits)
+    monkeypatch.setattr(app.state.context_budget, 'count', count)
     with TestClient(app, base_url=settings.public_url, client=("127.0.0.1", 50000)) as client:
         session = client.get("/api/session").json()
         client.headers.update({"Origin": settings.public_url, "X-CSRF-Token": session["csrf"]})

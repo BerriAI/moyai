@@ -53,7 +53,7 @@ def test_summary_route_pins_model_excludes_injections_and_accounts(workspace, mo
     response = client.post(url, content=seal('cap', route, json.dumps(body).encode()),
         headers={'Authorization': 'Bearer cap', 'Content-Type': CONTENT_TYPE})
     assert response.status_code == 200, response.text
-    assert response.json() == {'summary': 'Preserve Escape. PR #127 already exists.'}
+    assert response.json() == {'summary': 'Preserve Escape. PR #127 already exists.', 'through_seq': 1}
     request = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
     assert request['status'] == 'completed'
     assert (request['prompt_tokens'], request['completion_tokens'], request['total_tokens']) == (100, 12, 112)
@@ -142,7 +142,7 @@ def test_summary_recovers_without_cutting_output_or_replaying_actions(workspace,
         response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
                                json={'summary': previous, 'entries': entries})
         assert response.status_code == 200, response.text
-        return response.json()['summary']
+        return response.json()
     journal.compact(summarize)
     assert journal.state()['summary'] == final
     assert journal.state()['cursor'] > 0

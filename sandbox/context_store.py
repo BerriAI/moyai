@@ -117,7 +117,7 @@ class ContextStore:
             size += cost
         return result
 
-    def compact(self, summarize):
+    def compact(self, summarize, *, force=False, summary_bytes=SUMMARY_BYTES):
         """Process only new entries, with bounded model input and durable progress.
 
         Called between runtime invocations, with no tools in flight. Batches can
@@ -125,6 +125,8 @@ class ContextStore:
         tool-call messages. The independent pending ledger remains authoritative.
         """
         with self.lock:
+            if type(summary_bytes) is not int or not 512 <= summary_bytes <= SUMMARY_BYTES:
+                raise ValueError('Invalid summary budget')
             if self.pending:
                 raise ContextUnavailable('Saved context has unfinished tools; verify their outcome before recovery.')
             latest = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
@@ -134,19 +136,30 @@ class ContextStore:
                 state = self.state()
                 covered = self.db.execute('SELECT total_bytes FROM journal WHERE seq=?', (state['cursor'],)).fetchone()
                 remaining = latest['total_bytes'] - (covered[0] if covered else 0)
-                if remaining <= BATCH_BYTES and latest['seq'] - state['cursor'] <= BATCH_ROWS:
+                if not force and remaining <= BATCH_BYTES and latest['seq'] - state['cursor'] <= BATCH_ROWS:
                     return
-                entries = self.batch(state['cursor'], max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS))
+                if force and state['cursor'] == latest['seq'] and len(state['summary'].encode()) <= summary_bytes:
+                    return
+                entries = self.batch(state['cursor'], latest['seq'] if force else max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS))
+                if not entries:
+                    # Re-summarize the already-covered prefix without changing
+                    # its cursor, e.g. after switching to a smaller model.
+                    entries = [{'seq': state['cursor'], 'excerpt': 'Rewrite the previous summary more concisely; it covers this sequence.'}]
                 try:
-                    summary = summarize(state['summary'], entries)
-                    if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > SUMMARY_BYTES:
+                    value = (summarize(state['summary'], entries, summary_bytes=summary_bytes) if force
+                             else summarize(state['summary'], entries))
+                    summary = value.get('summary') if isinstance(value, dict) else value
+                    through = value.get('through_seq') if isinstance(value, dict) else entries[-1]['seq']
+                    if type(through) is not int or through not in {entry['seq'] for entry in entries}:
+                        raise ValueError('Invalid summary cursor')
+                    if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > summary_bytes:
                         raise ValueError('Invalid summary')
                 except Exception as exc:
                     raise ContextUnavailable('Context summary could not be updated. Saved receipts are preserved; retry to resume.') from exc
                 # A failed request or crash before commit leaves the old cursor
                 # intact. Retrying inference cannot repeat any external action.
                 with self.db:
-                    self.db.execute('UPDATE state SET summary=?,cursor=? WHERE id=1', (summary, entries[-1]['seq']))
+                    self.db.execute('UPDATE state SET summary=?,cursor=? WHERE id=1', (summary, through))
 
     def history(self):
         if not self.has_history:

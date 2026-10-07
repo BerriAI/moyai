@@ -41,6 +41,15 @@ def provider(app, monkeypatch, *, raw=None, metadata=None, history=None, status=
             return httpx.Response(status, content=raw, headers={'location': 'https://evil.example/stolen'})
         assert request.url.host == 'gateway.example'
         assert request.headers['Authorization'] == 'Bearer model-test-key'
+        if request.url.path == '/model/info':
+            return httpx.Response(200, json={'data': [{'model_name': name, 'model_info': {
+                'max_input_tokens': 128000, 'max_output_tokens': 16000}}
+                for name in ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5']]})
+        if request.url.path == '/utils/token_counter':
+            content = json.loads(request.content)['messages'][0]['content']
+            assert content[-1]['type'] == 'image_url'
+            assert base64.b64decode(content[-1]['image_url']['url'].split(',', 1)[1]) == inspect_file(png())[1]
+            return httpx.Response(200, json={'total_tokens': 1000, 'tokenizer_type': 'openai_api'})
         model_inputs.append(json.loads(request.content))
         return httpx.Response(200, json={'choices': [{'message': {'content': 'Image received.'}}]})
 

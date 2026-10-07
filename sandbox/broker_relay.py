@@ -32,14 +32,16 @@ class BrokerRelay:
         self.startup_failure = None
         self.steering = None
         self.before_model = None
+        self.context_required = None
+        self.context_recovery = False
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
                 pass  # Never log capabilities, prompts or tool arguments.
 
-            def error(self, status, message):
-                content = json.dumps({'error': {'message': message, 'type': 'broker_error', 'code': 'broker_error'}}).encode()
+            def error(self, status, message, code='broker_error'):
+                content = json.dumps({'error': {'message': message, 'type': code, 'code': code}}).encode()
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(content)))
@@ -68,6 +70,8 @@ class BrokerRelay:
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
                     if route in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}:
+                        if relay.context_recovery and relay.context_required:
+                            return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
                         if relay.before_model and not relay.before_model():
                             return self.error(409, 'Saving at a complete tool boundary.')
                     if credential_route:
@@ -166,6 +170,17 @@ class BrokerRelay:
                     if not message:
                         try:
                             value = json.loads(exc.read(8192))
+                            pressure = value.get('detail')
+                            if (exc.headers.get('X-Moyai-Context') == 'compact' and isinstance(pressure, dict)
+                                    and pressure.get('code') == 'context_compaction_required'
+                                    and all(type(pressure.get(key)) is int and pressure[key] > 0
+                                            for key in ('input_tokens', 'input_budget'))):
+                                exc.close()
+                                if relay.context_recovery:
+                                    relay.context_required = pressure
+                                # Hermes owns native overflow recovery. Give it
+                                # the standard structured error, not a generic 502.
+                                return self.error(400, 'Context length exceeded. Compact history before the next model call.', 'context_length_exceeded')
                             credential = value.get('moyai_wait_credential') if credential_route else None
                             if isinstance(credential, str) and re.fullmatch(r'[0-9a-f]{32}', credential):
                                 relay.wait_credential = credential
@@ -208,14 +223,15 @@ class BrokerRelay:
             # Control-plane failure cannot authorize interrupting or replaying work.
             return {}
 
-    def compact(self, summary, entries):
+    def compact(self, summary, entries, *, summary_bytes=None):
         """Tool-free maintenance outside the runtime's next-model checkpoint hook.
 
         Use the same run capability and encrypted transport. The server can
         recover rejected summaries without restarting the SDK or executing tools.
         """
         route = '/context/compact'
-        body = json.dumps({'summary': summary, 'entries': entries}).encode()
+        body = json.dumps({'summary': summary, 'entries': entries, 'cursor_protocol': 1,
+                           **({'summary_bytes': summary_bytes} if summary_bytes is not None else {})}).encode()
         # Allow the server's three accounted, tool-free recovery attempts. Queue
         # rejection happens before inference and can safely wait for admission.
         deadline = time.monotonic() + 940
@@ -236,7 +252,8 @@ class BrokerRelay:
             raw = response.read(64_001)
             if len(raw) > 64_000:
                 raise ValueError('Context summary response exceeded the limit.')
-            return json.loads(raw)['summary']
+            value = json.loads(raw)
+            return value if 'through_seq' in value else value['summary']
 
     def close(self):
         self.server.shutdown()

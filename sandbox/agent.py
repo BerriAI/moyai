@@ -177,7 +177,7 @@ def run_agent(spec, relay):
     # Otherwise an agent's `git add -A` could commit the private conversation.
     history_path = Path("/session/conversation.json")
     history_path.parent.mkdir(exist_ok=True, mode=0o700)
-    context_store = open_context(history_path.parent, spec) if definition.durable_context and spec.get('chat_enabled') else None
+    context_store = open_context(history_path.parent, spec) if definition.durable_context else None
     agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
                          relay=relay, config=config, activity=harness_activity, step=step,
                          cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))

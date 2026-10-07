@@ -41,6 +41,7 @@ class TurnJournal:
         self.context_store = context_store
         self.messages = [*history]
         self.pending = set()
+        self.completed_tools = 0
         self.lock = threading.RLock()
         self.append({'role': 'user', 'content': prompt})
 
@@ -59,6 +60,8 @@ class TurnJournal:
     def tool_finished(self, call_id, output):
         with self.lock:
             self.append({'role': 'tool', 'tool_call_id': call_id, 'content': output})
+            if call_id in self.pending:
+                self.completed_tools += 1
             self.pending.discard(call_id)
 
     def finish(self, text):

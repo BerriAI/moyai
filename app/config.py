@@ -4,6 +4,7 @@ import re
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from .context_budget import ModelContextLimits
 
 
 # Keep picker IDs and labels in code so a stale deployment environment cannot
@@ -42,6 +43,7 @@ class Settings(BaseSettings):
     encryption_key: str = ""
     litellm_api_base: str = ""
     litellm_api_key: str = ""
+    model_context_limits: dict[str, ModelContextLimits] = Field(default_factory=dict)
     session_titles_enabled: bool = True
     session_title_model: str = Field(default="openai/gpt-4.1-nano", min_length=1, max_length=200)
     session_title_timeout_seconds: float = Field(default=8, ge=0.1, le=60)

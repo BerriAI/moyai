@@ -15,7 +15,7 @@ jobs:
       - name: Test startup and migration guards
         run: uv run --python 3.13 pytest -q tests/test_docker_start.py tests/test_render.py tests/test_workspace_image.py
       - name: Test persistent context and real SDK continuation
-        run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_goals.py tests/test_continuation.py
+        run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_goals.py tests/test_continuation.py
       - name: Build production image
         run: docker build -t moyai-docker-smoke .
       - name: Exercise mounted disk migration and restart

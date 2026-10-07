@@ -82,6 +82,56 @@ separate. Normal Messages, Responses and Chat Completions requests preserve an
 explicit runtime output limit, and leave an omitted limit to the gateway. Moyai
 does not inject an 8,192-token default or clamp requests to 16,000 tokens.
 
+Every Messages, Responses and Chat Completions request now passes a context
+budget check **after** model pinning, private memory, skills and attachments are
+applied, and **before** inference admission/accounting. The selected deployment's
+input ceiling and shared context window must leave room for the unchanged output
+allowance, plus 10% input headroom (at least 512 tokens). Omitted output limits
+reserve the configured effective default, or conservatively the model maximum;
+the check does not insert a generation limit. An impossible allowance is reported
+explicitly rather than silently clamped.
+
+Limits come from `MODEL_CONTEXT_LIMITS` or the gateway's `/model/info`, cached
+for five minutes by gateway, credential and model. A routed alias uses the minimum
+limits of all its deployments. Metadata `max_tokens` alone is not a context
+window. When only `max_input_tokens` is available, output is conservatively
+reserved inside that limit. Missing/invalid limits pause inference with a
+configuration error. Configure verified limits for private model aliases; model
+names such as Astra and GLM do not imply Claude's context window.
+
+The gateway's `/utils/token_counter?call_endpoint=true` estimates a serialization
+of the complete request content, schemas and opaque native items, with images
+passed separately as images. This intentionally adds JSON/protocol headroom and
+does not rewrite the inference payload. Generic tokenizer counts cannot reduce
+the conservative UTF-8 byte estimate for text; provider API counters can. If
+counting is unavailable, text uses that byte estimate; images require a working
+provider API counter rather than a guessed cost for their URL or base64 text.
+Unsupported audio/file/video blocks fail explicitly. Provider-injected content
+and tokenizer approximations can still differ: a structured pre-generation
+context rejection also requests reduction; arbitrary errors/timeouts do not.
+
+For Claude and the fresh-session LiteLLM adapters, the relay returns a typed
+context signal and blocks further calls from that native session. After the SDK
+closes and all tool receipts settle, the adapter forces journal compaction and
+starts a fresh session with a bounded reference and the original current request.
+The journal is available for non-chat tasks too. User stop/steering wins over
+recovery, pending tools prevent it, and task deadlines are not reset. Repeated
+rejections without task progress must reduce input and stop after at most three
+repairs. New completed work can trigger further compactions for long tasks.
+Hermes receives the standard `context_length_exceeded` error and retains its
+native bounded overflow-compression path; its native transcript is not rewritten
+by Moyai. Temporal continues to checkpoint lifecycle references, not prompts.
+
+Summary generation uses the same budget check. Oversized batches are split into
+prefixes; each response returns `through_seq`, so the store advances only over
+records actually summarized. Forced compaction can cover the full remaining tail
+and request a smaller saved summary after a model change. No record is deleted.
+If even the summary plus one excerpt cannot fit, recovery pauses with the last
+valid summary and receipts intact instead of recursively attempting compaction.
+Partial batches require the client's `cursor_protocol: 1` capability. An older
+sandbox that cannot consume returned cursors pauses instead of skipping records
+during a rolling deployment; updated clients can still read old full-batch replies.
+
 An oversized, empty or incomplete summary is regenerated from the same original
 records with a more concise target, for up to three attempts. The code never
 cuts off a summary to fit. Transient gateway failures can also retry; refusals

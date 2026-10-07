@@ -7,10 +7,12 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from .harness_bindings import RUNTIME_BINDINGS
     from .harness_dependencies import prepare_runtime, prepare_binary
+    from .context_recovery import run_with_context_recovery
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from harness_bindings import RUNTIME_BINDINGS
     from harness_dependencies import prepare_runtime, prepare_binary
+    from context_recovery import run_with_context_recovery
 
 
 class LiteLLMAgent(HarnessAgent):
@@ -21,7 +23,9 @@ class LiteLLMAgent(HarnessAgent):
         self.stopped = threading.Event()
         self.journal = None
         self.calls = {}
+        self.pending_text = []
         relay.before_model = self.before_model
+        relay.context_recovery = True
 
     def validate(self):
         if self.definition.runtime_binding not in RUNTIME_BINDINGS:
@@ -46,8 +50,9 @@ class LiteLLMAgent(HarnessAgent):
             self.context_store.compact(self.context.relay.compact)
             conversation_history = self.context_store.history()
         self.journal = TurnJournal(conversation_history, prompt, self.context_store)
-        reference_dir = self.context.spec.get('history_reference_dir', self.context.cwd)
-        return asyncio.run(self._run(self.journal.prompt(prompt, conversation_history, cwd=reference_dir), system_message))
+        self.pending_text.clear()
+        return run_with_context_recovery(self, prompt, conversation_history,
+            lambda current: asyncio.run(self._run(current, system_message)))
 
     async def _run(self, prompt, system_message):
         import litellm
@@ -55,7 +60,7 @@ class LiteLLMAgent(HarnessAgent):
         ctx = self.context
         binding = RUNTIME_BINDINGS[self.definition.runtime_binding]
         harness = getattr(litellm.Harness, self.definition.litellm_harness)
-        pending_text = []
+        pending_text = self.pending_text
         async with binding.sandbox_factory(ctx.cwd, ctx.config) as sandbox:
             async with litellm.aagent_session(
                 harness, sandbox=sandbox, model='litellm_proxy/' + ctx.spec['model'],
@@ -63,7 +68,7 @@ class LiteLLMAgent(HarnessAgent):
                 api_key=os.environ['WORKSPACE_RUN_TOKEN'],
                 instructions=system_message + '\n' + binding.instructions
                     + ' Hermes discovery wrappers are unavailable. Do not start detached work.',
-                max_turns=ctx.spec.get('max_iterations') or None, timeout=ctx.spec.get('timeout'),
+                max_turns=ctx.spec.get('max_iterations') or None, timeout=getattr(self, 'context_timeout', ctx.spec.get('timeout')),
                 permissions='full', options=binding.options_factory(ctx.config),
                 tools=binding.tools(ctx.cwd, ctx.config),
             ) as session:
@@ -101,3 +106,4 @@ class LiteLLMAgent(HarnessAgent):
 
     def close(self):
         self.context.relay.before_model = None
+        self.context.relay.context_recovery = False

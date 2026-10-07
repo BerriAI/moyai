@@ -43,7 +43,7 @@ def test_compaction_waits_for_unbilled_admission_with_fresh_envelopes(monkeypatc
     entries = [{'seq': 1, 'excerpt': 'Already completed action receipt'}]
     try:
         assert relay.compact('', entries) == 'Complete saved summary'
-        assert requests == [{'summary': '', 'entries': entries}] * 2
+        assert requests == [{'summary': '', 'entries': entries, 'cursor_protocol': 1}] * 2
         assert envelopes[0] != envelopes[1]
         with pytest.raises(urllib.error.HTTPError) as error:
             relay.compact('', entries)

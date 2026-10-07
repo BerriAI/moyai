@@ -52,9 +52,14 @@ def compaction_payload(body, model, attempt=0):
         raise HTTPException(422, 'Context compaction batch exceeded its limit.')
     # No caller-supplied model, tools, system messages, keys or routing fields.
     instructions = INSTRUCTIONS
+    budget = body.get('summary_bytes', SUMMARY_BYTES)
+    if type(budget) is not int or not 512 <= budget <= SUMMARY_BYTES:
+        raise HTTPException(422, 'Invalid saved-summary budget.')
+    if budget < SUMMARY_BYTES:
+        instructions += f'\nFor this update, the saved summary must fit {budget} UTF-8 bytes. Aim for half that size.'
     if attempt:
         instructions += (f'\nRecovery attempt {attempt}: the previous generation was not accepted. '
-                         f'Rewrite from these original records in about {400 // attempt} words. '
+                         f'Rewrite from these original records in at most {min(400 // attempt, budget // 12)} words, within {budget} UTF-8 bytes. '
                          'Prioritize the goal, constraints, action receipts and next step; use journal '
                          'references for detail. Do not continue or copy a partial earlier generation.')
     # Generation limits belong to the selected model/gateway. The saved working
@@ -65,7 +70,7 @@ def compaction_payload(body, model, attempt=0):
                              {'previous_summary': body['summary'], 'new_records': entries}, ensure_ascii=False)}]}
 
 
-def compaction_result(raw):
+def compaction_result(raw, limit=SUMMARY_BYTES):
     try:
         choice = json.loads(raw)['choices'][0]
         message = choice['message']
@@ -89,6 +94,6 @@ def compaction_result(raw):
         size = len(summary.encode())
     except UnicodeEncodeError:
         raise SummaryFailure('invalid_response') from None
-    if size > SUMMARY_BYTES:
+    if size > limit:
         raise SummaryFailure('summary_too_large', summary_bytes=size)
     return {'summary': summary}

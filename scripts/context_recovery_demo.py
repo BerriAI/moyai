@@ -30,6 +30,13 @@ def demonstrate(checkpoints, delay=0):
         def log_message(self, *args): pass
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if self.path.startswith('/utils/token_counter'):
+                raw = json.dumps({'total_tokens': len(json.dumps(payload['messages']).encode())}).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             assert not {'max_tokens', 'max_completion_tokens', 'max_output_tokens', 'tools'} & payload.keys()
             requests.append(payload)
             # Reproduce a complete summary that exceeds the saved byte budget.
@@ -53,6 +60,10 @@ def demonstrate(checkpoints, delay=0):
                                 litellm_api_key='synthetic-demo-key', litellm_api_base=f'http://127.0.0.1:{server.server_port}/v1',
                                 modal_token_id='', modal_token_secret='', temporal_enabled=False,
                                 session_titles_enabled=False)
+            # Synthetic deployment limits, not claims about the live Astra model.
+            from app.context_budget import ModelContextLimits
+            settings.model_context_limits['openai/gpt-6-astra'] = ModelContextLimits(
+                context_window=128000, max_input_tokens=128000, max_output_tokens=8000)
             app = create_app(settings)
             with TestClient(app, base_url=settings.public_url, client=('127.0.0.1', 50000)) as client:
                 run = app.state.store.create_run('Verify release; do not deploy', '', 'modal', [], model='openai/gpt-6-astra')
@@ -66,10 +77,10 @@ def demonstrate(checkpoints, delay=0):
                 def summarize(previous, entries):
                     route = '/context/compact'
                     response = client.post(f"/broker/{run['id']}" + route,
-                        content=seal('demo-capability', route, json.dumps({'summary': previous, 'entries': entries}).encode()),
+                        content=seal('demo-capability', route, json.dumps({'summary': previous, 'entries': entries, 'cursor_protocol': 1}).encode()),
                         headers={'Authorization': 'Bearer demo-capability', 'Content-Type': CONTENT_TYPE})
                     response.raise_for_status()
-                    return response.json()['summary']
+                    return response.json()
                 for checkpoint in range(checkpoints):
                     for index in range(12):
                         number = checkpoint * 12 + index

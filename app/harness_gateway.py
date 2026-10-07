@@ -13,6 +13,7 @@ from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 from .spend import UsageCapture
 from .context_compaction import compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
+from .context_budget import ContextPressure, provider_context_rejection
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -89,11 +90,12 @@ class NativeUsageCapture(UsageCapture):
 
 class HarnessGateway:
     def __init__(self, *, settings, store, spend, checkpoints, require_run, read_body,
-                 model_slots, memory, skills, tracing):
+                 model_slots, memory, skills, tracing, context_budget):
         self.settings, self.store, self.spend = settings, store, spend
         self.checkpoints, self.require_run, self.read_body = checkpoints, require_run, read_body
         self.model_slots, self.memory, self.skills = model_slots, memory, skills
         self.tracing = tracing
+        self.context_budget = context_budget
 
     async def forward(self, run_id, request, route):
         if route != '/context/compact':
@@ -174,6 +176,7 @@ class HarnessGateway:
                 # Persistable summaries must never receive requester-private
                 # memory, skills, attachments or the native SDK transcript.
                 payload = compaction_payload(body, model, attempt)
+                partial_cursor = type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
             else:
                 context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
                 payload = authorized_payload(body, route, model, context)
@@ -182,6 +185,25 @@ class HarnessGateway:
                 if isinstance(items, str):
                     items = [{'role': 'user', 'content': items}]
                 payload[field] = self.store.attachments.with_images(run, items, protocol=route)
+            while True:
+                try:
+                    checked_budget = await self.context_budget.check(payload)
+                    break
+                except ContextPressure as exc:
+                    if not compact:
+                        self.store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
+                        await self.checkpoints.flush()
+                        raise
+                    if not partial_cursor:
+                        raise HTTPException(422, 'Reconnect the runtime to compact smaller journal batches safely. Saved records are preserved.') from None
+                    if len(body['entries']) == 1:
+                        raise HTTPException(422, 'The model cannot fit the summary and one journal excerpt. '
+                            'Saved records are preserved; choose a model with more input room.') from None
+                    # Consume a prefix only. The returned cursor tells the store
+                    # exactly which records were summarized; the rest stay pending.
+                    body = {**body, 'entries': body['entries'][:max(1, len(body['entries']) // 2)]}
+                    payload = compaction_payload(body, model, attempt)
+            self.require_run(run_id, request)
             admitted = self.store.execute(
                 "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
                 "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
@@ -206,6 +228,19 @@ class HarnessGateway:
             upstream = await client.send(client.build_request('POST', url, json=payload, headers=headers), stream=True)
             self.spend.headers(request_id, upstream, capture.streaming)
             if upstream.status_code >= 400:
+                raw_error = bytearray()
+                async for chunk in upstream.aiter_bytes():
+                    raw_error.extend(chunk[:8192 - len(raw_error)])
+                    if len(raw_error) >= 8192:
+                        break
+                if provider_context_rejection(upstream.status_code, raw_error):
+                    if compact:
+                        if partial_cursor and len(body['entries']) > 1:
+                            compaction_body['entries'] = body['entries'][:max(1, len(body['entries']) // 2)]
+                            raise SummaryFailure('summary_input_too_large')
+                        raise SummaryFailure('summary_input_too_large', retryable=False)
+                    self.store.event(run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
+                    raise ContextPressure(checked_budget.public())
                 if compact:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
                     raise SummaryFailure('upstream_unavailable' if transient else 'upstream_rejected',
@@ -219,7 +254,9 @@ class HarnessGateway:
                         raise HTTPException(502, 'Model response exceeded the size limit.')
                 capture.feed(bytes(raw))
                 capture.finish()
-                result = JSONResponse(compaction_result(raw)) if compact else Response(bytes(raw), media_type='application/json')
+                result = (JSONResponse({**compaction_result(raw, body.get('summary_bytes', 12_000)),
+                                       'through_seq': body['entries'][-1]['seq']})
+                          if compact else Response(bytes(raw), media_type='application/json'))
                 status = 'completed' if capture.done and not capture.failed else 'failed'
                 await finish()
                 return result
