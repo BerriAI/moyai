@@ -61,8 +61,12 @@ class MessageQueue:
                 return None
             row = conn.execute("SELECT * FROM messages WHERE run_id=? AND id=? AND status='queued'", (run_id, run['steer_message_id'])).fetchone()
             if not row:
-                # Slack has no Send now control, so its oldest reply takes a free slot.
-                row = conn.execute("SELECT m.* FROM messages m JOIN slack_receipts s ON s.run_id=m.run_id AND s.message_id=m.id WHERE m.run_id=? AND m.status='queued' ORDER BY m.id LIMIT 1", (run_id,)).fetchone()
+                # Opted-in web follow-ups and Slack replies each retain their
+                # intent while another message occupies the steering slot.
+                row = conn.execute("""SELECT m.* FROM messages m WHERE m.run_id=? AND m.status='queued'
+                    AND (m.send_immediately=1 OR EXISTS (
+                        SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
+                    ORDER BY m.id LIMIT 1""", (run_id,)).fetchone()
                 if row and row['id'] != active_message_id:
                     conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (row['id'], run_id))
             if not row or row['id'] == active_message_id:

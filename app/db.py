@@ -170,7 +170,7 @@ class Store:
             if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             columns = {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}
-            for name in ('revision', 'queue_locked'):
+            for name in ('revision', 'queue_locked', 'send_immediately'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
             if 'started_at' not in columns:
@@ -382,15 +382,15 @@ class Store:
         messages = ordered + [m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] == 'queued']
         return self.attachments.messages(run_id, messages)
 
-    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False):
+    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now)
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if not row or not row["chat_enabled"]:
@@ -403,7 +403,7 @@ class Store:
             return dict(existing), False
         if row["status"] == "stopping":
             raise ValueError("Wait for the current response to stop before sending another message.")
-        if send_now and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
+        if send_now and not send_immediately and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
             raise ValueError('Moyai is already picking up another queued message. Wait or queue this normally.')
         pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
         count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
@@ -415,11 +415,14 @@ class Store:
         model = model if model is not None else row['model'] or self.default_model
         from .harnesses import validate_harness
         validate_harness(row['harness'], model)
-        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, content, client_id, stamp, model, user_id)).lastrowid
+        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?)", (run_id, content, client_id, stamp, model, user_id, send_immediately)).lastrowid
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
-        if send_now:
-            conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (message_id, run_id))
+        if send_now or send_immediately:
+            # Automatic follow-ups retain their own steering intent. Preserve
+            # the current handoff; accept_steer will pick up the rest in order.
+            if not send_immediately or not row['steer_message_id']:
+                conn.execute('UPDATE runs SET steer_message_id=? WHERE id=?', (message_id, run_id))
             conn.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (run_id,))
         running = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone()
         if not running:
@@ -434,7 +437,7 @@ class Store:
                 return None
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone():
                 return None
-            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
+            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 WHEN send_immediately=1 THEN 1 ELSE 2 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
             if not row:
                 return None
             conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (now(), row["id"]))

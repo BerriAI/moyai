@@ -130,3 +130,16 @@ test('composer shortcuts distinguish queue/send-now and leave Shift+Enter, IME, 
   hasFiles=true;key({metaKey:true});assert.equal(sent.at(-1),'now');assert.equal(first,1);
   skillHandles=true;key({ctrlKey:true});assert.equal(sent.length,4);
 });
+
+test('automatic follow-ups appear in the conversation while ordinary messages retain queue controls',()=>{
+  const automatic={...message,id:3,send_immediately:1};
+  const run={status:'running',messages:[active,message,automatic]};
+  assert.deepEqual(queue.presentation(run),{queued:[message],transcript:[active,automatic]});
+  const b=controller();let immediate=false;
+  const c=queue.create({...b.options,sendImmediately:()=>immediate});
+  c.render(run);assert.match(b.element.html,/Enter to queue/);
+  immediate=true;c.render(run);assert.match(b.element.html,/New messages send immediately/);
+  assert.match(b.element.html,/1 queued/);
+  c.render({...run,messages:[active,automatic]});assert.equal(b.element.hidden,true);
+  assert.deepEqual(queue.presentation({...run,status:'queued',messages:[message,automatic]}),{queued:[message],transcript:[automatic]});
+});

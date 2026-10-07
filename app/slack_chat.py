@@ -86,7 +86,7 @@ class SlackChat:
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {})))
 
-    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False):
+    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False):
         """Save a verified web input and its mirror in the same transaction.
 
         Only new inputs in an enabled, awake binding are eligible. Retrying a
@@ -96,7 +96,7 @@ class SlackChat:
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately)
             binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
             if created and binding:
                 allowed = enabled and binding['team_id'] == team
