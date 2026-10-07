@@ -242,7 +242,7 @@ def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, t
 
 
 def test_pending_progress_survives_recovery_but_ambiguous_send_never_replays(mirror, monkeypatch):
-    app, _, run_id = start(mirror)
+    app, client, run_id = start(mirror)
     store = app.state.store
     store.claim_message(run_id)
     store.event(run_id, 'message', 'Opening update')
@@ -251,7 +251,8 @@ def test_pending_progress_survives_recovery_but_ambiguous_send_never_replays(mir
     async def recover_without_delivery():
         chat.recover()
         await chat.shutdown()
-    asyncio.run(recover_without_delivery())
+    # Keep managed workers on the same loop as application lifespan teardown.
+    client.portal.call(recover_without_delivery)
     assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'pending'}]
     attempts = []
     async def uncertain(*args, **kwargs):

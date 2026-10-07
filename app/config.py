@@ -126,6 +126,8 @@ class Settings(BaseSettings):
     slack_thread_chat_enabled: bool = True
     slack_dm_enabled: bool = True
     slack_identity_linking_enabled: bool = True
+    # Custom workspace emoji; fall back to :link: when it is not installed.
+    slack_pr_reaction: str = Field(default='pr', min_length=1, max_length=100, pattern=r'^[a-z0-9_+-]+$')
     # Comma-separated Slack user IDs, or * for all users in the installed team.
     # Empty disables inbound sessions even when the bot is installed.
     slack_session_users: str = ""

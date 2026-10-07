@@ -14,6 +14,7 @@ from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat
 from .slack_files import SlackFiles, file_ids as slack_file_ids
+from .slack_prs import SlackPullRequests
 
 
 class SlackSessions:
@@ -26,6 +27,7 @@ class SlackSessions:
         self.session_titles = None
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
+        self.pull_requests = SlackPullRequests(self)
         self.agentchat, self.channel = connect_agentchat(self)
 
     def status(self):
@@ -320,8 +322,10 @@ class SlackSessions:
         for row in self.store.rows("SELECT run_id FROM slack_events WHERE reply_status='pending' AND run_id NOT IN (SELECT run_id FROM slack_threads)"):
             self.submit_reply(row["run_id"])
         self.chat.recover()
+        self.pull_requests.recover()
 
     async def shutdown(self):
+        await self.pull_requests.shutdown()
         await self.chat.shutdown()
         jobs = list(self.jobs)
         for job in jobs:
