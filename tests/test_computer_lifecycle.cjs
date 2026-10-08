@@ -293,6 +293,113 @@ test('the pending input queue is bounded and overflow stops rather than replays'
 
 const prA='https://github.com/BerriAI/moyai/pull/145',prB='https://github.com/BerriAI/moyai/pull/135';
 const prFrame=(tab,controller='')=>({...frame(tab,controller),surface:'browser',tab,controller,controller_tab:controller?tab:''});
+test('first click claims an unowned screen and forwards that click once after the lease is granted',async()=>{
+  for(const tab of ['',prA]){
+    const commands=[];let finishClaim;
+    const state=owner=>tab?prFrame(tab,owner):frame(undefined,owner);
+    const {view,flush}=browser(async(path,options)=>{
+      if(!options)return state('');
+      const command=JSON.parse(options.body);commands.push(command);
+      if(command.action==='claim')await new Promise(resolve=>finishClaim=resolve);
+      return state('owner');
+    });
+    const host=node();await view.open('one',host,{tab});
+    const screen=host.child.querySelector('[data-screen]'),input=host.child.querySelector('[data-keyboard]');
+    assert.equal(commands.length,0,'Simply viewing a session never claims it');
+    assert.match(host.child.querySelector('[data-notice]').textContent,/Click inside/);
+    const click={clientX:20,clientY:30,button:0,pointerId:1};
+    screen.emit('pointerdown',click);screen.emit('pointerup',click);screen.emit('click',click);
+    await tick();await flush();
+    assert.deepEqual(commands.map(c=>c.action),['claim'],'No input is sent before ownership is confirmed');
+    screen.emit('click',click);await tick();assert.equal(commands.length,1,'A pending claim cannot be duplicated');
+    finishClaim();await tick();await flush();
+    assert.deepEqual(commands.filter(c=>c.action==='input').flatMap(c=>c.args.events),[
+      {type:'pointer',phase:'down',x:40,y:60,button:0},{type:'pointer',phase:'up',x:40,y:60,button:0}
+    ]);
+    assert.ok(commands.every(c=>c.tab===tab));assert.equal(input.focused,true);
+    screen.emit('pointerdown',click);screen.emit('pointerup',click);screen.emit('click',click);
+    type(input,'ready');await flush();
+    assert.equal(commands.filter(c=>c.action==='claim').length,1);
+    assert.deepEqual(commands.at(-1).args.events,[
+      {type:'pointer',phase:'down',x:40,y:60,button:0},{type:'pointer',phase:'up',x:40,y:60,button:0},
+      {type:'text',text:'ready'}
+    ],'Normal clicks and typing continue without duplicate input');
+    view.close();await tick();
+  }
+});
+
+test('click-to-control ignores occupied, unavailable, stale and shutting-down screens',async()=>{
+  for(const data of [frame(undefined,'other'),{...frame(),controller_tab:prA},
+    {...frame(undefined,''),available:false},{...frame(undefined,''),surface:'browser'},
+    {...frame(undefined,''),has_sandbox:false},{...frame(undefined,''),waking:true},
+    {...frame(undefined,''),shutting_down:true},{...frame(undefined,''),frame:''}]){
+    const commands=[];
+    const {view,flush}=browser(async(path,options)=>{if(options)commands.push(JSON.parse(options.body));return data;});
+    const host=node();await view.open('one',host);
+    host.child.querySelector('[data-screen]').emit('click',{clientX:20,clientY:30,button:0});
+    await tick();await flush();assert.deepEqual(commands,[]);
+    view.close();await tick();
+  }
+});
+
+test('hover, scroll, secondary clicks and letterboxing do not claim a desktop',async()=>{
+  const commands=[];
+  const {view,flush}=browser(async(path,options)=>{if(options)commands.push(JSON.parse(options.body));return frame(undefined,'');});
+  const host=node();await view.open('one',host);const screen=host.child.querySelector('[data-screen]');
+  screen.emit('pointermove',{clientX:20,clientY:30});
+  screen.emit('wheel',{clientX:20,clientY:30,deltaX:0,deltaY:24,deltaMode:0});
+  for(const button of [1,2])screen.emit('click',{clientX:20,clientY:30,button});
+  screen.getBoundingClientRect=()=>({left:0,top:0,width:640,height:500});
+  screen.emit('click',{clientX:20,clientY:30,button:0});
+  await tick();await flush();assert.deepEqual(commands,[]);view.close();await tick();
+});
+
+test('a lost claim race, failure or changed surface never replays the initiating click',async()=>{
+  for(const result of ['failure','other','width','height','unavailable','wrong-tab','shutdown','surface','pr-response']){
+    const commands=[],tab=result==='pr-response'?prA:'';
+    const {view,flush}=browser(async(path,options)=>{
+      if(!options)return tab?prFrame(tab):frame(undefined,'');
+      const command=JSON.parse(options.body);commands.push(command);
+      if(result==='failure')throw new Error('Another person is controlling this browser.');
+      if(result==='other')return frame(undefined,'other');
+      if(result==='width')return {...frame(),width:1920};
+      if(result==='height')return {...frame(),height:1080};
+      if(result==='unavailable')return {...frame(),available:false};
+      if(result==='shutdown')return {...frame(),shutting_down:true};
+      if(result==='surface')return {...frame(),surface:'browser'};
+      if(result==='pr-response')return prFrame(prB,'owner');
+      return {...frame(),controller_tab:prA};
+    });
+    const host=node();await view.open('one',host,{tab});
+    host.child.querySelector('[data-screen]').emit('click',{clientX:20,clientY:30,button:0});
+    await tick();await flush();
+    assert.equal(commands[0].action,'claim');assert.equal(commands.some(c=>c.action==='input'),false);
+    if(result==='failure'){
+      host.child.querySelector('[data-screen]').emit('click',{clientX:20,clientY:30,button:0});
+      await tick();assert.equal(commands.length,1,'Uncertain errors require explicit resume, not automatic replay');
+    }
+    view.close();await tick();
+  }
+});
+
+test('switching sessions while click-to-control is pending discards the click and releases the old lease',async()=>{
+  const commands=[];let finishClaim;
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options)return frame(undefined,'');
+    const command=JSON.parse(options.body);commands.push({path,...command});
+    if(command.action==='claim')await new Promise(resolve=>finishClaim=resolve);
+    return frame();
+  });
+  const host=node();await view.open('one',host);
+  host.child.querySelector('[data-screen]').emit('click',{clientX:20,clientY:30,button:0});
+  await tick();const next=node(),opening=view.open('two',next);
+  finishClaim();await opening;await flush();
+  assert.deepEqual(commands.map(c=>c.action),['claim','release']);
+  assert.ok(commands.every(c=>c.path==='/api/runs/one/computer'));
+  assert.equal(next.child.querySelector('[data-control]').textContent,'Take control');
+  view.close();await tick();
+});
+
 test('desktop and PR views open saved captures separately without acquiring control',async()=>{
   for(const tab of ['',prA]){
     const commands=[],opened=[];

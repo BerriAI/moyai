@@ -9,6 +9,8 @@ window.MoyaiComputer = {
     const surface=()=>browserTab?'browser':'desktop';
     const legacy=()=>current?.available && current.surface!==surface();
     const canInput=()=>active && own() && current?.available && !current.shutting_down && current.surface===surface() && !inputError && !changingControl && !closing;
+    const canClaimOnClick=()=>active && current?.has_sandbox && current.available && current.frame && !current.controller &&
+      current.surface===surface() && !current.waking && !current.shutting_down && !inputError && !busy && !changingControl && !closing;
     // The proxy also bounds JSON after Python's ASCII escaping and whitespace.
     const inputSize=events=>JSON.stringify({events}).replace(/[^\x00-\x7f]/g,'xxxxxx').length+events.length*16;
 
@@ -50,6 +52,7 @@ window.MoyaiComputer = {
       q('[data-empty]').hidden=!!data.frame;
       if(data.frame&&q('[data-screen]').src!=='data:image/jpeg;base64,'+data.frame)q('[data-screen]').src='data:image/jpeg;base64,'+data.frame;
       q('[data-screen]').classList.toggle('controlled',canInput());
+      q('[data-screen]').alt=`Live ${surface()}. ${canClaimOnClick()?'Click to take control and interact.':'Take control to click and type.'}`;
       q('[data-keyboard]').readOnly=!canInput();
       q('[data-keyboard]').tabIndex=canInput()?0:-1;
       q('[data-empty-text]').textContent=data.waking?'Waking your workspace. Your live computer will appear here.':data.has_sandbox?(browserTab?'Take control to open this pull request in the browser.':'Take control to open your desktop and browser.'):data.notice||data.wake_notice||(data.wake_supported===false?'This workspace is asleep. Enable durable sessions to wake its computer here.':'This workspace is asleep. Wake it up to see it live, then take control to use it.');
@@ -64,6 +67,7 @@ window.MoyaiComputer = {
       dialog.querySelectorAll('[data-action]').forEach(button=>button.disabled=busy||changingControl||!canInput()||!data.available);
       q('[data-notice]').textContent=legacy()?'Restart this workspace to enable desktop control. This browser is running an older version.':wakeError||data.wake_error||inputError||data.notice||((data.shutting_down||!data.has_sandbox)&&data.wake_notice)||(own()?
         `You have control. Click and type in the ${surface()}. Ctrl+Alt+Esc returns to these controls.`:
+        data.controller?'Someone else has control. You can watch here.':canClaimOnClick()?`Click inside the ${surface()} to take control and interact.`:
         browserTab?'Take control to use this pull request’s browser.':'Watch Moyai work here. Take control to use the desktop.');
     }
     async function poll(){
@@ -235,6 +239,17 @@ window.MoyaiComputer = {
         if(!Number.isFinite(x)||!Number.isFinite(y)||(!clamp&&(x<0||y<0||x>=current.width||y>=current.height)))return null;
         return {x:Math.round(Math.max(0,Math.min(current.width-1,x))),y:Math.round(Math.max(0,Math.min(current.height-1,y)))};
       }
+      screen.onclick=async event=>{
+        if(event.button!==0||!canClaimOnClick())return;
+        const point=position(event);if(!point)return;
+        event.preventDefault();
+        const v=version,{width,height}=current;
+        // Wait for the server's lease before forwarding the completed click.
+        // Never replay it after a failed claim, view change or resized desktop.
+        if(!await command('claim')||v!==version||!canInput()||current.width!==width||current.height!==height)return;
+        enqueue({type:'pointer',phase:'down',...point,button:0});
+        enqueue({type:'pointer',phase:'up',...point,button:0});
+      };
       screen.onpointerdown=event=>{
         if(!canInput()||pointer||![0,1,2].includes(event.button))return;
         const point=position(event);if(!point)return;
