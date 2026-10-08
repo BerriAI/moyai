@@ -117,7 +117,7 @@ wait for credentials/delegated work, or apply a correction at a complete tool
 boundary. In-flight redirect is a Hermes capability; Claude uses boundary
 steering. Stop revokes the capability and terminates the isolated machine.
 
-Claude and OpenCode can resume a compatible, successfully completed native
+Claude, OpenCode and Pi can resume a compatible, successfully completed native
 conversation on the next chat turn, including after the sandbox process exits.
 The SDK receives only the new request; it owns its existing conversation instead
 of receiving the public journal again inside a new user message. Completed
@@ -145,11 +145,11 @@ most 256 regular files for CLI runtimes; oversized state uses the public journal
 Native plaintext lives outside `/workspace` and is removed before attachments,
 project preparation or agent startup, including when starting a cloned child.
 Each SDK uses an isolated config/cache directory and fresh relay credentials.
-Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode uses
+Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode and Pi use
 LiteLLM's public resume API and its persisted native files. Missing, corrupt or
 incompatible state selects a fresh session before inference. An ambiguous SDK
 failure never automatically retries the task. Interrupted turns, intermediate
-goal iterations, Codex, Deep Agents, Tool Loop and Pi retain public-journal recovery;
+goal iterations, Codex, Deep Agents and Tool Loop retain public-journal recovery;
 Hermes retains its existing separate history flow.
 
 Malformed native state and confirmed context recovery can publish a replacement
@@ -363,7 +363,7 @@ choices, Slack selection and adapter creation. Each adapter implements
 checkpointing and delivery.
 
 OpenCode, Deep Agents, Tool Loop and Pi use `litellm.aagent_session`, or
-`litellm.aagent_resume` for eligible OpenCode conversations, with the named
+`litellm.aagent_resume` for eligible OpenCode and Pi conversations, with the named
 bindings in `sandbox/harness_bindings.py`. The pinned beta source
 is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
 contain that API. Claude Agent SDK stays pinned at `0.2.163`; the native Codex

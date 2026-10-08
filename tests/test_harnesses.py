@@ -968,16 +968,17 @@ def test_litellm_context_recovery_consumes_saved_corrections_once(native_cli_run
         agent.close()
 
 
-def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_cli_runtime, monkeypatch):
+@pytest.mark.parametrize('kind', ['opencode', 'pi'])
+def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_cli_runtime, kind, monkeypatch):
     runtime = native_cli_runtime
-    first = runtime.create('opencode')
+    first = runtime.create(kind)
     assert first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')['completed']
     assert 'Original constraint' in runtime.calls[0]['prompt']
     assert 'state' not in runtime.host  # Native upload belongs after answer delivery.
     first.close()
     assert runtime.host['state']['files'] and not list(first.native.cache.rglob('*'))
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'replacement-capability')
-    second = runtime.create('opencode')
+    second = runtime.create(kind)
     try:
         assert second.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] is True
@@ -990,13 +991,14 @@ def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_c
 
 
 @pytest.mark.parametrize('compaction_fails', [False, True])
-def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtime, compaction_fails):
+@pytest.mark.parametrize('kind', ['opencode', 'pi'])
+def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtime, kind, compaction_fails):
     from sandbox.context_store import ContextUnavailable
     runtime = native_cli_runtime
-    first = runtime.create('opencode')
+    first = runtime.create(kind)
     first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
     first.close()
-    agent = runtime.create('opencode')
+    agent = runtime.create(kind)
     old_lease, completed_writes, compactions = [], [], []
     def reject():
         if len(runtime.calls) != 2:
@@ -1038,7 +1040,7 @@ def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtim
     assert len(runtime.calls) == 3 and not runtime.calls[-1]['resumed']
     assert 'Saved write receipt' in runtime.calls[-1]['prompt']
     assert [body['action'] for body in runtime.requests] == ['begin', 'commit', 'begin', 'invalidate', 'restart', 'commit']
-    third = runtime.create('opencode')
+    third = runtime.create(kind)
     try:
         assert third.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] and runtime.calls[-1]['prompt'] == 'TLDR?'
@@ -1050,9 +1052,10 @@ def test_native_cli_confirmed_rejection_rebuilds_before_saving(native_cli_runtim
 @pytest.mark.parametrize('field,value', [('harness', 'codex'), ('workdir', '/other-workspace'),
     ('model', 'litellm_proxy/other-model'), ('native_session_id', None), ('native_session_id', '--last'),
     ('files', {}), ('files', {'../escape': 'eA=='})])
-def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_runtime, field, value):
+@pytest.mark.parametrize('kind', ['opencode', 'pi'])
+def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_runtime, kind, field, value):
     runtime = native_cli_runtime
-    first = runtime.create('opencode')
+    first = runtime.create(kind)
     first.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
     first.close()
     saved = runtime.host['state']
@@ -1062,7 +1065,7 @@ def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_ru
         state = json.loads(saved['state'])
         state[field] = value
         saved['state'] = json.dumps(state)
-    second = runtime.create('opencode')
+    second = runtime.create(kind)
     try:
         assert second.run_conversation('TLDR?', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] is False
@@ -1071,7 +1074,7 @@ def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_ru
         second.close()
     assert runtime.host.get('state'), 'The successful fresh fallback must replace the rejected checkpoint'
     assert len(runtime.calls) == 2  # The rejected native state never started an SDK invocation.
-    third = runtime.create('opencode')
+    third = runtime.create(kind)
     try:
         assert third.run_conversation('Next question', conversation_history=[], system_message='Rules')['completed']
         assert runtime.calls[-1]['resumed'] and runtime.calls[-1]['prompt'] == 'Next question'
@@ -1080,9 +1083,10 @@ def test_incompatible_native_cli_state_falls_back_before_inference(native_cli_ru
 
 
 @pytest.mark.parametrize('failure', ['runtime_error', 'interrupted', 'pending_tool'])
-def test_unfinished_native_cli_turn_cannot_publish_resume_state(native_cli_runtime, failure):
+@pytest.mark.parametrize('kind', ['opencode', 'pi'])
+def test_unfinished_native_cli_turn_cannot_publish_resume_state(native_cli_runtime, kind, failure):
     runtime = native_cli_runtime
-    agent = runtime.create('opencode')
+    agent = runtime.create(kind)
     if failure == 'runtime_error':
         runtime.stream.result.stop_reason = 'runtime_error'
     elif failure == 'interrupted':
@@ -1097,9 +1101,10 @@ def test_unfinished_native_cli_turn_cannot_publish_resume_state(native_cli_runti
     assert len(runtime.calls) == 1 and not any(body['action'] == 'restart' for body in runtime.requests)
 
 
-def test_goal_iteration_renews_native_contract_and_discards_intermediate_result(native_cli_runtime):
+@pytest.mark.parametrize('kind', ['opencode', 'pi'])
+def test_goal_iteration_renews_native_contract_and_discards_intermediate_result(native_cli_runtime, kind):
     runtime = native_cli_runtime
-    agent = runtime.create('opencode')
+    agent = runtime.create(kind)
     agent.run_conversation('First step.', conversation_history=[], system_message='Original rules')
     previous = agent.native
     assert previous.staged is not None and 'state' not in runtime.host
@@ -1162,3 +1167,4 @@ def test_native_cli_version_comes_from_installed_binary_and_failure_disables_res
     assert calls == [['opencode', '--version']]
     monkeypatch.setattr(harness_dependencies.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=1, stdout=''))
     assert harness_dependencies.runtime_version('opencode') == ''
+    assert harness_dependencies.runtime_version('pi') == ''

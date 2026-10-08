@@ -48,7 +48,7 @@ class LiteLLMAgent(HarnessAgent):
             self.runtime_version = runtime_version(self.definition.runtime_binding)
 
     def prepare_native(self, system_message):
-        if self.definition.runtime_binding != 'opencode':
+        if self.definition.runtime_binding not in ('opencode', 'pi'):
             return
         try:
             from .native_session import NativeSession
