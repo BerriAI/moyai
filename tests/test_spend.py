@@ -1,10 +1,16 @@
 import json
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
 from app.db import Store
 from app.security import digest
@@ -13,6 +19,7 @@ from test_workspace import workspace
 from test_slack import slack_app
 from test_slack import event, signed
 from test_slack_chat import start
+from scripts.spend_backfill import backfill, connect, load_logs, timestamp
 
 
 def sign_in(app, client, sub='alice', email='alice@berri.ai'):
@@ -362,3 +369,164 @@ def test_usage_capture_preserves_reported_reasoning_zero_and_omits_missing_break
     assert capture.usage['reasoning_tokens'] == 0
     capture.consume({'usage': {'completion_tokens_details': 'malformed'}})
     assert 'reasoning_tokens' not in capture.usage
+
+
+@pytest.fixture
+def backfill_sample(workspace: tuple[FastAPI, TestClient], tmp_path: Path) -> tuple[FastAPI, Path, dict[str, str]]:
+    app, _ = workspace
+    app.state.settings.litellm_api_key = 'historical-key'
+    run = active(app)
+    ids = {name: app.state.spend.begin(run, run['model']) for name in ('recover', 'priced', 'pending')}
+    for name, rid in ids.items():
+        app.state.spend.headers(rid, httpx.Response(200, headers={'x-litellm-call-id': 'gateway-' + rid}), True)
+        if name != 'pending':
+            app.state.spend.finish(rid, None, 'completed')
+    app.state.store.execute("UPDATE model_requests SET created_at='2026-10-01T00:00:00+00:00'")
+    app.state.store.execute("UPDATE model_requests SET cost='0',cost_source='response_header' WHERE id=?", (ids['priced'],))
+    logs = tmp_path / 'receipts.json'
+    records = [{'request_id': 'provider-' + name, 'litellm_call_id': 'gateway-' + rid,
+                'api_key': digest('historical-key'), 'spend': '0.01234567890123456789', 'status': 'success'}
+               for name, rid in ids.items()]
+    logs.write_text(json.dumps(records).replace('"0.01234567890123456789"', '0.01234567890123456789'))
+    app.state.settings.litellm_api_key = 'rotated-key'
+    return app, logs, ids
+
+
+def test_backfill_cli_dry_run_apply_backup_and_replay(backfill_sample: tuple[FastAPI, Path, dict[str, str]], tmp_path: Path) -> None:
+    app, logs, ids = backfill_sample
+    database = app.state.store.path
+    original = app.state.store.rows('SELECT * FROM model_requests ORDER BY id')
+    command = [sys.executable, 'scripts/spend_backfill.py', '--db', str(database), '--logs', str(logs),
+               '--before', '2026-10-07T00:00:00Z']
+    preview = subprocess.run(command, text=True, capture_output=True, check=True, timeout=30)
+    report = json.loads(preview.stdout)
+    assert report['mode'] == 'dry_run' and report['applied'] == 0 and report['recoverable'] == 1
+    assert report['recovered_spend'] == '0.01234567890123456789'
+    assert report['skip_counts'] == {'already_priced': 1, 'not_finalized': 1}
+    assert digest('historical-key') not in preview.stdout
+    assert app.state.store.rows('SELECT * FROM model_requests ORDER BY id') == original
+    with connect(database) as read_only:
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            read_only.execute("UPDATE model_requests SET cost='999'")
+    backup = tmp_path / 'before-backfill.db'
+    applied = subprocess.run(command + ['--apply', '--expect-plan', report['plan_sha256'], '--backup', str(backup)],
+                             text=True, capture_output=True, check=True, timeout=30)
+    assert json.loads(applied.stdout)['applied'] == 1
+    assert backup.stat().st_mode & 0o777 == 0o600
+    with connect(backup) as saved:
+        assert [dict(row) for row in saved.execute('SELECT * FROM model_requests ORDER BY id')] == original
+    expected = [{**row, 'cost': '0.01234567890123456789', 'cost_source': 'gateway_backfill'}
+                if row['id'] == ids['recover'] else row for row in original]
+    assert app.state.store.rows('SELECT * FROM model_requests ORDER BY id') == expected
+    totals = app.state.spend.report(start=datetime(2026, 10, 1).date(), end=datetime(2026, 10, 7).date())
+    assert totals['total']['spend'] == '0.01234567890123456789' and totals['priced_requests'] == 2
+    rerun = json.loads(subprocess.run(command, text=True, capture_output=True, check=True, timeout=30).stdout)
+    assert rerun['recoverable'] == 0
+    stale = subprocess.run(command + ['--apply', '--expect-plan', report['plan_sha256'], '--backup', str(tmp_path / 'stale.db')],
+                           text=True, capture_output=True, timeout=30)
+    assert stale.returncode == 1 and not (tmp_path / 'stale.db').exists()
+    assert app.state.store.rows('SELECT * FROM model_requests ORDER BY id') == expected
+
+
+@pytest.mark.parametrize('shape', ['call_id', 'metadata_call_id', 'nested_moyai_id', 'metadata_string', 'legacy_request_id', 'duplicate', 'failure'])
+def test_backfill_matches_real_export_id_shapes(backfill_sample: tuple[FastAPI, Path, dict[str, str]], shape: str) -> None:
+    app, logs, ids = backfill_sample
+    record = json.loads(logs.read_text(), parse_float=str)[0]
+    call = record.pop('litellm_call_id')
+    if shape == 'metadata_call_id':
+        record['metadata'] = {'litellm_call_id': call}
+    elif shape in {'nested_moyai_id', 'metadata_string'}:
+        metadata = {'spend_logs_metadata': {'moyai_request_id': ids['recover']}}
+        record['metadata'] = json.dumps(metadata) if shape == 'metadata_string' else metadata
+    elif shape == 'legacy_request_id':
+        record['request_id'] = call
+    else:
+        record['litellm_call_id'] = call
+    if shape == 'failure':
+        record['status'] = 'failure'
+    logs.write_text(json.dumps([record, record] if shape == 'duplicate' else [record]))
+    report = backfill(app.state.store.path, [logs], timestamp('2026-10-07T00:00:00Z'))
+    assert report['recoverable'] == 1 and report['changes'][0]['id'] == ids['recover']
+
+
+@pytest.mark.parametrize('scenario,reason', [
+    ('wrong_key', 'no_matching_receipt'), ('conflicting_alias', 'ambiguous_receipts'),
+    ('unknown_alias', 'conflicting_identifiers'), ('retry', 'multiple_billed_attempts'),
+    ('conflicting_duplicate', 'ambiguous_receipts'), ('zero', 'zero_cost_needs_review'),
+    ('negative', 'invalid_cost'), ('nan', 'invalid_cost'), ('boolean', 'invalid_cost'),
+    ('unknown_status', 'unknown_receipt_status'), ('bad_metadata', 'invalid_metadata'),
+    ('new_request', 'outside_cutoff'), ('unfinished', 'not_finalized'),
+])
+def test_backfill_leaves_uncertain_costs_unknown(backfill_sample: tuple[FastAPI, Path, dict[str, str]], scenario: str, reason: str) -> None:
+    app, logs, ids = backfill_sample
+    record = json.loads(logs.read_text(), parse_float=str)[0]
+    records = [record]
+    if scenario == 'wrong_key':
+        record['api_key'] = digest('different-key')
+    elif scenario in {'conflicting_alias', 'unknown_alias'}:
+        record['metadata'] = {'litellm_call_id': ids['pending'] if scenario == 'conflicting_alias' else 'unknown-call'}
+    elif scenario == 'retry':
+        records.append({**record, 'request_id': 'another-provider-attempt'})
+    elif scenario == 'conflicting_duplicate':
+        records.append({**record, 'spend': '2.0'})
+    elif scenario in {'zero', 'negative', 'nan', 'boolean'}:
+        record['spend'] = {'zero': 0, 'negative': -1, 'nan': 'NaN', 'boolean': True}[scenario]
+    elif scenario == 'unknown_status':
+        record['status'] = None
+    elif scenario == 'bad_metadata':
+        record['metadata'] = 'broken-json'
+    elif scenario == 'new_request':
+        app.state.store.execute("UPDATE model_requests SET created_at='2026-10-07T00:00:00+00:00' WHERE id=?", (ids['recover'],))
+    elif scenario == 'unfinished':
+        app.state.store.execute('UPDATE model_requests SET finished_at=NULL WHERE id=?', (ids['recover'],))
+    logs.write_text(json.dumps(records))
+    report = backfill(app.state.store.path, [logs], timestamp('2026-10-07T00:00:00Z'))
+    assert report['recoverable'] == 0
+    assert {'id': ids['recover'], 'reason': reason} in report['skipped']
+
+
+def test_backfill_apply_is_atomic_and_requires_a_new_backup(backfill_sample: tuple[FastAPI, Path, dict[str, str]], tmp_path: Path) -> None:
+    app, logs, ids = backfill_sample
+    database, cutoff = app.state.store.path, timestamp('2026-10-07T00:00:00Z')
+    app.state.store.execute("UPDATE model_requests SET cost=NULL,status='completed',finished_at='2026-10-01T01:00:00Z'")
+    last = sorted(ids.values())[-1]
+    with app.state.store.connect() as conn:
+        conn.execute(f"CREATE TRIGGER reject_repair BEFORE UPDATE OF cost ON model_requests WHEN OLD.id='{last}' "
+                     "BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")
+    report = backfill(database, [logs], cutoff)
+    assert report['recoverable'] == 3
+    backup = tmp_path / 'backup.db'
+    with pytest.raises(ValueError, match='requires'):
+        backfill(database, [logs], cutoff, apply=True)
+    with pytest.raises(sqlite3.IntegrityError, match='fixture failure'):
+        backfill(database, [logs], cutoff, apply=True, expected_plan=report['plan_sha256'], backup=backup)
+    assert all(row['cost'] is None for row in app.state.store.rows('SELECT cost FROM model_requests'))
+    with pytest.raises(FileExistsError):
+        backfill(database, [logs], cutoff, apply=True, expected_plan=report['plan_sha256'], backup=backup)
+    assert backup.exists()
+
+
+def test_backfill_rejects_incomplete_capped_or_aggregate_exports(tmp_path: Path) -> None:
+    one, two = tmp_path / 'one.json', tmp_path / 'two.json'
+    page = {'data': [{'request_id': 'first'}], 'total': 2, 'page': 1, 'page_size': 1,
+            'total_pages': 2, 'total_is_capped': False}
+    one.write_text(json.dumps(page))
+    with pytest.raises(ValueError, match='Missing'):
+        load_logs([one])
+    two.write_text(json.dumps({**page, 'data': [{'request_id': 'second'}], 'page': 2}))
+    assert len(load_logs([one, two])[0]) == 2
+    two.write_text(json.dumps({**page, 'page': 2}))
+    with pytest.raises(ValueError, match='Overlapping'):
+        load_logs([one, two])
+    one.write_text(json.dumps({**page, 'total_is_capped': True}))
+    with pytest.raises(ValueError, match='uncapped'):
+        load_logs([one, two])
+    one.write_text('[{"spend": 1}]')
+    with pytest.raises(ValueError, match='per-request'):
+        load_logs([one])
+    with pytest.raises(ValueError, match='timezone'):
+        timestamp('2026-10-07')
+    missing = tmp_path / 'missing.db'
+    with pytest.raises(sqlite3.OperationalError):
+        connect(missing)
+    assert not missing.exists()

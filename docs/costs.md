@@ -31,6 +31,37 @@ This is **just-in-time identity provisioning and accounting linkage**, not SCIM:
 
 **Activated September 30, 2026:** the approved profile/email scopes are installed on BerriAI’s dedicated Moyai app and the encrypted organization connection was refreshed. Live backfill resolved all four existing session senders: one retained its admin-selected Google link; three received company-email profiles awaiting their first Google login. The recorded total remained unchanged. The migration preserved all 26 sessions and has a private pre-migration SQLite backup on Render. Validation: 186 Python tests and three chat-stream tests passed; automatic matching in both sign-in orders was covered in tests, while live verification covered real Slack profile lookup and preservation of the existing link.
 
+## One-time historical cost repair
+
+`scripts/spend_backfill.py` is an offline maintenance command. It is never invoked by the server, startup or a scheduler. Use it only after deploying the streaming parser fix and obtaining a complete, ungrouped LiteLLM spend export for the historical interval. It reads the existing `workspace.db` directly without running app migrations or contacting a gateway.
+
+Supply either JSON arrays of per-request rows or **all** uncapped `/spend/logs/v2` page envelopes from the same export, repeating `--logs` for each file. Keep the gateway data unchanged while collecting pages; inconsistent, missing or capped pages are rejected. For raw arrays, the operator must ensure completeness. Do not use aggregate `/spend/logs` output or copy only a visible page. Retain `request_id`, hashed `api_key`, `litellm_call_id`, `metadata`, `spend` and `status`; prompts and responses are unnecessary. Gateway log retention and access determine how much history can be recovered.
+
+Matching requires the receipt's historical key hash and exact call IDs or Moyai metadata IDs. Provider response IDs alone usually differ from Moyai IDs. Conflicting identifiers, multiple billed attempts, unknown receipt status, invalid amounts and zero defaults remain unpriced for review. LiteLLM can default unknown spend to zero, so zero-only records cannot establish recovered coverage. Positive spend on a failed gateway request can still be billed. Existing costs, including zero, and all request statuses, tokens and attribution are preserved.
+
+First run a read-only preview with an explicit timezone-aware cutoff (requests created at or after it are excluded):
+
+```sh
+uv run python scripts/spend_backfill.py \
+  --db /path/to/workspace.db --logs /private/spend-export.json \
+  --before 2026-10-07T23:00:00Z > /private/backfill-preview.json
+```
+
+Review `changes`, `recovered_spend`, `skip_counts` and `skipped`. After explicit operator authorization, use the preview's `plan_sha256` with a new backup path:
+
+```sh
+uv run python scripts/spend_backfill.py \
+  --db /path/to/workspace.db --logs /private/spend-export.json \
+  --before 2026-10-07T23:00:00Z \
+  --apply --expect-plan REVIEWED_PLAN_SHA256 \
+  --backup /private/workspace-before-backfill.db > /private/backfill-applied.json
+```
+
+The example cutoff is illustrative; choose the actual historical boundary. Apply rereads the database under a SQLite write lock and refuses a changed plan. It makes a consistent, exclusive backup with mode `0600`, then commits all updates together. Run during a quiet maintenance window because backup and repair hold the write lock. Protect the backup as a full copy of the private database. A database write failure rolls back the repair; an already-created backup is retained. A repeat preview excludes repaired rows. Keep both JSON reports and the backup for the repair record.
+
+Repaired rows use `cost_source=gateway_backfill` (shown as **Earlier record** by the current dashboard). Reports omit key hashes and raw metadata. Decimal parsing preserves the digits in the export; it cannot recover precision already lost in the gateway's floating-point storage. No production repair runs automatically when this script is deployed.
+
+
 ## Infrastructure and total cost tracking
 
 **Settings → Spend** shows infrastructure, LLM, and combined USD costs for the
