@@ -10,8 +10,8 @@ aliases retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
 overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` setting
 to enable automatic pairing. The new-session picker shows the effective automatic
 choice and supports an explicit override. Explicitly
-selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents and
-Tool Loop. All configured models remain selectable with every harness. The configured
+selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents,
+Tool Loop and Pi. All configured models remain selectable with every harness. The configured
 `AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
 selected model and tool calls through the runtime's native API (Responses for
 Codex, Messages for Claude); selecting it does not establish provider compatibility.
@@ -149,7 +149,7 @@ Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode uses
 LiteLLM's public resume API and its persisted native files. Missing, corrupt or
 incompatible state selects a fresh session before inference. An ambiguous SDK
 failure never automatically retries the task. Interrupted turns, intermediate
-goal iterations, Codex, Deep Agents and Tool Loop retain public-journal recovery;
+goal iterations, Codex, Deep Agents, Tool Loop and Pi retain public-journal recovery;
 Hermes retains its existing separate history flow.
 
 Malformed native state and confirmed context recovery can publish a replacement
@@ -352,7 +352,7 @@ Read the repository
 ```
 
 The task line is optional. A harness-only command starts no compute. Other IDs
-are `hermes`, `codex`, `opencode`, `deepagents` and `tool-loop`.
+are `hermes`, `codex`, `opencode`, `deepagents`, `tool-loop` and `pi`.
 
 ## Other runtimes and extension
 
@@ -362,7 +362,7 @@ choices, Slack selection and adapter creation. Each adapter implements
 `sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
 checkpointing and delivery.
 
-OpenCode, Deep Agents and Tool Loop use `litellm.aagent_session`, or
+OpenCode, Deep Agents, Tool Loop and Pi use `litellm.aagent_session`, or
 `litellm.aagent_resume` for eligible OpenCode conversations, with the named
 bindings in `sandbox/harness_bindings.py`. The pinned beta source
 is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not

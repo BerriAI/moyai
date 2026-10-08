@@ -37,7 +37,7 @@ test('effective defaults follow server configuration, including deployment overr
 });
 test('every harness offers all configured models even with stale provider metadata',()=>{
   const c=setup();assert.equal(c.harnessModels('hermes').length,2);
-  for(const harness of ['hermes','claude-agent-sdk','codex','opencode','deepagents','tool-loop']){
+  for(const harness of ['hermes','claude-agent-sdk','codex','opencode','deepagents','tool-loop','pi']){
     assert.equal(c.harnessModels(harness).length,2);
     const html=c.modelPicker('model','openai/gpt-6-astra',false,harness);
     assert.match(html,/Opus/);assert.match(html,/value="openai\/gpt-6-astra" selected/);

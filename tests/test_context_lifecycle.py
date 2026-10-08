@@ -112,7 +112,7 @@ def test_missing_checkpoint_context_stops_instead_of_forgetting_history(tmp_path
     assert not (tmp_path / 'context.sqlite3').exists()
 
 
-@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_durable_harness_starts_new_turn_with_unknown_tool_outcome(tmp_path, monkeypatch, harness):
     from sandbox.harness_registry import create_agent
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
@@ -208,7 +208,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     store.close()
 
 
-@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('outage', [False, True])
 def test_every_durable_harness_answers_with_full_tail_while_maintenance_pending(tmp_path, monkeypatch, harness, outage):
     from sandbox.harness_registry import create_agent

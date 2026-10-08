@@ -20,7 +20,7 @@ OPUS = 'anthropic/claude-opus-5-5'
 def test_session_harness_validation_persistence_and_idempotency(workspace, monkeypatch):
     app, client = workspace
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
-    assert len(client.get('/api/config').json()['harnesses']) == 6
+    assert len(client.get('/api/config').json()['harnesses']) == 7
     assert client.post('/api/runs', json={'prompt': 'bad choice', 'harness': 'unknown'}).status_code == 422
     assert client.post('/api/runs', json={'prompt': 'bad model', 'harness': 'claude-agent-sdk', 'model': 'unconfigured/model'}).status_code == 422
     body = {'prompt': 'SDK task', 'harness': 'claude-agent-sdk', 'model': OPUS, 'client_id': 'harness-test-1'}
@@ -56,7 +56,7 @@ def test_slack_harness_command_and_followups(slack_app):
     assert app.state.store.run(run['id'])['model'] == 'openai/gpt-6-astra'
 
 
-@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_slack_harness_with_initial_task(slack_app, harness):
     app, client, submitted, _ = slack_app
     app.state.settings.agent_model = 'custom-provider-alias'
@@ -415,13 +415,13 @@ def installed_litellm_runtime(monkeypatch):
     monkeypatch.setattr(Path, 'is_dir', lambda path: False if path == source else is_dir(path))
     monkeypatch.setattr(harness_dependencies.shutil, 'which', lambda name: '/prepared/bin/' + name)
     def version_only(command, **kwargs):
-        assert command == ['opencode', '--version'], 'Unexpected runtime install'
+        assert command[1:] == ['--version'] and command[0] in ('opencode', 'pi'), 'Unexpected runtime install'
         return SimpleNamespace(returncode=0, stdout='1.18.35\n')
     monkeypatch.setattr(harness_dependencies.subprocess, 'run', version_only)
     return harness_dependencies
 
 
-@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_ready_litellm_harness_does_not_require_codex(installed_litellm_runtime, monkeypatch, harness):
     from types import SimpleNamespace
     from sandbox.harness_registry import create_agent
@@ -477,7 +477,7 @@ def test_native_validation_and_image_entrypoint_require_codex(installed_litellm_
             agent.close()
 
 
-@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['hermes', 'claude-agent-sdk', 'codex', 'opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('model', [OPUS, 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3', 'custom-alias'])
 def test_all_litellm_harnesses_can_be_selected(workspace, monkeypatch, harness, model):
     app, client = workspace
@@ -497,7 +497,7 @@ def test_catalog_covers_upstream_harness_enum():
     assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE', 'CODEX'} == {h.name for h in litellm.Harness}
 
 
-@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('boundary', ['startup', 'later_stream'])
 def test_real_litellm_first_request_fence_retains_each_prompt(tmp_path, monkeypatch, harness, boundary):
     """Optional pinned SDK contract; inference is scripted locally, never external."""
@@ -520,17 +520,18 @@ def test_real_litellm_first_request_fence_retains_each_prompt(tmp_path, monkeypa
         pytest.importorskip('langchain_litellm')
         assert importlib.metadata.version('deepagents') == '0.7.22'
         assert importlib.metadata.version('langchain-litellm') == '0.11.0'
-    if harness == 'opencode':
-        if not shutil.which('opencode'):
-            pytest.skip('Pinned OpenCode binary is not installed')
-        assert runtime_version('opencode') == '1.18.35'
+    if harness in ('opencode', 'pi'):
+        if not shutil.which(harness):
+            pytest.skip('Pinned CLI binary is not installed')
+        assert runtime_version(harness) == {'opencode': '1.18.35', 'pi': '1.1.0'}[harness]
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'synthetic-only')
     monkeypatch.setattr(litellm_harness, 'prepare_runtime', lambda: None)
     monkeypatch.setattr(litellm_harness, 'prepare_binary', lambda binding: None)
     binding = litellm_harness.RUNTIME_BINDINGS[harness]
     monkeypatch.setitem(litellm_harness.RUNTIME_BINDINGS, harness, SimpleNamespace(
         sandbox_factory=binding.sandbox_factory, in_process=binding.in_process, instructions=binding.instructions,
-        options_factory=(lambda config: sdk.OpenCodeOptions()) if harness == 'opencode' else binding.options_factory,
+        options_factory=({'opencode': lambda config: sdk.OpenCodeOptions(), 'pi': lambda config: sdk.PiOptions()}
+            .get(harness, binding.options_factory)),
         tools=lambda cwd, config: []))
     requests, fences, native_ids = [], [], []
     session_factory = litellm.aagent_session
@@ -608,7 +609,7 @@ def test_real_litellm_first_request_fence_retains_each_prompt(tmp_path, monkeypa
         expected = ['ORIGINAL_TASK', 'FIRST_CORRECTION'] + (['SECOND_CORRECTION'] if boundary == 'later_stream' else [])
         assert all(marker in admitted_history for marker in expected)
         assert all(json.dumps(result['messages']).count(marker) == 1 for marker in expected)
-        if harness == 'opencode':
+        if harness in ('opencode', 'pi'):
             assert native_ids[0] is None and native_ids[1]
             assert all(value == native_ids[1] for value in native_ids[1:])
         assert not relay.model_failed and not relay.last_failure and not relay.last_error
@@ -692,7 +693,7 @@ def native_cli_runtime(tmp_path, monkeypatch):
         result = SimpleNamespace(stop_reason='done', text='Completed once')
         def __aiter__(self): return self
         async def __anext__(self): raise StopAsyncIteration
-    harness = SimpleNamespace(CODEX='codex', OPENCODE='opencode', DEEPAGENTS='deepagents', TOOL_LOOP='tool-loop')
+    harness = SimpleNamespace(CODEX='codex', OPENCODE='opencode', DEEPAGENTS='deepagents', TOOL_LOOP='tool-loop', PI='pi')
     api = SimpleNamespace(Harness=harness,
         aagent_session=lambda value, **kwargs: Session(value, resumed=False, **kwargs),
         aagent_resume=lambda value, **kwargs: Session(value, resumed=True, **kwargs))
@@ -733,7 +734,7 @@ def native_cli_runtime(tmp_path, monkeypatch):
     store.close()
 
 
-@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('arrival', ['boundary', 'final'])
 def test_litellm_corrections_keep_session_and_tool_receipts(native_cli_runtime, harness, arrival):
     runtime = native_cli_runtime
@@ -812,7 +813,7 @@ def test_litellm_delayed_model_request_cannot_fence_replacement_stream(native_cl
         agent.close()
 
 
-@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 @pytest.mark.parametrize('correction', [False, True])
 def test_litellm_completed_answer_survives_expired_rotation(native_cli_runtime, harness, correction):
     from sandbox.continuation import RotationDeadline

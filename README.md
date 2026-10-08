@@ -21,7 +21,7 @@ continue through the agent normally.
   <img src="docs/assets/harnesses.png" alt="Supported harnesses: Claude Agent SDK, Codex, Hermes, OpenCode, Deep Agents, and Tool Loop" width="100%">
 </p>
 
-New sessions automatically use **Codex SDK** for `openai/` models and **Claude Agent SDK** for `anthropic/` models, including new model versions. Other model prefixes fall back to Claude Agent SDK. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, or Tool Loop**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
+New sessions automatically use **Codex SDK** for `openai/` models and **Claude Agent SDK** for `anthropic/` models, including new model versions. Other model prefixes fall back to Claude Agent SDK. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, Tool Loop, or Pi**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
 
 GPT-6 Astra (`openai/gpt-6-astra`) uses [Ultrafast mode](https://docs.litellm.ai/docs/providers/openai/ultrafast) for Responses API requests, including the default Codex harness. This requires upstream Ultrafast access and uses its pricing and rate limits. Messages, Chat Completions, and context summaries keep their existing processing mode.
 
