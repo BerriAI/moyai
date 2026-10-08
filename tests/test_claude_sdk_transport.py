@@ -17,6 +17,172 @@ from sandbox.context_store import ContextStore
 from test_workspace import workspace as broker_workspace
 
 
+def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
+    """Real SDK/MCP recovery proof, also callable by the local recording demo."""
+    from sandbox.broker_relay import BrokerRelay
+    from sandbox.broker_transport import unseal
+    from sandbox.transport_recovery import recovery_marker, validate_recovery
+
+    capability = 'recovery-fixture-capability'
+    request_id = 'render-recovery-request-502'
+    receipt = 'publication-receipt-001'
+    effects = tmp_path / 'publications.txt'
+    calls, requests, failures, native_actions, diagnostics = [], [], [], [], []
+    restored = False
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+
+        def reply(self, value, status=200, content_type='application/json', headers=None):
+            body = value if isinstance(value, bytes) else json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == '/context/window':
+                return self.reply({'input_budget': 200_000})
+            assert self.path == '/tools'
+            self.reply([{'name': 'publish_fixture', 'description': 'Publish one synthetic fixture record.',
+                         'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
+
+        def do_POST(self):
+            assert self.headers['Authorization'] == 'Bearer ' + capability
+            body = self.rfile.read(int(self.headers['Content-Length']))
+            data = json.loads(unseal(capability, self.path, body))
+            if self.path == '/context/maintenance':
+                return self.reply({})
+            if self.path == '/context/native':
+                native_actions.append(data['action'])
+                return self.reply({'lease': data['lease'], 'state': None, 'reason': 'fresh'})
+            if self.path == '/tools/call':
+                assert data == {'name': 'publish_fixture', 'arguments': {}}
+                calls.append(data)
+                with effects.open('a') as handle:
+                    handle.write(receipt + '\n')
+                progress('Tool completed: one publication; receipt saved.')
+                return self.reply({'receipt': receipt})
+            assert self.path == '/v1/messages'
+            requests.append(data)
+            if calls and not restored:
+                failures.append(True)
+                progress('Injected model HTTP 502; request ID: ' + request_id)
+                return self.reply(b'<html>Cloud edge unavailable</html>', status=502,
+                    content_type='text/html', headers={'X-Request-ID': request_id})
+            if restored:
+                assert receipt in json.dumps(data['messages'])
+                assert 'Do not publish twice' in json.dumps(data['messages'])
+                block = {'type': 'text', 'text': 'Recovered from the saved publication receipt.'}
+            elif any(tool['name'] == 'mcp__moyai__publish_fixture' for tool in data['tools']):
+                block = {'type': 'tool_use', 'id': 'publish_once', 'name': 'mcp__moyai__publish_fixture', 'input': {}}
+            else:
+                block = {'type': 'tool_use', 'id': 'find_publication', 'name': 'ToolSearch',
+                         'input': {'query': 'select:mcp__moyai__publish_fixture', 'max_results': 1}}
+            text = block['type'] == 'text'
+            message = {'id': 'msg_' + str(len(requests)), 'type': 'message', 'role': 'assistant',
+                       'model': 'claude-sonnet-4-5', 'content': [block],
+                       'stop_reason': 'end_turn' if text else 'tool_use', 'stop_sequence': None,
+                       'usage': {'input_tokens': 50, 'output_tokens': 10}}
+            if not data.get('stream'):
+                return self.reply(message)
+            frames = [dict(type='message_start', message={**message, 'content': [], 'stop_reason': None}),
+                      dict(type='content_block_start', index=0,
+                           content_block={'type': 'text', 'text': ''} if text else {**block, 'input': {}}),
+                      dict(type='content_block_delta', index=0,
+                           delta={'type': 'text_delta', 'text': block['text']} if text else
+                                 {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}),
+                      dict(type='content_block_stop', index=0),
+                      dict(type='message_delta', delta={'stop_reason': message['stop_reason'], 'stop_sequence': None},
+                           usage={'output_tokens': 10}),
+                      dict(type='message_stop')]
+            self.reply(''.join('event: ' + frame['type'] + '\ndata: ' + json.dumps(frame) + '\n\n'
+                              for frame in frames).encode(), content_type='text/event-stream')
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
+    workspace, session = tmp_path / 'workspace', tmp_path / 'session'
+    workspace.mkdir()
+    session.mkdir()
+    store = ContextStore(session / 'context.sqlite3', 'transport-recovery')
+    store.initialize([])
+    relay, agent = None, None
+
+    def start_agent(marker=None):
+        relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', capability,
+                            report_error=diagnostics.append).start()
+        agent = ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 4,
+                                 'history_reference_dir': str(store.path.parent),
+                                 **({'transport_recovery': marker, 'continuation': True} if marker else {})},
+            relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
+            activity=SimpleNamespace(start=lambda *args: None, complete=lambda *args: None, commentary=lambda text: None),
+            step=lambda: None, cwd=str(workspace), definition=None, context_store=store)
+        return relay, agent
+
+    try:
+        relay, agent = start_agent()
+        result = agent.run_conversation('Publish the fixture. Do not publish twice.', conversation_history=[],
+                                        system_message='Transport recovery fixture.')
+        assert result['failed'] and not result['completed']
+        assert effects.read_text().splitlines() == [receipt]
+        assert not agent.journal.pending and not store.pending
+        assert failures == [True], 'The SDK or relay must not resubmit the failed model request.'
+        marker = recovery_marker(agent, result)
+        assert marker and marker['checkpoint'] == store.checkpoint()
+        assert marker['failure']['request_ids']['x-request-id'] == request_id
+        assert marker['failure']['http_status'] == 502
+        assert marker['failure']['response_started'] is False
+        assert diagnostics == [marker['failure']]
+        assert capability not in json.dumps(diagnostics)
+        failed_request_count = len(requests)
+        agent.close()
+        agent = None
+        relay.close()
+        relay = None
+        store.close()
+        cold = tmp_path / 'cold-session'
+        cold.mkdir()
+        shutil.copy2(session / 'context.sqlite3', cold / 'context.sqlite3')
+        store = ContextStore(cold / 'context.sqlite3', 'transport-recovery')
+        validate_recovery(store, marker)
+        native_action_count = len(native_actions)
+        progress('Cold checkpoint restored and verified. Starting a fresh SDK from saved receipts.')
+        restored = True
+        relay, agent = start_agent(marker)
+        result = agent.run_conversation('Continue the unfinished task from its saved receipts. Do not publish twice.',
+                                        conversation_history=[], system_message='Transport recovery fixture.')
+        assert result['completed'], result['final_response']
+        assert len(requests) == failed_request_count + 1
+        assert calls == [{'name': 'publish_fixture', 'arguments': {}}]
+        assert effects.read_text().splitlines() == [receipt]
+        assert native_actions[native_action_count] == 'restart'
+        assert not agent.journal.pending and not store.pending
+        progress('Recovered successfully. Publication count: 1; no completed action repeated.')
+        return {'request_id': request_id, 'http_status': marker['failure']['http_status'],
+                'tool_executions': len(calls), 'failed_requests': len(failures), 'answer': result['final_response']}
+    finally:
+        if agent is not None:
+            agent.close()
+        if relay is not None:
+            relay.close()
+        store.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_real_sdk_recovers_broker_failure_from_cold_tool_receipts(tmp_path, monkeypatch):
+    broker_recovery_case(tmp_path, monkeypatch)
+
+
 @pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending', 'native', 'native-pressure', 'native-corrupt'],
                          ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool', 'native-resume', 'native-pressure', 'native-corrupt'])
 @pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3'])

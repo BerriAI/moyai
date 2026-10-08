@@ -21,6 +21,50 @@ separate recovery concern. Compare Render memory with process-start timestamps
 when investigating a broker failure, rather than attributing every interruption
 to a model or tool error.
 
+## Cloud request failures and recovery
+
+The sandbox emits an `error` event with `data.phase=broker_failure`. Its structured
+fields preserve HTTP status, original upstream status, client request ID,
+allowlisted response IDs (including Render and model ledger IDs), exception and
+underlying exception types, numeric errno, request timing, and partial-response
+state. Diagnostic records exclude request/response bodies, capability values,
+full URLs and arbitrary headers. Provider error bodies are not diagnostic logs.
+
+Search Render application logs for the event's `request_id`. Broker requests log
+`broker_request_started` and `broker_request_finished` or `broker_request_failed`,
+including the response status, byte count and elapsed time. The same generated ID
+travels in `X-Moyai-Request-ID`. Use the response's Render ID to correlate with edge
+request logs. An edge failure without an application start record narrows the
+failure boundary; it does not establish a particular proxy reset or timeout cause.
+
+With Temporal enabled, a transient model failure before any response reaches the
+SDK can continue automatically after the SDK exits, current tool receipts settle,
+and the filesystem checkpoint succeeds. Recovery retains the original user turn,
+requester, model and budgets. It uses up to three continuations, delayed by 2, 4
+and 8 seconds using Temporal timers. The restored public journal must match the
+saved epoch and sequence before a fresh SDK invocation starts. Completed calls
+remain receipts; the orchestrator does not replay them or resend the failed POST.
+
+Partial streams, pending tool calls, uncertain tool transport, permanent upstream
+rejections, unknown process outcomes and failed checkpoints do not qualify. An
+upstream 401/403 wrapped in a gateway 502 remains terminal. Cancellation and the
+original task timeout still apply. Hermes receives diagnostics but its legacy
+history does not support this automatic recovery protocol. Arbitrary external
+writes and inference billing do not have a generic exactly-once guarantee; an
+accepted inference may still be billed after its connection is lost.
+
+Run the local fault-injection proof with:
+
+```sh
+uv run pytest -q --tb=line tests/test_claude_sdk_transport.py::test_real_sdk_recovers_broker_failure_from_cold_tool_receipts
+uv run pytest -q --tb=line tests/test_durable.py tests/test_temporal_integration.py
+```
+
+The first test uses the real bundled Claude SDK, encrypted broker, MCP and SQLite,
+with local model responses and an injected HTTP 502. One synthetic publication
+survives a cold restore and completes with its action count still one. Temporal
+tests use a real local server and simulated sandbox provisioning.
+
 ## Agent Traces in LiteLLM
 
 Moyai can send the same sanitized spans to **LiteLLM Lens, Raindrop, Langfuse,

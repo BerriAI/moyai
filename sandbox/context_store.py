@@ -73,6 +73,11 @@ class ContextStore:
     def state(self):
         return dict(self.db.execute('SELECT * FROM state WHERE id=1').fetchone())
 
+    def checkpoint(self):
+        with self.lock:
+            return {'epoch': self.state()['epoch'],
+                    'seq': self.db.execute('SELECT coalesce(max(seq),0) FROM journal').fetchone()[0]}
+
     @property
     def has_history(self):
         return self.db.execute('SELECT 1 FROM journal LIMIT 1').fetchone() is not None

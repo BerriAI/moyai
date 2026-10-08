@@ -139,6 +139,111 @@ async def drive(manager, run_id, *, phase='idle', steps=40):
     pytest.fail(f'Never reached {phase}: {manager.state(run_id)}')
 
 
+def transport_failure_report():
+    return {'state': 'done', 'events': [], 'cursor': 0, 'exit_code': 75, 'final': {
+        'kind': 'final', 'message': 'Saving before reconnecting.', 'completed': False,
+        'transport_retry': {'version': 1, 'checkpoint': {'epoch': 'test-epoch', 'seq': 3},
+            'failure': {'version': 1, 'route': '/v1/messages', 'http_status': 502,
+                        'transient': True, 'response_started': False, 'request_id': 'request-fixture'}}}}
+
+
+@pytest.mark.parametrize('lost_machine', [False, True])
+async def test_transport_recovery_checkpoints_and_resumes_same_turn_after_worker_loss(durable, lost_machine):
+    manager, cloud, run_id = durable
+    cloud.saving_before_answer = False
+    original_command = cloud.command
+    async def outage(machine, action, directory, value, **kwargs):
+        if action == 'read' and len(cloud.launches) == 1:
+            return json.dumps(transport_failure_report())
+        return await original_command(machine, action, directory, value, **kwargs)
+    cloud.command = outage
+    manager.command = outage
+    await drive(manager, run_id, phase='transport_wait')
+    state = manager.state(run_id)
+    assert cloud.snapshots == 1 and len(cloud.launches) == 1
+    assert manager.store.run(run_id)['status'] == 'reconnecting'
+    assert not [m for m in manager.store.messages(run_id) if m['role'] == 'assistant']
+    assert manager.store.messages(run_id)[0]['status'] == 'running'
+    first_message, checkpoint = state['message_id'], state['snapshot_id']
+    manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    wait = await manager.advance(run_id)
+    assert 0 < wait['retry_seconds'] <= 2 and manager.state(run_id)['transport_attempt'] == 1
+    if lost_machine:
+        cloud.machines[0].alive = False
+    state = manager.state(run_id)
+    state['retry_at'] = 0
+    manager.save(run_id, state)
+    await drive(manager, run_id)
+    assert len(cloud.launches) == 2 and cloud.launches[0] != cloud.launches[1]
+    assert manager.state(run_id)['message_id'] == first_message
+    spec = cloud.machines[-1].spec
+    assert len(cloud.machines) == (2 if lost_machine else 1)
+    assert spec['continuation'] is True and spec['prompt'] == 'Do the task'
+    assert spec['transport_recovery'] == transport_failure_report()['final']['transport_retry']
+    assert checkpoint == 'im-1' and cloud.snapshots == 2
+    assert [m['content'] for m in manager.store.messages(run_id) if m['role'] == 'assistant'] == ['Saved answer']
+
+
+@pytest.mark.parametrize('condition', ['stop', 'save_failure', 'partial_response', 'unknown_process', 'exhausted'])
+async def test_transport_recovery_never_relaunches_without_safe_checkpoint(durable, condition):
+    manager, cloud, run_id = durable
+    cloud.saving_before_answer = False
+    command = cloud.command
+    async def outage(machine, action, directory, value, **kwargs):
+        if action == 'read':
+            report = transport_failure_report()
+            if condition == 'partial_response':
+                report['final']['transport_retry']['failure']['response_started'] = True
+            if condition == 'unknown_process':
+                return json.dumps({'state': 'uncertain', 'events': [], 'cursor': 0})
+            return json.dumps(report)
+        return await command(machine, action, directory, value, **kwargs)
+    manager.command = outage
+    await drive(manager, run_id, phase='monitor')
+    if condition == 'save_failure':
+        cloud.save_failures = 3
+    if condition == 'exhausted':
+        state = manager.state(run_id)
+        state['transport_attempt'] = 3
+        manager.save(run_id, state)
+    for _ in range(15):
+        try:
+            await manager.advance(run_id)
+        except TimeoutError:
+            pass
+        if manager.state(run_id).get('phase') == 'transport_wait':
+            assert condition == 'stop'
+            manager.store.update_run(run_id, status='stopping')
+        if manager.state(run_id).get('phase') == 'idle':
+            break
+    assert manager.state(run_id)['phase'] == 'idle'
+    assert len(cloud.launches) == 1
+    assert manager.store.run(run_id)['status'] in {'failed', 'cancelled', 'interrupted'}
+
+
+async def test_transport_recovery_bound_survives_segments_and_preserves_queued_input(durable):
+    manager, cloud, run_id = durable
+    cloud.saving_before_answer = False
+    command = cloud.command
+    async def outage(machine, action, directory, value, **kwargs):
+        return json.dumps(transport_failure_report()) if action == 'read' else await command(machine, action, directory, value, **kwargs)
+    cloud.command = outage
+    manager.command = outage
+    await drive(manager, run_id, phase='transport_wait')
+    manager.store.enqueue_message(run_id, 'Keep the original constraints', 'queued-correction')
+    for attempt in range(1, 4):
+        state = manager.state(run_id)
+        assert state['transport_attempt'] == attempt
+        assert manager.store.has_queued_messages(run_id)
+        state['retry_at'] = 0
+        manager.save(run_id, state)
+        manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+        await drive(manager, run_id, phase='transport_wait' if attempt < 3 else 'idle')
+    assert len(cloud.launches) == 4  # Original invocation plus three bounded continuations.
+    assert manager.store.run(run_id)['status'] == 'failed'
+    assert 'three continuation attempts' in manager.store.run(run_id)['error']
+
+
 async def test_image_build_failure_finishes_once_without_exposing_provider_logs(durable, monkeypatch):
     manager, cloud, run_id = durable
     attempts = 0

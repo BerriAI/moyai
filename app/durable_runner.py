@@ -16,6 +16,7 @@ from .environments import EnvironmentPending
 
 from .runner import RunManager, SAVE_WARNING, TERMINAL, safe_error_detail, refresh_sandbox_files
 from .security import digest
+from sandbox.transport_recovery import valid_retry
 
 
 class LostExecution(Exception):
@@ -84,12 +85,12 @@ class DurableRunner(RunManager):
             shutting_down = True
         elif state.get('computer_only') and phase in {'provision', 'install', 'waiting_environment'}:
             action, notice = 'pending', 'Waking your workspace. Your live computer will appear here.'
-        elif not state.get('computer_only') and phase in {'prepare', 'provision', 'install', 'launch', 'waiting_environment', 'startup_wait'}:
+        elif not state.get('computer_only') and phase in {'prepare', 'provision', 'install', 'launch', 'waiting_environment', 'startup_wait', 'transport_wait'}:
             starting = True
             notice = ('Preparing the workspace environment. The computer will appear when it is ready.'
                       if phase == 'waiting_environment' else
                       'Reconnecting workspace services. The computer will appear when they are ready.'
-                      if phase == 'startup_wait' else 'Starting your workspace. The computer will appear when it is ready.')
+                      if phase in {'startup_wait', 'transport_wait'} else 'Starting your workspace. The computer will appear when it is ready.')
         elif phase in {'waiting_children', 'waiting_credential'}:
             notice = ('This session is waiting for its agents. The computer will return when work resumes.'
                       if phase == 'waiting_children' else
@@ -233,6 +234,8 @@ class DurableRunner(RunManager):
             except LostExecution:
                 if ((state.get('reused_machine') and state['phase'] in {'prepare', 'install'})
                         or (state.get('startup_attempt') and state['phase'] == 'install'
+                            and not state.get('execution_started'))
+                        or (state.get('resume_transport') and state['phase'] == 'install'
                             and not state.get('execution_started'))):
                     # This new turn has not reached its launch boundary yet.
                     state.update(phase='provision', sandbox_id='', reused_machine=False)
@@ -427,6 +430,23 @@ class DurableRunner(RunManager):
                           **state['result']['startup_retry']})
         self.save(run_id, state)
 
+    def wait_for_transport(self, run_id, state):
+        # The process exited and its exact public receipts/files were saved.
+        # This counter belongs to the original user turn, not an SDK segment.
+        attempt = state.get('transport_attempt', 0) + 1
+        if attempt > 3:
+            self.fail(run_id, state, 'The cloud connection did not recover after three continuation attempts. '
+                      'Your request, completed tool receipts and error diagnostics are saved. '
+                      'No completed tool calls were automatically replayed.')
+            return
+        state.update(phase='transport_wait', transport_attempt=attempt, retry_at=time.time() + 2 ** attempt)
+        self.save(run_id, state)
+        self.running_status(run_id, 'reconnecting', '')
+        self.store.update_run(run_id, summary='', pending_result='')
+        self.store.event(run_id, 'status', 'Workspace saved. Reconnecting to continue from completed tool receipts.',
+                         {'activity_version': 1, 'phase': 'reconnecting', 'attempt': attempt,
+                          'request_id': state['result']['transport_retry']['failure'].get('request_id')})
+
     async def command(self, sandbox, *args, token=None):
         # Pass capabilities only in the exec environment, never in a persisted
         # task spec, command argument or Temporal payload. Reused machines have
@@ -492,6 +512,8 @@ class DurableRunner(RunManager):
                               'continuation': state['segment'] > 0})
             spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
             spec['chat_enabled'] = True
+            if state.get('resume_transport'):
+                spec['transport_recovery'] = state['resume_transport']
             if state.get('resume_group') and self.coordinator:
                 spec['agent_results'] = self.coordinator.results(run_id, state['resume_group'])
             state.pop('credential_delivery', None)
@@ -557,7 +579,7 @@ class DurableRunner(RunManager):
                         self.acknowledge_credential(run_id, state)
                     self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
                     state['result'] = {**report['final'], 'message_id': state['message_id']}
-                    if not state['result'].get('startup_retry'):
+                    if not state['result'].get('startup_retry') and not state['result'].get('transport_retry'):
                         self.receive_result(run_id, state['result'])
                 self.save(run_id, state)
                 if report['state'] == 'uncertain':
@@ -592,6 +614,25 @@ class DurableRunner(RunManager):
             for key in ('result', 'exit_code', 'last_error', 'save_attempts'):
                 state.pop(key, None)
             self.save(run_id, state)
+        elif phase == 'transport_wait':
+            self.running_status(run_id, 'reconnecting', '')
+            if (self.settings.run_timeout_seconds and
+                    time.time() - state['turn_started'] >= self.settings.run_timeout_seconds):
+                self.fail(run_id, state, 'This response reached its configured time limit while reconnecting. '
+                          'Completed work and error diagnostics are saved.')
+                return True
+            remaining = state['retry_at'] - time.time()
+            if remaining > 0:
+                return {'retry_seconds': remaining}
+            if time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds:
+                await self.cleanup(state, run_id)
+                state['sandbox_id'] = ''
+            state.update(phase='install' if state.get('sandbox_id') else 'provision',
+                         segment=state['segment'] + 1, cursor=0, execution_started=False,
+                         resume_transport=state['result']['transport_retry'])
+            for key in ('result', 'exit_code', 'last_error', 'save_attempts', 'startup_attempt', 'startup_deadline'):
+                state.pop(key, None)
+            self.save(run_id, state)
         elif phase == 'save':
             sandbox = await self.sandbox(state)
             result = state.get('result', {})
@@ -618,9 +659,16 @@ class DurableRunner(RunManager):
             with self.store.connect() as conn:
                 conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
                 conn.execute("UPDATE runs SET snapshot_id=?,checkpoint_error='',pending_result=? WHERE id=?",
-                             (snapshot.object_id, json.dumps(result), run_id))
+                             (snapshot.object_id, '' if result.get('transport_retry') else json.dumps(result), run_id))
         elif phase == 'checkpointed':
             result = state['result']
+            if result.get('transport_retry'):
+                if state['exit_code'] == 75 and valid_retry(result['transport_retry']) and not result.get('completed'):
+                    self.wait_for_transport(run_id, state)
+                else:
+                    self.fail(run_id, state, 'A safe cloud recovery could not be confirmed. '
+                              'Saved receipts and error diagnostics are preserved; no actions were replayed.')
+                return True
             continuing = result.get('continuation') and state['exit_code'] == 0
             steered = (state['exit_code'] == 0 and
                        self.message_queue.accepted(run_id, result.get('steer_message_id')))
@@ -655,6 +703,7 @@ class DurableRunner(RunManager):
                                  {'group_id': state['wait_group']})
                 self.save(run_id, state)
             elif continuing:
+                state.pop('resume_transport', None)
                 if time.time() - state['machine_started'] >= self.settings.sandbox_rotation_seconds:
                     await self.cleanup(state, run_id)
                     state.update(sandbox_id='', phase='provision')

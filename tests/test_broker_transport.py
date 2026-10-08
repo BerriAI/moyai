@@ -1,7 +1,11 @@
 import json
+import errno
+import socket
 import threading
 import time
 import urllib.error
+from contextlib import contextmanager
+from uuid import UUID
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,6 +23,140 @@ CODE = '''Repro: curl -s localhost:4100/openapi.json | python3 -c "import json,s
 Router already in sys.modules; check /v1/mcp/server/{server_id}/user-env-vars.
 Fix merged: https://github.com/BerriAI/litellm/pull/38416
 '''
+
+
+@contextmanager
+def diagnostic_relay(handler, *, remote=None):
+    server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    diagnostics = []
+    relay = BrokerRelay(remote or f'http://127.0.0.1:{server.server_port}', 'private-capability',
+                        report_error=diagnostics.append).start()
+    try:
+        with httpx.Client(base_url=relay.url, headers={'Authorization': 'Bearer private-capability'}, timeout=5) as client:
+            yield relay, client, diagnostics
+    finally:
+        relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_refused_connection_preserves_cause_type_and_errno_without_endpoint():
+    # Reserve a port until the test servers have bound their own ports, then
+    # close it so the relay encounters a real refused connection.
+    with socket.socket() as unavailable:
+        unavailable.bind(('127.0.0.1', 0))
+        endpoint = f'http://127.0.0.1:{unavailable.getsockname()[1]}/private-remote-path'
+        with diagnostic_relay(BaseHTTPRequestHandler, remote=endpoint) as (relay, client, diagnostics):
+            unavailable.close()
+            assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 502
+            saved = relay.last_failure
+            assert len(diagnostics) == 1 and saved == diagnostics[0]
+            assert saved['error_type'] == 'URLError' and saved['cause_type'] == 'ConnectionRefusedError'
+            assert saved['errno'] == errno.ECONNREFUSED
+            assert saved['route'] == '/v1/messages' and saved['transient']
+            assert 'private' not in json.dumps(saved) and '127.0.0.1' not in json.dumps(saved)
+
+
+def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
+    calls = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            calls.append(self.headers['X-Moyai-Request-ID'])
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(502)
+            self.send_header('Content-Type', 'text/html')
+            self.send_header('X-Request-ID', 'provider-123')
+            self.send_header('Rndr-Id', 'render-456')
+            self.send_header('X-Render-Request-ID', 'invalid value private-header')
+            self.send_header('X-Private', 'private-header')
+            self.end_headers()
+            self.wfile.write(b'<html>private-provider-body</html>')
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"tools":[]}')
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 502
+        assert len(diagnostics) == 1
+        saved = diagnostics[0]
+        assert saved == relay.last_failure
+        assert saved['request_id'] == UUID(calls[0]).hex
+        assert saved['request_ids'] == {'x-request-id': 'provider-123', 'rndr-id': 'render-456'}
+        assert saved['http_status'] == 502 and saved['upstream_status'] is None
+        assert saved['route'] == '/v1/messages' and saved['error_type'] == 'HTTPError'
+        assert saved['transient'] and not saved['response_started'] and not saved['uncertain_tool']
+        assert saved['response_bytes'] == len(b'<html>private-provider-body</html>')
+        assert 'private' not in json.dumps(saved)
+        assert client.get('/tools').status_code == 200
+        assert relay.last_failure == saved and relay.last_error
+        # The SDK may automatically retry 502; it must not resubmit inference.
+        assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 409
+        assert len(calls) == 1 and len(diagnostics) == 1
+
+
+@pytest.mark.parametrize('status,upstream,transient', [(502, 401, False), (502, 403, False),
+    (502, 429, True), (502, 503, True), (429, None, False), (425, None, True)])
+def test_failure_classification_uses_original_upstream_status(status, upstream, transient):
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(status)
+            if upstream:
+                self.send_header('X-Moyai-Upstream-Status', str(upstream))
+            self.send_header('X-Moyai-Model-Request-ID', 'ledger-id')
+            self.end_headers()
+            self.wfile.write(b'{"detail":"Model gateway rejected the request."}')
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.post('/v1/responses', json={}).status_code == status
+        assert relay.last_failure['upstream_status'] == upstream
+        assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
+        assert relay.last_failure['transient'] is transient
+
+
+@pytest.mark.parametrize('route,uncertain_tool', [('/v1/messages', False), ('/tools/call', True),
+    ('/credentials/materialize', True), ('/credentials/' + 'a' * 32 + '/v1/messages', True)])
+def test_dropped_connection_is_recorded_once_without_replaying_tools(route, uncertain_tool):
+    calls = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            calls.append(self.path)
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.close_connection = True
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.post(route, json={}).status_code == 502
+        assert len(calls) == len(diagnostics) == 1
+        saved = relay.last_failure
+        assert saved['error_type'] == 'RemoteDisconnected'
+        assert saved['http_status'] is None and saved['response_bytes'] == 0
+        assert saved['transient'] and not saved['response_started']
+        assert saved['uncertain_tool'] is uncertain_tool and relay.uncertain_tool is uncertain_tool
+
+
+def test_partial_stream_is_recorded_without_sending_another_http_status():
+    piece = b'event: message_start\ndata: {"partial":true}\n\n'
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Content-Length', str(len(piece) + 100))
+            self.send_header('X-Request-ID', 'partial-request')
+            self.end_headers()
+            self.wfile.write(piece)
+            self.close_connection = True
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        response = client.post('/v1/messages', json={})
+        assert response.status_code == 200 and response.content == piece
+        assert len(diagnostics) == 1
+        saved = relay.last_failure
+        assert saved['response_started'] and not saved['transient']
+        assert saved['response_bytes'] == len(piece) and saved['error_type'] == 'IncompleteRead'
+        assert saved['request_ids'] == {'x-request-id': 'partial-request'}
+        assert client.post('/v1/messages', json={}).status_code == 409
 
 
 def test_compaction_waits_for_unbilled_admission_with_fresh_envelopes(monkeypatch):

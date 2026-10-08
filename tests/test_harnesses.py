@@ -233,8 +233,10 @@ def test_native_images_are_not_translated():
     assert result['messages'] == messages
 
 
-def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch):
+@pytest.mark.parametrize('transport_failure', [False, True])
+def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch, transport_failure):
     from types import SimpleNamespace
+    from threading import Event
     from sandbox import agent, claude_harness
     events = []
     relay = SimpleNamespace(url='http://test', control=lambda body=None: {}, last_error='',
@@ -243,9 +245,18 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
         def __init__(self, **kwargs):
             assert kwargs['spec']['harness'] == 'claude-agent-sdk'
             self.context_store = kwargs['context_store']
+            self.context = SimpleNamespace(relay=relay)
+            self.stopped = Event()
         def run_conversation(self, prompt, **kwargs):
             from sandbox.harness_agent import TurnJournal
-            journal = TurnJournal([], prompt, self.context_store)
+            journal = self.journal = TurnJournal([], prompt, self.context_store)
+            if transport_failure:
+                journal.tool_started('write-once', 'Write', {})
+                journal.tool_finished('write-once', 'Saved receipt')
+                relay.last_error = 'HTTP 502'
+                relay.last_failure = {'version': 1, 'route': '/v1/messages', 'http_status': 502,
+                                      'transient': True, 'response_started': False, 'request_id': 'failure-fixture'}
+                return {'failed': True, 'messages': journal.messages}
             journal.finish('SDK result')
             return {'completed': True, 'final_response': 'SDK result',
                     'messages': journal.messages}
@@ -264,7 +275,17 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     monkeypatch.chdir(tmp_path)
     spec = {'run_id': 'harness-test', 'harness': 'claude-agent-sdk', 'broker_url': 'http://test', 'repo_url': '', 'model': OPUS,
             'prompt': 'test request', 'chat_enabled': True, 'max_iterations': 2, 'timeout': None}
-    assert agent.run_agent(spec, relay) == 0
+    assert agent.run_agent(spec, relay) == (75 if transport_failure else 0)
+    if transport_failure:
+        final = next(e[2] for e in events if e[0] == 'final')
+        assert not final['completed'] and not final['continuation']
+        assert final['transport_retry']['failure']['request_id'] == 'failure-fixture'
+        from sandbox.context_store import ContextStore
+        saved = ContextStore(tmp_path / 'session/context.sqlite3', 'harness-test')
+        assert saved.checkpoint() == final['transport_retry']['checkpoint']
+        assert 'Saved receipt' in saved.history()[0]['content'] and not saved.pending
+        saved.close()
+        return
     assert next(e for e in events if e[0] == 'final')[1:] == ('SDK result', {
         'completed': True, 'continuation': False, 'wait_group': '', 'wait_credential': '',
         'steer_message_id': None, 'steering_applied': []})

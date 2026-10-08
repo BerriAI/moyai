@@ -11,6 +11,83 @@ from app.security import digest
 from test_workspace import workspace
 
 
+@pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
+@pytest.mark.parametrize('upstream_status', [401, 403, 429, 503])
+def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, monkeypatch, caplog, route, upstream_status):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(lambda req: httpx.Response(upstream_status,
+            headers={'x-request-id': 'provider-123', 'x-litellm-call-id': 'gateway-456', 'x-private': 'private-header'},
+            json={'error': {'message': 'private-provider-body'}})), **kw))
+    run = app.state.store.create_run('private-prompt', '', 'modal', [])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('private-capability'))
+    correlation = '1' * 32
+    caplog.set_level('INFO', logger='uvicorn.error.moyai.broker')
+    response = client.post(f"/broker/{run['id']}/v1/{route}?secret=private-query",
+        headers={'Authorization': 'Bearer private-capability', 'X-Moyai-Request-ID': correlation},
+        json={'messages': [{'role': 'user', 'content': 'private-prompt'}], 'input': [], 'stream': False})
+    assert response.status_code == 502
+    assert response.headers['x-moyai-upstream-status'] == str(upstream_status)
+    assert response.headers['x-moyai-request-id'] == correlation
+    assert response.headers['x-request-id'] == 'provider-123'
+    assert response.headers['x-litellm-call-id'] == 'gateway-456'
+    row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
+    assert response.headers['x-moyai-model-request-id'] == row['id']
+    records = [json.loads(record.message) for record in caplog.records if record.name == 'uvicorn.error.moyai.broker']
+    assert [record['event'] for record in records] == ['broker_request_started', 'broker_request_failed']
+    assert all(record['request_id'] == correlation for record in records)
+    assert records[-1]['upstream_status'] == upstream_status
+    assert records[-1]['request_ids']['x-moyai-model-request-id'] == row['id']
+    assert 'private' not in json.dumps(records)
+
+
+@pytest.mark.parametrize('route', ['messages', 'chat/completions'])
+def test_gateway_network_failure_keeps_exception_type_without_exception_text(workspace, monkeypatch, caplog, route):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    actual = httpx.AsyncClient
+    def unavailable(request):
+        raise httpx.ReadTimeout('private-url-and-token', request=request)
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(unavailable), **kw))
+    run = app.state.store.create_run('network test', '', 'modal', [])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    caplog.set_level('INFO', logger='uvicorn.error.moyai.broker')
+    response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer cap'},
+                           json={'messages': [], 'stream': False})
+    assert response.status_code == 502
+    assert response.headers['x-moyai-upstream-error-type'] == 'ReadTimeout'
+    row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
+    assert response.headers['x-moyai-model-request-id'] == row['id']
+    records = [json.loads(record.message) for record in caplog.records if record.name == 'uvicorn.error.moyai.broker']
+    assert records[-1]['upstream_error_type'] == 'ReadTimeout'
+    assert 'private' not in json.dumps(records)
+
+
+async def test_broker_diagnostics_capture_partial_stream_failure(caplog):
+    from app.broker_diagnostics import BrokerDiagnosticsMiddleware
+    async def app(scope, receive, send):
+        await send({'type': 'http.response.start', 'status': 200, 'headers': []})
+        await send({'type': 'http.response.body', 'body': b'partial', 'more_body': True})
+        raise httpx.ReadError('private-response-body')
+    replies = []
+    async def send(message):
+        replies.append(message)
+    caplog.set_level('INFO', logger='uvicorn.error.moyai.broker')
+    scope = {'type': 'http', 'path': '/broker/' + 'a' * 32 + '/v1/messages', 'method': 'POST',
+             'headers': [(b'x-moyai-request-id', b'invalid secret')], 'query_string': b'private-query'}
+    with pytest.raises(httpx.ReadError):
+        await BrokerDiagnosticsMiddleware(app)(scope, None, send)
+    records = [json.loads(record.message) for record in caplog.records if record.name == 'uvicorn.error.moyai.broker']
+    assert len(records) == 2 and records[-1]['event'] == 'broker_request_failed'
+    assert records[-1]['http_status'] == 200 and records[-1]['response_started']
+    assert records[-1]['response_bytes'] == 7 and records[-1]['error_type'] == 'ReadError'
+    assert len(records[-1]['request_id']) == 32
+    assert 'private' not in json.dumps(records) and 'secret' not in json.dumps(records)
+
+
 def test_native_gateway_preserves_discovered_tool_references(workspace, monkeypatch):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'

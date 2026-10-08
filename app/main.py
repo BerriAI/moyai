@@ -29,6 +29,7 @@ from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
 from .access_logging import configure_access_logging
+from .broker_diagnostics import BrokerDiagnosticsMiddleware, upstream_headers
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
@@ -286,6 +287,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
+    app.add_middleware(BrokerDiagnosticsMiddleware)
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
         setattr(app.state, key, value)
 
@@ -1057,7 +1059,8 @@ def create_app(settings: Settings | None = None):
                         if provider_context_rejection(upstream.status_code, raw_error):
                             store.event(run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
                             raise ContextPressure(checked_budget.public())
-                        raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.')
+                        raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.',
+                                            headers=upstream_headers(request_id, upstream))
                     # Bound transport memory independently of model token limits.
                     raw_response = bytearray()
                     async for chunk in upstream.aiter_bytes():
@@ -1070,8 +1073,9 @@ def create_app(settings: Settings | None = None):
                         raise HTTPException(502, 'Model gateway returned an invalid completion.')
                     status = 'completed'
                     trace_response = json.loads(raw_response)
-            except httpx.HTTPError:
-                raise HTTPException(502, 'Model gateway could not be reached.')
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, 'Model gateway could not be reached.',
+                                    headers=upstream_headers(request_id, error=exc)) from None
             except asyncio.CancelledError:
                 status = 'interrupted'
                 raise
@@ -1091,8 +1095,8 @@ def create_app(settings: Settings | None = None):
                     if store.run(run_id)['status'] not in {'running', 'reconnecting', 'awaiting_approval'}:
                         break
                     yield chunk
-            return StreamingResponse(relay(), media_type='text/event-stream')
-        return JSONResponse(value)
+            return StreamingResponse(relay(), media_type='text/event-stream', headers=upstream_headers(request_id, upstream))
+        return JSONResponse(value, headers=upstream_headers(request_id, upstream))
 
     @app.get("/")
     async def index():

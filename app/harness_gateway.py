@@ -14,6 +14,7 @@ from fastapi.responses import Response, StreamingResponse, JSONResponse
 from .spend import UsageCapture
 from .context_compaction import compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
+from .broker_diagnostics import upstream_headers
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -282,7 +283,8 @@ class HarnessGateway:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
                     raise SummaryFailure('upstream_unavailable' if transient else 'upstream_rejected',
                                          retryable=transient, transient=transient)
-                raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}).')
+                raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}).',
+                                    headers=upstream_headers(request_id, upstream))
             if not capture.streaming:
                 raw = bytearray()
                 async for chunk in upstream.aiter_bytes():
@@ -293,17 +295,19 @@ class HarnessGateway:
                 capture.finish()
                 result = (JSONResponse({**compaction_result(raw, body.get('summary_bytes', 12_000)),
                                        'through_seq': body['entries'][-1]['seq']})
-                          if compact else Response(bytes(raw), media_type='application/json'))
+                          if compact else Response(bytes(raw), media_type='application/json',
+                                                   headers=upstream_headers(request_id, upstream)))
                 status = 'completed' if capture.done and not capture.failed else 'failed'
                 await finish()
                 return result
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
             await finish()
             if compact:
                 error = SummaryFailure('gateway_unreachable', transient=True)
                 error.request_id = request_id
                 raise error from None
-            raise HTTPException(502, 'Model gateway could not be reached.') from None
+            raise HTTPException(502, 'Model gateway could not be reached.',
+                                headers=upstream_headers(request_id, error=exc)) from None
         except SummaryFailure as exc:
             exc.request_id = request_id
             await finish()
@@ -332,4 +336,4 @@ class HarnessGateway:
                 raise
             finally:
                 await finish()
-        return StreamingResponse(stream(), media_type='text/event-stream')
+        return StreamingResponse(stream(), media_type='text/event-stream', headers=upstream_headers(request_id, upstream))

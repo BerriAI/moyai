@@ -198,3 +198,66 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             if successor:
                 await successor.shutdown()
             await manager.shutdown()
+
+
+async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable):
+    from test_durable import transport_failure_report
+    manager, cloud, run_id = durable
+    cloud.saving_before_answer = False
+    command = cloud.command
+    failure = transport_failure_report()
+    failed_directory = None
+
+    async def model_outage(machine, action, directory, value, **kwargs):
+        nonlocal failed_directory
+        if action == 'start' and failed_directory is None:
+            failed_directory = directory
+        if action == 'read' and directory == failed_directory:
+            return json.dumps(failure)
+        return await command(machine, action, directory, value, **kwargs)
+
+    manager.command = model_outage
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            return env.client
+        manager.connect_temporal = connect
+        successor = None
+        try:
+            await manager.recover()
+            await eventually(lambda: manager.state(run_id).get('phase') == 'transport_wait', seconds=25)
+            first_message = manager.state(run_id)['message_id']
+            checkpoint = manager.state(run_id)['snapshot_id']
+            assert checkpoint and cloud.snapshots == 1
+            assert not [m for m in manager.store.messages(run_id) if m['role'] == 'assistant']
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            # Let the activity return its persisted backoff so this exercises
+            # a real Temporal timer, not only a restart between activities.
+            async with asyncio.timeout(10):
+                while True:
+                    history = await handle.fetch_history()
+                    if any(event.HasField('timer_started_event_attributes') for event in history.events):
+                        break
+                    await asyncio.sleep(0.05)
+            await manager.shutdown()
+            assert cloud.machines[0].alive
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.command = model_outage
+            successor.connect_temporal = connect
+            await successor.recover()
+            await eventually(lambda: successor.store.run(run_id)['status'] == 'idle', seconds=30)
+            assert successor.state(run_id)['message_id'] == first_message
+            assert len(cloud.launches) == 2 and len(cloud.machines) == 1
+            assert cloud.launches[0] == failed_directory and cloud.launches[1] != failed_directory
+            assert cloud.machines[0].spec['continuation'] is True
+            assert cloud.machines[0].spec['transport_recovery'] == failure['final']['transport_retry']
+            assert [m['content'] for m in successor.store.messages(run_id) if m['role'] == 'assistant'] == ['Saved answer']
+            history = await handle.fetch_history()
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
+            history_text = history.to_json()
+            assert not any(token in history_text for token in cloud.launch_tokens)
+            assert 'transport_retry' not in history_text
+            await handle.terminate('Integration test complete')
+        finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()

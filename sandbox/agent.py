@@ -24,6 +24,7 @@ try:
     from .goals import GoalLoop, run_goal_conversation
     from .hermes_compat import apply_hermes_patches
     from .native_session import native_storage
+    from .transport_recovery import recovery_marker, validate_recovery
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -39,6 +40,7 @@ except ImportError:
     from goals import GoalLoop, run_goal_conversation
     from hermes_compat import apply_hermes_patches
     from native_session import native_storage
+    from transport_recovery import recovery_marker, validate_recovery
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -62,7 +64,9 @@ def conversation_prompt(spec, *, has_history=False):
 def run(spec):
     global ACTIVITY_INPUT_ID
     ACTIVITY_INPUT_ID = spec.get('activity_input_id')
-    relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting).start()
+    relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting,
+        report_error=lambda failure: emit('error', 'Cloud request failed; transport diagnostics saved.',
+            {'activity_version': 1, 'phase': 'broker_failure', **failure})).start()
     os.environ['MOYAI_CREDENTIAL_PROXY_URL'] = relay.url + '/credentials'
     try:
         return run_agent(spec, relay)
@@ -185,6 +189,13 @@ def _run_agent(spec, relay):
     history_path = Path("/session/conversation.json")
     history_path.parent.mkdir(exist_ok=True, mode=0o700)
     context_store = open_context(history_path.parent, spec) if definition.durable_context else None
+    if spec.get('transport_recovery'):
+        try:
+            validate_recovery(context_store, spec['transport_recovery'])
+        except ContextUnavailable:
+            if context_store is not None:
+                context_store.close()
+            raise
     agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
                          relay=relay, config=config, activity=harness_activity, step=step,
                          cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))
@@ -378,11 +389,13 @@ def _run_agent(spec, relay):
             result = {'completed': False, 'failed': True, 'messages': [], 'final_response': str(exc)}
         steering.close()
         completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
+        transport_retry = recovery_marker(agent, result) if definition.durable_context else None
         wait_group = waiting.group if waiting.can_continue(result) else ''
         wait_credential = waiting.credential if waiting.can_continue(result) else ''
         continuing = not relay.last_error and (bool(wait_group) or bool(wait_credential) or rotation.can_continue(result))
         steered = steering.message_id if steering.can_continue(result) and not relay.last_error else None
         summary = ("" if steered else
+                   "Cloud connection interrupted. Saving completed work before reconnecting." if transport_retry else
                    "Access is needed. Connect securely through the form in this session, not in chat." if continuing and wait_credential else
                    "Parallel agents are working; the coordinator will resume with their results." if continuing and wait_group else
                    "Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
@@ -390,6 +403,8 @@ def _run_agent(spec, relay):
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
+             **({'transport_retry': transport_retry} if transport_retry else {}),
+             **({'transport_failure': relay.last_failure} if getattr(relay, 'last_failure', None) else {}),
              steering_applied=steering.receipts() if hasattr(steering, 'receipts') else [])
         (artifacts / "result.md").write_text(summary)
         goal.save()
@@ -417,7 +432,7 @@ def _run_agent(spec, relay):
         except Exception:
             emit('error', 'Browser recording could not be finalized; any partial file remains in the workspace.')
     collect_archive(workspace, artifacts, os.environ["WORKSPACE_RUN_TOKEN"].encode())
-    return 0 if completed or continuing or steered else 1
+    return 75 if transport_retry else 0 if completed or continuing or steered else 1
 
 
 if __name__ == "__main__":

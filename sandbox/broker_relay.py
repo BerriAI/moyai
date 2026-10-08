@@ -8,14 +8,17 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import nullcontext
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+    from .broker_failure import MODEL_ROUTES, failure
     from .startup import StartupUnavailable, read_with_reconnect
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+    from broker_failure import MODEL_ROUTES, failure
     from startup import StartupUnavailable, read_with_reconnect
 
 EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
@@ -24,8 +27,11 @@ EDGE_ERROR = ('Moyai could not reach the model because the cloud connection reje
 
 
 class BrokerRelay:
-    def __init__(self, remote, token, notify=None):
+    def __init__(self, remote, token, notify=None, report_error=None):
         self.last_error = ''
+        self.last_failure = None
+        self.uncertain_tool = False
+        self.model_failed = False
         self.wait_group = ''
         self.wait_credential = ''
         self.remote, self.token = remote, token
@@ -46,10 +52,28 @@ class BrokerRelay:
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(content)))
                 self.end_headers()
-                self.wfile.write(content)
+                try:
+                    self.wfile.write(content)
+                except (ConnectionError, http.client.HTTPException):
+                    pass  # The local SDK may have already abandoned its request.
 
             def handle_request(self):
                 steering, generation = None, None
+                route, request_id = '', ''
+                response_started, response_bytes = False, 0
+                response_headers, response_status = {}, None
+                request_started = time.monotonic()
+
+                def record_failure(exc, *, headers=None, status=None):
+                    diagnostic = failure(route, request_id, exc, headers=headers,
+                        status=status, response_started=response_started, response_bytes=response_bytes)
+                    diagnostic.update(occurred_at=time.time(), duration_ms=round((time.monotonic() - request_started) * 1000))
+                    relay.last_failure = diagnostic
+                    relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
+                    if route in MODEL_ROUTES:
+                        relay.model_failed = True
+                    if report_error:
+                        report_error(diagnostic)
                 if self.path == '/v1/messages?beta=true':
                     self.path = '/v1/messages'
                 claude_request = self.path == '/v1/messages'
@@ -76,7 +100,9 @@ class BrokerRelay:
                         return self.error(413, 'Broker request is too large.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
-                    if route in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}:
+                    if route in MODEL_ROUTES:
+                        if relay.model_failed:
+                            return self.error(409, 'The failed model request is saved. Waiting for durable recovery.', 'broker_recovery_required')
                         if relay.context_recovery and relay.context_required:
                             return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
                         if relay.before_model and not relay.before_model(raw):
@@ -97,8 +123,9 @@ class BrokerRelay:
                     if self.command == 'GET' and self.path in {'/tools', '/v1/models'}:
                         if self.path == '/tools':
                             relay.startup_failure = None
+                        request_id = uuid4().hex
                         request = urllib.request.Request(remote.rstrip('/') + self.path,
-                            headers={'Authorization': 'Bearer ' + token}, method='GET')
+                            headers={'Authorization': 'Bearer ' + token, 'X-Moyai-Request-ID': request_id}, method='GET')
                         try:
                             status, content_type, body = read_with_reconnect(request,
                                 lambda response: (response.status, response.headers.get('Content-Type', 'application/json'),
@@ -110,11 +137,12 @@ class BrokerRelay:
                             return self.error(503, str(exc))
                         if self.path == '/tools':
                             relay.startup_failure = None
-                        relay.last_error = ''
                         if len(body) > MAX_BODY:
                             return self.error(502, 'Workspace service reply exceeds size limit.')
+                        response_status, response_bytes = status, len(body)
                         self.send_response(status)
                         self.send_header('Content-Type', content_type)
+                        response_started = True
                         self.end_headers()
                         self.wfile.write(body)
                         return
@@ -128,8 +156,11 @@ class BrokerRelay:
                             if steering and (steering.cancelled(generation) if hasattr(steering, 'cancelled') else steering.requested):
                                 return self.error(409, 'This model request was superseded by a queued message.')
                             data = seal(token, route, raw) if method == 'POST' else None
+                            request_id = uuid4().hex
+                            request_started = time.monotonic()
                             request = urllib.request.Request(remote.rstrip('/') + route, data=data,
                                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE,
+                                         'X-Moyai-Request-ID': request_id,
                                          **{k: self.headers[k] for k in ('anthropic-version', 'anthropic-beta') if k in self.headers}}, method=method)
                             try:
                                 response = urllib.request.urlopen(request, timeout=940)
@@ -147,11 +178,14 @@ class BrokerRelay:
 
                         if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                             return  # A redirected request may complete/bill later; discard its output.
+                        response_headers, response_status = response.headers, response.status
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
+                        response_started = True
                         self.end_headers()
                         if control_call:
                             body = response.read(MAX_BODY + 1)
+                            response_bytes += len(body)
                             if len(body) > MAX_BODY:
                                 raise ValueError('Delegation reply exceeds size limit')
                             value = json.loads(body)
@@ -164,11 +198,14 @@ class BrokerRelay:
                             self.wfile.write(body)
                         else:
                             while chunk := response.read1(65536):
+                                response_bytes += len(chunk)
                                 if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                                     return
                                 self.wfile.write(chunk)
-                        if not credential_route and not (steering and hasattr(steering, 'cancelled') and steering.cancelled(generation)):
-                            relay.last_error = ''
+                        # Sized reads can return EOF without raising when a
+                        # declared Content-Length was only partly received.
+                        if response.length:
+                            raise http.client.IncompleteRead(b'', response.length)
                 except urllib.error.HTTPError as exc:
                     if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                         exc.close()
@@ -176,7 +213,9 @@ class BrokerRelay:
                     message = EDGE_ERROR if exc.code == 403 and 'json' not in exc.headers.get('Content-Type', '') else ''
                     if not message:
                         try:
-                            value = json.loads(exc.read(8192))
+                            body = exc.read(8192)
+                            response_bytes += len(body)
+                            value = json.loads(body)
                             pressure = value.get('detail')
                             if (exc.headers.get('X-Moyai-Context') == 'compact' and isinstance(pressure, dict)
                                     and pressure.get('code') == 'context_compaction_required'
@@ -194,19 +233,33 @@ class BrokerRelay:
                             message = value.get('detail') or value.get('error', {}).get('message')
                         except (ValueError, AttributeError):
                             pass
+                        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as read_error:
+                            response_bytes += len(getattr(read_error, 'partial', b''))
                     message = str(message or 'The cloud connection failed before a response could finish.')
                     if not credential_route:
                         relay.last_error = message
+                    record_failure(exc, headers=exc.headers, status=exc.code)
+                    exc.close()
                     self.error(502 if exc.code == 403 else exc.code, message)
-                except (ValueError, KeyError, TypeError):
-                    self.error(422, 'Unsupported or invalid model wire payload.')
-                except (urllib.error.URLError, TimeoutError):
+                except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                    if not response_started:
+                        self.error(422, 'Unsupported or invalid model wire payload.')
+                    else:
+                        relay.last_error = 'The cloud reply could not be decoded. Your message is saved.'
+                        record_failure(exc, headers=response_headers, status=response_status)
+                        self.close_connection = True
+                except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
                     if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                         return
                     message = 'The cloud connection timed out or could not be reached. Your message is saved.'
+                    response_bytes += len(getattr(exc, 'partial', b''))
                     if not credential_route:
                         relay.last_error = message
-                    self.error(502, message)
+                    record_failure(exc, headers=response_headers, status=response_status)
+                    if not response_started:
+                        self.error(502, message)
+                    else:
+                        self.close_connection = True
 
             do_GET = do_POST = handle_request
 
@@ -221,7 +274,8 @@ class BrokerRelay:
     def control(self, body=None):
         request = urllib.request.Request(self.remote.rstrip('/') + '/control',
             data=seal(self.token, '/control', json.dumps(body or {}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
                 value = json.load(response)
@@ -232,7 +286,7 @@ class BrokerRelay:
 
     def context_window(self):
         request = urllib.request.Request(self.remote.rstrip('/') + '/context/window',
-            headers={'Authorization': 'Bearer ' + self.token})
+            headers={'Authorization': 'Bearer ' + self.token, 'X-Moyai-Request-ID': uuid4().hex})
         with urllib.request.urlopen(request, timeout=30) as response:
             value = json.loads(response.read(8192))
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
@@ -243,7 +297,8 @@ class BrokerRelay:
         route = '/context/native'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps(body).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         with urllib.request.urlopen(request, timeout=3) as response:
             raw = response.read(2_001_025)
             if len(raw) > 2_001_024:
@@ -254,7 +309,8 @@ class BrokerRelay:
         route = '/context/maintenance'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps({'snapshot': snapshot, 'ack': ack}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         # This waits for durable job admission, never for summary inference.
         with urllib.request.urlopen(request, timeout=2) as response:
             raw = response.read(64_001)
@@ -277,7 +333,8 @@ class BrokerRelay:
         while True:
             request = urllib.request.Request(self.remote.rstrip('/') + route,
                 data=seal(self.token, route, body),
-                headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE}, method='POST')
+                headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+                         'X-Moyai-Request-ID': uuid4().hex}, method='POST')
             try:
                 response = urllib.request.urlopen(request, timeout=max(1, deadline - time.monotonic()))
                 break

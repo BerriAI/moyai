@@ -63,9 +63,7 @@ class NativeSession:
         return self.state is not None
 
     def checkpoint(self):
-        with self.store.lock:
-            return {'epoch': self.store.state()['epoch'],
-                    'seq': self.store.db.execute('SELECT coalesce(max(seq),0) FROM journal').fetchone()[0]}
+        return self.store.checkpoint()
 
     def reset_files(self):
         remove(self.root)
@@ -84,6 +82,9 @@ class NativeSession:
             tempfile.tempdir = previous
 
     def begin(self, *, resume=True):
+        # A failed invocation's native state can precede completed tool work.
+        # Recover from the independently verified public receipt checkpoint.
+        resume = resume and not self.context.spec.get('transport_recovery')
         self.reset_files()
         self.state, self.staged = None, None
         self.enabled = False

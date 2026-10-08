@@ -10,6 +10,7 @@ from sandbox.broker_relay import BrokerRelay
 from sandbox.context_recovery import run_with_context_recovery
 from sandbox.context_store import ContextStore, ContextUnavailable
 from sandbox.harness_agent import TurnJournal
+from sandbox.transport_recovery import recovery_marker, validate_recovery
 
 
 def runtime(tmp_path):
@@ -25,6 +26,36 @@ def runtime(tmp_path):
         activity=SimpleNamespace(commentary=lambda text: None)), context_store=store,
         stopped=threading.Event(), pending_text=[], journal=TurnJournal([], 'Do not deploy.', store))
     return agent, summaries
+
+
+@pytest.mark.parametrize('unsafe', ['', 'pending', 'stopped', 'partial', 'completed', 'tool_transport', 'stream', 'permanent', 'missing_store'])
+def test_transport_recovery_requires_settled_durable_receipts(tmp_path, unsafe):
+    agent, _ = runtime(tmp_path)
+    store = agent.context_store
+    failure = {'version': 1, 'route': '/v1/messages', 'http_status': 502, 'request_id': 'edge-fixture',
+               'response_started': False, 'transient': True}
+    agent.context.relay.last_failure = failure
+    result = {'failed': True}
+    agent.journal.tool_started('write-one', 'publish', {})
+    if unsafe != 'pending':
+        agent.journal.tool_finished('write-one', 'Published once: receipt-one')
+    if unsafe == 'stopped': agent.stopped.set()
+    if unsafe in {'partial', 'completed'}: result[unsafe] = True
+    if unsafe == 'tool_transport': agent.context.relay.uncertain_tool = True
+    if unsafe == 'stream': failure['response_started'] = True
+    if unsafe == 'permanent': failure['transient'] = False
+    if unsafe == 'missing_store': agent.context_store = None
+    try:
+        marker = recovery_marker(agent, result)
+        assert bool(marker) is (unsafe == '')
+        if marker:
+            validate_recovery(store, marker)
+            assert 'receipt-one' in store.history()[0]['content']
+            store.append({'role': 'user', 'content': 'A newer checkpoint'})
+            with pytest.raises(ContextUnavailable, match='checkpoint'):
+                validate_recovery(store, marker)
+    finally:
+        store.close()
 
 
 def test_long_task_can_compact_repeatedly_without_replaying_tools(tmp_path):

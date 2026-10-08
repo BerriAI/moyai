@@ -29,7 +29,7 @@ def completed_response(run: dict[str, object], result: object) -> bool:
     return (type(message_id) is int and isinstance(result, dict)
             and type(result.get('message_id')) is int and result['message_id'] == message_id
             and result.get('completed') is True
-            and not any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential'))
+            and not any(result.get(key) for key in ('continuation', 'steer_message_id', 'startup_retry', 'transport_retry', 'wait_group', 'wait_credential'))
             and isinstance(result.get('message'), str) and bool(result['message'].strip()))
 
 
