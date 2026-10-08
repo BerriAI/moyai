@@ -89,21 +89,56 @@ def test_sensitive_content_is_redacted_and_private_tools_are_omitted(monkeypatch
     assert 'hello' in result
     assert len(trace_content('x' * 100000)) <= 16020
     events = []
-    activity = ActivityReporter(lambda *args: events.append(args), tracing=True)
+    activity = ActivityReporter(lambda *args: events.append(args), tracing=True, omit_private_tool_payloads=True)
     activity.start('private', 'mcp_workspace_skills_load', {'instructions': 'secret-definition'})
     activity.complete('private', 'mcp_workspace_skills_load', {}, {'content': 'secret-definition'})
     assert 'secret-definition' not in json.dumps(events)
     assert next(event for event in events if event[0] == 'trace')[2]['output'] == '[private tool payload omitted]'
 
 
-@pytest.mark.parametrize('name', ['memory_save', 'mcp_workspace_memory_save', 'mcp__workspace__memory_search'])
-def test_server_drops_memory_payload_even_if_sandbox_did_not_scrub_it(tmp_path, name):
+@pytest.mark.parametrize('name', ['memory_save', 'mcp_workspace_memory_save', 'mcp__workspace__memory_search',
+                                       'mcp__moyai__skills_load', 'credentials_request', 'workspace_call', 'call'])
+def test_server_omits_private_payloads_when_enabled_even_if_sandbox_did_not_scrub_it(tmp_path, name):
     store, tracing, processor, run, _ = setup(tmp_path)
+    actor = store.identity({'method': 'google', 'identity': {'sub': 'alice', 'email': 'alice@example.com'}})
+    store.execute('UPDATE messages SET user_id=? WHERE id=?', (actor, run['active_message_id']))
+    store.execute('INSERT INTO user_preferences(user_id,omit_private_tool_payloads) VALUES(?,1)', (actor,))
     stamp = time.time_ns()
     tracing.tool(run['id'], {'tool': name, 'call_id': 'memory', 'start_ns': stamp, 'end_ns': stamp,
                             'input': 'private-memory-marker', 'output': 'private-memory-marker'})
     assert len(processor.spans) == 1
     assert 'private-memory-marker' not in str(processor.spans[0].attributes)
+
+
+@pytest.mark.parametrize('name', ['skills_save', 'mcp__workspace__memory_search', 'credentials_request', 'workspace_call'])
+@pytest.mark.parametrize('omit', [False, True])
+def test_private_tool_capture_is_optional_and_secret_redaction_always_applies(tmp_path, name, omit):
+    store, tracing, processor, run, _ = setup(tmp_path)
+    events = []
+    activity = ActivityReporter(lambda kind, msg, data: events.append((kind, data)),
+                                tracing=True, omit_private_tool_payloads=omit)
+    args = {'content': 'Useful tool evidence', 'token': 'credential-value'}
+    result = {'result': 'Useful outcome', 'password': 'password-value'}
+    activity.start('tool-1', name, args)
+    activity.complete('tool-1', name, args, result)
+    public = [data for kind, data in events if kind != 'trace']
+    assert 'Useful tool evidence' not in str(public)
+    data = next(data for kind, data in events if kind == 'trace')
+    tracing.tool(run['id'], data)
+    attrs = processor.spans[-1].attributes
+    assert ('Useful tool evidence' in attrs['input.value']) is (not omit)
+    assert ('Useful outcome' in attrs['output.value']) is (not omit)
+    assert attrs['gen_ai.tool.call.arguments'] == attrs['input.value']
+    assert attrs['gen_ai.tool.call.result'] == attrs['output.value']
+    assert 'credential-value' not in str(events) + str(attrs)
+    assert 'password-value' not in str(events) + str(attrs)
+
+
+def test_private_tool_capture_is_on_by_default_in_reporter():
+    events = []
+    activity = ActivityReporter(lambda *event: events.append(event), tracing=True)
+    activity.complete('tool-1', 'skills_save', {'content': 'Useful evidence'}, {'saved': True})
+    assert 'Useful evidence' in next(event[2]['input'] for event in events if event[0] == 'trace')
 
 
 def test_slack_turn_root_span_links_its_thread_for_lens(tmp_path):
@@ -458,3 +493,23 @@ def test_model_usage_rejects_invalid_counts_and_preserves_explicit_zero(tmp_path
     for key in ('gen_ai.response.id', 'gen_ai.response.model', 'litellm.call_id', 'gen_ai.usage.input_tokens',
                 'gen_ai.usage.total_tokens', 'gen_ai.usage.cache_write.input_tokens'):
         assert key not in attrs
+
+
+def test_nested_trace_keeps_root_trace_and_direct_parent_span(tmp_path):
+    from app.agents import AgentCoordinator
+    from app.db import now
+    store = Store(tmp_path)
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    AgentCoordinator(store, settings, None)
+    tracing = AgentTracing(store, settings, processor=Processor())
+    root, batch, reviewer = [store.create_run('Trace task', '', 'demo', [], chat_enabled=True) for _ in range(3)]
+    for parent, child, group in [(root, batch, 'batch-group'), (batch, reviewer, 'review-group')]:
+        message_id = store.messages(parent['id'])[0]['id']
+        store.execute("INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at) VALUES(?,?,?,'trace','{}','running',?)", (group, parent['id'], message_id, now()))
+        store.execute('UPDATE runs SET parent_run_id=?,agent_group_id=? WHERE id=?', (parent['id'], group, child['id']))
+    identities = [tracing.identity(store.run(r['id']), store.messages(r['id'])[0]['id']) for r in (root, batch, reviewer)]
+    assert len({identity[0] for identity in identities}) == 1
+    assert [identity[3] for identity in identities] == [root['id']] * 3
+    assert identities[2][2] == identities[1][1]
+    store.execute("UPDATE agent_groups SET status='completed'")
+    assert tracing.identity(store.run(reviewer['id']), store.messages(reviewer['id'])[0]['id']) == identities[2]

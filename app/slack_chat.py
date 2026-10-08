@@ -17,6 +17,7 @@ from .pr_delivery import link_captures, select_captures, select_prs
 from .security import digest
 from .session_metadata import is_session_id_request, session_id_response
 from .slack_activity import SlackActivity
+from .slack_tables import reply_parts
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'idle'}
 COMMANDS = {'stop', 'sleep', 'wake', 'status'}
@@ -409,6 +410,10 @@ class SlackChat:
                 if binding['channel'].startswith('D') and not conn.execute(
                     "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
                     value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
+                mentions = self.mentionable_in(conn, run_id)
+                parts = reply_parts(value, lambda text: slack_text(
+                    text, mentions, public_url=self.settings.public_url, run_id=run_id), split_reply)
+                table_parts = parts if any(blocks for _, blocks in parts) else None
                 if media:
                     self.queue(conn, run_id, f"answer:{message['id']}:media", 'answer',
                                'Saved demo captures.\n\n' + self.link(run_id),
@@ -418,8 +423,21 @@ class SlackChat:
                 for index, chunk in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
                     metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else None
-                    self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
+                    if table_parts:
+                        # Queue the structured answer once; text chunks remain the fallback.
+                        if index == 0:
+                            self.queue_table_parts(conn, run_id, message['id'], table_parts, prs)
+                    else:
+                        self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
             conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
+
+    def queue_table_parts(self, conn, run_id, message_id, parts, prs):
+        for index, (chunk, blocks) in enumerate(parts):
+            suffix = '\n\n' + self.link(run_id) if index == len(parts) - 1 else ''
+            metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+            if blocks:
+                metadata['blocks'] = blocks
+            self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
 
     def collect(self):
         enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
@@ -484,8 +502,8 @@ class SlackChat:
                     elif data.get('captures'):
                         sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                     else:
-                        if data.get('pull_requests'):
-                            content = self.owner.channel.rich_reply(source, row['text'], data['pull_requests'])
+                        if data.get('pull_requests') or data.get('blocks'):
+                            content = self.owner.channel.build_rich_reply(source, row['text'], data.get('pull_requests', ()), data.get('blocks'))
                             response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
                         else:
                             response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])

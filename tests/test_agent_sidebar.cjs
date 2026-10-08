@@ -274,3 +274,17 @@ test('refresh failures keep rendered sessions and retry while scope changes disc
     assert.match(list.innerHTML,/could not load/);assert.match(list.innerHTML,/data-search-retry/);
   }
 });
+
+test('nested search retains coordinator path and renders expandable descendants',()=>{
+  const h=helpers();h.state.expandedParents=new Set(['root','batch']);
+  const nested=[{id:'root',prompt:'Gauntlet',children:[{id:'batch',parent_run_id:'root',agent_label:'PRs 1 to 5',children:[{id:'reviewer',parent_run_id:'batch',agent_label:'Independent security review'}]}]}];
+  const groups=h.sidebarGroups(nested,'security');
+  assert.equal(groups.length,1);
+  assert.equal(groups[0].children[0].children[0].id,'reviewer');
+  const html=h.sidebarRenderSessions(groups,'security');
+  assert.match(html,/data-toggle-agents="root"/);
+  assert.match(html,/data-toggle-agents="batch"/);
+  assert.match(html,/data-run="reviewer"/);
+  assert.doesNotMatch(html,/data-session-actions="batch"/);
+  assert.equal(h.sessionRows(nested).length,3);
+});

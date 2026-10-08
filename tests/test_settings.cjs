@@ -7,6 +7,7 @@ function setup({automations = false, role = 'admin'} = {}) {
   const elements = new Map();
   const context = {
     state: {pageVersion: 1, role: 'admin', runsRefresh: 0},
+    document: {activeElement:null,body:{}},
     restoreSessionScope:()=>{},renderSidebar:()=>{},
     $: key => {if (!elements.has(key)) elements.set(key, {}); return elements.get(key);},
     api: async () => ({authenticated: true, role, csrf: 'fresh', user_id: 'test-user'}),
@@ -118,6 +119,68 @@ test('delayed preference save updates the account without overwriting a newly op
   await elements.get('#send-immediately').onchange();
   assert.equal(elements.get('#content').innerHTML,'Another page');
   assert.equal(context.state.preferences.send_immediately,true);
+});
+
+test('both preferences live at the bottom and private tool omission defaults off', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  const html=elements.get('#content').innerHTML;
+  assert.ok(html.indexOf('id="preferences-title"')>html.indexOf('id="title-model-settings"'));
+  assert.match(html,/id="omit-private-tool-payloads" type="checkbox"\s+role="switch"/);
+  assert.equal(context.state.preferences.omit_private_tool_payloads,false);
+});
+
+test('independent preference saves can finish out of order without resetting each other', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  const pending=[];
+  context.api=async(url,options)=>new Promise(resolve=>pending.push({resolve,body:JSON.parse(options.body)}));
+  const chat=elements.get('#send-immediately'),trace=elements.get('#omit-private-tool-payloads');
+  chat.checked=true;const first=chat.onchange();
+  trace.checked=true;const second=trace.onchange();
+  assert.deepEqual(pending.map(p=>p.body),[{send_immediately:true},{omit_private_tool_payloads:true}]);
+  pending[1].resolve({send_immediately:true,omit_private_tool_payloads:true});await second;
+  pending[0].resolve({send_immediately:true,omit_private_tool_payloads:false});await first;
+  assert.equal(context.state.preferences.send_immediately,true);
+  assert.equal(context.state.preferences.omit_private_tool_payloads,true);
+  context.api=async()=>{throw Error('Connection lost.');};
+  trace.checked=false;await trace.onchange();
+  assert.equal(trace.checked,true);
+  assert.equal(trace.disabled,false);
+  assert.match(elements.get('#omit-private-tool-payloads-status').textContent,/Could not confirm/);
+});
+
+test('a preference response cannot update a different signed-in account', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  context.api=async()=>{
+    context.state.userId='another-user';
+    return {send_immediately:true,omit_private_tool_payloads:true};
+  };
+  const input=elements.get('#omit-private-tool-payloads');
+  input.checked=true;await input.onchange();
+  assert.equal(context.state.preferences.omit_private_tool_payloads,false);
+});
+
+test('a keyboard save restores switch focus only if the user has not moved elsewhere', async () => {
+  const {context,elements}=setup();
+  await context.renderSettings();
+  const input=elements.get('#omit-private-tool-payloads');
+  let focused=0;
+  input.focus=()=>{focused++;context.document.activeElement=input;};
+  context.document.activeElement=input;
+  context.api=async()=>{
+    context.document.activeElement=context.document.body;
+    return {omit_private_tool_payloads:true};
+  };
+  input.checked=true;await input.onchange();
+  assert.equal(focused,1);
+  context.api=async()=>{
+    context.document.activeElement={id:'another-control'};
+    return {omit_private_tool_payloads:false};
+  };
+  input.checked=false;await input.onchange();
+  assert.equal(focused,1);
 });
 
 test('settings navigation selects exactly one destination and respects member access', () => {

@@ -13,12 +13,26 @@ users. Choose **Only save manually** to stop agent writes while keeping recall,
 or **Pause memory** to stop both. You can review, edit, and delete each note.
 Shared passwords cannot use personal memory; local demo access has its own library.
 
-With automatic saving enabled, the agent reviews the current requester's messages
-before its final answer and saves lasting preferences, corrections, decisions or
-references. You do not need to say “remember this.” It searches first to avoid
-duplicates and checks that the save succeeded. One-off task instructions and
-temporary status do not become memories. The note and supporting quote go only
-to the private `memory_save` tool, not files, unrelated tools or chat.
+With automatic saving enabled, the agent can save useful context during a turn.
+A separate background reviewer also checks successfully completed turns, so
+capture does not depend on the task agent remembering to call `memory_save`.
+You do not need to say “remember this.” Preferences, corrections, decisions and
+references can become notes; one-off instructions and temporary status do not.
+An empty review is a normal result, not a reason to invent a memory.
+
+The reviewer waits 60 seconds after completion and defers while the session has
+queued or running messages. It uses the completed requester's messages and
+acknowledged same-requester follow-ups, never other participants, assistant text,
+tools, files or a whole shared transcript. It compares existing notes, reuses keys
+for corrections, and requires an exact supporting quote for every new or updated
+note. Sources remain visible under **Review & edit → Why Moyai saved this**.
+
+On startup it seeds the queue from at most 50 recent completed turns from the
+last seven days. Already reviewed turns are not repeated. This bounded seed can
+recover useful preferences missed before deployment; it is not a complete
+historical import. Demo, failed, cancelled, subagent and automation turns are
+excluded. The Memory page shows pending reviews and whether the most recent
+review saved notes, found nothing new, or failed.
 
 - `memory_search` retrieves up to five relevant notes, with an 8,000-character
   total payload budget. Nothing from the library loads until the agent searches.
@@ -48,8 +62,11 @@ Notes (including titles and source quotes) are encrypted in the existing durable
 SQLite database. Preserve the database and encryption key across deployments;
 Temporal and sandbox snapshots are not the memory store. Retrieved note bodies
 are injected only at the model broker and excluded from tool results and system
-prompt traces. Memory tool payloads are omitted from tool traces and scrubbed
-from saved conversation tool calls. Responses in shared chats can still reflect
+prompt traces. Memory tool payloads are scrubbed from saved conversation tool
+calls. To also omit them from exported tool traces, turn on **Settings →
+Preferences → Hide private tool content in traces** (off by default). This account
+preference also covers credential, skill, and connector tool payloads in new
+responses; secret redaction stays on either way. Responses in shared chats can still reflect
 remembered context; memory does not make those responses private. Deletion does
 not erase previous conversations, inference requests, or retained backups.
 
@@ -59,11 +76,28 @@ remain until deleted. Expired notes remain reviewable but are not retrieved.
 Known credential patterns are rejected; arbitrary sensitive data cannot be
 reliably detected, so keep secrets in the credential vault.
 
-This version uses bounded keyword retrieval and agent-authored notes. It does
-not embed or search whole transcripts, run background summarization, or backfill
-old chats. Shared reusable procedures belong in **Skills**. The agent may spend
-additional tool rounds finding and saving memories; there is no separate model
-or vector database running on every message.
+This version uses bounded keyword retrieval and concise notes. It does not embed
+or search whole transcripts or maintain a vector database. Shared reusable
+procedures belong in **Skills**. The background reviewer makes a separate,
+tool-free model request through the existing gateway, billed to the original
+requester and turn in the normal usage ledger. It uses the turn's configured
+model unless `MEMORY_REVIEW_MODEL` selects another enabled workspace model.
+Foreground model requests can reclaim its slot. Each input has at most three
+attempts; failures never fail or replay the user's task.
+
+Queue admission and turn completion commit together. Saving the review's notes
+and marking the job complete are also atomic. Original identity, settings,
+source text, repository and note revisions are rechecked before writing. Manual
+edits, forgetting and settings changes invalidate older background inputs, so
+restarting or re-enabling memory does not restore deleted notes from old chats.
+Only IDs, status and counts enter job records and activity events; generated
+notes and supporting quotes remain encrypted in the memory store.
+
+Configuration: `MEMORY_REVIEW_ENABLED` (default `true`), `MEMORY_REVIEW_MODEL`
+(default empty), `MEMORY_REVIEW_IDLE_SECONDS` (60),
+`MEMORY_REVIEW_TIMEOUT_SECONDS` (60), `MEMORY_REVIEW_BACKFILL_LIMIT` (50).
+Setting the backfill limit to zero disables the startup seed. Turning background
+review off leaves existing task-agent memory tools and user preferences intact.
 
 To evaluate automatic capture with a real model, set `GATEWAY_BASE_URL` and
 `GATEWAY_API_KEY` and run `uv run python -m scripts.memory_capture_smoke`.
@@ -75,9 +109,25 @@ it does not run a complete SDK or cloud sandbox, and is not a guarantee that
 every future preference will be captured. Use `--model` to test another model
 and `--report path.json` to save the evidence.
 
-The design draws on official [Codex memories](https://developers.openai.com/codex/customization/memories),
-[Claude Code memory](https://code.claude.com/docs/en/memory), and other coding-agent
-knowledge documentation (reviewed October 2, 2026): scoped recall, concise notes,
-provenance, user controls, and separation from required team instructions. Reusable
-guidance belongs in Skills. This is Moyai’s implementation, not a claim of
-exact product parity.
+To exercise the background path with a live model, run
+`uv run python -m scripts.memory_review_smoke --model openai/gpt-6-astra --report report.json`
+with those same gateway variables. This uses a fresh synthetic database, settles
+turns with **no agent save calls**, then runs the actual reviewer and checks
+capture, correction, duplicate handling, no-op tasks, quoted third-party text,
+cross-session recall and manual mode. It does not execute a cloud coding task.
+
+## Comparison that informed this implementation
+
+Reviewed October 8, 2026 against official documentation and LiteLLM source:
+
+| System | Documented collection behavior | Applied in Moyai |
+| --- | --- | --- |
+| [LiteLLM memory](https://docs.litellm.ai/docs/proxy/memory) | User/team-scoped CRUD storage. [Endpoint implementation](https://github.com/BerriAI/litellm/blob/main/litellm/proxy/memory/memory_endpoints.py) does not extract memories from chats. | Retain scoped, durable storage and separate capture from persistence. |
+| [Devin Memory and Dreaming](https://docs.devin.ai/product-guides/memory) | Saves notes during work; background dreaming consolidates notes, captures missed lessons and seeds from recent sessions. Notes preserve source links. | In-session saves plus background capture, bounded recent-session seed, source evidence and correction merging. |
+| [Codex local memories](https://learn.chatgpt.com/docs/customization/memories) | Background generation from eligible prior chats after idle time; separate extraction and consolidation settings. | Durable review queue, idle deferral, bounded inference, separate setting and no dependence on task-agent tool choice. |
+| [Claude Code auto memory](https://code.claude.com/docs/en/memory) | Selectively records user preferences, feedback, project context and references; skips one-off work and cheaply recoverable facts. | Keep these categories and quality filters; allow a review to save nothing. |
+
+Moyai keeps its encrypted server-side store and current search-based recall.
+It does not clone Devin's Git memory drive or daily pruning, Codex's local file
+pipeline, or Claude's startup `MEMORY.md` index. These are behavior references,
+not a claim of identical internal implementations.

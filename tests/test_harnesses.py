@@ -295,7 +295,7 @@ def test_claude_private_tool_prefixes_are_scrubbed():
         'name': 'mcp__moyai__memory_save', 'arguments': '{"content":"private note"}'}}]}]
     assert 'private note' not in json.dumps(scrub_memory_history(messages))
     events = []
-    reporter = ActivityReporter(lambda *args: events.append(args), tracing=True)
+    reporter = ActivityReporter(lambda *args: events.append(args), tracing=True, omit_private_tool_payloads=True)
     reporter.start('m', 'mcp__moyai__memory_save', {'content': 'private note'})
     reporter.complete('m', 'mcp__moyai__memory_save', {'content': 'private note'}, {})
     assert 'private note' not in json.dumps(events)
@@ -637,7 +637,7 @@ def test_all_harnesses_scrub_private_tool_aliases(name):
     message = {'role': 'assistant', 'tool_calls': [{'function': {'name': name, 'arguments': 'private note'}}]}
     assert 'private note' not in json.dumps(scrub_memory_history([message]))
     events = []
-    reporter = ActivityReporter(lambda *args: events.append(args), tracing=True)
+    reporter = ActivityReporter(lambda *args: events.append(args), tracing=True, omit_private_tool_payloads=True)
     reporter.start('one', name, {'content': 'private note'})
     reporter.complete('one', name, {'content': 'private note'}, 'private note')
     assert 'private note' not in json.dumps(events)

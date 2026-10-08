@@ -16,12 +16,12 @@ try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from .access_transport import broker_headers, open_broker
     from .broker_failure import MODEL_ROUTES, failure
-    from .startup import StartupUnavailable, read_with_reconnect
+    from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from access_transport import broker_headers, open_broker
     from broker_failure import MODEL_ROUTES, failure
-    from startup import StartupUnavailable, read_with_reconnect
+    from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 
 EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
               'Your conversation and files are saved. An administrator needs to repair the connection; '
@@ -42,6 +42,7 @@ class BrokerRelay:
         self.wait_credential = ''
         self.remote, self.token = remote, token
         self.startup_failure = None
+        self.repository_startup = False
         self.steering = None
         self.before_model = None
         self.context_required = None
@@ -126,27 +127,40 @@ class BrokerRelay:
                             return self.error(422,'Invalid provider request JSON.')
                         route,method = '/credentials/invoke','POST'
                     control_call = self.path == '/credentials/materialize'
+                    repository_read = False
                     if self.path == '/tools/call':
                         try:
-                            control_call = json.loads(raw).get('name') in {'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
+                            name = json.loads(raw).get('name')
+                            control_call = name in {'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
+                            # These broker operations only read repository/PR
+                            # metadata. Git mutations happen after their reply.
+                            repository_read = (relay.repository_startup and self.command == 'POST'
+                                               and name in {'github_checkout', 'github_repository'})
                         except (ValueError, AttributeError):
                             pass
-                    if self.command == 'GET' and self.path in {'/tools', '/v1/models'}:
-                        if self.path == '/tools':
+                    if repository_read or (self.command == 'GET' and self.path in {'/tools', '/v1/models'}):
+                        if self.path == '/tools' or repository_read:
                             relay.startup_failure = None
                         request_id = uuid4().hex
                         request = urllib.request.Request(remote.rstrip('/') + self.path,
-                            headers={**broker_headers(remote, token), 'X-Moyai-Request-ID': request_id}, method='GET')
+                            data=seal(token, route, raw) if repository_read else None,
+                            headers={**broker_headers(remote, token), 'X-Moyai-Request-ID': request_id,
+                                     **({'Content-Type': CONTENT_TYPE} if repository_read else {})}, method=self.command)
                         try:
-                            status, content_type, body = read_with_reconnect(request,
+                            read = _read_with_reconnect if repository_read else read_with_reconnect
+                            # GitHub metadata fans out to several upstream reads;
+                            # preserve its former 90s allowance per lookup.
+                            options = {'budget': REPOSITORY_METADATA_BUDGET, 'attempt_timeout': 90} if repository_read else {}
+                            status, content_type, body = read(request,
                                 lambda response: (response.status, response.headers.get('Content-Type', 'application/json'),
                                                   response.read(MAX_BODY + 1)),
-                                stage='workspace_tools', notify=notify, opener=open_broker)
+                                stage='repository_metadata' if repository_read else 'workspace_tools',
+                                notify=notify, opener=open_broker, **options)
                         except StartupUnavailable as exc:
-                            if self.path == '/tools':
+                            if self.path == '/tools' or repository_read:
                                 relay.startup_failure = exc
                             return self.error(503, str(exc))
-                        if self.path == '/tools':
+                        if self.path == '/tools' or repository_read:
                             relay.startup_failure = None
                         if len(body) > MAX_BODY:
                             return self.error(502, 'Workspace service reply exceeds size limit.')

@@ -11,10 +11,10 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
-from sandbox.trace_content import trace_content
-from sandbox.memory_history import private_memory as is_memory_tool
+from sandbox.trace_content import private_tool, trace_content
 from .slack_mentions import MENTION
 from .trace_outbox import RaindropEventOutbox, TraceOutbox
+from .user_preferences import UserPreferences
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +40,9 @@ def context(trace_id, span_id):
 
 
 class AgentTracing:
-    def __init__(self, store, settings, processor=None):
+    def __init__(self, store, settings, processor=None, *, preferences=None):
         self.store, self.settings = store, settings
+        self.preferences = preferences or UserPreferences(store, None, None)
         destinations = settings.trace_destinations()
         self.enabled = bool(destinations)
         self.resource = Resource({'service.name': 'moyai',
@@ -70,14 +71,16 @@ class AgentTracing:
                     saved['session_id'], saved['agent_name'])
         root = f"{run['id']}:{message_id or 0}"
         parent = None
+        inherited_trace = None
         session = run['id']
         if run.get('parent_run_id'):
             groups = connection.execute('SELECT * FROM agent_groups WHERE id=?', (run['agent_group_id'],)).fetchall()
             if groups and groups[0]['status'] in {'preparing', 'running'}:
-                session = run['parent_run_id']
-                root = f"{session}:{groups[0]['message_id']}"
-                parent = identifier('agent:' + root, 8)
-        trace_id = identifier('trace:' + root, 16)
+                parent_run = connection.execute('SELECT * FROM runs WHERE id=?', (run['parent_run_id'],)).fetchone()
+                if parent_run:
+                    self.store.root_id_in(connection, run['id'])
+                    inherited_trace, parent, _, session, _ = self.identity(dict(parent_run), groups[0]['message_id'], connection)
+        trace_id = inherited_trace or identifier('trace:' + root, 16)
         span_id = identifier(f"agent:{run['id']}:{message_id or 0}", 8)
         name = ' '.join(self.content(run.get('agent_label') or 'moyai').split())[:160] or 'moyai'
         # Freeze attribution before a group finishes or a label changes. A late
@@ -274,12 +277,12 @@ class AgentTracing:
         if not (0 < start <= end <= now + 60_000_000_000):
             return
         name = str(data['tool'])[:120]
-        private_memory = is_memory_tool(name)
+        omit = private_tool(name) and self.preferences.for_run(run)['omit_private_tool_payloads']
         self.emit(run, run.get('active_message_id'), name, str(data['call_id']), start, end,
                   {'gen_ai.operation.name': 'execute_tool', 'openinference.span.kind': 'TOOL',
                    'gen_ai.tool.name': name, 'gen_ai.tool.call.id': str(data['call_id']),
-                   'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if private_memory else data.get('input')),
-                   'output.value': self.content('[private tool payload omitted]' if private_memory else data.get('output')),
+                   'tool.name': name, 'input.value': self.content('[private tool payload omitted]' if omit else data.get('input')),
+                   'output.value': self.content('[private tool payload omitted]' if omit else data.get('output')),
                    'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
 
     @best_effort

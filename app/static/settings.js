@@ -121,14 +121,6 @@ async function renderSettings() {
   const admin = state.role === 'admin';
   $('#content').innerHTML = `<section class="settings-page">
     <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Make Moyai work the way your team does.</p></div></div>
-    <section class="settings-group" aria-labelledby="personal-preferences-title">
-      <h2 id="personal-preferences-title">Personal preferences</h2>
-      <div class="chat-preference">
-        <label for="send-immediately"><input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} aria-describedby="send-immediately-description send-immediately-status"><span>Send messages immediately</span></label>
-        <p id="send-immediately-description" class="subtext">While Moyai is working, send follow-ups into the active response instead of queueing them. Saved for your account across chats.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p>
-        <p id="send-immediately-status" class="subtext" role="status">${state.preferences.send_immediately?'On · Enter and the send button send immediately.':'Off · Follow-ups queue while Moyai is working.'}</p>
-      </div>
-    </section>
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
         <h2 id="settings-${group.id}">${group.title}${group.admin ? '<span>Admin</span>' : ''}</h2>
@@ -140,23 +132,52 @@ async function renderSettings() {
           </a>`).join('')}</div>
       </section>`).join('')}</div>
     <section class="card settings-form-section" id="title-model-settings"><div><h2>Session titles</h2><p class="subtext">Choose the model that names new chats. Existing titles and the chat model stay the same.</p></div><form id="title-model-form"><label for="title-model">Gateway model ID</label><input id="title-model" maxlength="200" required placeholder="openai/gpt-4.1-nano" aria-describedby="title-model-status" ${admin?'':'disabled'}><button type="submit" ${admin?'':'disabled'}>Save model</button><p id="title-model-status" role="status">Loading…</p></form></section>
+    <section class="settings-group" aria-labelledby="preferences-title">
+      <div><h2 id="preferences-title">Preferences</h2><p class="subtext">Saved for your account.${session.identity?'':' Shared password and local sign-ins use a shared profile.'}</p></div>
+      <div class="settings-preferences">
+        <div class="settings-preference">
+          <label for="send-immediately">
+            <span class="settings-copy"><strong id="send-immediately-title">Send messages immediately</strong><span id="send-immediately-description">Send follow-ups into the active response instead of queueing them while Moyai is working.</span></span>
+            <input id="send-immediately" type="checkbox" ${state.preferences.send_immediately?'checked':''} role="switch" aria-labelledby="send-immediately-title" aria-describedby="send-immediately-description send-immediately-status">
+          </label>
+          <p id="send-immediately-status" class="subtext" role="status">${state.preferences.send_immediately?'On':'Off'}</p>
+        </div>
+        <div class="settings-preference">
+          <label for="omit-private-tool-payloads">
+            <span class="settings-copy"><strong id="omit-private-tool-payloads-title">Hide private tool content in traces</strong><span id="omit-private-tool-payloads-description">Hide inputs and results from credential, skill, memory, and connector tools in new responses. Secret redaction stays on either way.</span></span>
+            <input id="omit-private-tool-payloads" type="checkbox" ${state.preferences.omit_private_tool_payloads?'checked':''} role="switch" aria-labelledby="omit-private-tool-payloads-title" aria-describedby="omit-private-tool-payloads-description omit-private-tool-payloads-status">
+          </label>
+          <p id="omit-private-tool-payloads-status" class="subtext" role="status">${state.preferences.omit_private_tool_payloads?'On':'Off'}</p>
+        </div>
+      </div>
+    </section>
   </section>`;
-  const preferenceInput=$('#send-immediately'),preferenceStatus=$('#send-immediately-status'),userId=state.userId;
-  preferenceInput.onchange=async()=>{
-    const previous=state.preferences.send_immediately;
-    preferenceInput.disabled=true;preferenceStatus.textContent='Saving…';
-    try{
-      const saved=await api('/api/settings/preferences',{method:'PUT',body:JSON.stringify({send_immediately:preferenceInput.checked})});
-      if(state.userId===userId)state.preferences=saved;
-      if(version!==state.pageVersion)return;
-      preferenceInput.checked=saved.send_immediately;
-      preferenceStatus.textContent=saved.send_immediately?'Saved · Messages now go straight into the active response.':'Saved · Follow-ups will queue while Moyai is working.';
-    }catch(error){
-      if(version!==state.pageVersion)return;
-      preferenceInput.checked=previous;
-      preferenceStatus.textContent='Could not confirm the change. '+error.message+' Reload settings to check, or try again.';
-    }finally{if(version===state.pageVersion)preferenceInput.disabled=false;}
-  };
+  const userId=state.userId;
+  for(const key of ['send_immediately','omit_private_tool_payloads']){
+    const id=key.replaceAll('_','-'),input=$('#'+id),status=$('#'+id+'-status');
+    input.onchange=async()=>{
+      const previous=state.preferences[key],hadFocus=document.activeElement===input;
+      input.disabled=true;status.textContent='Saving…';
+      try{
+        const saved=await api('/api/settings/preferences',{method:'PUT',body:JSON.stringify({[key]:input.checked})});
+        if(state.userId!==userId)return;
+        // Another switch may have saved since this request started.
+        state.preferences[key]=saved[key];
+        if(version!==state.pageVersion)return;
+        input.checked=saved[key];
+        status.textContent=(saved[key]?'On':'Off')+' · Saved';
+      }catch(error){
+        if(version!==state.pageVersion||state.userId!==userId)return;
+        input.checked=previous;
+        status.textContent='Could not confirm the change. '+error.message+' Reload settings to check, or try again.';
+      }finally{
+        if(version===state.pageVersion&&state.userId===userId){
+          input.disabled=false;
+          if(hadFocus&&document.activeElement===document.body)input.focus();
+        }
+      }
+    };
+  }
   try{
     const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
     $('#title-model').value=saved.model;

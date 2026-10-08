@@ -21,7 +21,8 @@ function applyUserSession(session) {
   const changed=state.role!==(session.role||'member')||state.userId!==session.user_id||state.authenticated!==session.authenticated;
   state.role = session.role || 'member'; state.identity = session.identity; state.csrf = session.csrf;
   state.authenticated = session.authenticated; state.userId = session.user_id;
-  state.preferences = {send_immediately: session.preferences?.send_immediately === true};
+  state.preferences = {send_immediately: session.preferences?.send_immediately === true,
+    omit_private_tool_payloads: session.preferences?.omit_private_tool_payloads === true};
   restoreSessionScope();
   if(changed){++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
   if (session.identity) $('.rail-foot small').title = state.role === 'admin' ? 'Organization admin' : 'Internal user';

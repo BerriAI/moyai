@@ -84,12 +84,13 @@ def tool_summary(name, arguments):
 
 
 class ActivityReporter:
-    def __init__(self, emit, *, tracing=False):
+    def __init__(self, emit, *, tracing=False, omit_private_tool_payloads=False):
         self.emit = emit
         self.prefix = uuid.uuid4().hex
         self.starts = {}
         self.lock = threading.Lock()
         self.tracing = tracing
+        self.omit_private_tool_payloads = omit_private_tool_payloads
         self.trace_starts = {}
 
     def start(self, call_id, name, args):
@@ -116,12 +117,12 @@ class ActivityReporter:
             # only after the tool completed; observation must not break work.
             try:
                 try:
-                    from .trace_content import trace_content
+                    from .trace_content import private_tool, trace_content
                 except ImportError:
-                    from trace_content import trace_content
+                    from trace_content import private_tool, trace_content
                 with self.lock:
                     start = self.trace_starts.pop(str(call_id), time.time_ns())
-                private = data['tool'].startswith(('credentials_', 'skills_', 'memory_')) or data['tool'] in {'workspace_call', 'call'}
+                private = self.omit_private_tool_payloads and private_tool(data['tool'])
                 self.emit('trace', '', {'tool': data['tool'], 'call_id': data['call_id'],
                           'start_ns': start, 'end_ns': time.time_ns(), 'status': phase,
                           'input': '[private tool payload omitted]' if private else trace_content(args),

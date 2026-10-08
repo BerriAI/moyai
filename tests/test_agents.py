@@ -74,7 +74,7 @@ async def test_fanout_is_atomic_idempotent_and_inherits_identity_files_model_per
         assert child['snapshot_id'] == 'im-1'
         assert manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (child['id'],))[0]['revision'] == 1
         assert manager.store.messages(child['id'])[0]['user_id'] == 'google:tin'
-        assert not coordinator.tools(manager.store.run(child['id']))
+        assert coordinator.tools(manager.store.run(child['id']))
     with pytest.raises(ValueError, match='different work'):
         await coordinator.fanout(manager.store.run(run_id), args.model_copy(update={'workers': 3}))
     with pytest.raises(ValueError, match='enabled'):
@@ -194,7 +194,7 @@ async def test_retry_waiting_on_lock_cannot_outlive_parent_cancellation(durable)
     await asyncio.sleep(0)
     await manager.cancel(root)
     lock.release()
-    with pytest.raises(ValueError, match='active top-level'):
+    with pytest.raises(ValueError, match='active Temporal'):
         await pending
     assert len(manager.store.messages(child['id'])) == 1
     assert manager.store.rows('SELECT * FROM agent_retries') == []
@@ -268,15 +268,16 @@ def test_agent_wait_interrupts_only_after_trusted_delegation_and_complete_tools(
     assert waiting.can_continue(result)
 
 
-def test_broker_hides_delegation_without_temporal_and_denies_child_escalation(workspace):
+def test_broker_hides_delegation_without_temporal_and_keeps_run_scope(workspace):
     app, client = workspace
     root = active(app)
     headers = {'Authorization':'Bearer capability'}
     assert not any(t['name'].startswith('agents_') for t in client.get(f"/broker/{root['id']}/tools", headers=headers).json())
     app.state.settings.temporal_enabled = True
     assert any(t['name'] == 'agents_fanout' for t in client.get(f"/broker/{root['id']}/tools", headers=headers).json())
-    app.state.store.execute("UPDATE runs SET parent_run_id='parent' WHERE id=?", (root['id'],))
-    assert client.post(f"/broker/{root['id']}/tools/call", headers=headers, json={'name':'agents_fanout','arguments':{}}).status_code == 403
+    other = active(app)
+    app.state.store.update_run(other['id'], token_hash='different-capability')
+    assert client.get(f"/broker/{other['id']}/tools", headers=headers).status_code == 401
 
 
 def test_capacity_configuration_accepts_100_not_unbounded():
@@ -440,3 +441,155 @@ async def test_cancelled_group_cannot_freeze_other_workers_that_are_still_stoppi
     assert not coordinator.group(root, result['group_id'])['result_snapshot']
     assert not coordinator.settled(root, result['group_id'])
     assert not coordinator.handoff(root, result['group_id'])
+
+
+async def test_five_batches_delegate_reviewers_with_one_slot_and_restart(durable):
+    manager, cloud, root = durable
+    manager.settings.max_concurrent_runs = 1
+    coordinator = attach(manager)
+    cloud.saving_before_answer = False
+    manager.store.execute("UPDATE messages SET user_id='google:requester' WHERE run_id=?", (root,))
+    await drive(manager, root, phase='monitor')
+    group = await coordinator.call(root, 'agents_fanout', {
+        'request_key': 'gauntlet-batches', 'instructions': 'Run gauntlet for the assigned PRs, then delegate independent review.',
+        'items': [f'PR {i}' for i in range(23)], 'workers': 5})
+    batches = coordinator.children(group['group_id'])
+    assert len(batches) == 5
+    partitions = [json.loads(manager.store.run(b['id'])['prompt'].split('indices):\n')[1].split('\nReturn a result')[0]) for b in batches]
+    assert sorted(len(items) for items in partitions) == [4, 4, 5, 5, 5]
+    assert sorted(item['index'] for items in partitions for item in items) == list(range(1, 24))
+    await pause_parent(manager, root, group['group_id'])
+    for batch in batches:
+        await drive(manager, batch['id'], phase='monitor')
+        assignments = {'request_key': 'independent-review', 'tasks': [
+            {'label': 'Security reviewer', 'prompt': 'Review only this batch for security.'},
+            {'label': 'Regression reviewer', 'prompt': 'Review only this batch for regressions.'}]}
+        worker_limit, pending_limit = manager.settings.max_parallel_agents, manager.settings.max_pending_runs
+        manager.settings.max_parallel_agents = 1
+        with pytest.raises(ValueError, match='at most 1 workers'):
+            await coordinator.call(batch['id'], 'agents_fanout', assignments)
+        manager.settings.max_parallel_agents = worker_limit
+        manager.settings.max_pending_runs = 1
+        with pytest.raises(ValueError, match='queue is full'):
+            await coordinator.call(batch['id'], 'agents_fanout', assignments)
+        manager.settings.max_pending_runs = pending_limit
+        assert not manager.store.rows('SELECT id FROM agent_groups WHERE parent_id=?', (batch['id'],))
+        review = await coordinator.call(batch['id'], 'agents_fanout', assignments)
+        reviewers = [row['id'] for row in coordinator.children(review['group_id'])]
+        for reviewer in reviewers:
+            assert manager.store.run(reviewer)['parent_run_id'] == batch['id']
+            assert manager.store.root_id(reviewer) == root
+            assert manager.store.run(reviewer)['owner_id'] == 'google:requester'
+            assert await manager.advance(reviewer) == 'capacity'
+        await pause_parent(manager, batch['id'], review['group_id'])
+        assert manager.has_capacity() and not any(m.alive for m in cloud.machines)
+        # Recover the entire chain from the same durable database, not Python tasks.
+        manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+        coordinator = attach(manager)
+        assert await manager.advance(root) == 'children'
+        for reviewer in reviewers:
+            await drive(manager, reviewer)
+        await drive(manager, batch['id'])
+        assert {row['id'] for row in cloud.machines[-1].spec['agent_results']['children']} == set(reviewers)
+    await drive(manager, root)
+    assert manager.store.run(root)['status'] == 'idle'
+    assert cloud.machines[-1].spec['agent_results']['completed'] == 5
+    assert len(manager.store.subtree(root)) == 16
+    assert not any(m.alive for m in cloud.machines)
+
+
+async def nested(durable):
+    manager, cloud, root = durable
+    coordinator, group, _ = await launch(durable, count=1)
+    batch = coordinator.children(group['group_id'])[0]['id']
+    await pause_parent(manager, root, group['group_id'])
+    await drive(manager, batch, phase='monitor')
+    review = await coordinator.call(batch, 'agents_fanout', {
+        'request_key': 'review', 'tasks': [{'label': 'Reviewer', 'prompt': 'Review independently.'}]})
+    return coordinator, group, batch, review, coordinator.children(review['group_id'])[0]['id']
+
+
+async def test_nested_requester_scope_costs_and_frozen_artifacts(durable):
+    from app.credentials import Resolve
+    from test_credentials import attach as attach_credentials, access_request, generic_value
+    manager, cloud, root = durable
+    manager.store.execute("UPDATE runs SET owner_id='google:original-owner' WHERE id=?", (root,))
+    coordinator, group, batch, review, reviewer = await nested(durable)
+    vault = attach_credentials(manager)
+    await pause_parent(manager, batch, review['group_id'])
+    await drive(manager, reviewer, phase='monitor')
+    request = access_request(vault, manager.store.run(reviewer))
+    with manager.store.connect() as conn:
+        assert [r['id'] for r in vault.pending_rows(conn, root, include_children=True)] == [request['request_id']]
+    vault.resolve(request['request_id'], Resolve(scope='personal', lifetime='session', value=generic_value('env'), generation=0), 'google:tin', False)
+    secret = manager.store.rows('SELECT * FROM provider_secrets')[0]
+    assert secret['root_id'] == root
+    assert vault.permitted(secret, manager.store.run(reviewer), 'google:tin')
+    assert not vault.permitted(secret, manager.store.run(reviewer), 'google:other')
+    assert not vault.permitted(secret, manager.store.run(reviewer), 'google:original-owner')
+    unrelated = manager.store.create_run('Unrelated workflow', '', 'demo', [], user_id='google:tin')
+    assert not vault.permitted(secret, unrelated, 'google:tin')
+    # Direct group/artifact capabilities do not expand to arbitrary descendants.
+    with pytest.raises(ValueError, match='belong'):
+        coordinator.results(root, review['group_id'])
+    with pytest.raises(ValueError, match='belong'):
+        coordinator.read_artifact(root, Artifact(child_id=reviewer))
+    await drive(manager, reviewer)
+    while manager.store.has_queued_messages(reviewer):
+        await drive(manager, reviewer)
+    directory = manager.settings.data_dir / 'artifacts'
+    directory.mkdir(exist_ok=True)
+    with zipfile.ZipFile(directory / (reviewer + '.zip'), 'w') as archive:
+        archive.writestr('review.txt', 'Frozen independent review')
+    assert coordinator.handoff(batch, review['group_id'])
+    with zipfile.ZipFile(directory / 'next.zip', 'w') as archive:
+        archive.writestr('review.txt', 'Later follow-up')
+    (directory / 'next.zip').replace(directory / (reviewer + '.zip'))
+    assert coordinator.read_artifact(batch, Artifact(child_id=reviewer, path='review.txt'))['content'] == 'Frozen independent review'
+    spend = Spend(manager.store, manager.settings, None, None)
+    for identity in (root, batch, reviewer):
+        request_id = spend.begin(manager.store.run(identity), 'test-model')
+        manager.store.execute("UPDATE model_requests SET cost='0.1',status='completed' WHERE id=?", (request_id,))
+    tree = coordinator.view(root)
+    assert tree['spend'] == '0.3'
+    assert tree['groups'][0]['children'][0]['cost']['spend'] == '0.2'
+    assert tree['groups'][0]['children'][0]['children'][0]['cost']['spend'] == '0.1'
+    assert spend.report()['total']['spend'] == '0.3'
+
+
+async def test_nested_stop_fences_direct_chats_and_cancels_completed_group_followups(durable):
+    manager, cloud, root = durable
+    coordinator, group, batch, review, reviewer = await nested(durable)
+    await pause_parent(manager, batch, review['group_id'])
+    await drive(manager, reviewer)
+    await drive(manager, batch)
+    await drive(manager, root)
+    coordinator.enqueue_child(reviewer, 'Inspect one more case', 'later-review', None, 'google:other')
+    await drive(manager, reviewer, phase='monitor')
+    manager.store.update_run(root, status='stopping')
+    with pytest.raises(ValueError, match='finish stopping'):
+        coordinator.enqueue_child(reviewer, 'Race with stop', 'stop-race', None, 'google:other')
+    with pytest.raises(ValueError, match='finish stopping'):
+        await coordinator.call(reviewer, 'agents_fanout', {'request_key': 'stop-race', 'tasks': [{'label': 'Late', 'prompt': 'Must not launch'}]})
+    await manager.cancel(root)
+    await drive(manager, reviewer)
+    assert manager.store.run(reviewer)['status'] == 'cancelled'
+    assert not manager.store.run(reviewer)['token_hash']
+    assert not any(m.alive for m in cloud.machines)
+
+
+def test_ancestry_survives_reopen_and_rejects_orphans_and_cycles(tmp_path):
+    store = Store(tmp_path)
+    root, child, leaf = [store.create_run('Legacy run', '', 'demo', [])['id'] for _ in range(3)]
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (root, child))
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (child, leaf))
+    store = Store(tmp_path)
+    assert store.root_id(leaf) == root
+    assert {r['id'] for r in store.subtree(child)} == {child, leaf}
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (leaf, root))
+    with pytest.raises(ValueError, match='workflow root'):
+        store.root_id(leaf)
+    assert len(store.subtree(root)) == 3
+    store.execute("UPDATE runs SET parent_run_id='missing' WHERE id=?", (root,))
+    with pytest.raises(ValueError, match='workflow root'):
+        store.root_id(leaf)

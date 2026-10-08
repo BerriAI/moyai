@@ -77,7 +77,7 @@ const daily=Array.from({length:30},(_,i)=>({date:new Date(Date.UTC(2026,8,8+i)).
 daily.forEach((d,i)=>d.seven_day_average=Number((daily.slice(Math.max(0,i-6),i+1).reduce((n,d)=>n+d.requests,0)/7).toFixed(1)));
 const adoption={start:daily[0].date,end:daily.at(-1).date,total_requests:daily.reduce((n,d)=>n+d.requests,0),active_users:6,daily,weekly:{requests:312,previous_requests:198,percent_change:57.6,delta:114,start:'2026-09-30',end:'2026-10-06',previous_start:'2026-09-23',previous_end:'2026-09-29'}};
 let titleModel='openai/gpt-4.1-nano';
-let chatPreferences={send_immediately:false};
+let chatPreferences={send_immediately:false,omit_private_tool_payloads:false};
 let sandboxConnection={provider:'modal',revision:0,public_key:'c3ludGhldGljLXByZXZpZXctcHVibGljLWtleS1vbmx5',providers:{
  modal:{configured:true,values:{modal_app_name:'moyai'},secrets:{modal_token_id:true,modal_token_secret:true}},
  substrate:{configured:false,values:{substrate_api_url:'',substrate_router_url:'',substrate_atespace:'moyai',substrate_template:'moyai',substrate_egress_hosts:'*'},secrets:{substrate_api_token:false}}
@@ -120,7 +120,13 @@ const server=http.createServer(async(req,res)=>{
  if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:false,mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);
- if(p==='/api/settings/preferences'){if(req.method==='PUT')chatPreferences={send_immediately:body.send_immediately===true};return json(res,200,chatPreferences);}
+ if(p==='/api/settings/preferences'){
+  if(req.method==='PUT'){
+   if(fixture==='error')return json(res,503,{detail:'This preview simulates a service outage.'});
+   for(const key of Object.keys(chatPreferences))if(key in body)chatPreferences[key]=body[key]===true;
+  }
+  return json(res,200,chatPreferences);
+ }
  if(p==='/api/settings/session-titles'){if(req.method==='PUT')titleModel=body.model;return json(res,200,{model:titleModel,enabled:true,gateway_configured:true});}
  if(p==='/api/skills')return json(res,200,{skills:empty?[]:skills});
  if(p.startsWith('/api/skills/'))return json(res,200,skills.find(s=>s.id===p.split('/')[3])||{});

@@ -12,13 +12,13 @@ Moyai also verifies the signed `Cf-Access-Jwt-Assertion` at the origin. A public
 
 Use the account that owns the chosen domain. Enable Zero Trust, review its terms and any billing authorization, and choose the team's `*.cloudflareaccess.com` hostname. The example application hostname below is `moyai.litellm-sandbox.ai`; replace it consistently if another hostname is chosen.
 
-Configure the company Google identity provider, permit only approved company identities, and enforce MFA in Google Workspace. If MFA enforcement has not been confirmed, do not describe the rollout as enforcing MFA. Retain Moyai's existing Google sign-in and allowed-domain settings.
+Use the company Google identity provider if configured. Alternatively, select only Cloudflare's One-time PIN method and restrict the employee policy to the existing company email domain; users must then pass Moyai's existing Google sign-in as well. Retain Moyai's allowed-domain and role settings. Confirm MFA enforcement in Google Workspace separately before describing the rollout as enforcing MFA: an email code alone is not an independent MFA factor.
 
 Create these self-hosted Access applications **before** publishing the DNS/tunnel route:
 
 | Application | Host and path | Policy | Origin check |
 | --- | --- | --- | --- |
-| Moyai employees | `moyai.litellm-sandbox.ai` (all paths) | Allow approved company Google identities; short session, e.g. 8 hours. No Everyone or Bypass rule. | Employee application audience, then existing Moyai auth |
+| Moyai employees | `moyai.litellm-sandbox.ai` (all paths) | Allow approved company identities using Google or company-email One-time PIN; short session, e.g. 6 hours. No Everyone or Bypass rule. | Employee application audience, then existing Moyai auth |
 | Moyai broker | `moyai.litellm-sandbox.ai/broker/*` | **Service Auth**, include only the dedicated Moyai broker service token | Distinct broker application audience plus per-run bearer |
 | Slack events | `moyai.litellm-sandbox.ai/hooks/slack/events` | Bypass Everyone for this path only | POST only; existing Slack signing-secret verification |
 | Slack interactions | `moyai.litellm-sandbox.ai/hooks/slack/interactions` | Bypass Everyone for this path only | POST only; existing Slack signing-secret verification |

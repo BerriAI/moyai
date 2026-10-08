@@ -167,18 +167,19 @@ class SlackWebhookChannel:
             content + '\n\n' + self.owner.chat.link(source.metadata['run_id']))
         return response.metadata['slack_ts']
 
-    def rich_reply(self, source, content, pull_requests=()):
+    def build_rich_reply(self, source, content, pull_requests=(), body_blocks=None):
+        """Build a payload with the session footer and PR cards; does not send it."""
         link = self.owner.chat.link(source.metadata['run_id'])
         body = content.removesuffix('\n\n' + link)
-        blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        blocks = list(body_blocks) if body_blocks else [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
         if body != content:
             blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
         cards = tuple(pr_delivery.attachment(pr_delivery.PullRequest.model_validate(pr),
             self.owner.settings.public_url, source.metadata['run_id']) for pr in pull_requests)
-        return RichReply(text=content, blocks=tuple(blocks) if len(body) <= 3000 else (), attachments=cards)
+        return RichReply(text=content, blocks=tuple(blocks) if body_blocks or len(body) <= 3000 else (), attachments=cards)
 
     async def reply(self, source, content):
-        return await self.reply_rich(source, self.rich_reply(source, content))
+        return await self.reply_rich(source, self.build_rich_reply(source, content))
 
     async def credential_card(self, source, card_id):
         installation = self.owner.connectors.slack_installation()
@@ -195,6 +196,7 @@ class SlackWebhookChannel:
         return sent, metadata
 
     async def reply_rich(self, source: Message, content: RichReply) -> Message:
+        """Send a prepared payload (the agentchat channel protocol method)."""
         # Resolve the destination from our saved binding, never model output.
         installation = self.owner.connectors.slack_installation()
         identity = (installation.get('team_id'), installation.get('user_id'))

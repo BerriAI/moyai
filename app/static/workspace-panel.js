@@ -211,15 +211,20 @@
     function renderAgents(host){
       const focused=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-agent-id'):null;
       const ready=agents.filter(child=>['idle','completed'].includes(child.status)).length;
-      host.innerHTML=`<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc(statusFor(child))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`;
+      host.innerHTML=`<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`;
       if(focused)host.querySelector(`[data-agent-id="${focused}"]`)?.focus({preventScroll:true});
     }
     function syncAgents(data){
       if(disposed||data.id!==run.id||!data.agents)return;
       const byId=new Map();
-      for(const group of data.agents.groups||[])for(const child of group.children||[]){
-        if(child&&/^[a-f0-9]{32}$/.test(child.id))byId.set(child.id,{id:child.id,agent_label:child.agent_label,status:child.status});
+      function collect(children,path=''){
+        for(const child of children||[]){
+          if(!child||!/^[a-f0-9]{32}$/.test(child.id))continue;
+          byId.set(child.id,{id:child.id,agent_label:child.agent_label,status:child.status,path});
+          collect(child.children,[path,child.agent_label||'Agent'].filter(Boolean).join(' / '));
+        }
       }
+      for(const group of data.agents.groups||[])collect(group.children);
       const next=[...byId.values()],signature=JSON.stringify(next);
       if(signature===agentSignature)return;agentSignature=signature;agents=next;
       renderAgents(agentsSection);syncToolboxVisibility();

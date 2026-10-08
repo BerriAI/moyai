@@ -253,9 +253,9 @@ def test_broker_sends_private_context_without_leaking_it_to_tools_or_traces(work
     assert MARKER not in str(app.state.store.rows('SELECT * FROM memory_selections'))
 
 
-def test_private_memory_payloads_omitted_from_activity_and_snapshots():
+def test_opted_in_private_memory_payloads_omitted_from_activity_and_snapshots():
     events=[]
-    activity=ActivityReporter(lambda *event:events.append(event),tracing=True)
+    activity=ActivityReporter(lambda *event:events.append(event),tracing=True,omit_private_tool_payloads=True)
     activity.start('a','mcp_workspace_memory_save',{'content':MARKER})
     activity.complete('a','mcp_workspace_memory_save',{'content':MARKER},{'saved':True})
     assert MARKER not in json.dumps(events)

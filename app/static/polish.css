@@ -351,8 +351,9 @@ body { color: var(--text); letter-spacing: -0.006em; }
 }
 
 /* Rich composer keeps the existing text field's spacing and mobile sizing. */
-.composer .skill-editor-input {width:100%;box-sizing:border-box;min-height:62px;max-height:200px;overflow-y:auto;border:0;background:transparent;padding:16px 18px 6px;font:inherit;font-size:15px;line-height:22px;color:#1f1f1f;white-space:pre-wrap;overflow-wrap:anywhere;cursor:text;outline:none}
-.skill-editor-input[data-empty="true"]::before {content:attr(data-placeholder);color:#767676;pointer-events:none}
+.composer .skill-editor-input {position:relative;width:100%;box-sizing:border-box;min-height:62px;max-height:200px;overflow-y:auto;border:0;background:transparent;padding:16px 18px 6px;font:inherit;font-size:15px;line-height:22px;color:#1f1f1f;white-space:pre-wrap;overflow-wrap:anywhere;cursor:text;outline:none}
+/* Keep placeholder text out of the editable line so the caret starts at the left. */
+.skill-editor-input[data-empty="true"]::before {position:absolute;inset:16px 18px auto;content:attr(data-placeholder);color:#767676;pointer-events:none}
 .composer:focus-within {border-color:var(--accent,#8054bb)}
 .composer-skill {display:inline;padding:2px 6px;border-radius:5px;background:#f1eaf8;color:#67438c;box-decoration-break:clone;-webkit-box-decoration-break:clone;font-weight:500}
 .composer-skill>.skill-symbol {margin-right:5px}

@@ -17,7 +17,7 @@ try:
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
     from .activity import ActivityReporter, split_focus
-    from .startup import StartupUnavailable
+    from .startup import StartupUnavailable, REPOSITORY_METADATA_BUDGET
     from .project_environment import prepare_project
     from .memory_history import scrub_memory_history
     from .context_store import open_context, ContextUnavailable
@@ -33,7 +33,7 @@ except ImportError:
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
     from activity import ActivityReporter, split_focus
-    from startup import StartupUnavailable
+    from startup import StartupUnavailable, REPOSITORY_METADATA_BUDGET
     from project_environment import prepare_project
     from memory_history import scrub_memory_history
     from context_store import open_context, ContextUnavailable
@@ -123,10 +123,19 @@ def _run_agent(spec, relay):
             def broker(path, body):
                 request = urllib.request.Request(relay.url + path, data=json.dumps(body).encode(),
                     headers={'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN'], 'Content-Type': 'application/json'})
-                with urllib.request.urlopen(request, timeout=90) as response:
-                    return json.load(response)
+                try:
+                    with urllib.request.urlopen(request, timeout=REPOSITORY_METADATA_BUDGET + 10) as response:
+                        return json.load(response)
+                except urllib.error.HTTPError:
+                    if relay.startup_failure and relay.startup_failure.stage == 'repository_metadata':
+                        raise relay.startup_failure from None
+                    raise
             emit('tool', 'Preparing the shared GitHub repository')
-            checked_out = github_checkout(broker, spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], **({'repository_id': spec['github_repository_id']} if spec.get('github_repository_id') else {'repository': requested_repo}))
+            relay.repository_startup = True
+            try:
+                checked_out = github_checkout(broker, spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], **({'repository_id': spec['github_repository_id']} if spec.get('github_repository_id') else {'repository': requested_repo}))
+            finally:
+                relay.repository_startup = False
             if checked_out.get('error'):
                 raise RuntimeError('The shared GitHub checkout was not confirmed')
         elif not (workspace / "repo").exists():
@@ -169,7 +178,8 @@ def _run_agent(spec, relay):
         on_input=lambda item: goal.steer(item['content']))
     if not definition.live_steering:
         steering = AgentSteer(relay)
-    activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')))
+    activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')),
+                                omit_private_tool_payloads=bool(spec.get('omit_private_tool_payloads')))
     def tool_complete(call_id, name, args, result):
         activity.complete(call_id, name, args, result)
         goal.tool_complete(call_id, name, args, result)
@@ -294,12 +304,12 @@ def _run_agent(spec, relay):
             "For access credentials, check authorized saved personal and organization access and connected 1Password first. Use credentials_request to reuse access; ask through its secure form only when existing access is missing or unusable. The form requires the user to choose who can use the credential and whether it can be reused. "
             "Personal or Organization controls who can use it; This session or Future sessions controls reuse independently. Long-lived credentials are supported. Never ask for secret values in chat. "
             + ("You are a delegated worker. Complete only your assigned work and report evidence, failures, and saved result paths. "
-               "Your workspace is an isolated copy; your changes do not automatically merge into the coordinator’s files. " if spec.get('is_child_agent') else
+               "Your workspace is an isolated copy; your changes do not automatically merge into the coordinator’s files. " if spec.get('is_child_agent') else "") +
                "When asked to parallelize independent work, use agents_fanout if available. Supply exact assignments or an items list and worker count. "
                "Do not simulate child agents with model calls or claim parallel work without using the tool. "
                "Launch delegation in its own tool round, after finishing file writes. It copies current files and automatically pauses you until workers finish. "
                "After resuming, collect worker artifacts and combine results; count failed and missing cases accurately. "
-               "Child work is isolated and cannot create further child agents. Gateway and connected-app credentials stay on the server. ") +
+               "Each worker can delegate its assigned work further using the same tools and limits. Preserve the assigned scope. Gateway and connected-app credentials stay on the server. " +
             "For issue follow-ups, read its status and comments first; if a fix PR already exists, give its link and state instead of creating a duplicate. "
             "When GitHub tools are available, use github_repositories to list allowed repositories and github_checkout with its permanent repository_id to prepare it without overwriting local files. "
             "When the task requests a PR, use github_create_pull_request to package actual changed files and open a normal ready-for-review PR directly in an authorized repository. Do not ask for an extra administrator approval to create it. To continue an existing Moyai PR from any chat, check out its current head with github_checkout using its repository_id, number and a fresh directory, then use github_update_pull_request for follow-up fixes; use github_comment_pull_request for requested review-bot commands and github_pull_request_comments to read feedback. "

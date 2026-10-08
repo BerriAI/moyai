@@ -382,6 +382,8 @@ class RunManager:
                 "continuation": bool(run.get("continuation")),
                 "activity_input_id": activity_input_id,
                 "tracing_enabled": bool(self.store.tracing and self.store.tracing.enabled),
+                "omit_private_tool_payloads": bool(self.store.tracing and
+                    self.store.tracing.preferences.for_run(run)['omit_private_tool_payloads']),
                 "is_child_agent": bool(run.get('parent_run_id')),
                 "fresh_child": fresh_child,
                 "context_checkpoint": context_checkpoint,

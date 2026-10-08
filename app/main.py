@@ -176,7 +176,7 @@ def create_app(settings: Settings | None = None):
     infrastructure = spend.infrastructure
     sandbox_settings.modal_clients = infrastructure.modal_clients = manager.modal_clients
     coordinator = AgentCoordinator(store, settings, manager)
-    tracing = AgentTracing(store, settings)
+    tracing = AgentTracing(store, settings, preferences=user_preferences)
     store.tracing = tracing
     manager.coordinator = coordinator
     credentials = Credentials(store, security, settings, manager, checkpoints)
@@ -185,6 +185,9 @@ def create_app(settings: Settings | None = None):
     memory = Memory(store, security, credentials.same_requester, checkpoints)
     from .model_slots import ModelSlots
     model_slots = ModelSlots(settings.max_concurrent_model_requests)
+    from .memory_review import MemoryReview
+    memory_review = MemoryReview(memory, settings, spend, model_slots)
+    memory.reviewer = store.memory_review = memory_review
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     credentials.slots = model_slots
@@ -225,9 +228,11 @@ def create_app(settings: Settings | None = None):
         tracing.start()
         infrastructure.start()
         session_titles.start()
+        memory_review.start()
         try:
             yield
         finally:
+            await memory_review.close()
             await spend.recovery.close()
             await harness_gateway.maintenance.close()
             await computer.close()
@@ -277,6 +282,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(skills.routes())
     app.include_router(memory.routes())
     app.state.memory = memory
+    app.state.memory_review = memory_review
     session_folders = SessionFolders(store, security, checkpoints)
     app.state.session_folders = session_folders
     app.include_router(session_folders.routes())
@@ -461,7 +467,7 @@ def create_app(settings: Settings | None = None):
         memberships = session_folders.memberships(owner)
         pins = session_folders.pins(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
-        parent_id = (selected['parent_run_id'] or selected['id']) if selected else ''
+        parent_id = store.root_id(selected['id']) if selected else ''
         search = search.strip().lower()
         ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, *pins, parent_id],
                                     archive_owner=owner, archived=archived, pin_owner=owner,
@@ -478,16 +484,16 @@ def create_app(settings: Settings | None = None):
                 continue
             runs[run_id] = {**public_run(run), **session_lifecycle.metadata(run, owner, admin, archives), **sidebar_metadata.get(run_id, {}),
                            'pr_summary': pr_summaries[run_id], 'folder_id': memberships.get(run_id), 'children': []}
-        visible_ids = list(runs)
-        for offset in range(0, len(visible_ids), 500):
-            batch = visible_ids[offset:offset + 500]
-            children = store.rows("SELECT id,parent_run_id,agent_label,status,mode,created_at,updated_at,active_message_id,pending_result FROM runs WHERE deleted_at='' AND parent_run_id IN (" + ','.join('?' for _ in batch) + ') ORDER BY created_at,id', batch)
-            for child in children:
-                runs[child['parent_run_id']]['children'].append({**public_run(child), 'archived': archived, 'can_delete': False})
-        if search:
-            for parent in runs.values():
-                for row in [parent, *parent['children']]:
-                    row.update(search_query=search, search_match=row['id'] in matches, search_snippet=matches.get(row['id'], ''))
+        nodes = dict(runs)
+        for child in store.subtrees(list(runs)):
+            if child['id'] not in runs and not child['deleted_at']:
+                nodes[child['id']] = {**public_run({key: child[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id', 'pending_result')}),
+                                     'archived': runs[child['ancestor_id']]['archived'], 'can_delete': False, 'children': []}
+        for child in nodes.values():
+            if child['id'] not in runs and child['parent_run_id'] in nodes:
+                nodes[child['parent_run_id']]['children'].append(child)
+            if search:
+                child.update(search_query=search, search_match=child['id'] in matches, search_snippet=matches.get(child['id'], ''))
         return list(runs.values())
 
     @app.post("/api/runs", status_code=201)
@@ -555,7 +561,8 @@ def create_app(settings: Settings | None = None):
         messages = public_messages(run, store.messages(run_id))
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
-        sidebar_id = run['parent_run_id'] or run_id
+        sidebar_id = store.root_id(run_id)
+        run['workflow_root_id'] = sidebar_id
         pr_summary = session_pull_requests.summaries([run_id])[run_id]
         return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
                 **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
@@ -883,7 +890,7 @@ def create_app(settings: Settings | None = None):
                 return {'error':str(exc)}
         if body.name in AGENT_TOOLS:
             if not coordinator.available(run):
-                raise HTTPException(403, 'Only a top-level Temporal session can coordinate agents.')
+                raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
             try:
                 result = await coordinator.call(run_id, body.name, body.arguments)
                 await checkpoints.flush()

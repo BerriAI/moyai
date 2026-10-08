@@ -298,7 +298,7 @@ class Credentials:
             conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")
 
     def root(self, run):
-        return run['parent_run_id'] or run['id']
+        return self.store.root_id(run['id'])
 
     def row(self, request_id):
         rows = self.store.rows('SELECT * FROM credential_requests WHERE id=?', (request_id,))
@@ -460,7 +460,7 @@ class Credentials:
     def pending_rows(self, conn: sqlite3.Connection, run_id: str, *, include_children: bool = False) -> list[sqlite3.Row]:
         # Pending access belongs to the session and requester, not its latest turn.
         return conn.execute(f"""SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id
-            WHERE (r.id=? OR (? AND r.parent_run_id=?)) AND r.deleted_at=''
+            WHERE (r.id=? OR (? AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))) AND r.deleted_at=''
             AND r.status IN ({','.join('?' for _ in ACCESSIBLE)}) AND q.status='pending'
             ORDER BY q.created_at,q.id""", (run_id, include_children, run_id, *ACCESSIBLE)).fetchall()
 

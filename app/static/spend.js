@@ -1,4 +1,4 @@
-const spendState={start:'',end:'',user:'',timer:null,version:0};
+const spendState={start:'',end:'',user:'',timer:null,version:0,displayed:'',scope:'',pending:false};
 function dollars(value){return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:6}).format(Number(value));}
 function spendCount(value){return Number(value||0).toLocaleString();}
 function spendCostSource(row){return {response_header:'Response header',response_usage:'Response usage',gateway_recovery:'Recovered receipt'}[row.cost_source]||(row.cost!==null?'Earlier record':'Not returned');}
@@ -25,35 +25,83 @@ function bindSpendFilters(){
   if(typeof bindAnalyticsPreset==='function')bindAnalyticsPreset('spend',range=>{Object.assign(spendState,range);renderSpend().catch(showError);});
   $('#sync-spend').onclick=async()=>{const button=$('#sync-spend');button.disabled=true;button.textContent='Refreshing…';try{await renderSpend();}catch(e){showError(e);button.disabled=false;button.textContent='Refresh';}};
 }
+function spendContext(start=spendState.start,end=spendState.end){return [state.pageVersion,state.role,start,end].join('/');}
+function spendSupportsSelection(el){
+  return el?.tagName==='TEXTAREA'||el?.tagName==='INPUT'&&['text','search','url','tel','password'].includes(el.type);
+}
+function preserveSpendView(preserveValues=true){
+  const root=$('#content'),active=document.activeElement;
+  if(typeof document.querySelectorAll!=='function')return ()=>{};
+  const nodes=[...document.querySelectorAll('#content [id]')].map(el=>({id:el.id,open:el.open,value:preserveValues&&el.matches?.('input,select,textarea')?el.value:undefined,top:el.scrollTop,left:el.scrollLeft}));
+  const details=[...document.querySelectorAll('#content details')].map(el=>({label:el.querySelector('summary')?.textContent,open:el.open}));
+  const scrollers=[...document.querySelectorAll('#content .spend-table-wrap')].map(el=>({label:el.getAttribute('aria-label'),left:el.scrollLeft,top:el.scrollTop}));
+  const focus=active?.id,top=root.scrollTop;
+  let selection;
+  // Selection APIs are only defined for text controls; some browsers throw.
+  if(spendSupportsSelection(active))try{selection=[active.selectionStart,active.selectionEnd,active.selectionDirection];}catch{}
+  return ()=>{
+    for(const saved of nodes){const el=document.getElementById?.(saved.id);if(!el)continue;if(saved.open!==undefined)el.open=saved.open;if(saved.value!==undefined)el.value=saved.value;el.scrollTop=saved.top;el.scrollLeft=saved.left;}
+    for(const el of document.querySelectorAll('#content details')){const saved=details.find(s=>s.label===el.querySelector('summary')?.textContent);if(saved)el.open=saved.open;}
+    for(const el of document.querySelectorAll('#content .spend-table-wrap')){const saved=scrollers.find(s=>s.label===el.getAttribute('aria-label'));if(saved){el.scrollTop=saved.top;el.scrollLeft=saved.left;}}
+    const el=focus?document.getElementById?.(focus):null;el?.focus?.({preventScroll:true});if(selection?.[0]!=null&&spendSupportsSelection(el))try{el.setSelectionRange(...selection);}catch{}
+    root.scrollTop=top;
+  };
+}
+function spendRefreshNotice(message='',error=false){
+  const notice=$('#spend-refresh-status');
+  if(notice){notice.className=error?'error-banner':'subtext';notice.textContent=message==='Updating…'?'':message;}
+  const button=$('#sync-spend');if(button){button.disabled=false;button.textContent=message==='Updating…'?'Refreshing…':'Refresh';}
+}
 async function renderSpend(background = false){
   clearTimeout(spendState.timer);
-  if(background && state.view!=='spend')return;
-  if(background && settingsInteractionActive()){
+  if(state.view!=='spend')return;
+  if(background && (document.hidden||settingsInteractionActive())){
     spendState.timer=setTimeout(()=>renderSpend(true).catch(showError),5000);
     return;
   }
   const version=state.pageVersion,renderVersion=++spendState.version;
-  const current=()=>version===state.pageVersion&&renderVersion===spendState.version;
-  const preserved=typeof document.querySelector==='function'&&document.querySelector('.analytics-page')?{open:[...document.querySelectorAll('#content details[id][open]')].map(el=>el.id),focus:document.activeElement?.id,scroll:$('#content').scrollTop}:null;
-  $('#content').innerHTML='<p class="subtext" role="status">Loading spend…</p>';
+  const current=()=>state.view==='spend'&&version===state.pageVersion&&renderVersion===spendState.version;
+  const context=spendContext(),retained=spendState.displayed===context;
+  // Same-context spend and PR polling have independent lifetimes. Keep the PR
+  // timer alive if this fetch fails or its background commit is deferred.
+  if(!retained)clearTimeout(spendPRState.timer);
+  if(retained)spendRefreshNotice('Updating…');
+  else {spendState.displayed='';spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;$('#content').innerHTML='<p class="subtext" role="status">Loading spend…</p>';}
   const query=new URLSearchParams();if(spendState.start)query.set('start',spendState.start);if(spendState.end)query.set('end',spendState.end);
   let data,identityStatus;
   try{
     data=await api('/api/spend?'+query);
     if(!current())return;
+    if(retained&&data.scope!==spendState.scope){spendState.displayed='';$('#content').innerHTML='<p class="subtext" role="status">Loading spend…</p>';}
+    if(data.scope!=='organization'){clearTimeout(spendPRState.timer);spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;}
     identityStatus=data.scope==='organization'?await api('/api/admin/identities/status'):null;
   }catch(error){
     if(!current())return;
+    if(retained&&spendState.displayed===context&&error.status!==401&&error.status!==403){
+      spendRefreshNotice('Could not update. '+error.message+' Use Refresh to retry.',true);
+      if(spendState.pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
+      return;
+    }
+    clearTimeout(spendPRState.timer);
+    spendState.displayed='';spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;
     $('#content').innerHTML=`<div class="page-heading"><h1>${state.role==='admin'?'Spend & usage':'Spend'}</h1></div><div class="error-banner" role="alert">${esc(error.message)}</div>${renderSpendFilters(spendState.start,spendState.end)}`;
     bindSpendFilters();
     return;
   }
   if(!current())return;
-  const admin=data.scope==='organization';
+  if(background&&data.scope===spendState.scope&&(document.hidden||settingsInteractionActive())){
+    spendRefreshNotice();
+    spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
+    return;
+  }
+  const restore=retained&&data.scope===spendState.scope?preserveSpendView():()=>{};
+  const admin=data.scope==='organization';spendState.scope=data.scope;
+  spendState.pending=!!(data.total.pending_costs||admin&&data.infrastructure.pending);
   spendState.start=data.start;spendState.end=data.end;
   if(admin){
-    if(!await renderAdminSpend(data,identityStatus)||!current())return;
-    if(preserved){for(const id of preserved.open){const el=$('#'+id);if(el)el.open=true;}if(preserved.focus)$('#'+preserved.focus)?.focus({preventScroll:true});$('#content').scrollTop=preserved.scroll;}
+    const rendered=renderAdminSpend(data,identityStatus,null,true);
+    spendState.displayed=spendContext(data.start,data.end);restore();
+    await rendered;if(!current())return;
     if(data.infrastructure.pending||data.total.pending_costs)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
     return;
   }
@@ -62,13 +110,13 @@ async function renderSpend(background = false){
   const verified=data.total.requests>0&&!pending&&!missing;
   const sessions=data.sessions;
   $('#content').innerHTML=`<div class="page-heading"><div><h1>Your LLM spend</h1><p class="subtext">Only your model usage and costs, including your linked Slack activity.</p></div><span class="badge">USD</span></div>
-    ${renderSpendFilters(data.start,data.end)}
+    ${renderSpendFilters(data.start,data.end)}<div id="spend-refresh-status" role="status"></div>
     ${renderPersonalSpendSummary(data)}
     <div class="spend-reconciliation ${verified?'verified':''}" role="status"><strong>${verified?'✓ All tracked LLM requests priced':missing?'Some costs are unavailable':data.total.requests?'Costs pending':'Ready to track usage'}</strong><p>${verified?'Your total includes the costs returned by the gateway for your requests.':data.total.requests?`${spendCount(pending)} costs await confirmation; ${spendCount(missing)} costs are unavailable. Missing costs are not treated as free.`:'New model requests will be attributed to the signed-in user using the cost returned by LiteLLM.'}</p></div>
     <section class="card spend-section"><h2>Your sessions</h2><div class="spend-table-wrap" role="region" aria-label="Session spend" tabindex="0"><table class="spend-table"><thead><tr><th>Session</th><th>Requests</th><th>Spend</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><a href="#run=${esc(s.run_id)}">${esc(s.title)}</a></td><td>${spendCount(s.requests)}</td><td>${dollars(s.spend)}${s.missing_costs?'<small>Cost missing</small>':s.pending_costs?'<small>Cost pending</small>':''}</td></tr>`).join('')||`<tr><td colspan="3" class="subtext">No model requests attributed to you in this period.</td></tr>`}</tbody></table></div></section>
     <section class="card spend-section"><h2>Your models</h2><div class="spend-models">${data.models.map(m=>`<div><span>${esc(modelName(m.model))}</span><strong>${dollars(m.spend)}</strong><small>${spendCount(m.requests)} requests</small></div>`).join('')||'<p class="subtext">No usage yet.</p>'}</div></section>
     <details class="card spend-section"><summary>Request costs · latest 500 in this period</summary><div class="spend-table-wrap" role="region" aria-label="Exact request costs" tabindex="0"><table class="spend-table"><thead><tr><th>Time</th><th>Model</th><th>Cache read tokens</th><th>Cache write tokens</th><th>Cost source</th><th>Exact USD</th></tr></thead><tbody>${data.request_details.map(r=>`<tr><td><a href="#run=${esc(r.run_id)}" title="${esc(r.id)}">${esc(new Date(r.created_at).toLocaleString())}</a></td><td>${esc(modelName(r.model))}</td><td>${r.cache_read_input_tokens==null?'Not reported':spendCount(r.cache_read_input_tokens)}</td><td>${r.cache_creation_input_tokens==null?'Not reported':spendCount(r.cache_creation_input_tokens)}</td><td>${spendCostSource(r)}</td><td>${spendCostValue(r)}</td></tr>`).join('')||'<tr><td colspan="6">No requests in this period.</td></tr>'}</tbody></table></div></details>
     <p class="subtext spend-note">LLM costs are saved from inference responses and recovered gateway receipts. Recorded costs are preserved across gateway key rotations. Each response is attributed to the person who sent that message. Your view excludes other users and infrastructure costs. Calls made with separate credential-proxy keys are not included. Usage before tracking began or outside Moyai is not included. An interrupted or failed request may have no returned cost, so this is not a full audit of the key’s lifetime spend. ${data.tracked_since?'Per-user tracking began '+esc(new Date(data.tracked_since).toLocaleString())+'.':''}</p>`;
-  bindSpendFilters();
+  bindSpendFilters();spendState.displayed=spendContext(data.start,data.end);restore();
   if(pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
 }

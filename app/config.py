@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     session_title_timeout_seconds: float = Field(default=8, ge=0.1, le=60)
     session_title_concurrency: int = Field(default=2, ge=1, le=8)
     session_title_backfill_limit: int = Field(default=50, ge=0, le=128)
+    memory_review_enabled: bool = True
+    # Empty uses the completed turn's configured model; no new provider is needed.
+    memory_review_model: str = Field(default='', max_length=200)
+    memory_review_idle_seconds: float = Field(default=60, ge=0, le=3600)
+    memory_review_timeout_seconds: float = Field(default=60, ge=1, le=180)
+    memory_review_backfill_limit: int = Field(default=50, ge=0, le=200)
     audio_transcription_model: str = "gpt-transcribe"
     audio_transcription_prompt: str = Field(default="", max_length=800)
     # Separate destination/key; enabling traces never reroutes inference.
