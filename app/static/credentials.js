@@ -225,7 +225,7 @@ async function openCredentialDialog(request=null,secret=null,preset=null){
     if(reload)sessions=null;
     const drawSessions=()=>{
       const selected=picker.value,scope=$('#secret-scope').value;
-      const choices=(sessions||[]).filter(run=>!run.parent_run_id&&run.chat_enabled!==false&&(scope!=='personal'||!state.userId||!run.active_user_id||run.active_user_id===state.userId||(state.userId.startsWith('google:')&&run.active_user_id.startsWith('slack:'))));
+      const choices=(sessions||[]).filter(run=>!run.parent_run_id&&run.chat_enabled!==false&&(scope!=='personal'||!state.userId||!run.active_user_id||run.active_user_id===state.userId||((state.userId.startsWith('google:')||state.userId.startsWith('cloudflare:'))&&run.active_user_id.startsWith('slack:'))));
       // A saved root is retained even outside the latest page. Authorization is checked on save.
       if(rootId&&!choices.some(run=>run.id===rootId))choices.unshift({id:rootId,prompt:'Saved session'});
       const chosen=choices.some(run=>run.id===selected)?selected:'';

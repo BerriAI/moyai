@@ -300,7 +300,7 @@ function restoreSessionScope(){
   $('#session-scope').innerHTML='<option value="mine">My sessions</option>'+(canViewAll?'<option value="all">All sessions</option>':'');
   $('#session-scope').value=state.sessionScope;
   $('#session-scope').disabled=!canViewAll;
-  $('#session-scope').title=state.userId?.startsWith('google:')?'Sessions you created or messaged in, including linked Slack activity. Opening a link alone does not count.':'Sessions created or messaged in by this shared login. Sign in with Google for a personal view.';
+  $('#session-scope').title=(state.userId?.startsWith('google:')||state.userId?.startsWith('cloudflare:'))?'Sessions you created or messaged in, including linked Slack activity. Opening a link alone does not count.':'Sessions created or messaged in by this shared login. Sign in with Google for a personal view.';
 }
 async function changeSessionScope(){
   state.sessionScope=state.role==='admin'&&$('#session-scope').value==='all'?'all':'mine';
@@ -708,7 +708,7 @@ async function boot(){
     [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
     $('#logout').hidden=!!session.local;
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';}
-    $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{await api('/api/logout',{method:'POST'});location.reload();}catch(error){button.disabled=false;showError(error);}};
+    $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{const result=await api('/api/logout',{method:'POST'});if(result.logout_url==='/cdn-cgi/access/logout')location.assign(result.logout_url);else location.reload();}catch(error){button.disabled=false;showError(error);}};
     const linkedRun=parseSessionLink(location.hash); if(linkedRun)await openRun(linkedRun.runId,linkedRun.hash);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();

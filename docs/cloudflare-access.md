@@ -6,13 +6,13 @@ This is an opt-in rollout guide, not a claim that an existing deployment is prot
 
 Employees reach Cloudflare Access, then an outbound Cloudflare Tunnel, then Moyai on Render's private network. The private service has no public `onrender.com` endpoint. Sandboxes reach the same hostname using a broker-only Cloudflare service token plus Moyai's existing per-run bearer token. No VPN client is needed for browser access.
 
-Moyai also verifies the signed `Cf-Access-Jwt-Assertion` at the origin. A public-origin URL, forged email header, or existing Moyai login cookie cannot bypass this check. Access does not replace Google sign-in, roles, run ownership, Slack signatures, or run-token expiration. It does not restrict sandbox outbound networking, remove the app's ability to decrypt stored credentials, or prevent an authorized agent from misusing a granted tool. Keep those credentials scoped and budget-limited.
+Moyai also verifies the signed `Cf-Access-Jwt-Assertion` at the origin. A public-origin URL, forged email header, or existing Moyai login cookie cannot bypass this check. By default, Access is an additional gate before Moyai sign-in. With `CLOUDFLARE_ACCESS_LOGIN=true`, the verified employee assertion signs the person into Moyai directly. Roles, run ownership, Slack signatures, and run-token expiration remain enforced. It does not restrict sandbox outbound networking, remove the app's ability to decrypt stored credentials, or prevent an authorized agent from misusing a granted tool. Keep those credentials scoped and budget-limited.
 
 ## 1. Prepare Cloudflare without changing the live origin
 
 Use the account that owns the chosen domain. Enable Zero Trust, review its terms and any billing authorization, and choose the team's `*.cloudflareaccess.com` hostname. The example application hostname below is `moyai.litellm-sandbox.ai`; replace it consistently if another hostname is chosen.
 
-Use company Google SSO with a dedicated OAuth web client in a company-owned Google Cloud project whose audience is **Internal**. Add the team's `https://<team>.cloudflareaccess.com` origin and exact `/cdn-cgi/access/callback` redirect, store the client secret only in Cloudflare's identity-provider configuration, and enable PKCE. Cloudflare's Google integration supports sign-in without directory access; its Google Workspace integration additionally requires administrator authorization for group membership. Select only this Google provider on the employee application, keep the company-email policy, and retain Moyai's existing Google sign-in and role settings. Confirm MFA enforcement in Google Workspace separately before describing the rollout as enforcing MFA. If One-time PIN is used as an interim login method, an email code alone is not an independent MFA factor.
+Use company Google SSO with a dedicated OAuth web client in a company-owned Google Cloud project whose audience is **Internal**. Add the team's `https://<team>.cloudflareaccess.com` origin and exact `/cdn-cgi/access/callback` redirect, store the client secret only in Cloudflare's identity-provider configuration, and enable PKCE. Cloudflare's Google integration supports sign-in without directory access; its Google Workspace integration additionally requires administrator authorization for group membership. Select only this Google provider on the employee application, keep the company-email policy, and retain Moyai's allowed-domain and administrator settings. Enable the optional identity handoff below to avoid a second Google sign-in. Confirm MFA enforcement in Google Workspace separately before describing the rollout as enforcing MFA. If One-time PIN is used as an interim login method, an email code alone is not an independent MFA factor.
 
 Company-wide MFA verification is outside this rollout's scope and is not a cutover prerequisite. Leave any existing Google MFA policy unchanged; this rollout does not assert or enforce MFA for every employee.
 
@@ -20,7 +20,7 @@ Create these self-hosted Access applications **before** publishing the DNS/tunne
 
 | Application | Host and path | Policy | Origin check |
 | --- | --- | --- | --- |
-| Moyai employees | `moyai.litellm-sandbox.ai` (all paths) | Allow approved company Google identities; 8-hour session. No Everyone or Bypass rule. | Employee application audience, then existing Moyai auth |
+| Moyai employees | `moyai.litellm-sandbox.ai` (all paths) | Allow approved company Google identities; 8-hour session. No Everyone or Bypass rule. | Employee application audience; optional verified identity handoff, then Moyai authorization |
 | Moyai broker | `moyai.litellm-sandbox.ai/broker/*` | **Service Auth**, include only the dedicated Moyai broker service token | Distinct broker application audience plus per-run bearer |
 | Slack events | `moyai.litellm-sandbox.ai/hooks/slack/events` | Bypass Everyone for this path only | POST only; existing Slack signing-secret verification |
 | Slack interactions | `moyai.litellm-sandbox.ai/hooks/slack/interactions` | Bypass Everyone for this path only | POST only; existing Slack signing-secret verification |
@@ -48,6 +48,18 @@ Only when an automation actually uses an inbound webhook, add a separate Access 
    Outside Render, use `PUBLIC_URL` instead of `MOYAI_PUBLIC_URL`. The three identity settings must be configured together; partial configuration refuses startup. Never enable the gate before all callers have their matching policies and credentials.
 5. Deploy the reviewed commit to staging. Keep the Docker command empty for the app; its entrypoint prepares disk ownership and keeps the empty-database guard. The production Temporal worker must not start during staging. The new service initially serves only maintenance responses.
 
+## Optional: one employee sign-in
+
+After the employee Access application is restricted to the company Google provider and company emails, set `CLOUDFLARE_ACCESS_LOGIN=true` on the private app. Keep `GOOGLE_ALLOWED_DOMAINS` and `GOOGLE_ADMIN_EMAILS` configured; existing database role assignments remain authoritative. Separate Moyai Google OAuth credentials are no longer needed for login, but may be retained for rollback.
+
+Moyai checks the signature, issuer, employee audience, expiry, subject, and allowed email domain on **every request**. It never trusts a plain forwarded-email header. Machine assertions, health checks and webhook exemptions cannot create employee sessions. Old Moyai cookies cannot override the current Access identity. Normal CSRF, origin checks and live role changes still apply.
+
+At first login, the authoritative signed company email is matched exactly to one existing person account, preserving its ID, history, preferences, personal credentials and Slack links. The Access issuer and subject are then pinned to that account. An ambiguous email, changed email, or conflicting subject fails closed and needs administrator review. New employees receive distinct `cloudflare:` accounts. This relies on the company-only Google Access policy; do not add OTP, service tokens or unrelated identity providers to that application without reviewing the enrollment trust model.
+
+Sign out clears the Moyai cookie and opens Cloudflare's logout endpoint. The next visit uses Access again; Google may reuse its existing session. Moyai does not add a second Google account picker. Access's eight-hour expiry still limits access even if a Moyai cookie has a longer lifetime.
+
+To roll back the handoff alone, disable `CLOUDFLARE_ACCESS_LOGIN` and retain the origin gate and Google settings. Existing Google account IDs remain intact. Accounts created only through Access have distinct IDs; review their ownership before moving them to direct Google login.
+
 ## 3. Connect the tunnel
 
 Create a named, remotely managed tunnel dedicated to Moyai. Store its connector token as `TUNNEL_TOKEN` on **moyai-tunnel only**; that worker needs no Moyai database, provider secrets, or application service token. Deploy the pinned official cloudflared image and confirm the connector is healthy.
@@ -69,7 +81,7 @@ Plan a short maintenance window. Do not run two production app/Temporal workers 
 ## 5. Verify the live boundaries
 
 - Anonymous public app request reaches the Cloudflare login/block page; an unapproved identity cannot enter.
-- Valid employee Access session still requires Moyai sign-in and respects existing roles.
+- With the handoff enabled, a valid employee Access session opens the same Moyai account directly, without a second Google account picker. Existing roles and personal ownership remain intact. With it disabled, the separate Moyai sign-in remains required.
 - Missing, forged, expired, wrong-issuer or wrong-audience origin JWT gets 401. Signing-key retrieval failure returns 503 and never opens access.
 - Broker requires both the broker Access identity and an active run's bearer token. The machine assertion cannot enter `/api/credentials` or the dashboard, and an employee assertion cannot substitute for the broker identity.
 - An unsigned Slack event fails; signed Slack delivery succeeds. Unconfigured webhook paths remain blocked.
@@ -85,7 +97,7 @@ Rotate the broker and tunnel tokens separately; revoke the old token after repla
 Local verification (synthetic identities, no Cloudflare account or production secrets):
 
 ```sh
-uv run pytest -q tests/test_cloudflare_access.py tests/test_access_transport.py tests/test_render.py
+uv run pytest -q tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py tests/test_render.py
 uv run python -m scripts.cloudflare_access_demo
 ```
 

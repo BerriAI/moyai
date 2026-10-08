@@ -225,7 +225,7 @@ class Connectors:
         rows = self.store.rows("""SELECT COALESCE(linked.email,u.email) AS email,
             COALESCE(linked.kind,u.kind) AS kind FROM users u
             LEFT JOIN users linked ON linked.id=u.linked_user_id WHERE u.id=?""", (user_id,))
-        if not rows or rows[0]['kind'] != 'google' or not rows[0]['email']:
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare'} or not rows[0]['email']:
             raise ConnectorError('Sign in with Google or link your Slack identity before using My Linear tickets.')
         if rows[0]['email'].rpartition('@')[2] not in self.settings.google_domains():
             raise ConnectorError('Your work email is no longer allowed in this workspace.')
@@ -333,7 +333,7 @@ class Connectors:
         if not actor and run and not run.get('chat_enabled'):
             actor = run.get('owner_id')
         rows = self.store.rows('SELECT name,email,kind FROM users WHERE id=?', (actor,)) if actor else []
-        if not rows or rows[0]['kind'] not in {'google', 'slack'}:
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'}:
             raise ConnectorError('Slack sends require an identified requester. Sign in with Google or send from your Slack account.')
         label = ' '.join((rows[0]['name'] or rows[0]['email']).split())[:160]
         if not label:

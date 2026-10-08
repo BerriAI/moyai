@@ -31,18 +31,23 @@ def demonstrate(output: Path, delay: float):
         time.sleep(delay)
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    def assertion(audience):
+    def assertion(audience, email='tin@berri.ai', subject='access-tin'):
         return jwt.encode({'iss': 'https://local-demo.cloudflareaccess.com', 'aud': [audience],
-                           'iat': int(time.time()), 'exp': int(time.time()) + 300, 'type': 'app'},
+                           'iat': int(time.time()), 'exp': int(time.time()) + 300, 'type': 'app',
+                           'email': email, 'sub': subject},
                           key, algorithm='RS256', headers={'kid': 'local-demo'})
 
     with tempfile.TemporaryDirectory(prefix='moyai-access-demo-') as temporary:
         settings = Settings(_env_file=None, data_dir=Path(temporary), public_url='https://moyai.example',
-                            workspace_password='synthetic-demo-password', temporal_enabled=False,
+                            password_login_enabled=False, temporal_enabled=False,
+                            cloudflare_access_login=True, google_allowed_domains='berri.ai',
+                            google_admin_emails='tin@berri.ai',
                             cloudflare_access_team_domain='local-demo.cloudflareaccess.com',
                             cloudflare_access_audience='employee-demo',
                             cloudflare_access_broker_audience='broker-demo')
         app = create_app(settings)
+        owner = app.state.store.identity({'method': 'google', 'identity':
+            {'sub': 'existing-tin', 'email': 'tin@berri.ai', 'name': 'Tin'}})
         # Pin only the disposable demo key, avoiding external key discovery.
         app.state.cloudflare_access.keys = {'local-demo': key.public_key()}
         app.state.cloudflare_access.expires = time.monotonic() + 300
@@ -57,10 +62,14 @@ def demonstrate(output: Path, delay: float):
             check('Forged Access header', client.get('/api/credentials',
                   headers={'Cf-Access-Jwt-Assertion': 'forged'}), 401)
             employee = {'Cf-Access-Jwt-Assertion': assertion('employee-demo')}
-            check('Valid employee assertion, no Moyai login', client.get('/api/credentials', headers=employee), 401)
-            assert client.post('/api/login', headers=employee,
-                               json={'password': 'synthetic-demo-password'}).status_code == 200
-            check('Employee assertion + Moyai login', client.get('/api/credentials', headers=employee), 200)
+            session = client.get('/api/session', headers=employee)
+            check('Employee assertion, no second login', session, 200)
+            assert session.json()['authenticated'] and session.json()['user_id'] == owner
+            assert not app.state.store.rows('SELECT * FROM login_states')
+            log('PASS  Existing account ID retained; no Google login transaction')
+            check('Employee opens existing personal account', client.get('/api/credentials', headers=employee), 200)
+            member = {'Cf-Access-Jwt-Assertion': assertion('employee-demo', 'member@berri.ai', 'access-member')}
+            check('Member cannot open administrator controls', client.get('/api/admin/users', headers=member), 403)
             check('Moyai login alone cannot bypass Access', client.get('/api/credentials'), 401)
             run = app.state.store.create_run('Synthetic demo', '', 'modal', [], model='test-model')
             app.state.store.update_run(run['id'], status='running', token_hash=digest('synthetic-run-token'))
@@ -71,7 +80,7 @@ def demonstrate(output: Path, delay: float):
             check('Broker identity + active run bearer', client.get(path, headers=machine), 200)
             check('Broker identity cannot open dashboard', client.get('/api/credentials', headers=machine), 401)
             check('Unsigned Slack POST remains blocked', client.post('/hooks/slack/events', json={}), 401)
-            log('9/9 boundaries verified. No production state changed.')
+            log('11/11 checks passed. Single sign-in; authorization preserved.')
     header = {'version': 2, 'width': 100, 'height': 22, 'timestamp': int(time.time()),
               'title': 'Moyai Access: real local request recording'}
     (output / 'moyai-access.cast').write_text('\n'.join(json.dumps(row) for row in [header, *events]) + '\n')

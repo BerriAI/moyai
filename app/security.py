@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
 from fastapi import HTTPException, Request
+from starlette.responses import Response
+from starlette.requests import HTTPConnection
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 from .config import Settings
@@ -40,7 +42,7 @@ class Security:
         if settings.google_enabled() and (not settings.google_domains() or not settings.google_admins()
                 or any(email.rpartition("@")[2] not in settings.google_domains() for email in settings.google_admins())):
             raise ValueError("Configure GOOGLE_ALLOWED_DOMAINS and GOOGLE_ADMIN_EMAILS in those domains.")
-        if not self.local and not settings.google_enabled() and (not settings.password_login_enabled or not settings.workspace_password):
+        if not self.local and not settings.person_login_enabled() and (not settings.password_login_enabled or not settings.workspace_password):
             raise ValueError("Configure Google sign-in or WORKSPACE_PASSWORD before exposing the workspace.")
         if settings.workspace_password and len(settings.workspace_password) < 16:
             raise ValueError("Set WORKSPACE_PASSWORD to at least 16 characters before exposing the workspace.")
@@ -54,6 +56,12 @@ class Security:
             raise ValueError("WORKSPACE_MEMBER_PASSWORD must be at least 16 characters and different from the administrator password.")
 
     def session_info(self, request: Request) -> dict | None:
+        if self.settings.cloudflare_access_login:
+            # Set only by the middleware after verifying THIS request's Access
+            # assertion. Cookies alone, including legacy admin cookies, cannot
+            # authenticate or override the currently signed-in Access identity.
+            info = getattr(request.state, 'access_session', None)
+            return {**info, 'role': self.google_role(info['identity']['email'])} if info else None
         try:
             info = self.signer.loads(request.cookies.get("workspace_session", ""), max_age=43200)
             # Sessions from the original single-password deployment belong to
@@ -84,13 +92,35 @@ class Security:
         except (BadSignature, SignatureExpired, KeyError, TypeError, AttributeError):
             return None
 
+    def access_session(self, request: HTTPConnection, identity: dict) -> bytes | None:
+        """Establish a browser session from a verified employee assertion only."""
+        self.user_roles.store.access_identity(identity)
+        try:
+            info = self.signer.loads(request.cookies.get('workspace_session', ''), max_age=43200)
+        except (BadSignature, SignatureExpired):
+            info = {}
+        if (isinstance(info, dict) and info.get('method') == 'cloudflare'
+                and isinstance(info.get('sid'), str) and info['sid']
+                and info.get('audience') == self.settings.cloudflare_access_audience
+                and info.get('identity') == identity):
+            request.state.access_session = info
+            return None
+        # The store pins issuer/subject to one account. Ambiguous emails and
+        # attempts to rebind a different subject fail closed with ValueError.
+        info = {'sid': secrets.token_urlsafe(32), 'method': 'cloudflare', 'identity': identity,
+                'audience': self.settings.cloudflare_access_audience}
+        request.state.access_session = info
+        response = Response()
+        self.set_session_cookie(response, info)
+        return response.headers['set-cookie'].encode('latin-1')
+
     def google_role(self, email: str) -> str:
         if self.user_roles is not None:
             return self.user_roles.role(email)
         return 'admin' if email in self.settings.google_admins() else 'member'
 
     def local_preview(self) -> bool:
-        return self.local and not self.settings.workspace_password and not self.settings.google_enabled()
+        return self.local and not self.settings.workspace_password and not self.settings.person_login_enabled()
 
     def session(self, request: Request) -> str | None:
         info = self.session_info(request)
@@ -126,9 +156,12 @@ class Security:
             info.update(identity=identity, client_id=self.settings.google_client_id)
         elif role == "member":
             info["password_tag"] = digest(self.settings.workspace_member_password)
-        response.set_cookie("workspace_session", self.signer.dumps(info), max_age=43200,
-                            httponly=True, secure=not self.local, samesite="lax", path="/")
+        self.set_session_cookie(response, info)
         return sid
+
+    def set_session_cookie(self, response, info):
+        response.set_cookie('workspace_session', self.signer.dumps(info), max_age=43200,
+                            httponly=True, secure=not self.local, samesite='lax', path='/')
 
     def encrypt(self, value: str) -> str:
         return self.fernet.encrypt(value.encode()).decode()

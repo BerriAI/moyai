@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     cloudflare_access_client_id: str = Field(default='', repr=False)
     cloudflare_access_client_secret: str = Field(default='', repr=False)
     cloudflare_access_webhook_paths: list[str] = Field(default_factory=list)
+    cloudflare_access_login: bool = False
 
     @model_validator(mode='after')
     def validate_cloudflare_access(self):
@@ -56,6 +57,9 @@ class Settings(BaseSettings):
                   self.cloudflare_access_broker_audience)
         if any(values) and not all(values):
             raise ValueError('Configure the Cloudflare team domain and both application audiences together.')
+        if self.cloudflare_access_login and (not all(values) or not self.google_domains() or not self.google_admins()
+                or any(email.rpartition('@')[2] not in self.google_domains() for email in self.google_admins())):
+            raise ValueError('Access sign-in requires Cloudflare Access, allowed work domains and administrator emails.')
         if self.cloudflare_access_team_domain:
             if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.cloudflareaccess\.com', values[0]):
                 raise ValueError('Use the Cloudflare team hostname without a scheme or path.')
@@ -82,6 +86,9 @@ class Settings(BaseSettings):
                 'WORKSPACE_ACCESS_ORIGIN': self.public_url.rstrip('/') if self.cloudflare_access_client_id else '',
                 'WORKSPACE_ACCESS_CLIENT_ID': self.cloudflare_access_client_id,
                 'WORKSPACE_ACCESS_CLIENT_SECRET': self.cloudflare_access_client_secret}
+
+    def person_login_enabled(self) -> bool:
+        return self.google_enabled() or self.cloudflare_access_login
 
     workspace_password: str = ""
     workspace_member_password: str = ""

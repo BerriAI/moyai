@@ -235,7 +235,7 @@ class Automations:
     def validate_execution(self, definition, owner_id):
         # Re-evaluate access at every launch; saved workflows confer no new rights.
         owners = self.store.rows('SELECT * FROM users WHERE id=?', (owner_id,))
-        if not owners or (owners[0]['kind'] == 'google' and (not self.settings.google_enabled() or owners[0]['email'].rpartition('@')[2] not in self.settings.google_domains())):
+        if not owners or (owners[0]['kind'] in {'google', 'cloudflare'} and (not self.settings.person_login_enabled() or owners[0]['email'].rpartition('@')[2] not in self.settings.google_domains())):
             raise HTTPException(409, 'The automation owner no longer has workspace access.')
         if owners[0]['kind'] == 'shared' and not (self.security.local_preview() or self.settings.password_login_enabled):
             raise HTTPException(409, 'The automation owner no longer has workspace access.')

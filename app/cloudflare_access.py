@@ -1,11 +1,13 @@
-"""An optional outer identity check. Never substitutes for Moyai authorization."""
+"""Verify Access assertions; optional employee sign-in retains Moyai authorization."""
 import asyncio
+import re
 import time
 
 import httpx
 import jwt
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
+from starlette.requests import HTTPConnection
 
 from .config import Settings
 
@@ -16,6 +18,7 @@ class AccessUnavailable(Exception):
 
 class CloudflareAccess:
     def __init__(self, settings: Settings):
+        self.settings = settings
         self.enabled = bool(settings.cloudflare_access_team_domain)
         self.issuer = 'https://' + settings.cloudflare_access_team_domain
         self.audience = settings.cloudflare_access_audience
@@ -81,24 +84,44 @@ class CloudflareAccess:
         audiences = claims['aud'] if isinstance(claims['aud'], list) else [claims['aud']]
         if set(audiences) != {audience} or claims.get('type') != 'app':
             raise jwt.InvalidTokenError()
+        if self.settings.cloudflare_access_login and audience == self.audience:
+            # Only signed employee claims identify a person. A forwarded email
+            # header or a machine's common_name never establishes a login.
+            email, subject = claims.get('email'), claims.get('sub')
+            if (not isinstance(email, str) or len(email) > 254
+                    or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+", email)
+                    or email.lower().rpartition('@')[2] not in self.settings.google_domains()
+                    or not isinstance(subject, str) or not subject or len(subject) > 255
+                    or 'common_name' in claims):
+                raise jwt.InvalidTokenError()
+            return {'sub': subject, 'issuer': self.issuer, 'email': email.lower(),
+                    'domain': email.lower().rpartition('@')[2]}
 
 
 class CloudflareAccessMiddleware:
-    def __init__(self, app, access: CloudflareAccess):
-        self.app, self.access = app, access
+    def __init__(self, app, access: CloudflareAccess, security):
+        self.app, self.access, self.security = app, access, security
 
     async def __call__(self, scope, receive, send):
         if scope['type'] not in {'http', 'websocket'}:
             return await self.app(scope, receive, send)
         try:
-            await self.access.check(scope['path'], scope.get('method', 'GET'),
-                                    Headers(scope=scope).get('cf-access-jwt-assertion', ''))
+            identity = await self.access.check(scope['path'], scope.get('method', 'GET'),
+                                               Headers(scope=scope).get('cf-access-jwt-assertion', ''))
+            cookie = None
+            if identity is not None:
+                cookie = self.security.access_session(HTTPConnection(scope), identity)
         except (jwt.PyJWTError, ValueError, TypeError):
             status, detail = 401, 'Cloudflare Access authentication required.'
         except AccessUnavailable:
             status, detail = 503, 'Cloudflare Access verification is temporarily unavailable.'
         else:
-            return await self.app(scope, receive, send)
+            async def authenticated_send(message):
+                if (cookie is not None and message['type'] == 'http.response.start'
+                        and scope['path'] != '/api/logout'):
+                    message['headers'] = [*message['headers'], (b'set-cookie', cookie), (b'cache-control', b'no-store')]
+                await send(message)
+            return await self.app(scope, receive, authenticated_send)
         if scope['type'] == 'websocket':
             await send({'type': 'websocket.close', 'code': 4401 if status == 401 else 1013})
             return

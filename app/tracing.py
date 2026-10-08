@@ -134,10 +134,10 @@ class AgentTracing:
         if not user:
             return None
         account = connection.execute('''SELECT u.kind,u.email,linked.email AS sso_email
-            FROM users u LEFT JOIN users linked ON linked.id=u.linked_user_id AND linked.kind='google'
+            FROM users u LEFT JOIN users linked ON linked.id=u.linked_user_id AND linked.kind IN ('google','cloudflare')
             WHERE u.id=?''', (user,)).fetchone()
         if account:
-            email = account['email'] if account['kind'] == 'google' else account['sso_email']
+            email = account['email'] if account['kind'] in {'google', 'cloudflare'} else account['sso_email']
             if email:
                 return email
         # Unlinked Slack and shared-password accounts have no SSO email.
