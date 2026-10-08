@@ -81,10 +81,17 @@
 .settings-view .settings-group { display: grid; grid-template-columns: 180px minmax(0,1fr); gap: 32px; padding-block: 24px; border-top: 1px solid var(--settings-line); }
 .settings-view .settings-group h2 { display: block; margin: 12px 0 0; color: var(--settings-text); font-size: var(--settings-body) !important; }
 .settings-view .settings-group h2>span { display: table; margin-block-start: 8px; font-size: .666667rem; }
-.settings-view .chat-preference { padding: 12px; min-width: 0; }
-.settings-view .chat-preference label { display: flex; align-items: center; gap: 12px; min-height: 44px; font-weight: 550; cursor: pointer; }
-.settings-view .chat-preference input { width: 18px; height: 18px; flex: 0 0 18px; accent-color: var(--settings-accent); }
-.settings-view .chat-preference p { margin: 8px 0 0; max-width: 65ch; }
+.settings-view .settings-preferences { min-width: 0; }
+.settings-view .settings-preference { padding: 12px; }
+.settings-view .settings-preference + .settings-preference { margin-block-start: 8px; }
+.settings-view .settings-preference label { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 44px; cursor: pointer; }
+.settings-view .settings-preference .settings-copy { min-width: 0; max-width: 65ch; }
+.settings-view .settings-preference input { appearance: none; width: 36px; height: 22px; flex: 0 0 36px; padding: 2px; margin: 0; border: 1px solid var(--settings-control-border); border-radius: 20px; background: var(--settings-subtle); cursor: pointer; }
+.settings-view .settings-preference input::before { content: ''; display: block; width: 16px; height: 16px; border-radius: 50%; background: var(--settings-muted); }
+.settings-view .settings-preference input:checked { background: var(--settings-accent); border-color: var(--settings-accent); }
+.settings-view .settings-preference input:checked::before { background: var(--settings-surface); transform: translateX(14px); }
+.settings-view .settings-preference input:disabled { cursor: wait; opacity: .6; }
+.settings-view .settings-preference p { margin: 8px 0 0; font-size: var(--settings-caption); }
 .settings-view .settings-links { border: 0; border-radius: 0; overflow: visible; }
 .settings-view .settings-link { min-height: 72px; padding: 12px; gap: 14px; border: 0; border-radius: 8px; }
 .settings-view .settings-icon { width: 32px; height: 32px; flex-basis: 32px; background: none; color: var(--settings-muted); }

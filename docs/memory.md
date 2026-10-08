@@ -62,8 +62,11 @@ Notes (including titles and source quotes) are encrypted in the existing durable
 SQLite database. Preserve the database and encryption key across deployments;
 Temporal and sandbox snapshots are not the memory store. Retrieved note bodies
 are injected only at the model broker and excluded from tool results and system
-prompt traces. Memory tool payloads are omitted from tool traces and scrubbed
-from saved conversation tool calls. Responses in shared chats can still reflect
+prompt traces. Memory tool payloads are scrubbed from saved conversation tool
+calls. To also omit them from exported tool traces, turn on **Settings →
+Preferences → Hide private tool content in traces** (off by default). This account
+preference also covers credential, skill, and connector tool payloads in new
+responses; secret redaction stays on either way. Responses in shared chats can still reflect
 remembered context; memory does not make those responses private. Deletion does
 not erase previous conversations, inference requests, or retained backups.
 

@@ -11,6 +11,11 @@ except ImportError:
 PRIVATE_FIELDS = re.compile(r'(?i)(token|secret|password|authorization|api.?key|cookie|reasoning|thinking|instructions|system_prompt)')
 
 
+def private_tool(name):
+    name = re.sub(r'^(?:mcp[_-]+)?(?:workspace|moyai)[_-]+', '', str(name))
+    return name.startswith(('credentials_', 'skills_', 'memory_')) or name == 'call'
+
+
 def trace_content(value, *, secrets=(), limit=16000):
     def clean(item, depth=0):
         if depth > 12:

@@ -38,16 +38,16 @@ def send(client, run_id, key, **kwargs):
 def test_members_can_opt_in_and_preference_survives_sign_in_and_restart(personal):
     app, client = personal
     assert client.get('/api/session').json()['role'] == 'member'
-    assert client.get(ROUTE).json() == {'send_immediately': False}
-    assert client.put(ROUTE, json={'send_immediately': True}).json() == {'send_immediately': True}
+    assert client.get(ROUTE).json() == {'send_immediately': False, 'omit_private_tool_payloads': False}
+    assert client.put(ROUTE, json={'send_immediately': True}).json() == {'send_immediately': True, 'omit_private_tool_payloads': False}
     sign_in(app, client, 'alice', 'alice@berri.ai')
-    assert client.get(ROUTE).json() == {'send_immediately': False}
-    assert client.get('/api/session').json()['preferences'] == {'send_immediately': False}
+    assert client.get(ROUTE).json() == {'send_immediately': False, 'omit_private_tool_payloads': False}
+    assert client.get('/api/session').json()['preferences'] == {'send_immediately': False, 'omit_private_tool_payloads': False}
     sign_in(app, client, 'bob', 'bob@berri.ai')
-    assert client.get('/api/session').json()['preferences'] == {'send_immediately': True}
+    assert client.get('/api/session').json()['preferences'] == {'send_immediately': True, 'omit_private_tool_payloads': False}
     restarted = create_app(app.state.settings)
-    assert restarted.state.user_preferences.get('google:bob') == {'send_immediately': True}
-    assert restarted.state.user_preferences.get('google:alice') == {'send_immediately': False}
+    assert restarted.state.user_preferences.get('google:bob') == {'send_immediately': True, 'omit_private_tool_payloads': False}
+    assert restarted.state.user_preferences.get('google:alice') == {'send_immediately': False, 'omit_private_tool_payloads': False}
 
 
 def test_preferences_require_authentication_csrf_and_server_owned_identity(personal):
@@ -60,11 +60,66 @@ def test_preferences_require_authentication_csrf_and_server_owned_identity(perso
     assert client.put(ROUTE, json={'send_immediately': True}).status_code == 401
 
 
+@pytest.mark.parametrize('key', ['send_immediately', 'omit_private_tool_payloads'])
 @pytest.mark.parametrize('value', ['false', 1, None])
-def test_preference_requires_an_explicit_boolean(personal, value):
+def test_preference_requires_an_explicit_boolean(personal, key, value):
     _, client = personal
-    assert client.put(ROUTE, json={'send_immediately': value}).status_code == 422
-    assert client.get(ROUTE).json() == {'send_immediately': False}
+    assert client.put(ROUTE, json={key: value}).status_code == 422
+    assert client.get(ROUTE).json() == {'send_immediately': False, 'omit_private_tool_payloads': False}
+
+
+def test_trace_preference_defaults_off_and_saves_independently_per_account(personal):
+    app, client = personal
+    run_id, _ = active_chat(app, client)
+    assert app.state.manager.spec(app.state.store.run(run_id))['omit_private_tool_payloads'] is False
+    assert client.put(ROUTE, json={'omit_private_tool_payloads': True}).json() == {
+        'send_immediately': False, 'omit_private_tool_payloads': True}
+    assert client.put(ROUTE, json={'send_immediately': True}).json() == {
+        'send_immediately': True, 'omit_private_tool_payloads': True}
+    assert app.state.manager.spec(app.state.store.run(run_id))['omit_private_tool_payloads'] is True
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    assert client.get(ROUTE).json()['omit_private_tool_payloads'] is False
+    restarted = create_app(app.state.settings)
+    assert restarted.state.user_preferences.get('google:bob')['omit_private_tool_payloads'] is True
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    assert client.put(ROUTE, json={'omit_private_tool_payloads': False}).json() == {
+        'send_immediately': True, 'omit_private_tool_payloads': False}
+
+
+def test_existing_preference_table_migrates_without_changing_saved_chat_behavior(tmp_path):
+    from app.db import Store
+    from app.user_preferences import UserPreferences
+    store = Store(tmp_path)
+    actor = store.identity({'method': 'local', 'role': 'admin'})
+    with store.connect() as conn:
+        conn.execute('CREATE TABLE user_preferences (user_id TEXT PRIMARY KEY, send_immediately INTEGER NOT NULL DEFAULT 0)')
+        conn.execute('INSERT INTO user_preferences VALUES(?,1)', (actor,))
+    preferences = UserPreferences(store, None, None)
+    assert preferences.get(actor) == {'send_immediately': True, 'omit_private_tool_payloads': False}
+    # Startup migration is safe to run again.
+    assert UserPreferences(store, None, None).get(actor) == preferences.get(actor)
+
+
+def test_trace_preference_uses_turn_author_and_linked_slack_account(personal):
+    app, client = personal
+    store = app.state.store
+    run_id, turn = active_chat(app, client)
+    client.put(ROUTE, json={'omit_private_tool_payloads': True})
+    assert app.state.user_preferences.for_run(store.run(run_id))['omit_private_tool_payloads'] is True
+    store.finish_message(run_id, turn, 'Done')
+    sign_in(app, client, 'alice', 'alice@berri.ai')
+    send(client, run_id, 'alice-owns-this-turn')
+    store.claim_message(run_id)
+    assert store.run(run_id)['owner_id'] == 'google:bob'
+    assert app.state.user_preferences.for_run(store.run(run_id))['omit_private_tool_payloads'] is False
+    with store.connect() as conn:
+        slack = store.slack_identity_in(conn, 'T12345678', 'U12345678')
+        conn.execute('UPDATE users SET linked_user_id=? WHERE id=?', ('google:bob', slack))
+    slack_run = store.create_run('Slack task', '', 'modal', [], chat_enabled=True, user_id=slack)
+    store.claim_message(slack_run['id'])
+    assert app.state.user_preferences.for_run(store.run(slack_run['id']))['omit_private_tool_payloads'] is True
+    store.execute('UPDATE users SET linked_user_id=NULL WHERE id=?', (slack,))
+    assert app.state.user_preferences.for_run(store.run(slack_run['id']))['omit_private_tool_payloads'] is False
 
 
 def test_opt_in_injects_rapid_followups_in_order_without_promoting_old_queue(personal):
@@ -103,7 +158,7 @@ def test_opt_out_restores_queueing_and_explicit_send_now_still_works(personal):
     run_id, turn_id = active_chat(app, client)
     client.put(ROUTE, json={'send_immediately': True})
     automatic = send(client, run_id, 'sent-before-opt-out')
-    assert client.put(ROUTE, json={'send_immediately': False}).json() == {'send_immediately': False}
+    assert client.put(ROUTE, json={'send_immediately': False}).json() == {'send_immediately': False, 'omit_private_tool_payloads': False}
     queued = send(client, run_id, 'queued-after-opt-out')
     queue = MessageQueue(app.state.store)
     assert queue.live_control(run_id, turn_id, [])['input']['id'] == automatic['id']

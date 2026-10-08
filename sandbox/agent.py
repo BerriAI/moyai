@@ -169,7 +169,8 @@ def _run_agent(spec, relay):
         on_input=lambda item: goal.steer(item['content']))
     if not definition.live_steering:
         steering = AgentSteer(relay)
-    activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')))
+    activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')),
+                                omit_private_tool_payloads=bool(spec.get('omit_private_tool_payloads')))
     def tool_complete(call_id, name, args, result):
         activity.complete(call_id, name, args, result)
         goal.tool_complete(call_id, name, args, result)

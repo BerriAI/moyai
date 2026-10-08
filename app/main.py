@@ -175,7 +175,7 @@ def create_app(settings: Settings | None = None):
     infrastructure = spend.infrastructure
     sandbox_settings.modal_clients = infrastructure.modal_clients = manager.modal_clients
     coordinator = AgentCoordinator(store, settings, manager)
-    tracing = AgentTracing(store, settings)
+    tracing = AgentTracing(store, settings, preferences=user_preferences)
     store.tracing = tracing
     manager.coordinator = coordinator
     credentials = Credentials(store, security, settings, manager, checkpoints)
