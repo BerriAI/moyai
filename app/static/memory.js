@@ -50,7 +50,7 @@ async function renderMemory() {
   };
   draw();$('#memory-search').oninput=draw;
   $('#memory-add').onclick=()=>openMemoryEditor();
-  if(prefs.enabled&&prefs.auto_save)$('#memory-refresh').onclick=renderMemory;
+  if(prefs.enabled&&prefs.auto_save)$('#memory-refresh').onclick=async()=>{await renderMemory();if(version===state.pageVersion)$('#memory-refresh')?.focus();};
   const update=async changes=>{
     $('#memory-toggle').disabled=true;$('#memory-learning').disabled=true;
     try { await api('/api/memory/preferences',{method:'PUT',body:JSON.stringify({...prefs,...changes})});if(version===state.pageVersion)await renderMemory(); }
