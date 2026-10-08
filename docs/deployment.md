@@ -93,6 +93,14 @@ For cutover, wait for every old session to settle, stop the old Modal web servic
 
 Update the Slack Events request URL and Slack/Notion OAuth redirect URLs to the new origin, then verify a real Slack mention and an existing chat follow-up. Keep the original Modal Volume as a migration backup. If reverting after accepting new work on Render, export the current Render database and artifacts first; the frozen old Modal checkpoint is no longer current.
 
+```sh
+uv run python scripts/db_backup.py --data-dir /var/data/moyai --backup-dir /var/backups/moyai-render
+cp -r /var/data/moyai/artifacts /var/backups/moyai-render/artifacts
+```
+
+See [Backup, restore, and health monitoring](operations.md) for scheduled backups,
+verified restores, and the `/health` and `/api/health/detailed` probes.
+
 ### Private file storage
 
 SQLite stores chat history and file metadata. Configure a private S3-compatible bucket to store new attachments, previews, result archives, browser captures, and operator backups outside the Render disk. Existing inline and disk files remain readable during rollout. Without a bucket, local storage behavior remains enabled. Follow [the object-storage rollout guide](object-storage.md) for credentials, verified migration, backups, and rollback limits. The 10 GB Render disk provides database headroom; it does not replace object storage or backups.
