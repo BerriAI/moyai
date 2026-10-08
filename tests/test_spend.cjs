@@ -486,3 +486,95 @@ for (const scope of ['personal','organization']) test(scope+' request costs dist
   assert.match(html,/Receipt access required/);
   assert.doesNotMatch(html,/In progress/);
 });
+
+for(const background of [false,true])test(`same-range ${background?'automatic':'manual'} refresh retains the mounted leaderboard through both fetches`,async()=>{
+  const {context:c,elements:e,data,prData}=setup('organization');
+  c.settingsInteractionActive=()=>false;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  e.get('#person-google:maya').onclick();
+  const original=c.api,pending=[];
+  c.api=url=>url.startsWith('/api/spend?')||url.includes('pull-requests')?new Promise(resolve=>pending.push(resolve)):original(url);
+  const html=e.get('#content').innerHTML;
+  const refresh=c.renderSpend(background);
+  assert.equal(e.get('#content').innerHTML,html,'mounted content is never replaced by a loader');
+  pending.shift()(data);await refresh;
+  assert.match(e.get('#content').innerHTML,/PR leaderboard/);
+  assert.match(e.get('#content').innerHTML,/Pull requests · Maya/);
+  assert.doesNotMatch(e.get('#content').innerHTML,/Loading pull request analytics/);
+  pending.shift()({...prData,total_merged:42});await settle();
+  assert.match(e.get('#spend-panel').innerHTML,/42/);
+  assert.match(e.get('#spend-panel').innerHTML,/Pull requests · Maya/);
+});
+
+for(const endpoint of ['spend','identities','pull-requests'])test(`${endpoint} refresh failure retains data and retry recovers`,async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const mounted=e.get('#content').innerHTML;
+  const original=c.api;c.api=url=>url.includes(endpoint)?Promise.reject(Error('<offline>')):original(url);
+  await c.renderSpend();await settle();
+  if(endpoint!=='pull-requests')assert.equal(e.get('#content').innerHTML,mounted);
+  assert.match(e.get('#spend-panel').innerHTML,/PR leaderboard/);
+  if(endpoint==='pull-requests'){
+    assert.match(e.get('#spend-panel').innerHTML,/Maya/);
+    assert.match(e.get('#spend-panel').innerHTML,/&lt;offline>/);
+  }else assert.match(e.get('#spend-refresh-status').textContent,/<offline>/);
+  c.api=original;await c.renderSpend();await settle();
+  assert.match(e.get('#spend-panel').innerHTML,/Maya/);
+  assert.equal(e.get('#spend-export').disabled,false);
+});
+
+for(const status of [401,403])test(`authorization ${status} clears retained report`,async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  c.api=()=>Promise.reject(Object.assign(Error('Access denied'),{status}));
+  await c.renderSpend();
+  assert.doesNotMatch(e.get('#content').innerHTML,/PR leaderboard|Maya/);
+  assert.equal(vm.runInContext('spendPRState.data',c),null);
+});
+
+test('date changes and route changes do not reuse a displayed report',async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  let finish;const original=c.api;c.api=url=>url.startsWith('/api/spend?')?new Promise(resolve=>finish=resolve):original(url);
+  vm.runInContext("spendState.start='2026-10-03'",c);
+  const pending=c.renderSpend();assert.match(e.get('#content').innerHTML,/Loading spend/);
+  c.state.view='settings';c.state.pageVersion++;e.get('#content').innerHTML='Settings';
+  await c.renderSpend();assert.equal(e.get('#content').innerHTML,'Settings');
+  finish(await original('/api/spend?'));await pending;assert.equal(e.get('#content').innerHTML,'Settings');
+});
+
+test('hidden polling and interactions that start during transport leave the DOM untouched',async()=>{
+  const {context:c,elements:e,calls,data}=setup('organization');const timers=new Map();let id=0,interacting=false;
+  c.setTimeout=fn=>{timers.set(++id,fn);return id;};c.clearTimeout=id=>timers.delete(id);
+  c.settingsInteractionActive=()=>interacting;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const html=e.get('#content').innerHTML,count=calls.length;
+  c.document.hidden=true;await c.renderSpend(true);assert.equal(calls.length,count);assert.equal(timers.size,1);
+  c.document.hidden=false;let finish;c.api=()=>new Promise(resolve=>finish=resolve);
+  const pending=c.renderSpend(true);interacting=true;finish({...data,scope:'personal'});await pending;
+  assert.doesNotMatch(e.get('#content').innerHTML,/PR leaderboard/,'scope downgrade still clears while interacting');
+  assert.equal(vm.runInContext('spendPRState.data',c),null);
+});
+
+test('a background response defers commit when interaction begins during the request',async()=>{
+  const {context:c,elements:e,data}=setup();const timers=new Map();let id=0,interacting=false;
+  c.setTimeout=fn=>{timers.set(++id,fn);return id;};c.clearTimeout=id=>timers.delete(id);c.settingsInteractionActive=()=>interacting;
+  await c.renderSpend();const html=e.get('#content').innerHTML;
+  let finish;c.api=()=>new Promise(resolve=>finish=resolve);
+  const pending=c.renderSpend(true);interacting=true;finish({...data,total:{...data.total,spend:'99'}});await pending;
+  assert.equal(e.get('#content').innerHTML,html);assert.equal(timers.size,1);
+});
+
+test('old PR completion is rejected while a different date range is still loading spend',async()=>{
+  const {context:c,elements:e,prData,data}=setup('organization'),original=c.api;
+  let finishPR,finishSpend;
+  c.api=url=>url.includes('pull-requests')?new Promise(resolve=>finishPR=resolve):original(url);
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  vm.runInContext("spendState.start='2026-10-03'",c);
+  c.api=url=>url.startsWith('/api/spend?')?new Promise(resolve=>finishSpend=resolve):original(url);
+  const pending=c.renderSpend();c.$('#spend-panel').innerHTML='unmounted';
+  finishPR(prData);await settle();
+  assert.match(e.get('#content').innerHTML,/Loading spend/);
+  assert.equal(e.get('#spend-panel').innerHTML,'unmounted');
+  finishSpend({...data,start:'2026-10-03'});await pending;await settle();
+});

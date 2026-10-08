@@ -1,6 +1,6 @@
 /* PR reports share the authenticated organization Spend scope and date controls. */
 const spendPRState={key:'',data:null,promise:null,error:null,timer:null,search:'',status:'',contributor:''};
-function spendPRKey(data){return [state.pageVersion,spendState.version,data.start,data.end].join('/');}
+function spendPRKey(data){return [state.pageVersion,data.scope,data.start,data.end].join('/');}
 function prepareSpendPRReport(data){
   const key=spendPRKey(data);
   if(spendPRState.key!==key){spendPRState.key=key;spendPRState.data=null;spendPRState.promise=null;spendPRState.error=null;}
@@ -78,13 +78,14 @@ function bindSpendPRControls(data,tab,request){
   }
 }
 function paintSpendPRPanel(data,tab,request){
-  const active=document.activeElement,focus=active?.id?.startsWith('spend-pr-')?active.id:null,position=active?.selectionStart;
-  $('#spend-panel').innerHTML=spendPRPanel(tab);
+  const restore=preserveSpendView();
+  const html=spendPRPanel(tab);
+  if($('#spend-panel').innerHTML!==html)$('#spend-panel').innerHTML=html;
   bindSpendPRControls(data,tab,request);
-  if(focus){$('#'+focus)?.focus({preventScroll:true});if(position!=null)$('#'+focus)?.setSelectionRange?.(position,position);}
+  restore();
 }
-function spendPRCurrent(data,tab,request){return spendPRState.key===spendPRKey(data)&&spendAnalyticsState.tab===tab&&spendAnalyticsState.request===request;}
-async function loadSpendPRReport(data,tab,request,refresh=false){
+function spendPRCurrent(data,tab,request){return state.view==='spend'&&spendPRState.key===spendPRKey(data)&&spendAnalyticsState.tab===tab&&spendAnalyticsState.request===request;}
+async function loadSpendPRReport(data,tab,request,refresh=false,background=false){
   if(!spendPRCurrent(data,tab,request))return;
   if(refresh){spendPRState.promise=null;spendPRState.error=null;}
   if(spendPRState.data&&!refresh&&!spendPRState.promise){bindSpendPRControls(data,tab,request);scheduleSpendPRRefresh(data,tab,request);return;}
@@ -94,9 +95,11 @@ async function loadSpendPRReport(data,tab,request,refresh=false){
   try{
     const report=await promise;
     if(!spendPRCurrent(data,tab,request)||spendPRState.promise!==promise)return;
+    if(background&&(document.hidden||typeof settingsInteractionActive==='function'&&settingsInteractionActive())){spendPRState.promise=null;scheduleSpendPRRefresh(data,tab,request);$('#spend-export').disabled=!spendPRState.data||!!spendPRState.error;return;}
     spendPRState.data=report;spendPRState.error=null;
   }catch(error){
     if(!spendPRCurrent(data,tab,request)||spendPRState.promise!==promise)return;
+    if(error.status===401||error.status===403)spendPRState.data=null;
     spendPRState.error=error;
   }
   if(!spendPRCurrent(data,tab,request))return;
@@ -107,7 +110,7 @@ async function loadSpendPRReport(data,tab,request,refresh=false){
 }
 function scheduleSpendPRRefresh(data,tab,request){
   clearTimeout(spendPRState.timer);
-  if(spendPRState.data?.pending_refresh)spendPRState.timer=setTimeout(()=>{if(!spendPRCurrent(data,tab,request))return;if(typeof settingsInteractionActive==='function'&&document.querySelector('#spend-panel')?.contains(document.activeElement)&&settingsInteractionActive()){scheduleSpendPRRefresh(data,tab,request);return;}loadSpendPRReport(data,tab,request,true);},4000);
+  if(spendPRState.data?.pending_refresh)spendPRState.timer=setTimeout(()=>{if(!spendPRCurrent(data,tab,request))return;if(document.hidden||typeof settingsInteractionActive==='function'&&document.querySelector('#spend-panel')?.contains(document.activeElement)&&settingsInteractionActive()){scheduleSpendPRRefresh(data,tab,request);return;}loadSpendPRReport(data,tab,request,true,true);},4000);
 }
 function spendPRExport(tab){
   const data=spendPRState.data;
