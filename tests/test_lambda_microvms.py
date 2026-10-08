@@ -409,7 +409,8 @@ def test_image_package_contains_no_server_secrets_and_uses_real_sdk_shape(tmp_pa
     validate_parameters(request, client.meta.service_model.operation_model('CreateMicrovmImage').input_shape)
 
 
-def test_aws_image_ready_hook_uses_documented_path():
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+def test_aws_image_ready_hook_works_before_bootstrap_without_a_body(method):
     from http.server import ThreadingHTTPServer
     import threading
     from sandbox.lambda_guest import Handler
@@ -418,7 +419,7 @@ def test_aws_image_ready_hook_uses_documented_path():
     worker.start()
     try:
         url = f'http://127.0.0.1:{server.server_port}'
-        response = httpx.get(url + '/aws/lambda-microvms/runtime/v1/ready')
+        response = httpx.request(method, url + '/aws/lambda-microvms/runtime/v1/ready')
         assert response.status_code == 200
         assert response.json() == {'version': 1, 'bootstrapped': False}
         assert httpx.get(url + '/unknown').status_code == 404

@@ -115,7 +115,7 @@ class LocalAWS:
             async with httpx.AsyncClient() as client:
                 for _ in range(100):
                     try:
-                        if (await client.get('http://127.0.0.1:' + port + '/aws/lambda-microvms/runtime/v1/ready')).status_code == 200:
+                        if (await client.post('http://127.0.0.1:' + port + '/aws/lambda-microvms/runtime/v1/ready')).status_code == 200:
                             break
                     except httpx.TransportError:
                         pass

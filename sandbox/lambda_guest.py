@@ -266,6 +266,10 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200 if ready else 404, {'version': 1, 'bootstrapped': BOOTSTRAPPED})
 
     def do_POST(self):
+        if self.path == '/aws/lambda-microvms/runtime/v1/ready':
+            # AWS invokes the build hook before per-VM bootstrap, with an
+            # empty POST body. It is not a guest command or an execution job.
+            return self.reply(200, {'version': 1, 'bootstrapped': BOOTSTRAPPED})
         if self.path == '/bootstrap':
             # Every image restore gets a fresh interpreter and fresh TLS/RNG
             # state before accepting commands. No TLS client is snapshotted.
