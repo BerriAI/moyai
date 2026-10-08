@@ -471,7 +471,10 @@ async def test_computer_rpc_bounds_and_uid_recheck_prevent_forwarding(transport,
     monkeypatch.setattr(guest.computer, 'request', replaced)
     with pytest.raises(RuntimeError, match='401'):
         await sandbox.computer_request({'action': 'state'})
-    assert len(calls) == 2 and guest.COMPUTER_PENDING == 0
+    assert len(calls) == 2
+    # The response reaches the client before the handler's context exits.
+    with guest.COMPUTER_IDLE:
+        assert guest.COMPUTER_IDLE.wait_for(lambda: guest.COMPUTER_PENDING == 0, timeout=5)
 
 
 async def test_computer_rpc_allows_guest_reads_but_freeze_waits_for_completion(transport, monkeypatch):
