@@ -16,6 +16,7 @@ from .pr_delivery import link_captures, select_captures, select_prs
 from .security import digest
 from .session_metadata import is_session_id_request, session_id_response
 from .slack_activity import SlackActivity
+from .slack_tables import reply_parts
 
 TERMINAL = {'completed', 'failed', 'cancelled', 'interrupted', 'idle'}
 COMMANDS = {'stop', 'sleep', 'wake', 'status'}
@@ -394,10 +395,13 @@ class SlackChat:
                     self.queue(conn, run_id, f"answer:{message['id']}:media", 'answer',
                                'Saved demo captures.\n\n' + self.link(run_id),
                                {'captures': [item.model_dump() for item in media]})
-                chunks = split_reply(slack_text(value, self.mentionable_in(conn, run_id)))
-                for index, chunk in enumerate(chunks):
+                mentions = self.mentionable_in(conn, run_id)
+                chunks = reply_parts(value, lambda text: slack_text(text, mentions), split_reply)
+                for index, (chunk, blocks) in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
-                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else None
+                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+                    if blocks:
+                        metadata['blocks'] = blocks
                     self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
             conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
 
@@ -464,8 +468,8 @@ class SlackChat:
                     elif data.get('captures'):
                         sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                     else:
-                        if data.get('pull_requests'):
-                            content = self.owner.channel.rich_reply(source, row['text'], data['pull_requests'])
+                        if data.get('pull_requests') or data.get('blocks'):
+                            content = self.owner.channel.rich_reply(source, row['text'], data.get('pull_requests', ()), data.get('blocks'))
                             response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
                         else:
                             response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])

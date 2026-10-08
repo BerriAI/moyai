@@ -167,15 +167,15 @@ class SlackWebhookChannel:
             content + '\n\n' + self.owner.chat.link(source.metadata['run_id']))
         return response.metadata['slack_ts']
 
-    def rich_reply(self, source, content, pull_requests=()):
+    def rich_reply(self, source, content, pull_requests=(), body_blocks=None):
         link = self.owner.chat.link(source.metadata['run_id'])
         body = content.removesuffix('\n\n' + link)
-        blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
+        blocks = list(body_blocks) if body_blocks else [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': body, 'verbatim': True}}]
         if body != content:
             blocks.append({'type': 'context', 'elements': [{'type': 'mrkdwn', 'text': link, 'verbatim': True}]})
         cards = tuple(pr_delivery.attachment(pr_delivery.PullRequest.model_validate(pr),
             self.owner.settings.public_url, source.metadata['run_id']) for pr in pull_requests)
-        return RichReply(text=content, blocks=tuple(blocks) if len(body) <= 3000 else (), attachments=cards)
+        return RichReply(text=content, blocks=tuple(blocks) if body_blocks or len(body) <= 3000 else (), attachments=cards)
 
     async def reply(self, source, content):
         return await self.reply_rich(source, self.rich_reply(source, content))

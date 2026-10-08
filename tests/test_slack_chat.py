@@ -1213,3 +1213,19 @@ def test_deleted_slack_binding_cannot_continue_or_be_readopted(slack_app):
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
     assert store.messages(run_id) == before
     assert len(store.rows('SELECT id FROM runs')) == 1
+
+
+def test_answer_delivers_native_table_in_thread_with_session_link(slack_app):
+    app, _, run_id = start(slack_app)
+    finish(app, run_id, 'Measurements\n\n| Phase | Time |\n| --- | ---: |\n| ASGI entry | 3.32 |')
+    # Each outbox message is rate limited; wait for the prose before the table.
+    wait_for(lambda: any('Measurements' in message.get('text', '') for message in slack_app[3]))
+    wait_for(lambda: any(any(b['type'] == 'table' for b in message.get('blocks', []))
+                         for message in slack_app[3]))
+    posted = next(message for message in slack_app[3]
+                  if any(b['type'] == 'table' for b in message.get('blocks', [])))
+    assert posted['channel'] == 'C12345678' and posted['thread_ts'] == ROOT
+    assert posted['blocks'][0]['rows'][1][1] == {'type': 'raw_text', 'text': '3.32'}
+    assert posted['blocks'][-1]['type'] == 'context'
+    assert f'/#run={run_id}' in posted['text']
+    assert 'ASGI entry' in posted['text']
