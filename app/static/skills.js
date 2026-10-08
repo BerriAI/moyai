@@ -50,6 +50,8 @@ async function openSkillEditor(id=''){
 }
 function insertSkill(skill,inputId){
   const input=document.getElementById(inputId);if(!input)return;
+  input.setSkillCatalog?.([skill]);
+  if(input.maxLength>0&&input.value.length+skillToken(skill).length+1>input.maxLength){toast('Shorten your message before adding this skill.');return;}
   if(!input.value.split(/\s+/).includes(skillToken(skill)))input.value=skillToken(skill)+' '+input.value;
   input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);input.focus();
 }

@@ -122,7 +122,7 @@ test('composer shortcuts distinguish queue/send-now and leave Shift+Enter, IME, 
   const script=readFileSync('app/static/app.js','utf8');const handlers={},sent=[];let first=0,hasFiles=false,skillHandles=false;
   const hidden={kind:'now'},submit={disabled:false},form={querySelector:s=>s==='[data-send-now]'?hidden:submit,requestSubmit:button=>sent.push(button?.kind||'queue')};
   const input={id:'followup',value:'Draft',addEventListener:(event,fn)=>handlers[event]=fn};
-  const context={state:{selected:'run',messageQueue:{sendFirst:()=>first++}},autoSize:()=>{},bindInlineSkillPicker:()=>({keydown:()=>skillHandles}),bindAttachments:()=>({hasFiles:()=>hasFiles})};
+  const context={state:{selected:'run',messageQueue:{sendFirst:()=>first++}},autoSize:()=>{},bindSkillEditor:input=>input,bindInlineSkillPicker:()=>({keydown:()=>skillHandles}),bindAttachments:()=>({hasFiles:()=>hasFiles})};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function bindComposer'),script.indexOf('async function navigate')),context);context.bindComposer(input,form);
   const key=extra=>handlers.keydown({key:'Enter',preventDefault(){},...extra});
   key({});key({metaKey:true});key({ctrlKey:true});key({shiftKey:true});key({isComposing:true,ctrlKey:true});
