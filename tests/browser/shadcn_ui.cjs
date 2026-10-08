@@ -26,6 +26,99 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+async function assertTableTextContained(page) {
+  const overlaps = await page.locator('#content th:visible, #content td:visible').evaluateAll(cells => cells.flatMap(cell => {
+    const bounds = cell.getBoundingClientRect();
+    const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    const failures = [];
+    while (walker.nextNode()) {
+      if (!walker.currentNode.textContent.trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(walker.currentNode);
+      if ([...range.getClientRects()].some(rect => rect.width && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1))) {
+        failures.push(walker.currentNode.textContent);
+      }
+    }
+    return failures;
+  }));
+  assert.deepEqual(overlaps, [], 'Table text stays inside its own column');
+}
+
+for (const width of [1440, 1024, 768, 320]) {
+  test(`library rows keep their leading edge and compact actions at ${width}px`, async t => {
+    const page = await pageFor(t, 'skills', 'populated', width);
+    for (const route of ['skills', 'secrets']) {
+      if (route !== 'skills') await page.evaluate(view => navigate(view), route);
+      const rows = page.locator('.skill-card, .secret-card');
+      await rows.first().waitFor();
+      if (route === 'secrets') {
+        const select = await page.locator('#secret-scope-filter').boundingBox();
+        const icon = await page.locator('.settings-toolbar [data-slot="native-select-icon"]').boundingBox();
+        assert.ok(icon.x >= select.x && icon.x + icon.width <= select.x + select.width, 'The scope filter arrow stays inside its control');
+        if (width >= 768) assert.equal(select.y, (await page.locator('#secret-search').boundingBox()).y, 'Desktop filters share a row');
+      }
+      const geometry = await rows.evaluateAll(rows => rows.map(row => {
+        const box = el => el.getBoundingClientRect().toJSON();
+        return { row: box(row), info: box(row.firstElementChild), actions: box(row.lastElementChild) };
+      }));
+      for (const { row, info, actions } of geometry) {
+        assert.ok(Math.abs(info.x - row.x - 4) <= 1, `${route}: details align with the row's leading edge`);
+        assert.ok(actions.right <= row.right + 1, `${route}: actions stay inside the row`);
+        if (width > 1150) {
+          assert.ok(actions.x >= info.right, `${route}: desktop actions follow the details horizontally`);
+          assert.ok(row.height <= Math.max(info.height, actions.height) + 46, `${route}: row remains compact`);
+        } else if (route === 'skills' || width <= 650) {
+          assert.ok(actions.y >= info.bottom, `${route}: narrow actions wrap below details`);
+          assert.ok(Math.abs(actions.x - info.x) <= 1, `${route}: wrapped actions stay left-aligned`);
+        }
+      }
+    }
+  });
+
+  test(`pull request columns wrap and remain reachable at ${width}px`, async t => {
+    const page = await pageFor(t, 'spend', 'populated', width);
+    await page.locator('#spend-tab-prs').click();
+    const table = page.locator('.analytics-pr-table');
+    await table.waitFor();
+    await assertTableTextContained(page);
+    const region = page.getByRole('region', { name: 'Pull requests first tracked in selected dates', exact: true });
+    const bounds = await table.boundingBox();
+    const frame = await region.boundingBox();
+    assert.ok(bounds.width >= 900, 'Narrow screens retain readable column widths');
+    if (width === 1440) assert.ok(bounds.width <= frame.width, 'All six columns fit the desktop content area');
+    if (bounds.width > frame.width) {
+      await region.focus();
+      await page.keyboard.press('ArrowRight');
+      await page.waitForFunction(() => document.querySelector('.analytics-pr-table').closest('[role="region"]').scrollLeft > 0);
+      await region.evaluate(el => { el.scrollLeft = el.scrollWidth; });
+      const last = await table.locator('tbody tr').first().locator('td').last().boundingBox();
+      assert.ok(last.x >= frame.x && last.x + last.width <= frame.x + frame.width + 1, 'The named scroll region reveals the spend column');
+    }
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'The table never widens the page');
+    await page.locator('#spend-pr-search').fill('no matching pull request');
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+    await table.waitFor();
+    await page.locator('#spend-pr-status').selectOption('merged');
+    assert.ok(await table.locator('tbody tr').count());
+    assert.equal(await table.locator('tbody .badge').evaluateAll(badges => badges.every(badge => badge.textContent === 'Merged')), true);
+    await assertTableTextContained(page);
+    await page.locator('#spend-tab-leaderboard').click();
+    assert.ok((await page.locator('.analytics-pr-leaderboard').boundingBox()).width >= 980, 'Leaderboard columns do not collapse on mobile');
+    await page.locator('[data-pr-contributor]').first().click();
+    await page.locator('.analytics-pr-detail').waitFor();
+    await assertTableTextContained(page);
+    await page.getByRole('button', { name: 'Close details', exact: true }).click();
+    for (const tab of ['overall', 'users', 'history', 'infrastructure']) {
+      await page.locator(`#spend-tab-${tab}`).click();
+      for (const summary of await page.locator('.analytics-breakdown>summary, .identity-overrides>summary').all()) {
+        if (!await summary.evaluate(el => el.parentElement.open)) await summary.click();
+      }
+      await assertTableTextContained(page);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${tab}: no page overflow`);
+    }
+  });
+}
+
 for (const width of [1440, 768, 320]) {
   test(`all workspace and settings routes use shadcn and fit at ${width}px`, async t => {
     const page = await pageFor(t, 'tasks', 'populated', width);
@@ -36,6 +129,7 @@ for (const width of [1440, 768, 320]) {
       assert.equal(missing, 0, `${route}: every base control comes from shadcn`);
       assert.ok(await page.locator('#content [data-slot]').count(), `${route}: components rendered`);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${route}: no page overflow`);
+      await assertTableTextContained(page);
     }
   });
 }
