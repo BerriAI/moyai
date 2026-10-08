@@ -99,10 +99,16 @@ Automatic builds consume Modal compute just like manual builds.
 The LiteLLM starter installs a separate Python 3.13 project environment from
 `uv.lock`, proxy/database dependencies, pytest and Playwright. It initializes a
 local PostgreSQL development database, applies `schema.prisma`, inserts 100 small
-synthetic case records, imports the real proxy, and starts its HTTP health endpoint
-before stopping services for the snapshot. These fixtures are a starting point;
+synthetic case records, and verifies database-connected readiness plus key
+creation, lookup and deletion through the real proxy before stopping services
+for the snapshot. Setup saves the local database URL in the repository's `.env`
+when that file is absent, so worker commands retain it after a restore. An
+existing `.env` is preserved. These fixtures are a starting point;
 they are not production-representative data or model responses. Benchmarks should
 create equivalent isolated datasets for the exact base/head revisions. The known
 local database password in the recipe is solely for this sandbox's development
 database; it is not a provider or production credential. Template setup is
 editable because dependency requirements can change with the source revision.
+Starter changes apply to newly created recipes. Existing saved recipes and
+sessions stay pinned: an administrator must update the recipe and rebuild it,
+then start a new session to adopt the revised preparation.

@@ -10,8 +10,13 @@ uv python install 3.13
 uv sync --frozen --python 3.13 --extra proxy --extra extra_proxy --no-default-groups
 uv pip install --python .venv/bin/python pytest==8.4.2 pytest-asyncio==1.2.0 playwright==1.58.0
 export PATH="$PWD/.venv/bin:$PATH"
+# Shell exports do not survive build phases or filesystem snapshots. LiteLLM
+# loads .env in worker tools too; preserve an existing project's configuration.
+if ! test -e .env; then
+  printf '%s\\n' 'DATABASE_URL=postgresql://moyai_dev:local-development-only@127.0.0.1:5432/moyai_dev' > .env
+fi
 # Generate the database client for this exact checkout.
-if test -f schema.prisma; then .venv/bin/prisma generate --schema=schema.prisma; fi
+.venv/bin/prisma generate --schema=schema.prisma
 ''',
     'startup': '''service postgresql start
 pg_isready -h 127.0.0.1 -p 5432
@@ -24,11 +29,12 @@ fi
 ''',
     'verify': '''export PATH="$PWD/.venv/bin:$PATH"
 .venv/bin/python -c "import litellm; import litellm.proxy.proxy_server; print('LiteLLM proxy imports successfully')"
-export DATABASE_URL='postgresql://moyai_dev:local-development-only@127.0.0.1:5432/moyai_dev'
-if test -f schema.prisma; then .venv/bin/prisma db push --schema=schema.prisma --skip-generate; fi
+.venv/bin/prisma db push --schema=schema.prisma --skip-generate
 .venv/bin/python - <<'PY'
 import os
 import psycopg
+from dotenv import load_dotenv
+load_dotenv('.env')
 with psycopg.connect(os.environ['DATABASE_URL']) as conn:
     # Keep fixtures outside the public schema managed by Prisma, so repeating
     # verification does not make Prisma try to drop populated fixture tables.
@@ -40,25 +46,41 @@ with psycopg.connect(os.environ['DATABASE_URL']) as conn:
     print('Postgres ready with 100 synthetic benchmark case records')
 PY
 .venv/bin/python - <<'PY'
-import os, secrets, subprocess, time, urllib.request
+import json, os, secrets, subprocess, time, urllib.request
+master_key = 'sk-' + secrets.token_hex(32)
+key = ''
+def request(path, token=master_key, data=None, timeout=15):
+    req = urllib.request.Request('http://127.0.0.1:18000' + path,
+        data=None if data is None else json.dumps(data).encode(),
+        headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.load(response)
 with open('/tmp/moyai-proxy-smoke.log', 'w') as log:
     process = subprocess.Popen(['.venv/bin/python', '-m', 'uvicorn', 'litellm.proxy.proxy_server:app', '--host', '127.0.0.1', '--port', '18000'],
-        env={**os.environ, 'LITELLM_MASTER_KEY': 'sk-' + secrets.token_hex(32)}, stdout=log, stderr=log)
+        env={**os.environ, 'LITELLM_MASTER_KEY': master_key}, stdout=log, stderr=log)
     try:
         for attempt in range(60):
             if process.poll() is not None:
                 raise RuntimeError('LiteLLM proxy exited during startup')
             try:
-                with urllib.request.urlopen('http://127.0.0.1:18000/health/liveliness', timeout=2) as response:
-                    assert response.status == 200
-                    print('Real LiteLLM proxy health endpoint passed')
-                    break
+                readiness = request('/health/readiness', timeout=2)
             except OSError:
                 time.sleep(1)
+                continue
+            if readiness.get('db') != 'connected':
+                raise RuntimeError('LiteLLM proxy database is not connected')
+            break
         else:
             raise RuntimeError('LiteLLM proxy did not become healthy')
+        key = request('/key/generate', data={'key_alias': 'moyai-environment-smoke'})['key']
+        try:
+            assert request('/key/info', token=key)['info']['key_alias'] == 'moyai-environment-smoke'
+        finally:
+            request('/key/delete', data={'keys': [key]})
+        print('Real LiteLLM proxy database connected; key create/read/delete passed')
     except Exception:
-        print(open('/tmp/moyai-proxy-smoke.log').read()[-6000:])
+        output = open('/tmp/moyai-proxy-smoke.log').read()[-6000:].replace(master_key, '[smoke master key]')
+        print(output.replace(key, '[smoke key]') if key else output)
         raise
     finally:
         process.terminate()
@@ -74,6 +96,7 @@ PY
 For subprocesses such as Prisma, export PATH="/workspace/repo/.venv/bin:$PATH".
 Postgres runs locally on port 5432. Development-only DATABASE_URL:
 postgresql://moyai_dev:local-development-only@127.0.0.1:5432/moyai_dev
+The repository .env supplies this default to LiteLLM, including after restore.
 The schema is initialized and moyai_benchmark.cases contains 100 synthetic case records.
 These are small starter fixtures, not production-representative traffic. Create task-specific data for a benchmark.
 For before/after work, resolve exact base/head SHAs and use separate worktrees and equivalent isolated databases.

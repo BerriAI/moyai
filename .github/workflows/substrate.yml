@@ -29,7 +29,7 @@ jobs:
           go-version: '1.27.0'
           cache: false
       - name: Unit and protocol tests
-        run: uv run --python 3.13 pytest -q tests/test_sandbox_providers.py tests/test_runner.py tests/test_durable.py tests/test_environment_discovery.py tests/test_infrastructure_costs.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_sandbox_providers.py tests/test_runner.py tests/test_durable.py tests/test_environments.py tests/test_environment_discovery.py tests/test_infrastructure_costs.py
       - uses: actions/checkout@v4
         with:
           repository: agent-substrate/substrate

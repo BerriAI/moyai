@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -185,7 +186,78 @@ def test_litellm_template_has_real_proxy_database_checks():
     assert 'litellm.proxy.proxy_server' in template.verify
     assert 'prisma db push' in template.verify and 'generate_series(1,100)' in template.verify
     assert 'postgresql stop' in template.shutdown
-    assert '/health/liveliness' in template.verify
+    assert '/health/readiness' in template.verify
+
+
+@pytest.mark.parametrize('existing_env', [False, True])
+@pytest.mark.parametrize('has_schema', [False, True])
+def test_litellm_setup_persists_defaults_and_requires_prisma(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, existing_env: bool, has_schema: bool,
+) -> None:
+    import os
+    import subprocess
+    binaries = tmp_path / '.venv/bin'
+    binaries.mkdir(parents=True)
+    for name, body in {
+        'python': 'exit 0', 'uv': 'exit 0',
+        'prisma': 'test -f "${2#--schema=}" || exit 9\nprintf generated > prisma-ran',
+    }.items():
+        executable = binaries / name
+        executable.write_text('#!/bin/sh\n' + body + '\n')
+        executable.chmod(0o755)
+    if has_schema:
+        (tmp_path / 'schema.prisma').write_text('fixture schema')
+    if existing_env:
+        (tmp_path / '.env').write_text('DATABASE_URL=postgresql://custom.invalid/existing\n')
+    monkeypatch.setenv('PATH', str(binaries) + os.pathsep + os.environ['PATH'])
+    result = subprocess.run(['bash', '-euo', 'pipefail', '-c', TEMPLATES[0]['setup']], cwd=tmp_path, capture_output=True)
+    assert result.returncode == (0 if has_schema else 9)
+    assert (tmp_path / 'prisma-ran').exists() is has_schema
+    saved = (tmp_path / '.env').read_text()
+    assert saved == ('DATABASE_URL=postgresql://custom.invalid/existing\n' if existing_env else
+                     'DATABASE_URL=postgresql://moyai_dev:local-development-only@127.0.0.1:5432/moyai_dev\n')
+
+
+@pytest.mark.parametrize('database', ['connected', 'Not connected'])
+def test_litellm_verification_rejects_db_less_health_and_exercises_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, database: str,
+) -> None:
+    import io
+    import subprocess
+    import urllib.request
+    requests, lifecycle = [], []
+    process = SimpleNamespace(poll=lambda: None, terminate=lambda: lifecycle.append('terminated'), wait=lambda **kw: 0)
+    monkeypatch.setattr(subprocess, 'Popen', lambda *args, **kwargs: process)
+
+    def respond(request: urllib.request.Request, timeout: int) -> io.BytesIO:
+        path = request.full_url.removeprefix('http://127.0.0.1:18000')
+        requests.append(path)
+        if path == '/health/readiness':
+            data = {'status': 'healthy', 'db': database}
+        elif path == '/key/generate':
+            assert json.loads(request.data)['key_alias'] == 'moyai-environment-smoke'
+            data = {'key': 'sk-fixture-only'}
+        elif path == '/key/info':
+            assert request.get_header('Authorization') == 'Bearer sk-fixture-only'
+            data = {'info': {'key_alias': 'moyai-environment-smoke'}}
+        elif path == '/key/delete':
+            assert json.loads(request.data) == {'keys': ['sk-fixture-only']}
+            data = {'deleted_keys': ['sk-fixture-only']}
+        else:
+            raise AssertionError('Unexpected endpoint: ' + path)
+        return io.BytesIO(json.dumps(data).encode())
+
+    monkeypatch.setattr(urllib.request, 'urlopen', respond)
+    source = TEMPLATES[0]['verify'].rsplit(".venv/bin/python - <<'PY'\n", 1)[1].split('\nPY', 1)[0]
+    source = source.replace('/tmp/moyai-proxy-smoke.log', str(tmp_path / 'proxy.log'))
+    if database == 'connected':
+        exec(source, {})
+        assert requests == ['/health/readiness', '/key/generate', '/key/info', '/key/delete']
+    else:
+        with pytest.raises(RuntimeError, match='database is not connected'):
+            exec(source, {})
+        assert requests == ['/health/readiness']
+    assert lifecycle == ['terminated']
 
 
 def test_daily_refresh_is_opt_in_and_coalesces_pending_builds(workspace):
