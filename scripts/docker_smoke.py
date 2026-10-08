@@ -132,6 +132,11 @@ def main():
               "-e", "PORT=12345", "-e", "RENDER_MIGRATION_STAGE=false", "-e", "BOOTSTRAP_MODAL_VOLUME=")
         healthy(name)
         log("PASS: /health returns HTTP 200 on PORT=12345 using the Render origin.")
+        root_access = docker("exec", "--user", "0", name, python, "-c",
+                             "from pathlib import Path; from app.db import Store; "
+                             "Store(Path('/var/data/moyai'))", check=False)
+        assert root_access.returncode != 0 and "Database access requires UID 10001" in root_access.stderr
+        log("PASS: root maintenance is rejected before opening the live private database.")
         log(docker("exec", "--user", "10001:10001", name, python, "-c", VERIFY).stdout.strip())
         docker("stop", "--time", "30", name)
         assert docker("inspect", "-f", "{{.State.ExitCode}}", name).stdout.strip() == "0"

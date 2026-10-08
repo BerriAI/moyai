@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -238,6 +239,11 @@ class Store:
 
     @contextmanager
     def connect(self):
+        if hasattr(os, 'geteuid'):
+            owner = (self.path if self.path.exists() else self.path.parent).stat().st_uid
+            if os.geteuid() != owner:
+                # Even read-only root connections can race the owner's WAL/SHM creation.
+                raise PermissionError(f"Database access requires UID {owner}; run maintenance as the database owner.")
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.create_function('unicode_lower', 1, str.lower, deterministic=True)

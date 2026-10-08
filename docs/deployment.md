@@ -58,6 +58,10 @@ Use one replica with a persistent local disk. Avoid serverless request hosts tha
 
 The container entrypoint prepares `DATA_DIR` after the disk is mounted, then drops to the `workspace` user (UID/GID 10001) before starting Python. It preserves file permissions and contents, adopts ownership only within the data directory, and does not follow symlinks to outside files. Use a dedicated absolute data directory. This also handles disks created by a previous native Python service with a different UID. Hosts that enforce a non-root container user must provision the disk for that user in advance. Do not override the entrypoint. The server and Docker health check both honor `PORT` (default 8787 outside Render).
 
+Run maintenance, replay and database inspection commands as the database owner too. Docker exec and Render Web Shell can start as root without passing through the entrypoint. Even read-only SQLite connections can create WAL/SHM files briefly inaccessible to the running server, interrupting active model streams. `Store` rejects a different effective UID before opening the database; raw SQLite tools must follow the same rule. Keep the private file permissions intact.
+
+For the standard image, use `docker exec --user 10001:10001 <container> /app/.venv/bin/python <script>` or, in Render Web Shell, `runuser -u workspace -- /app/.venv/bin/python <script>`. Verify `id -u` under that user before accessing live data. This does not require restarting the service.
+
 To reproduce the migration and restart checks with disposable local Docker volumes:
 
 ```sh

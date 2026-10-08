@@ -1,4 +1,6 @@
 import asyncio
+import os
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,6 +12,31 @@ from app.config import Settings
 from app.db import Store
 from app.persistence import Checkpoints, restore_checkpoint
 from test_workspace import workspace
+
+
+@pytest.mark.skipif(not hasattr(os, 'geteuid'), reason='POSIX database ownership')
+@pytest.mark.parametrize('operation', ['create', 'reopen', 'query'])
+def test_database_rejects_other_uid_before_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              operation: str) -> None:
+    store = Store(tmp_path) if operation != 'create' else None
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()}
+
+    def different_user() -> int:
+        return tmp_path.stat().st_uid + 1
+
+    monkeypatch.setattr(os, 'geteuid', different_user)
+
+    def forbidden_open(*args: object, **kwargs: object) -> None:
+        pytest.fail('A different UID must be rejected before SQLite can create sidecars')
+
+    monkeypatch.setattr(sqlite3, 'connect', forbidden_open)
+    with pytest.raises(PermissionError, match='run maintenance as the database owner'):
+        if operation == 'query':
+            assert store is not None
+            store.rows('SELECT id FROM runs')
+        else:
+            Store(tmp_path)
+    assert {path.name: path.read_bytes() for path in tmp_path.iterdir() if path.is_file()} == before
 
 
 async def test_checkpoint_restores_committed_database_and_results(tmp_path):
