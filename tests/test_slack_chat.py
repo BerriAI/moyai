@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from app.db import Store, now
 from app.slack_chat import slack_text, split_reply
+from storage_fixture import MemoryObjects
 from test_slack import slack_app, signed, event, wait_for
 
 ROOT = '1790719000.123456'
@@ -119,15 +120,17 @@ def test_pr_completion_uses_confirmed_receipt_and_preserves_plain_replies(slack_
     assert len([message for message in slack_app[3] if message.get('attachments')]) == 1
 
 
-def test_capture_handoff_selects_only_referenced_saved_files_and_handles_old_grant(slack_app):
-    from app import captures
+@pytest.mark.parametrize('remote', [False, True])
+def test_capture_handoff_selects_only_referenced_saved_files_and_handles_old_grant(slack_app, remote):
     app, _, run_id = start(slack_app)
+    store = app.state.store
+    if remote:
+        store.objects = MemoryObjects()
     url = publication(app, run_id)
-    root = captures.directory(app.state.settings, run_id)
-    root.mkdir(parents=True)
-    (root / 'demo.webm').write_bytes(b'\x1aE\xdf\xa3webm-recording-fixture')
-    (root / 'result.png').write_bytes(b'\x89PNG\r\n\x1a\nscreenshot-fixture')
-    (root / 'unrelated.png').write_bytes(b'\x89PNG\r\n\x1a\nunrelated-private-content')
+    for name, raw in [('demo.webm', b'\x1aE\xdf\xa3webm-recording-fixture'),
+                      ('result.png', b'\x89PNG\r\n\x1a\nscreenshot-fixture'),
+                      ('unrelated.png', b'\x89PNG\r\n\x1a\nunrelated-private-content')]:
+        store.artifacts.save(run_id + '-captures/' + name, raw)
     finish(app, run_id, f'[PR]({url})\n[Video](/workspace/moyai-captures/demo.webm)\n'
            '![Screenshot](/workspace/moyai-captures/result.png)')
     rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' ORDER BY id")

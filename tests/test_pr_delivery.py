@@ -1,7 +1,10 @@
 import hashlib
 import json
 
+import pytest
+
 from app import captures, pr_delivery
+from storage_fixture import MemoryObjects
 from test_computer import PNG, WEBM
 from test_slack import slack_app
 from test_slack_chat import publication, start
@@ -71,22 +74,30 @@ def test_pr_selection_requires_the_exact_url_and_supports_legacy_receipts(worksp
         assert pr_delivery.select_prs(conn, run_id, url) == []
 
 
-def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(workspace):
+@pytest.mark.parametrize('remote', [False, True])
+def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(workspace, remote):
     app, _ = workspace
-    run_id = app.state.store.create_run('Capture handoff', '', 'demo', [])['id']
-    root = captures.directory(app.state.settings, run_id)
-    root.mkdir(parents=True)
+    store = app.state.store
+    if remote:
+        store.objects = MemoryObjects()
+    run_id = store.create_run('Capture handoff', '', 'demo', [])['id']
     for name, raw in [('first.png', PNG), ('second.png', PNG + b'second'),
                       ('flow.webm', WEBM), ('other.webm', WEBM + b'other')]:
-        (root / name).write_bytes(raw)
+        store.artifacts.save(run_id + '-captures/' + name, raw)
     answer = ('[Video](/workspace/moyai-captures/flow.webm)\n'
               '![Result](moyai-captures/second.png)\n'
               '[Extra](moyai-captures/first.png) [Extra video](moyai-captures/other.webm)')
-    selected = pr_delivery.select_captures(app.state.settings, run_id, answer)
+    if remote:
+        store.objects.fail = True
+    with store.connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        selected = pr_delivery.select_captures(app.state.settings, run_id, answer, store=store, conn=conn)
+    if remote:
+        assert store.objects.reads == 0
     assert [capture.name for capture in selected] == ['flow.webm', 'second.png']
     assert [capture.sha256 for capture in selected] == [
         hashlib.sha256(WEBM).hexdigest(), hashlib.sha256(PNG + b'second').hexdigest()]
-    assert pr_delivery.select_captures(app.state.settings, run_id, 'No demo in this answer.') == []
+    assert pr_delivery.select_captures(app.state.settings, run_id, 'No demo in this answer.', store=store) == []
     for reference in [
         '/workspace/moyai-captures/first.png.extra',
         '/workspace/moyai-captures/first.png?download=true',
@@ -97,7 +108,7 @@ def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(wo
         'https://other.example/?file=/workspace/moyai-captures/first.png',
         'https://workspace.example/api/runs/' + 'f' * 32 + '/computer/captures/first.png',
     ]:
-        assert pr_delivery.select_captures(app.state.settings, run_id, f'[Other]({reference})') == [], reference
+        assert pr_delivery.select_captures(app.state.settings, run_id, f'[Other]({reference})', store=store) == [], reference
 
 
 def test_capture_selection_skips_symlinks_invalid_bytes_and_oversized_files(workspace, monkeypatch):
@@ -112,24 +123,27 @@ def test_capture_selection_skips_symlinks_invalid_bytes_and_oversized_files(work
     monkeypatch.setattr(captures, 'MAX_FILE', len(PNG))
     answer = '\n'.join(f'[Capture](moyai-captures/{name})' for name in
                        ['link.png', 'corrupt.png', 'large.png', 'missing.png', 'valid.png'])
-    assert [capture.name for capture in pr_delivery.select_captures(app.state.settings, run_id, answer)] == ['valid.png']
+    assert [capture.name for capture in pr_delivery.select_captures(app.state.settings, run_id, answer,
+        store=app.state.store)] == ['valid.png']
 
 
-async def test_entire_capture_batch_is_revalidated_before_any_external_upload(slack_app, monkeypatch):
+@pytest.mark.parametrize('remote', [False, True])
+async def test_entire_capture_batch_is_revalidated_before_any_external_upload(slack_app, monkeypatch, remote):
     app, _, run_id = start(slack_app)
+    store = app.state.store
+    if remote:
+        store.objects = MemoryObjects()
     channel = app.state.slack.channel
     source = channel.source_for_run(run_id, {'kind': 'answer'})
     credentials = await app.state.connectors.credentials('slack')
     credentials['bot']['scope'] += ',files:write'
     app.state.connectors.save('slack', credentials, 'Test organization')
-    root = captures.directory(app.state.settings, run_id)
-    root.mkdir(parents=True)
-    (root / 'flow.webm').write_bytes(WEBM)
-    (root / 'result.png').write_bytes(PNG)
+    store.artifacts.save(run_id + '-captures/flow.webm', WEBM)
+    store.artifacts.save(run_id + '-captures/result.png', PNG)
     selected = pr_delivery.select_captures(app.state.settings, run_id,
-        '[Video](moyai-captures/flow.webm) ![Image](moyai-captures/result.png)')
+        '[Video](moyai-captures/flow.webm) ![Image](moyai-captures/result.png)', store=store)
     assert [capture.name for capture in selected] == ['flow.webm', 'result.png']
-    (root / 'result.png').write_bytes(PNG + b'replaced after answer collection')
+    store.artifacts.save(run_id + '-captures/result.png', PNG + b'replaced after answer collection')
     uploads = []
 
     async def request(method, url, **kwargs):

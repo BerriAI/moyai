@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - 'app/computer.py'
+      - 'app/blob_storage.py'
+      - 'app/captures.py'
       - 'app/durable_runner.py'
       - 'app/temporal_runtime.py'
       - 'app/static/computer.*'

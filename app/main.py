@@ -23,6 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .config import Settings
 from .connectors import Connectors, ConnectorError, TOOLS
 from .db import Store, now
+from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
@@ -154,7 +155,7 @@ def create_app(settings: Settings | None = None):
     settings = settings or Settings()
     restore_checkpoint(settings)
     store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled,
-                  max_pending_runs=settings.max_pending_runs)
+                  max_pending_runs=settings.max_pending_runs, object_storage=ObjectStorage(settings))
     user_roles = UserRoles(store, settings)
     security = Security(settings, user_roles)
     from .sandbox_settings import SandboxSettings
@@ -244,7 +245,10 @@ def create_app(settings: Settings | None = None):
             if watcher:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
-            await checkpoints.flush()
+            try:
+                await checkpoints.flush()
+            finally:
+                await asyncio.to_thread(store.objects.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
@@ -560,7 +564,7 @@ def create_app(settings: Settings | None = None):
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": artifact_path(run_id).exists(), "has_captures": bool(captures.listing(settings, run_id)), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):
@@ -650,18 +654,15 @@ def create_app(settings: Settings | None = None):
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    def artifact_path(run_id):
-        if not re.fullmatch(r"[0-9a-f]{32}", run_id):
-            raise HTTPException(404, "Task not found")
-        return settings.data_dir / "artifacts" / f"{run_id}.zip"
-
     @app.get("/api/runs/{run_id}/artifact")
-    async def artifact(run_id: str, request: Request):
+    def artifact(run_id: str, request: Request):
         security.require(request)
-        path = artifact_path(run_id)
-        if not path.exists() or not store.run(run_id):
+        if not re.fullmatch(r"[0-9a-f]{32}", run_id) or not store.run(run_id):
             raise HTTPException(404, "No result archive is available.")
-        return FileResponse(path, media_type="application/zip", filename=f"moyai-{run_id[:8]}.zip")
+        try:
+            return store.artifacts.download(run_id + '.zip', f'moyai-{run_id[:8]}.zip')
+        except FileNotFoundError:
+            raise HTTPException(404, 'No result archive is available.') from None
 
     @app.get("/api/connections")
     async def connections(request: Request):
@@ -854,7 +855,7 @@ def create_app(settings: Settings | None = None):
             return result
         if body.name in SKILL_TOOLS:
             try:
-                result = skills.call(run,body.name,body.arguments)
+                result = await asyncio.to_thread(skills.call, run, body.name, body.arguments)
             except ValidationError:
                 raise HTTPException(422,'Invalid skill arguments. Check the tool schema, text limits and relative file paths.') from None
             await checkpoints.flush()
@@ -944,7 +945,7 @@ def create_app(settings: Settings | None = None):
 
     @app.get('/broker/{run_id}/attachments/{attachment_id}')
     async def broker_attachment(run_id: str, attachment_id: str, request: Request):
-        return store.attachments.broker_file(require_run(run_id, request), attachment_id)
+        return await asyncio.to_thread(store.attachments.broker_file, require_run(run_id, request), attachment_id)
 
     @app.post('/hooks/slack/interactions')
     async def slack_interactions(request: Request):
@@ -1013,7 +1014,7 @@ def create_app(settings: Settings | None = None):
         allowed = {"messages", "tools", "tool_choice", "parallel_tool_calls", "temperature", "top_p", "stop", "stream", "stream_options", "response_format", "reasoning_effort", "max_tokens", "max_completion_tokens", "seed"}
         payload = {key: value for key, value in body.items() if key in allowed}
         native_sessions.observe_scope(run)
-        payload['messages'] = store.attachments.with_images(run, scrub_memory_history(payload['messages']))
+        payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
         memory_context = memory.context(run)
         if memory_context:
             # Resolve references for the current requester on every inference.

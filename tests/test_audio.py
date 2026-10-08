@@ -8,7 +8,8 @@ from app.attachments import attachment_context
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.slack_files import file_ids
-from test_attachments import upload, start
+from test_attachments import upload, start, storage_mode, off_event_loop
+from storage_fixture import MemoryObjects
 from test_slack import slack_app, signed, event
 from test_spend import sign_in
 from test_workspace import workspace
@@ -65,7 +66,7 @@ def configured(app):
     app.state.settings.litellm_api_key = 'private-gateway-key'
 
 
-def test_web_audio_transcribes_once_preserves_original_and_reaches_agent(workspace, monkeypatch):
+def test_web_audio_transcribes_once_preserves_original_and_reaches_agent(workspace, monkeypatch, storage_mode):
     app, client = workspace
     configured(app)
     calls = []
@@ -82,6 +83,9 @@ def test_web_audio_transcribes_once_preserves_original_and_reaches_agent(workspa
     assert file['transcript'] == 'Please investigate the failing health check.'
     assert client.get(file['audio_url']).content == wav()
     assert client.get(file['audio_url']).headers['content-type'] == 'audio/wav'
+    partial = client.get(file['audio_url'], headers={'Range': 'bytes=10-29'})
+    assert partial.status_code == 206 and partial.content == wav()[10:30]
+    assert partial.headers['Content-Range'] == f'bytes 10-29/{len(wav())}'
     assert upload(client, 'voice.wav', wav(), file_id).json() == file
     assert len(calls) == 1
     run_id = start(app, client, monkeypatch, [file]).json()['id']
@@ -92,7 +96,7 @@ def test_web_audio_transcribes_once_preserves_original_and_reaches_agent(workspa
     assert Store(app.state.settings.data_dir).messages(run_id)[0]['attachments'][0]['transcript'] == file['transcript']
 
 
-def test_audio_playback_obeys_draft_ownership(workspace, monkeypatch):
+def test_audio_playback_obeys_draft_ownership(workspace, monkeypatch, storage_mode):
     app, client = workspace
     configured(app)
     gateway(monkeypatch, lambda r: httpx.Response(200, json={'text': 'Private draft'}))
@@ -124,8 +128,12 @@ def test_unconfigured_invalid_and_provider_failure_are_actionable(workspace, mon
     assert 'private-gateway-key' not in response.text
 
 
-def test_slack_audio_only_is_durable_deduplicated_and_off_ack_path(slack_app, monkeypatch):
+@pytest.mark.parametrize('remote', [False, True])
+def test_slack_audio_only_is_durable_deduplicated_and_off_ack_path(slack_app, monkeypatch, remote):
     app, client, runs, _ = slack_app
+    if remote:
+        app.state.store.objects = MemoryObjects()
+        monkeypatch.setattr(app.state.store.objects, 'put', off_event_loop(app.state.store.objects.put))
     payload = event(text='<@U99999999>', files=[{'id':'F12345678','name':'voice.wav','mimetype':'audio/wav'}])
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
     assert len(runs) == 1
@@ -151,6 +159,7 @@ def test_slack_audio_only_is_durable_deduplicated_and_off_ack_path(slack_app, mo
     stored = app.state.store.messages(run_id)[0]
     assert stored['user_id'] == message['user_id']
     assert stored['attachments'][0]['transcript'] == 'Investigate the deployment logs.'
+    assert app.state.store.attachments.broker_file(app.state.store.run(run_id), stored['attachments'][0]['id']).body == wav()
     assert 'Investigate' in attachment_context(app.state.store.attachments.for_run(run_id, message['id']))
 
 

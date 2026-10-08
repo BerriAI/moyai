@@ -548,13 +548,7 @@ class RunManager:
             data = await sandbox.filesystem.read_bytes.aio("/artifacts/result.zip")
             if len(data) > 20 * 1024 * 1024:
                 return
-            directory = self.settings.data_dir / "artifacts"
-            directory.mkdir(exist_ok=True, mode=0o700)
-            path = directory / f"{run_id}.zip"
-            staged = path.with_suffix('.next')
-            staged.write_bytes(data)
-            staged.chmod(0o600)
-            staged.replace(path)
+            await asyncio.to_thread(self.store.artifacts.save, f"{run_id}.zip", data)
             self.store.event(run_id, "artifact", "Result archive saved", {"download": f"/api/runs/{run_id}/artifact"})
         except Exception:
             self.store.event(run_id, "error", "No result archive was recovered from this run.")

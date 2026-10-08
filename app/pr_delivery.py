@@ -49,7 +49,8 @@ def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullR
     return result[:10]
 
 
-def select_captures(settings: Settings, run_id: str, answer: str) -> list[Capture]:
+def select_captures(settings: Settings, run_id: str, answer: str, *, store,
+                    conn: sqlite3.Connection | None = None) -> list[Capture]:
     tokens = TOKENS.findall(answer)
     names = [match[1] for token in tokens if (match := re.fullmatch(
         r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))', token))]
@@ -60,10 +61,21 @@ def select_captures(settings: Settings, run_id: str, answer: str) -> list[Captur
         if kind in kinds:
             continue
         try:
-            raw, _ = captures.read(captures.directory(settings, run_id) / name)
+            path = captures.directory(settings, run_id) / name
+            info = store.artifacts.info(run_id + '-captures/' + name, conn=conn)
+            if info and info['reference']:
+                # Capture saves validate media before publishing their immutable
+                # hash. Answer collection holds a transaction, so fetch no bytes
+                # here; delivery still validates the entire batch before upload.
+                if not 0 < info['size'] <= captures.MAX_FILE:
+                    continue
+                checksum = info['sha256']
+            else:
+                raw, _ = captures.read(path, store=store)
+                checksum = hashlib.sha256(raw).hexdigest()
         except (OSError, HTTPException):
             continue
-        result.append(Capture(name=name, sha256=hashlib.sha256(raw).hexdigest()))
+        result.append(Capture(name=name, sha256=checksum))
         kinds.add(kind)
     return result
 
