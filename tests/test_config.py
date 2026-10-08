@@ -61,7 +61,7 @@ def test_custom_default_stays_selectable_alongside_code_catalog(monkeypatch):
 @pytest.mark.parametrize(('model', 'harness'), [
     ('astra', 'codex'), ('6-astra', 'codex'), ('GPT-6 Astra', 'codex'),
     ('opus', 'claude-agent-sdk'), ('Claude Opus 5.5', 'claude-agent-sdk'),
-    ('glm', 'claude-agent-sdk'), ('sol', 'claude-agent-sdk'),
+    ('glm', 'claude-agent-sdk'), ('sol', 'codex'), ('GPT-6.1 Sol', 'codex'),
     ('custom-gateway-model', 'claude-agent-sdk'),
 ])
 def test_new_session_default_harness_resolves_models(model, harness, monkeypatch):
@@ -70,6 +70,21 @@ def test_new_session_default_harness_resolves_models(model, harness, monkeypatch
     assert settings.default_harness(model) == harness
     with pytest.raises(ValueError, match='enabled'):
         settings.default_harness('not-configured')
+
+
+@pytest.mark.parametrize(('model', 'harness'), [
+    ('openai/future-model', 'codex'),
+    ('anthropic/future-model', 'claude-agent-sdk'),
+    ('openai-compatible/gpt-next', 'claude-agent-sdk'),
+    ('other/openai/gpt-next', 'claude-agent-sdk'),
+    ('custom-gateway-model', 'claude-agent-sdk'),
+    ('openai', 'claude-agent-sdk'),
+])
+def test_custom_default_harness_uses_provider_namespace(model, harness, monkeypatch):
+    monkeypatch.delenv('AGENT_HARNESS', raising=False)
+    settings = Settings(_env_file=None, agent_model=model)
+    assert settings.default_harness() == harness
+    assert settings.default_harness(model) == harness
 
 
 @pytest.mark.parametrize('source', ['init', 'environment', 'dotenv'])
@@ -87,3 +102,4 @@ def test_explicit_harness_configuration_overrides_model_pairings(tmp_path, monke
     settings = Settings(_env_file=env_file, agent_model='openai/gpt-6-astra', **kwargs)
     assert settings.default_harness() == harness
     assert settings.default_harness('opus') == harness
+    assert settings.default_harness('sol') == harness

@@ -1,8 +1,12 @@
 # Agent harnesses
 
-New web sessions, Slack threads and saved automations default to **Codex SDK**
-(`codex`) for GPT-6 Astra and **Claude Agent SDK** (`claude-agent-sdk`) for Opus 5.5.
-Other models retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
+New web sessions, Slack threads and saved automations choose a default from the
+resolved model ID's provider prefix: **Codex SDK** (`codex`) for `openai/` and
+**Claude Agent SDK** (`claude-agent-sdk`) for `anthropic/`. This includes GPT-6 Astra,
+GPT-6.1 Sol and future models added to the catalog or configured as `AGENT_MODEL`;
+no version-specific routing entry is needed. Model aliases and display names are
+resolved before choosing the SDK. Other provider prefixes and unqualified gateway
+aliases retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
 overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` setting
 to enable automatic pairing. The new-session picker shows the effective automatic
 choice and supports an explicit override. Explicitly

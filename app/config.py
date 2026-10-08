@@ -231,10 +231,13 @@ class Settings(BaseSettings):
         model = self.resolve_model(value)
         if 'agent_harness' in self.model_fields_set:
             return self.agent_harness
+        # Resolve aliases first, then use the provider namespace so new catalog
+        # models inherit their native SDK without a version-specific pairing.
+        provider = model.split('/', 1)[0] if '/' in model else ''
         return {
-            'openai/gpt-6-astra': 'codex',
-            'anthropic/claude-opus-5-5': 'claude-agent-sdk',
-        }.get(model, self.agent_harness)
+            'openai': 'codex',
+            'anthropic': 'claude-agent-sdk',
+        }.get(provider, self.agent_harness)
 
     def harness_model(self, harness: str, value: str | None = None) -> str:
         from .harnesses import validate_harness

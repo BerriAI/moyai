@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
+from app.config import MODEL_CATALOG
 from app.db import Store
 from sandbox.broker_relay import BrokerRelay
 from sandbox.broker_transport import unseal
@@ -74,7 +75,7 @@ def use_model_defaults(settings):
     settings.model_fields_set.discard('agent_harness')
 
 
-@pytest.mark.parametrize(('model', 'harness'), [('astra', 'codex'), ('opus', 'claude-agent-sdk'), ('glm', 'claude-agent-sdk')])
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'codex'), ('sol', 'codex'), ('opus', 'claude-agent-sdk'), ('glm', 'claude-agent-sdk')])
 def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspace, monkeypatch, model, harness):
     app, client = workspace
     use_model_defaults(app.state.settings)
@@ -97,8 +98,28 @@ def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspa
     assert explicit.json()['harness'] == 'hermes'
 
 
+@pytest.mark.parametrize(('model', 'harness'), [
+    ('openai/future-model', 'codex'),
+    ('anthropic/future-model', 'claude-agent-sdk'),
+    ('other/future-model', 'claude-agent-sdk'),
+])
+def test_new_catalog_models_inherit_provider_default(workspace, monkeypatch, model, harness):
+    app, client = workspace
+    use_model_defaults(app.state.settings)
+    monkeypatch.setitem(MODEL_CATALOG, model, 'Future Model')
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    catalog = client.get('/api/config').json()
+    assert {'id': model, 'name': 'Future Model', 'default_harness': harness} in catalog['models']
+    # A new display-name alias also routes after resolving to its canonical ID.
+    response = client.post('/api/runs', json={'prompt': 'Use the new model', 'model': 'Future Model'})
+    assert response.status_code == 201, response.text
+    run = response.json()
+    assert (run['model'], run['harness']) == (model, harness)
+    assert app.state.manager.spec(app.state.store.run(run['id']))['harness'] == harness
+
+
 @pytest.mark.parametrize('thread_chat', [True, False])
-@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'codex'), (OPUS, 'claude-agent-sdk')])
+@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'codex'), ('openai/gpt-6.1-sol', 'codex'), (OPUS, 'claude-agent-sdk')])
 def test_slack_new_sessions_pair_configured_model(slack_app, thread_chat, model, harness):
     app, client, submitted, _ = slack_app
     use_model_defaults(app.state.settings)
@@ -109,20 +130,21 @@ def test_slack_new_sessions_pair_configured_model(slack_app, thread_chat, model,
     assert (submitted[0]['model'], submitted[0]['harness']) == (model, harness)
 
 
-def test_slack_selected_model_pairs_only_new_thread(slack_app):
+@pytest.mark.parametrize('model', ['astra', 'sol'])
+def test_slack_selected_model_pairs_only_new_thread(slack_app, model):
     app, client, submitted, _ = slack_app
     use_model_defaults(app.state.settings)
     app.state.settings.agent_model = OPUS
-    response = client.post('/hooks/slack/events', **signed(event(text='<@U99999999> model astra')))
+    response = client.post('/hooks/slack/events', **signed(event(text=f'<@U99999999> model {model}')))
     assert response.status_code == 200, response.text
     run = app.state.store.rows('SELECT * FROM runs')[0]
-    assert (run['model'], run['harness']) == ('openai/gpt-6-astra', 'codex')
+    assert (run['model'], run['harness']) == (app.state.settings.resolve_model(model), 'codex')
     send(client, 1, '<@U99999999> model opus')
     current = app.state.store.run(run['id'])
     assert (current['model'], current['harness']) == (OPUS, 'codex')
 
 
-@pytest.mark.parametrize(('model', 'harness'), [('astra', 'codex'), ('opus', 'claude-agent-sdk')])
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'codex'), ('sol', 'codex'), ('opus', 'claude-agent-sdk')])
 def test_new_automation_default_persists_across_edits_and_launches(workspace, monkeypatch, model, harness):
     app, client = workspace
     use_model_defaults(app.state.settings)
