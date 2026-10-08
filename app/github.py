@@ -24,7 +24,14 @@ from .github_repositories import GitHubRepositories
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
-MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write'}
+# Optional grants are requested for new Apps only; baseline PERMISSIONS stay
+# narrow so existing installations without them keep working.
+MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'issues': 'write'}
+ISSUES_PERMISSION_ERROR = ('GitHub issue tools need the Issues repository permission ({level}) on the organization GitHub App, '
+                           'and this installation has not been granted it. For an existing App, an administrator enables '
+                           'Repository permissions → Issues in the GitHub App settings, then an organization owner approves '
+                           'the updated permissions for this installation (Organization settings → GitHub Apps). Retry after '
+                           'approval. Code, pull request and ruleset access still work.')
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
 
@@ -86,6 +93,31 @@ class Feedback(PullRequest):
 
 class Comment(PullRequest):
     body: str = Field(min_length=1, max_length=20000, pattern=r"\S")
+    request_key: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
+
+
+class Issue(Repository):
+    number: int = Field(ge=1, description="GitHub issue number.")
+
+
+class ReadIssue(Issue):
+    comments_page: int = Field(default=1, ge=1, le=10000, description="Page of comments to read, oldest first.")
+
+
+class ListIssues(Repository):
+    state: Literal["open", "closed", "all"] = Field(default="open", description="State of issues to list.")
+    page: int = Field(default=1, ge=1, le=10000, description="Page number for pagination.")
+
+
+class CreateIssue(Repository):
+    title: str = Field(min_length=1, max_length=250, pattern=r"\S", description="Issue title.")
+    # GitHub accepts an issue without a description.
+    body: str = Field(default="", max_length=20000, description="Optional issue description in Markdown.")
+    request_key: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
+
+
+class CommentIssue(Issue):
+    body: str = Field(min_length=1, max_length=20000, pattern=r"\S", description="Comment body.")
     request_key: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
 
 
@@ -168,6 +200,10 @@ TOOLS = {
     'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR created by this session. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
     'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR created by this session, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
+    'github_issues': ('github', False, ListIssues, 'List issues in the connected repository, excluding pull requests. Filter by state (open, closed, all). Pull requests are removed after paging, so a page can hold fewer issues or none; follow next_page until null.'),
+    'github_issue': ('github', False, ReadIssue, 'Read an issue description, labels and one page of comments (30 per page, oldest first). comments_count is the total; follow comments_next_page, or request the last page for the newest comments. Pull requests are rejected; use github_pull_request.'),
+    'github_create_issue': ('github', True, CreateIssue, 'Create a new GitHub issue with a title and optional Markdown description in an authorized repository. No administrator approval step. Use a unique request_key; on an uncertain result, retry only with the same request_key and unchanged arguments, which checks for the earlier issue and never creates another. Never retry an uncertain creation with a new key before inspecting the repository.'),
+    'github_comment_issue': ('github', True, CommentIssue, 'Post a conversation comment on an existing GitHub issue (not a pull request; use github_comment_pull_request for PRs published by this session). No administrator approval step. Use a unique request_key; on an uncertain result, retry only with the same request_key and body, which checks for the earlier comment and never posts again.'),
 }
 
 
@@ -245,14 +281,14 @@ class GitHub(GitHubRepositories):
             self.remember_repository(items[0], credentials)
         return ', '.join(self.repository_name(i, credentials) for i in self.connected_ids(credentials))
 
-    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False):
+    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False, issues=False):
         credentials = credentials if credentials is not None else await self.ensure_connection()
         target = self.target(repository, credentials)
         if target not in self.connected_ids(credentials):
             raise ConnectorError('The GitHub installation does not match the configured repository.')
         installation = int(credentials['installation_id'])
         config = self.app_config()
-        key = (config.get('id'), installation, target, write, rules)
+        key = (config.get('id'), installation, target, write, rules, issues)
         async with self.token_lock:
             cached = self.tokens.get(key)
             if not fresh and cached and cached[0] > time.time():
@@ -260,13 +296,18 @@ class GitHub(GitHubRepositories):
             permissions = {'contents': 'write' if write else 'read', 'pull_requests': 'write' if write else 'read'}
             if rules:
                 permissions = {'administration': 'write'} if write else {'metadata': 'read'}
-            if rules and write:
+            elif issues:
+                permissions = {'issues': 'write'} if write else {'issues': 'read'}
+            if (rules and write) or issues:
                 installed = await self.request('GET', f'/app/installations/{installation}', token=self.app_jwt(config))
                 if (installed.get('suspended_at') or installed.get('account', {}).get('type') != 'Organization'
                         or installed.get('account', {}).get('id') != credentials.get('account_id')):
                     raise ConnectorError('The GitHub installation is suspended or belongs to another organization. Reconnect GitHub.')
-                if not supports_permissions(installed.get('permissions'), {'administration': 'write'}):
+                if rules and write and not supports_permissions(installed.get('permissions'), {'administration': 'write'}):
                     raise ConnectorError('Ruleset inspection is available, but editing requires Administration: read and write on the organization GitHub App. An organization owner must enable and approve that permission for this installation, then retry. Existing code and PR access still works.')
+                if issues and not rules and not supports_permissions(installed.get('permissions'), permissions):
+                    # Installation permissions list only grants the organization approved.
+                    raise ConnectorError(ISSUES_PERMISSION_ERROR.format(level='Read and write' if write else 'Read (or Read and write)'))
             result = await self.request('POST', f'/app/installations/{installation}/access_tokens', token=self.app_jwt(config),
                                         json={'repository_ids': [target], 'permissions': permissions})
             from datetime import datetime
@@ -291,13 +332,18 @@ class GitHub(GitHubRepositories):
         if name == 'github_update_ruleset_reviewers':
             async with self.write_lock:
                 return await self.update_ruleset_reviewers(run, RulesetReviewers.model_validate(arguments))
-        if name in {'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request'}:
+        if name in {'github_create_pull_request', 'github_update_pull_request', 'github_comment_pull_request',
+                    'github_create_issue', 'github_comment_issue'}:
             async with self.write_lock:
                 if name == 'github_create_pull_request':
                     return await self.publish(run, Publish.model_validate(arguments))
                 if name == 'github_update_pull_request':
                     return await self.update(run, Update.model_validate(arguments))
-                return await self.comment(run, Comment.model_validate(arguments))
+                if name == 'github_comment_pull_request':
+                    return await self.comment(run, Comment.model_validate(arguments))
+                if name == 'github_create_issue':
+                    return await self.create_issue(run, CreateIssue.model_validate(arguments))
+                return await self.comment_issue(run, CommentIssue.model_validate(arguments))
         if name == 'github_repositories':
             await self.refresh_connection()
             return {'repositories': self.repository_options()}
@@ -313,6 +359,61 @@ class GitHub(GitHubRepositories):
             data = await self.request('GET', f'/repositories/{target}/rulesets/{args.ruleset_id}', token=token,
                                       params={'includes_parents': 'true'})
             return self.ruleset_result(target, data)
+        if name in {'github_issues', 'github_issue'}:
+            token = await self.installation_token(repository=target, issues=True)
+            if name == 'github_issues':
+                args = ListIssues.model_validate(arguments)
+                page = await self.request('GET', f'/repositories/{target}/issues', token=token,
+                                          params={'state': args.state, 'per_page': 30, 'page': args.page})
+                # GitHub pages issues and PRs together; paginate on the raw page size.
+                items = [i for i in page if 'pull_request' not in i]
+                return {
+                    'repository_id': target,
+                    'repository': self.repository_name(target),
+                    'issues': [{
+                        'number': item['number'],
+                        'title': item['title'],
+                        'state': item['state'],
+                        'url': item.get('html_url', ''),
+                        'author': (item.get('user') or {}).get('login'),
+                        'labels': [l.get('name', '') for l in item.get('labels', []) if isinstance(l, dict)],
+                        'created_at': item.get('created_at'),
+                        'comments_count': item.get('comments', 0),
+                    } for item in items],
+                    'page': args.page,
+                    'next_page': args.page + 1 if len(page) == 30 else None,
+                }
+            args = ReadIssue.model_validate(arguments)
+            data = await self.request('GET', f'/repositories/{target}/issues/{args.number}', token=token)
+            if 'pull_request' in data:
+                raise ConnectorError(f'#{args.number} is a pull request, not an issue. Use github_pull_request or github_pull_request_comments.')
+            # This endpoint only lists comments oldest first; it has no sort option.
+            comments = await self.request('GET', f'/repositories/{target}/issues/{args.number}/comments', token=token,
+                                          params={'per_page': 30, 'page': args.comments_page})
+            return {
+                'repository_id': target,
+                'repository': self.repository_name(target),
+                'number': data['number'],
+                'title': data['title'],
+                'body': (data.get('body') or '')[:20000],
+                'body_truncated': len(data.get('body') or '') > 20000,
+                'state': data['state'],
+                'url': data.get('html_url', ''),
+                'author': (data.get('user') or {}).get('login'),
+                'labels': [l.get('name', '') for l in data.get('labels', []) if isinstance(l, dict)],
+                'created_at': data.get('created_at'),
+                'comments_count': data.get('comments', 0),
+                'comments': [{
+                    'id': c.get('id'),
+                    'url': c.get('html_url', ''),
+                    'author': (c.get('user') or {}).get('login'),
+                    'body': (c.get('body') or '')[:20000],
+                    'body_truncated': len(c.get('body') or '') > 20000,
+                    'created_at': c.get('created_at'),
+                } for c in comments],
+                'comments_page': args.comments_page,
+                'comments_next_page': args.comments_page + 1 if len(comments) == 30 else None,
+            }
         token = await self.installation_token(repository=target)
         if name in {'github_repository', 'github_checkout'}:
             repo = {**await self.repository(token, target), 'git_path': f'/github/repositories/{target}.git'}
@@ -670,5 +771,80 @@ class GitHub(GitHubRepositories):
             self.store.execute('UPDATE github_followups SET sent=1 WHERE id=?', (row['id'],))
             comment = await self.request('POST', path, token=token, json={'body': args.body + '\n\n' + marker})
         result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number, 'repository_id': target, 'repository': self.repository_name(target)}
+        self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
+        return result
+
+    async def find_marked(self, token, path, body, params, pages):
+        """Read-only recovery: find the item carrying this journal's exact body."""
+        for page in range(1, pages + 1):
+            items = await self.request('GET', path, token=token, params={**params, 'per_page': 100, 'page': page})
+            found = next((item for item in items if item.get('body') == body and 'pull_request' not in item), None)
+            if found or len(items) < 100:
+                return found
+        return None
+
+    async def send_issue_write(self, run, version, tool, row, path, token, payload):
+        # Token acquisition and earlier reads await; the session, connection or
+        # write policy may have changed meanwhile. Recheck right before sending.
+        self.ensure_publish_allowed(run, version, tool)
+        self.store.execute('UPDATE github_followups SET sent=1 WHERE id=?', (row['id'],))
+        try:
+            return await self.request('POST', path, token=token, json=payload)
+        except ConnectorError as error:
+            raise ConnectorError(f'{error} The write may have been applied. Do not retry with a new request_key; retry only with '
+                                 'the same request_key and unchanged arguments, which checks GitHub and never sends it again.') from None
+
+    async def create_issue(self, run, args):
+        tool = 'github_create_issue'
+        if run.get('github_connection_version'):
+            self.ensure_publish_allowed(run, run['github_connection_version'], tool)
+        target = await self.selected_target(run, args.repository, args.repository_id)
+        version = run.get('github_connection_version') or self.connection_version()
+        self.ensure_publish_allowed(run, version, tool)
+        row = self.followup(run, tool, args, version, target)
+        if row['result']:
+            return self.receipt(row['result'], target)
+        token = await self.installation_token(repository=target, write=True, issues=True)
+        path = f'/repositories/{target}/issues'
+        marker = '<!-- moyai-issue:' + row['id'] + ' -->'
+        body = args.body + '\n\n' + marker if args.body else marker
+        if row['sent']:
+            issue = await self.find_marked(token, path, body, {'state': 'all', 'sort': 'created', 'direction': 'desc'}, 10)
+            if not issue:
+                raise ConnectorError('The earlier issue was not confirmed. Inspect the repository before choosing a new request_key; it will not be created again automatically.')
+        else:
+            issue = await self.send_issue_write(run, version, tool, row, path, token, {'title': args.title, 'body': body})
+        result = {'number': issue['number'], 'url': issue['html_url'], 'title': issue.get('title', args.title),
+                  'state': issue.get('state', 'open'), 'repository_id': target, 'repository': self.repository_name(target)}
+        self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
+        return result
+
+    async def comment_issue(self, run, args):
+        tool = 'github_comment_issue'
+        if run.get('github_connection_version'):
+            self.ensure_publish_allowed(run, run['github_connection_version'], tool)
+        target = await self.selected_target(run, args.repository, args.repository_id)
+        version = run.get('github_connection_version') or self.connection_version()
+        self.ensure_publish_allowed(run, version, tool)
+        row = self.followup(run, tool, args, version, target)
+        if row['result']:
+            return self.receipt(row['result'], target)
+        token = await self.installation_token(repository=target, write=True, issues=True)
+        # The issue-comments endpoint also accepts PR numbers. PR comments keep
+        # their session-ownership rules in github_comment_pull_request.
+        issue = await self.request('GET', f'/repositories/{target}/issues/{args.number}', token=token)
+        if 'pull_request' in issue:
+            raise ConnectorError(f'#{args.number} is a pull request, not an issue. No comment was sent. '
+                                 'Use github_comment_pull_request for a PR published by this session.')
+        path = f'/repositories/{target}/issues/{args.number}/comments'
+        body = args.body + '\n\n<!-- moyai-comment:' + row['id'] + ' -->'
+        if row['sent']:
+            comment = await self.find_marked(token, path, body, {}, 100)
+            if not comment:
+                raise ConnectorError('The earlier comment was not confirmed. Inspect the issue before choosing a new request_key; it will not be posted again automatically.')
+        else:
+            comment = await self.send_issue_write(run, version, tool, row, path, token, {'body': body})
+        result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number,
+                  'repository_id': target, 'repository': self.repository_name(target)}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
         return result
