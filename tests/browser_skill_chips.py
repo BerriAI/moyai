@@ -24,6 +24,7 @@ def checks():
         page.goto(BASE + '/_test/sign-in')
         editor = page.get_by_label('Message Moyai')
         expect(editor).to_be_visible()
+        expect(editor).to_have_accessible_name('Message Moyai')
         for scope in ('personal', 'organization'):
             page.evaluate('''async scope => {
               const skills = (await api('/api/skills')).skills;
@@ -124,6 +125,8 @@ def checks():
         page.get_by_role('button', name='Start session', exact=True).click()
         followup = page.locator('#followup')
         expect(followup).to_be_visible(timeout=20000)
+        expect(followup).to_have_accessible_name('Message Moyai')
+        expect(page.get_by_role('textbox', name='Message Moyai', exact=True)).to_have_attribute('id', 'followup')
         followup.fill('/org:tea')
         expect(page.locator('.skill-inline-option')).to_have_count(1)
         followup.press('Enter')

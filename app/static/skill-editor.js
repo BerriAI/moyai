@@ -6,7 +6,13 @@ function bindSkillEditor(textarea, form) {
   input.contentEditable = 'true';
   input.setAttribute('role', 'textbox');
   input.setAttribute('aria-multiline', 'true');
-  input.setAttribute('aria-label', textarea.getAttribute('aria-label'));
+  // A div does not inherit a textarea's native <label for> association.
+  // Preserve explicit ARIA naming and use the native labels as a fallback.
+  const labelledBy = textarea.getAttribute('aria-labelledby');
+  const label = textarea.getAttribute('aria-label') ||
+    Array.from(textarea.labels || [], label => label.textContent.trim()).filter(Boolean).join(' ');
+  if (labelledBy) input.setAttribute('aria-labelledby', labelledBy);
+  if (label) input.setAttribute('aria-label', label);
   input.dataset.placeholder = textarea.placeholder;
   input.maxLength = textarea.maxLength;
   input.minLength = textarea.minLength;
