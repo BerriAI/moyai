@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from modal.exception import NotFoundError
 
 from app import captures
-from app.computer import DesktopConnection
+from app.computer import BROWSER_PARTIAL_NOTICE, DesktopConnection
 from sandbox import computer
 from test_workspace import workspace
 
@@ -22,6 +22,16 @@ def cloud(workspace):
     run = app.state.store.create_run('Browser test', '', 'modal', [], chat_enabled=True,
                                     user_id='google:owner')
     return app, client, run['id'], f"/api/runs/{run['id']}/computer"
+
+
+def browser_sandbox(run_id, transport):
+    async def request(body):
+        operation = body.get('args', {}).get('browser')
+        if operation:
+            assert body['action'] == 'state' and body['args']['scope'] == run_id
+            return {'scope': run_id, **({'restored': True} if operation == 'restore' else {'state': None})}
+        return await transport(body)
+    return SimpleNamespace(object_id='test-sandbox', computer_request=request)
 
 
 def test_preview_control_requires_login_csrf_and_requester(workspace, monkeypatch):
@@ -69,6 +79,249 @@ def test_saved_media_survives_sleep_supports_ranges_and_blocks_paths(workspace):
     assert client.get(url+'/captures/..%2Fworkspace.db').status_code == 404
     client.cookies.clear()
     assert client.get(media).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_browser_checkpoint_is_encrypted_private_and_scoped_to_its_run(workspace):
+    app, client, rid, url = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    state = {'storage': {'cookies': [{'name': 'session', 'value': 'private-login-marker'}], 'origins': []},
+             'pages': [{'url': 'https://example.test/account', 'session_storage': {}}], 'active': 0}
+    async def exchange(body):
+        return {'scope': rid, **({'state': state} if body['args']['browser'] == 'checkpoint' else {'restored': True})}
+    transport = AsyncMock(side_effect=exchange)
+    sandbox = SimpleNamespace(object_id='sb-browser', computer_request=transport)
+    store.update_run(rid, sandbox_id=sandbox.object_id)
+    await hub.checkpoint(sandbox, rid)
+    encrypted = store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted']
+    assert 'private-login-marker' not in encrypted
+    assert json.loads(hub.security.decrypt(encrypted)) == {'scope': rid, 'state': state}
+    await hub.restore(sandbox, rid)
+    assert transport.call_args.args[0] == {'action': 'state', 'args': {'browser': 'restore', 'scope': rid, 'state': state}}
+    child = store.create_run('Child browser', '', 'modal', [], chat_enabled=True)['id']
+    store.execute('UPDATE runs SET parent_run_id=?,snapshot_id=?,sandbox_id=? WHERE id=?',
+                  (rid, 'parent-snapshot', 'sb-child', child))
+    child_transport = AsyncMock(return_value={'scope': child, 'restored': True})
+    await hub.restore(SimpleNamespace(object_id='sb-child', computer_request=child_transport), child)
+    assert child_transport.call_args.args[0]['args'] == {'browser': 'restore', 'scope': child, 'state': None}
+    hub.sandbox = AsyncMock(return_value=None)
+    for response in (client.get(url), client.get('/api/runs/' + rid), client.get('/api/runs')):
+        assert response.status_code == 200
+        assert 'private-login-marker' not in response.text and encrypted not in response.text
+    for action in ('checkpoint', 'restore'):
+        assert client.post(url, json={'action': action}).status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply', ['absent', 'late', 'deleted', 'logout'])
+async def test_browser_checkpoint_keeps_good_state_until_current_browser_explicitly_clears_it(workspace, reply):
+    app, _, rid, _ = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    state = {'storage': {'cookies': [{'name': 'session', 'value': 'keep-login'}], 'origins': []},
+             'pages': [], 'active': 0}
+    original = hub.security.encrypt(json.dumps({'scope': rid, 'state': state}))
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, original))
+    store.update_run(rid, sandbox_id='sb-browser')
+    empty = {'storage': {'cookies': [], 'origins': []}, 'pages': [], 'active': 0}
+    async def checkpoint(body):
+        assert body == {'action': 'state', 'args': {'browser': 'checkpoint', 'scope': rid}}
+        if reply == 'late':
+            store.update_run(rid, sandbox_id='sb-replacement')
+        elif reply == 'deleted':
+            store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (rid,))
+        return {'scope': rid, 'state': None if reply == 'absent' else empty}
+    await hub.checkpoint(SimpleNamespace(object_id='sb-browser', computer_request=checkpoint), rid)
+    saved = store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted']
+    if reply == 'logout':
+        assert json.loads(hub.security.decrypt(saved)) == {'scope': rid, 'state': empty}
+    else:
+        assert saved == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['transport', 'error_reply'])
+async def test_browser_checkpoint_failure_preserves_previous_login(workspace, failure):
+    app, _, rid, _ = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    state = {'storage': {'cookies': [{'name': 'session', 'value': 'keep-login'}], 'origins': []},
+             'pages': [], 'active': 0}
+    original = hub.security.encrypt(json.dumps({'scope': rid, 'state': state}))
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, original))
+    store.update_run(rid, sandbox_id='sb-browser')
+    transport = AsyncMock(side_effect=ConnectionError('lost reply')) if failure == 'transport' else AsyncMock(
+        return_value={'error': 'private runtime diagnostic'})
+    sandbox = SimpleNamespace(object_id='sb-browser', computer_request=transport)
+    with pytest.raises(HTTPException) as error:
+        await hub.checkpoint(sandbox, rid)
+    assert 'private runtime diagnostic' not in str(error.value)
+    assert store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('fault', ['ciphertext', 'json', 'scope'])
+async def test_corrupt_browser_restore_fails_without_sending_fresh_state(workspace, fault):
+    app, _, rid, _ = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    state = {'storage': {'cookies': [], 'origins': []}, 'pages': [], 'active': 0}
+    raw = 'not-json' if fault == 'json' else json.dumps({'scope': 'another-run', 'state': state})
+    encrypted = 'invalid-ciphertext' if fault == 'ciphertext' else hub.security.encrypt(raw)
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, encrypted))
+    store.update_run(rid, sandbox_id='sb-browser')
+    transport = AsyncMock(return_value={'scope': rid, 'restored': True})
+    with pytest.raises(HTTPException) as error:
+        await hub.restore(SimpleNamespace(object_id='sb-browser', computer_request=transport), rid)
+    assert error.value.status_code == 503
+    assert transport.call_args.args[0] == {'action': 'state',
+        'args': {'browser': 'restore', 'scope': rid, 'blocked': True}}
+    assert store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == encrypted
+
+
+def test_browser_restore_get_preserves_error_until_row_or_sandbox_changes(workspace, monkeypatch):
+    app, client, rid, url = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    clock = [100]
+    monkeypatch.setattr('app.computer.time', SimpleNamespace(monotonic=lambda: clock[0]))
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, 'invalid-ciphertext'))
+    store.update_run(rid, sandbox_id='sb-first')
+    state = {'storage': {'cookies': [], 'origins': []}, 'pages': [], 'active': 0}
+    async def exchange(body):
+        operation = body.get('args', {}).get('browser')
+        if operation == 'restore':
+            return {'scope': rid, 'restored': True}
+        if operation == 'checkpoint':
+            return {'scope': rid, 'state': None}
+        return {'available': True, 'frame': 'recovered'}
+    transport = AsyncMock(side_effect=exchange)
+    sandbox = SimpleNamespace(object_id='sb-first', computer_request=transport)
+    hub.sandbox = AsyncMock(return_value=sandbox)
+    detail = {'detail': 'Saved browser access could not be restored. The checkpoint is preserved.'}
+    for _ in range(3):
+        response = client.get(url)
+        assert response.status_code == 503 and response.json() == detail
+        clock[0] += .1
+    transport.assert_awaited_once_with({'action': 'state',
+        'args': {'browser': 'restore', 'scope': rid, 'blocked': True}})
+    assert hub.cache == {}
+    assert store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == 'invalid-ciphertext'
+
+    sandbox.object_id = 'sb-replacement'
+    store.update_run(rid, sandbox_id=sandbox.object_id)
+    response = client.get(url)
+    assert response.status_code == 503 and response.json() == detail
+    assert transport.await_count == 2  # A replacement must receive its own block marker.
+
+    encrypted = hub.security.encrypt(json.dumps({'scope': rid, 'state': state}))
+    store.execute('UPDATE browser_sessions SET encrypted=? WHERE run_id=?', (encrypted, rid))
+    response = client.get(url)
+    assert response.status_code == 200 and response.json()['frame'] == 'recovered'
+    assert transport.await_args_list[2].args[0] == {'action': 'state',
+        'args': {'browser': 'restore', 'scope': rid, 'state': state}}
+    assert rid not in hub.restore_failures
+    assert store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == encrypted
+
+
+@pytest.mark.parametrize('failure', ['legacy', 'error', 'transport'])
+def test_browser_restore_get_delays_only_known_failures(workspace, monkeypatch, failure):
+    app, client, rid, url = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    clock = [100]
+    monkeypatch.setattr('app.computer.time', SimpleNamespace(monotonic=lambda: clock[0]))
+    state = {'storage': {'cookies': [], 'origins': []}, 'pages': [], 'active': 0}
+    encrypted = hub.security.encrypt(json.dumps({'scope': rid, 'state': state}))
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, encrypted))
+    store.update_run(rid, sandbox_id='sb-browser')
+    reply = {'available': True} if failure == 'legacy' else {'error': 'private runtime diagnostic'}
+    transport = AsyncMock(return_value=reply, side_effect=ConnectionError('lost reply') if failure == 'transport' else None)
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(object_id='sb-browser', computer_request=transport))
+    expected = ('The workspace browser needs an update to restore saved access.' if failure == 'legacy' else
+                'Browser access could not be restored. The checkpoint is preserved.')
+    if failure == 'transport':
+        expected = 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.'
+    response = client.get(url)
+    assert response.status_code == 503 and response.json() == {'detail': expected}
+    if failure == 'transport':
+        assert rid not in hub.restore_failures
+    else:
+        assert encrypted not in hub.restore_failures[rid]
+        clock[0] += 9.9
+        assert client.get(url).json() == {'detail': expected}
+        clock[0] += .2
+    assert transport.await_count == 1 and hub.cache == {}
+
+    transport.side_effect = [{'scope': rid, 'restored': True}, {'available': True, 'frame': 'recovered'},
+                             {'scope': rid, 'state': None}]
+    response = client.get(url)
+    assert response.status_code == 200 and response.json()['frame'] == 'recovered'
+    assert transport.await_count == 4 and rid not in hub.restore_failures
+    assert store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == encrypted
+
+
+@pytest.mark.asyncio
+async def test_wrong_scope_checkpoint_cannot_replace_saved_browser_auth(workspace):
+    app, _, rid, _ = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    state = {'storage': {'cookies': [{'name': 'session', 'value': 'keep-login'}], 'origins': []},
+             'pages': [], 'active': 0}
+    original = hub.security.encrypt(json.dumps({'scope': rid, 'state': state}))
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, original))
+    store.update_run(rid, sandbox_id='sb-browser')
+    transport = AsyncMock(return_value={'scope': 'another-run',
+        'state': {'storage': {'cookies': [], 'origins': []}, 'pages': [], 'active': 0}})
+    await hub.checkpoint(SimpleNamespace(object_id='sb-browser', computer_request=transport), rid)
+    assert store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == original
+
+
+@pytest.mark.parametrize('owner', ['poll', 'shutdown'])
+async def test_partial_checkpoint_is_saved_and_reported_to_its_owner(workspace, owner):
+    app, client, rid, url = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    saved = {'storage': {'cookies': [{'name': 'session', 'value': 'partial-login'}], 'origins': []}, 'pages': [], 'active': 0}
+    async def exchange(body):
+        operation = body.get('args', {}).get('browser')
+        if operation == 'checkpoint':
+            assert body['args'].get('releasing', False) == (owner == 'shutdown')
+            return {'scope': rid, 'state': saved, 'partial': True}
+        if operation == 'restore':
+            return {'scope': rid, 'restored': True}
+        return {'available': True, 'frame': 'live'}
+    sandbox = SimpleNamespace(object_id='sb-partial', computer_request=exchange)
+    store.update_run(rid, sandbox_id=sandbox.object_id)
+    hub.sandbox = AsyncMock(return_value=sandbox)
+    hub.execute, hub.sync = AsyncMock(return_value={}), AsyncMock()
+    if owner == 'poll':
+        response = client.get(url)
+        assert response.status_code == 200 and response.json()['frame'] == 'live'
+        assert response.json()['notice'] == BROWSER_PARTIAL_NOTICE
+    else:
+        await hub.save_captures(sandbox, rid, releasing=True)
+        assert any(event['message'] == BROWSER_PARTIAL_NOTICE for event in store.events(rid))
+    encrypted = store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted']
+    assert json.loads(hub.security.decrypt(encrypted)) == {'scope': rid, 'state': saved}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply', [{'error': 'Browser checkpoint belongs to another session.'}, {'available': True}])
+async def test_restore_without_saved_row_distinguishes_explicit_fault_from_legacy_state(workspace, reply):
+    app, _, rid, _ = cloud(workspace)
+    hub = app.state.computer
+    sandbox = SimpleNamespace(object_id='sb-browser', computer_request=AsyncMock(return_value=reply))
+    if 'error' in reply:
+        with pytest.raises(HTTPException) as error:
+            await hub.restore(sandbox, rid)
+        assert error.value.status_code == 503
+    else:
+        await hub.restore(sandbox, rid)
+    assert not app.state.store.rows('SELECT * FROM browser_sessions WHERE run_id=?', (rid,))
+
+
+def test_deleting_session_removes_browser_authentication_for_parent_and_children(workspace):
+    from test_agent_sidebar import seeded_group
+    app, client = workspace
+    parent, child, _ = seeded_group(app)
+    for rid in (parent, child):
+        app.state.store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (rid, 'encrypted-auth'))
+    assert client.delete('/api/runs/' + parent).status_code == 200
+    assert not app.state.store.rows('SELECT * FROM browser_sessions WHERE run_id IN (?,?)', (parent, child))
 
 
 @pytest.mark.asyncio
@@ -399,7 +652,7 @@ def test_failed_refresh_keeps_last_successful_cache_and_retries(workspace, monke
     monkeypatch.setattr('app.computer.time', SimpleNamespace(monotonic=lambda: clock[0]))
     state = {'available': True, 'tab': tab, 'controller': 'owner', 'frame': 'first'}
     transport = AsyncMock(side_effect=[state, ConnectionError('private provider error'), {**state, 'frame': 'recovered'}])
-    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    hub.sandbox = AsyncMock(return_value=browser_sandbox(rid, transport))
     assert client.get(url, params={'tab': tab}).json()['frame'] == 'first'
     cached = hub.cache[rid, tab]
     assert client.get(url, params={'tab': tab}).json()['frame'] == 'first'
@@ -422,7 +675,7 @@ def test_named_computer_routes_scope_frames_and_invalidate_shared_lease(workspac
         assert body['actor'] != 'agent'
         return {'available': True, 'tab': body.get('tab', ''), 'frame': body.get('tab', '')}
     transport = AsyncMock(side_effect=execute)
-    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    hub.sandbox = AsyncMock(return_value=browser_sandbox(rid, transport))
     for tab in ['', PR_TAB, OTHER_TAB]:
         result = client.get(url, params={'tab': tab}).json()
         assert result['tab'] == result['frame'] == tab
@@ -439,7 +692,7 @@ def test_old_computer_runtime_cannot_render_or_mutate_the_agent_page(workspace):
     app, client, _, url = cloud(workspace)
     hub = app.state.computer
     transport = AsyncMock(return_value={'available': True, 'frame': 'agent-secret'})
-    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(object_id='legacy-sandbox', computer_request=transport))
     result = client.get(url, params={'tab': PR_TAB}).json()
     assert result['available'] is False and not result.get('frame')
     assert result['tab'] == PR_TAB
@@ -485,7 +738,8 @@ def test_named_close_on_healthy_legacy_runtime_never_mutates_the_agent_browser(w
     hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
     result = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
     assert result.status_code == 200 and result.json()['tab'] == PR_TAB
-    assert transport.await_count == 1
+    assert transport.await_count == 2
+    assert all(call.args[0]['action'] == 'state' for call in transport.await_args_list)
     assert transport.call_args.args[0]['action'] == 'state'
 
 
@@ -498,16 +752,17 @@ def test_named_close_does_not_treat_malformed_or_wrong_scope_as_absent(workspace
     transport = AsyncMock(return_value=scope)
     hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
     assert client.post(url, json={'action': 'close_tab', 'tab': PR_TAB}).status_code == 503
-    assert transport.await_count == 1
+    assert transport.await_count == (1 if scope.get('error') else 2)
+    assert all(call.args[0]['action'] == 'state' for call in transport.await_args_list)
     assert transport.call_args.args[0]['action'] == 'state'
 
 
 def test_named_close_preserves_live_runtime_recording_rejection(workspace):
-    app, client, _, url = cloud(workspace)
+    app, client, rid, url = cloud(workspace)
     hub = app.state.computer
     transport = AsyncMock(side_effect=[{'available': False, 'tab': PR_TAB, 'recording': True},
                                         {'error': 'Stop the recording before closing this tab.'}])
-    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    hub.sandbox = AsyncMock(return_value=browser_sandbox(rid, transport))
     result = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
     assert result.status_code == 409 and 'Stop the recording' in result.json()['detail']
     assert transport.await_count == 2
@@ -548,6 +803,333 @@ class BrowserPage:
         self.events[event] = callback
     def locator(self, selector):
         return SimpleNamespace(inner_text=AsyncMock(return_value=self.url), evaluate_all=AsyncMock(return_value=[]))
+
+
+def restoring_context(desktop, *, navigation='', failure=''):
+    context = SimpleNamespace(pages=[], originals=[], events={})
+    context.on = lambda event, callback: context.events.update({event: callback})
+    async def new_page():
+        page = BrowserPage('about:blank')
+        context.pages.append(page)
+        context.originals.append(page)
+        context.events['page'](page)
+        async def navigate(url, **kwargs):
+            page.url = url
+            if len(context.originals) == 1 and navigation == 'popup':
+                popup = BrowserPage('https://example.test/popup')
+                context.pages.append(popup)
+                context.events['page'](popup)
+            if ((len(context.originals) == 1 and navigation == 'close_first') or
+                    (len(context.originals) == 2 and navigation == 'close_active')):
+                await page.close()
+                context.pages.remove(page)
+        page.goto = AsyncMock(side_effect=navigate)
+        return page
+    async def cdp(page):
+        if failure == 'setup' and len(context.originals) == 2:
+            raise RuntimeError('CDP setup failed')
+        async def send(method, args=None):
+            if failure == 'remove' and method == 'Page.removeScriptToEvaluateOnNewDocument':
+                raise RuntimeError('CDP removal failed')
+            return {'identifier': 'restore-script'}
+        return SimpleNamespace(send=AsyncMock(side_effect=send), detach=AsyncMock(
+            side_effect=RuntimeError('CDP detach failed') if failure == 'detach' else None))
+    async def close():
+        for page in context.pages:
+            await page.close()
+        context.events['close'](context)
+    context.new_page, context.new_cdp_session, context.close = AsyncMock(side_effect=new_page), AsyncMock(side_effect=cdp), AsyncMock(side_effect=close)
+    return context
+
+
+def saved_browser_pages():
+    return {'storage': {'cookies': [], 'origins': []}, 'active': 1,
+        'pages': [{'url': 'https://example.test/' + page, 'session_storage': {'tab': page}} for page in ('first', 'second')]}
+
+
+@pytest.fixture
+def checkpoint_browser(workspace, monkeypatch):
+    app, _, rid, _ = cloud(workspace)
+    desktop = computer.Computer()
+    desktop.browser_scope = rid
+    desktop.context = SimpleNamespace(pages=[], storage_state=AsyncMock(return_value={
+        'cookies': [{'name': 'session', 'value': 'fresh-login'}], 'origins': []}))
+    sandbox = SimpleNamespace(object_id='sb-export', computer_request=desktop.command)
+    app.state.store.update_run(rid, sandbox_id=sandbox.object_id)
+    for name in ('BROWSER_ACTIVE_TIMEOUT', 'BROWSER_STORAGE_TIMEOUT', 'BROWSER_PAGE_TIMEOUT'):
+        monkeypatch.setattr(computer, name, .02)
+    return app.state.computer, desktop, sandbox, rid
+
+
+def exporting_page(desktop, url, values):
+    page = BrowserPage(url)
+    page.session_storage = dict(values)
+    async def evaluate(script):
+        if 'document.visibilityState' in script:
+            return {'visible': True, 'focused': page is desktop.page}
+        return {'url': page.url, 'session_storage': dict(page.session_storage)}
+    page.evaluate = AsyncMock(side_effect=evaluate)
+    return page
+
+
+@pytest.mark.parametrize('fault', ['error', 'hang'])
+async def test_partial_export_keeps_only_same_page_and_url_state(checkpoint_browser, fault):
+    hub, desktop, sandbox, rid = checkpoint_browser
+    first = desktop.page = exporting_page(desktop, 'https://example.test/account', {'session': 'first-login'})
+    second = exporting_page(desktop, first.url, {'session': 'second-login'})
+    desktop.context.pages = [first, second]
+    assert await hub.checkpoint(sandbox, rid) is False
+    async def failed(script):
+        if 'document.visibilityState' in script:
+            return {'visible': True, 'focused': True}
+        if fault == 'hang':
+            await computer.asyncio.Event().wait()
+        raise RuntimeError('Tab navigated during export')
+    first.evaluate.side_effect = failed
+    second.session_storage['session'] = 'second-rotated'
+    desktop.context.storage_state.return_value = {'cookies': [{'name': 'session', 'value': 'rotated-login'}], 'origins': []}
+    assert await computer.asyncio.wait_for(hub.checkpoint(sandbox, rid), .5) is True
+    assert desktop.saved_browser['pages'][0]['session_storage'] == {'session': 'first-login'}
+    assert desktop.saved_browser['pages'][1]['session_storage'] == {'session': 'second-rotated'}
+    assert desktop.saved_browser['storage']['cookies'][0]['value'] == 'rotated-login'
+    first.url = 'https://another.test/account'
+    assert await hub.checkpoint(sandbox, rid) is True
+    assert desktop.saved_browser['pages'][0] == {'url': first.url, 'session_storage': {}}
+    replacement = desktop.page = exporting_page(desktop, second.url, {})
+    replacement.evaluate.side_effect = failed
+    desktop.context.pages = [replacement, second]
+    second.session_storage.clear()
+    desktop.context.storage_state.return_value = {'cookies': [], 'origins': []}
+    assert await hub.checkpoint(sandbox, rid) is True
+    encrypted = hub.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted']
+    saved = json.loads(hub.security.decrypt(encrypted))['state']
+    assert saved['storage'] == {'cookies': [], 'origins': []}
+    assert all(page['session_storage'] == {} for page in saved['pages'])
+    assert first not in desktop.saved_pages
+    second.evaluate.side_effect = failed
+    await hub.checkpoint(sandbox, rid)
+    assert all(page['session_storage'] == {} for page in desktop.saved_browser['pages'])
+    desktop.context_closed(desktop.context)
+    assert not desktop.saved_pages
+
+
+async def test_export_bounds_focus_probe_and_concurrently_selects_active_tab(checkpoint_browser):
+    hub, desktop, sandbox, rid = checkpoint_browser
+    pages = [exporting_page(desktop, f'https://example.test/{index}', {}) for index in range(34)]
+    desktop.context.pages, desktop.page = pages, pages[-1]
+    started, together = set(), computer.asyncio.Event()
+    for page in pages:
+        async def evaluate(script, page=page):
+            if 'document.visibilityState' in script:
+                await computer.asyncio.Event().wait()
+            started.add(page)
+            if len(started) == 32:
+                together.set()
+            await together.wait()
+            return {'url': page.url, 'session_storage': {'tab': page.url}}
+        page.evaluate.side_effect = evaluate
+    assert await computer.asyncio.wait_for(hub.checkpoint(sandbox, rid), .5) is True
+    assert started == set(pages[:31] + [pages[-1]])
+    saved = desktop.saved_browser
+    assert [page['url'] for page in saved['pages']] == [page.url for page in pages[:31] + [pages[-1]]]
+    assert saved['pages'][saved['active']]['url'] == pages[-1].url
+    assert saved['storage']['cookies'][0]['value'] == 'fresh-login'
+    assert all(page['session_storage'] for page in saved['pages'])
+
+
+@pytest.mark.parametrize('fault', ['error', 'hang'])
+async def test_authoritative_storage_failure_keeps_runtime_and_encrypted_checkpoint(checkpoint_browser, fault):
+    hub, desktop, sandbox, rid = checkpoint_browser
+    await hub.checkpoint(sandbox, rid)
+    saved = desktop.saved_browser
+    encrypted = hub.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted']
+    async def failed(**kwargs):
+        if fault == 'hang':
+            await computer.asyncio.Event().wait()
+        raise RuntimeError('Storage export unavailable')
+    desktop.context.storage_state.side_effect = failed
+    with pytest.raises(HTTPException):
+        await computer.asyncio.wait_for(hub.checkpoint(sandbox, rid), .5)
+    assert desktop.saved_browser is saved
+    assert hub.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted'] == encrypted
+
+
+async def test_restored_page_cache_survives_first_failed_metadata_export():
+    desktop = computer.Computer()
+    desktop.browser_scope = 'a' * 32
+    saved = desktop.saved_browser = saved_browser_pages()
+    context = restoring_context(desktop)
+    context.storage_state = AsyncMock(return_value=saved['storage'])
+    desktop.start_browser = desktop.refresh_frame = AsyncMock()
+    desktop.browser = SimpleNamespace(new_context=AsyncMock(return_value=context))
+    await desktop.open()
+    result = await desktop.command({'action': 'state',
+        'args': {'browser': 'checkpoint', 'scope': desktop.browser_scope}})
+    assert result['partial'] is True and result['state'] == saved
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('navigation', ['popup', 'close_first', 'close_active'])
+async def test_browser_restore_focus_uses_saved_page_identity(navigation):
+    desktop = computer.Computer()
+    desktop.saved_browser = saved_browser_pages()
+    context = restoring_context(desktop, navigation=navigation)
+    desktop.start_browser = desktop.refresh_frame = AsyncMock()
+    desktop.browser = SimpleNamespace(new_context=AsyncMock(return_value=context))
+    await desktop.open()
+    expected = context.originals[0 if navigation == 'close_active' else 1]
+    assert desktop.page is expected and not expected.is_closed()
+    expected.bring_to_front.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['setup', 'remove', 'detach'])
+async def test_browser_restore_rolls_back_partial_context_and_retries(failure):
+    desktop = computer.Computer()
+    saved = desktop.saved_browser = saved_browser_pages()
+    failed, ready = restoring_context(desktop, failure=failure), restoring_context(desktop)
+    desktop.start_browser = desktop.refresh_frame = AsyncMock()
+    desktop.browser = SimpleNamespace(new_context=AsyncMock(side_effect=[failed, ready]))
+    with pytest.raises(RuntimeError):
+        await desktop.open()
+    assert desktop.context is None and desktop.page is None
+    failed.close.assert_awaited_once()
+    assert await desktop.checkpoint() == saved
+    await desktop.open()
+    assert desktop.context is ready and desktop.page is ready.originals[1]
+    assert [page.url for page in ready.originals] == [entry['url'] for entry in saved['pages']]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('live', [False, True])
+async def test_blocked_browser_preserves_checkpoint_and_heals_only_in_same_scope(live):
+    desktop = computer.Computer()
+    desktop.start_browser = desktop.active_page = desktop.refresh_frame = AsyncMock()
+    context = restoring_context(desktop)
+    desktop.browser = SimpleNamespace(new_context=AsyncMock(return_value=context))
+    saved = desktop.saved_browser = saved_browser_pages()
+    scope = 'a' * 32
+    async def restore(**args):
+        return await desktop.command({'action': 'state', 'args': {'browser': 'restore', 'scope': scope, **args}})
+    await restore(state=saved)
+    if live:
+        page = desktop.page = BrowserPage('https://example.test/newer-live-page')
+        desktop.context = SimpleNamespace(pages=[page])
+    await restore(blocked=True)
+    with pytest.raises(ValueError, match='Saved browser access'):
+        await desktop.open()
+    with pytest.raises(ValueError, match='Saved browser access'):
+        await desktop.command({'action': 'state', 'args': {'browser': 'checkpoint', 'scope': scope}})
+    assert desktop.saved_browser == saved
+    with pytest.raises(ValueError, match='another session'):
+        await desktop.command({'action': 'state', 'args': {'browser': 'restore', 'scope': 'b' * 32, 'state': saved}})
+    await restore(state=saved)
+    await desktop.open()
+    assert desktop.page is (page if live else context.originals[1])
+
+
+@pytest.mark.parametrize('failure', ['unbound', 'unknown_block', 'transport', 'blocked'])
+async def test_first_browser_admission_replaces_unbound_live_context_without_losing_saved_auth(workspace, failure):
+    app, _, rid, _ = cloud(workspace)
+    hub, store = app.state.computer, app.state.store
+    desktop = computer.Computer()
+    live, restored = restoring_context(desktop), restoring_context(desktop)
+    live.storage_state = AsyncMock(return_value={'cookies': [], 'origins': []})
+    desktop.start_browser = desktop.refresh_frame = AsyncMock()
+    desktop.browser = SimpleNamespace(new_context=AsyncMock(side_effect=[live, restored]))
+    sandbox = SimpleNamespace(object_id='sb-admission', computer_request=desktop.command)
+    saved = saved_browser_pages()
+    saved['storage']['cookies'] = [{'name': 'session', 'value': 'preserved-login'}]
+    encrypted = hub.security.encrypt(json.dumps({'scope': rid, 'state': saved}))
+    store.update_run(rid, sandbox_id=sandbox.object_id)
+    store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)',
+                  (rid, 'corrupt' if failure in {'unknown_block', 'blocked'} else encrypted))
+    if failure in {'unbound', 'blocked'}:
+        await desktop.open()
+    if failure != 'unbound':
+        if failure in {'unknown_block', 'transport'}:
+            sandbox.computer_request = AsyncMock(side_effect=ConnectionError('Unknown restore delivery'))
+        await hub.restore(sandbox, rid, required=False)
+        if failure == 'blocked':
+            with pytest.raises(ValueError, match='Saved browser access'):
+                await desktop.open()
+        else:
+            await desktop.open()  # The agent can open a fresh context after an unknown restore outcome.
+    assert desktop.context is live and not desktop.browser_admitted
+    store.execute('UPDATE browser_sessions SET encrypted=? WHERE run_id=?', (encrypted, rid))
+    sandbox.computer_request = desktop.command
+    await hub.restore(sandbox, rid)
+    live.close.assert_awaited_once()
+    assert desktop.context is None and desktop.page is None and not desktop.saved_pages
+    assert desktop.browser_admitted and not desktop.browser_blocked and desktop.saved_browser == saved
+    await hub.checkpoint(sandbox, rid)  # A poll before hydration must not publish the blank old context.
+    encrypted = store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (rid,))[0]['encrypted']
+    assert json.loads(hub.security.decrypt(encrypted)) == {'scope': rid, 'state': saved}
+    await desktop.open()
+    assert desktop.context is restored
+    assert desktop.browser.new_context.call_args.kwargs['storage_state'] == saved['storage']
+    assert [page.url for page in restored.pages] == [entry['url'] for entry in saved['pages']]
+
+
+@pytest.mark.parametrize('logout', [False, True])
+async def test_admitted_live_browser_keeps_newer_auth_and_logout_during_same_scope_healing(logout):
+    desktop = computer.Computer()
+    page = desktop.page = exporting_page(desktop, 'https://example.test/live', {} if logout else {'session': 'new-tab'})
+    storage = {'cookies': [] if logout else [{'name': 'session', 'value': 'new-login'}], 'origins': []}
+    context = desktop.context = SimpleNamespace(pages=[page], storage_state=AsyncMock(return_value=storage), close=AsyncMock())
+    async def restore(**args):
+        return await desktop.command({'action': 'state', 'args': {'browser': 'restore', 'scope': 'a' * 32, **args}})
+    await restore(state=None)  # Authoritative absence may adopt a live context.
+    assert desktop.browser_admitted
+    await restore(state=saved_browser_pages())
+    await restore(blocked=True)
+    await restore(state=saved_browser_pages())
+    context.close.assert_not_awaited()
+    assert desktop.context is context and desktop.page is page
+    saved = await desktop.checkpoint()
+    assert saved['storage'] == storage and saved['pages'][0]['session_storage'] == page.session_storage
+
+
+@pytest.mark.parametrize('failure', ['error', 'timeout', 'cancel'])
+async def test_failed_first_context_close_reserves_scope_and_retries_without_admitting(monkeypatch, failure):
+    monkeypatch.setattr(computer, 'BROWSER_CLOSE_TIMEOUT', .02)
+    desktop, started = computer.Computer(), computer.asyncio.Event()
+    async def close():
+        started.set()
+        if failure == 'error':
+            raise RuntimeError('Close failed')
+        await computer.asyncio.Event().wait()
+    context = desktop.context = SimpleNamespace(close=AsyncMock(side_effect=close))
+    page = desktop.page = BrowserPage('https://example.test/unbound')
+    previous = {page: {'url': page.url, 'session_storage': {'token': 'unadmitted'}}}
+    desktop.saved_pages = dict(previous)
+    saved = saved_browser_pages()
+    async def restore(scope='a' * 32):
+        return await desktop.command({'action': 'state', 'args': {'browser': 'restore', 'scope': scope, 'state': saved}})
+    attempt = computer.asyncio.create_task(restore())
+    await computer.asyncio.wait_for(started.wait(), .5)
+    if failure == 'cancel':
+        attempt.cancel()
+    expected = {'error': RuntimeError, 'timeout': TimeoutError, 'cancel': computer.asyncio.CancelledError}[failure]
+    try:
+        with pytest.raises(expected):
+            await computer.asyncio.wait_for(computer.asyncio.shield(attempt), .5)
+        assert attempt.done()
+    finally:
+        if not attempt.done():
+            attempt.cancel()
+            await computer.asyncio.gather(attempt, return_exceptions=True)
+    assert desktop.browser_scope == 'a' * 32 and desktop.browser_blocked and not desktop.browser_admitted
+    assert desktop.context is context and desktop.page is page and desktop.saved_pages == previous
+    assert desktop.saved_browser is None
+    with pytest.raises(ValueError, match='another session'):
+        await restore('b' * 32)
+    with pytest.raises(ValueError, match='Saved browser access'):
+        await desktop.open()
+    context.close.side_effect = None
+    await restore()
+    assert desktop.browser_admitted and not desktop.browser_blocked and desktop.saved_browser == saved
+    assert desktop.context is None and desktop.page is None and not desktop.saved_pages
 
 
 @pytest.fixture
@@ -737,7 +1319,8 @@ async def test_handoff_failure_keeps_frame_loop_alive_and_preserves_finalized_ca
 
 
 @pytest.mark.asyncio
-async def test_whole_service_finish_fences_already_queued_and_later_mutations(monkeypatch, tmp_path):
+@pytest.mark.parametrize('closing', ['finish', 'checkpoint'])
+async def test_whole_service_finish_fences_already_queued_and_later_mutations(monkeypatch, tmp_path, closing):
     monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
     c = computer.Computer()
     await c.command({'action': 'finish'})
@@ -745,13 +1328,18 @@ async def test_whole_service_finish_fences_already_queued_and_later_mutations(mo
     await c.lock.acquire()
     queued = computer.asyncio.create_task(c.command({'action': 'claim', 'actor': 'owner'}))
     await computer.asyncio.sleep(0)
-    release = computer.asyncio.create_task(c.command({'action': 'finish', 'args': {'all': True}}))
+    c.browser_scope = 'a' * 32
+    command = ({'action': 'finish', 'args': {'all': True}} if closing == 'finish' else
+               {'action': 'state', 'args': {'browser': 'checkpoint', 'scope': c.browser_scope, 'releasing': True}})
+    release = computer.asyncio.create_task(c.command(command))
     await computer.asyncio.sleep(0)
     assert c.stopping
     c.lock.release()
     with pytest.raises(ValueError, match='shutting down'):
         await queued
-    assert await release == {'recording': False}
+    result = await release
+    assert result == ({'recording': False} if closing == 'finish' else
+                      {'scope': c.browser_scope, 'state': None, 'partial': False})
     for action in ['claim', 'open', 'record_start']:
         with pytest.raises(ValueError, match='shutting down'):
             await c.command({'action': action, 'actor': 'owner'})
@@ -1171,7 +1759,7 @@ def test_named_close_legacy_bridge_fallback_requires_healthy_unscoped_state(work
     hub.execute = AsyncMock(return_value=fallback)
     response = client.post(url, json={'action': 'close_tab', 'tab': PR_TAB})
     assert response.status_code == expected
-    assert native.await_count == 1 and native.call_args.args[0]['action'] == 'state'
+    assert native.await_count == 2 and all(call.args[0]['action'] == 'state' for call in native.await_args_list)
     assert hub.execute.await_count == 1 and json.loads(hub.execute.call_args.args[2])['action'] == 'state'
 
 

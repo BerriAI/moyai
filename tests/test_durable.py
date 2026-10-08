@@ -38,6 +38,12 @@ class Machine:
         if path.endswith('.json'):
             self.spec = json.loads(data)
 
+    async def computer_request(self, body):
+        assert self.alive and body['action'] == 'state'
+        args = body['args']
+        assert args['browser'] in {'restore', 'checkpoint'}
+        return {'scope': args['scope'], **({'restored': True} if args['browser'] == 'restore' else {'state': None})}
+
     async def poll_impl(self):
         return None if self.alive else 0
 

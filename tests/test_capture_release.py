@@ -9,6 +9,7 @@ import pytest
 
 from app import captures
 from app.computer import Computer
+from app.security import Security
 from sandbox import computer as runtime
 from test_durable import durable, drive
 from test_runner import FakeSandbox, aio, runner
@@ -23,6 +24,8 @@ def recorded_browser(manager, machine, run_id, monkeypatch):
     monkeypatch.setattr(runtime, 'CAPTURES', manager.settings.data_dir / 'sandbox-captures')
     path = runtime.capture_directory() / 'human.recording'
     browser = runtime.Computer()
+    browser.browser_scope = run_id
+    machine.computer_request = browser.command
     process = SimpleNamespace(returncode=None)
     def interrupt(_):
         path.write_bytes(WEBM)
@@ -85,6 +88,57 @@ async def test_stalled_capture_release_is_bounded_and_reports_loss(runner, monke
         lock.release()
     assert machine.terminated and runner.store.run(run_id)['token_hash'] == ''
     assert not captures.listing(runner.settings, run_id)
+    assert any('could not be saved' in row['message'] for row in runner.store.events(run_id))
+
+
+@pytest.mark.parametrize('blocked', ['finish', 'copy', 'checkpoint_lock', 'storage'])
+async def test_shutdown_gives_browser_auth_and_captures_independent_budgets(runner, monkeypatch, blocked):
+    monkeypatch.setattr('app.runner.CAPTURE_RELEASE_TIMEOUT', .15)
+    monkeypatch.setattr('app.computer.BROWSER_CHECKPOINT_TIMEOUT', .04)
+    monkeypatch.setattr(runtime, 'BROWSER_STORAGE_TIMEOUT', .02)
+    run_id = runner.store.create_run('Save browser and recording', '', 'modal', [])['id']
+    machine = runner.sandboxes[run_id] = FakeSandbox()
+    runner.store.update_run(run_id, status='running', sandbox_id=machine.object_id, token_hash='active-capability')
+    browser, hub, _ = recorded_browser(runner, machine, run_id, monkeypatch)
+    hub.security = Security(runner.settings)
+    browser.saved_browser = {'storage': {'cookies': [{'name': 'session', 'value': 'old-login'}], 'origins': []},
+                             'pages': [], 'active': 0}
+    await hub.checkpoint(machine, run_id)
+    previous = runner.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (run_id,))[0]['encrypted']
+    fresh = {'cookies': [{'name': 'session', 'value': 'new-login'}], 'origins': []}
+    browser.context = SimpleNamespace(pages=[], storage_state=AsyncMock(return_value=fresh))
+    cancelled = []
+    async def stalled(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+    lock = None
+    if blocked == 'finish':
+        browser.stop_recording = stalled
+    elif blocked == 'storage':
+        browser.context.storage_state.side_effect = stalled
+    else:
+        owner = hub.capture_locks if blocked == 'copy' else hub.checkpoint_locks
+        lock = owner.setdefault(run_id, asyncio.Lock())
+        await lock.acquire()
+    async def terminate():
+        encrypted = runner.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (run_id,))[0]['encrypted']
+        if blocked in {'finish', 'copy'}:
+            assert json.loads(hub.security.decrypt(encrypted))['state']['storage'] == fresh
+        else:
+            assert encrypted == previous
+            assert (captures.directory(runner.settings, run_id) / 'human.webm').read_bytes() == WEBM
+        await machine.terminate_sandbox()
+    machine.terminate = aio(terminate)
+    try:
+        await asyncio.wait_for(runner.cancel(run_id), 1)
+    finally:
+        if lock:
+            lock.release()
+    assert machine.terminated and runner.store.run(run_id)['token_hash'] == ''
+    if blocked in {'finish', 'storage'}:
+        assert cancelled == [True]
     assert any('could not be saved' in row['message'] for row in runner.store.events(run_id))
 
 

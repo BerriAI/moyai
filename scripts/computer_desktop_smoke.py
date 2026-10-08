@@ -178,9 +178,125 @@ async def exercise(output: Path) -> None:
             server.shutdown()
 
 
+async def browser_resume(output: Path) -> None:
+    """Real Chromium state and private pipe across a cold browser/service restart."""
+    output.mkdir(parents=True, exist_ok=True)
+    scope = 'a' * 32
+    page_html = PAGE.replace(
+        "document.querySelector('output').textContent='Signed in as '+this.email.value",
+        "document.cookie='demo=yes; SameSite=Lax'; localStorage.setItem('demo','yes'); sessionStorage.setItem('demo','yes'); "
+        "document.querySelector('output').textContent='Signed in as '+this.email.value")
+    page_html += '''<script>if(document.cookie.includes('demo=yes') && localStorage.demo==='yes' && sessionStorage.demo==='yes')
+        document.querySelector('output').textContent='Signed in as demo@example.com';</script>'''
+    desktop = computer.Computer()
+    service = asyncio.create_task(computer.serve(desktop))
+    recorder = None
+    async def private(operation, state=None):
+        body = {'action': 'state', 'args': {'browser': operation, 'scope': scope}}
+        if operation == 'restore':
+            body['args']['state'] = state
+        # An actual new stdin bridge client, including the >64 KiB restore.
+        process = await asyncio.create_subprocess_exec(sys.executable, computer.__file__, 'bridge',
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate((json.dumps(body)+'\n').encode())
+        assert process.returncode == 0, stderr.decode()
+        result = json.loads(stdout)
+        assert not result.get('error'), result.get('error')
+        return result
+    with tempfile.TemporaryDirectory() as directory:
+        Path(directory, 'index.html').write_text(page_html)
+        server = ThreadingHTTPServer(('127.0.0.1', 0), partial(SimpleHTTPRequestHandler, directory=directory))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        url = f'http://127.0.0.1:{server.server_port}/'
+        try:
+            await private('restore')
+            await desktop.command({'action': 'open', 'args': {'url': url}})
+            recorder = await asyncio.create_subprocess_exec('ffmpeg', '-y', '-loglevel', 'error', '-f', 'x11grab',
+                '-video_size', f'{computer.WIDTH}x{computer.HEIGHT}', '-framerate', '15', '-i', ':99.0', '-an',
+                '-c:v', 'libvpx-vp9', '-deadline', 'realtime', '-cpu-used', '6', '-b:v', '700k',
+                str(output/'browser-resume.webm'), stdin=asyncio.subprocess.PIPE)
+            await asyncio.sleep(2)
+            await desktop.command({'action': 'fill', 'args': {'label': 'Email', 'value': 'demo@example.com'}})
+            await desktop.command({'action': 'fill', 'args': {'label': 'Password', 'value': 'sample-password'}})
+            await desktop.command({'action': 'click', 'args': {'role': 'button', 'name': 'Continue'}})
+            await desktop.page.evaluate('''async () => {
+                localStorage.large = 'x'.repeat(90000);
+                const db = await new Promise(resolve => { const r = indexedDB.open('auth', 1);
+                    r.onupgradeneeded = () => r.result.createObjectStore('tokens'); r.onsuccess = () => resolve(r.result); });
+                await new Promise(resolve => { const t = db.transaction('tokens', 'readwrite');
+                    t.objectStore('tokens').put('signed-in', 'demo'); t.oncomplete = resolve; }); db.close();
+            }''')
+            first = desktop.page
+            second = await desktop.context.new_page()
+            await second.goto(url+'?second-tab')
+            await second.evaluate("sessionStorage.demo='second-tab'")
+            await first.bring_to_front()
+            # Review tabs carry separate state, never included in the checkpoint.
+            review = await desktop.browser.new_context()
+            await review.add_cookies([{'name': 'private-review', 'value': 'excluded', 'url': url}])
+            desktop.review_context = review
+            saved = (await private('checkpoint'))['state']
+            assert len(json.dumps(saved)) > 65536
+            assert [p['session_storage']['demo'] for p in saved['pages']] == ['yes', 'second-tab']
+            assert not any(c['name'] == 'private-review' for c in saved['storage']['cookies'])
+            (output/'browser-before-restart.png').write_bytes(await asyncio.to_thread(desktop.desktop_image, 'PNG'))
+            await asyncio.sleep(3)
+            await desktop.browser.close()
+            await desktop.playwright.stop()
+            service.cancel()
+            await asyncio.gather(service, return_exceptions=True)
+            # No Python or browser object survives; only the private checkpoint.
+            previous = desktop
+            desktop = computer.Computer()
+            service = asyncio.create_task(computer.serve(desktop))
+            await private('restore', saved)
+            await desktop.open()
+            assert await desktop.page.locator('output').inner_text() == 'Signed in as demo@example.com'
+            assert await desktop.context.pages[1].evaluate('sessionStorage.demo') == 'second-tab'
+            token = await desktop.page.evaluate('''async () => { const db = await new Promise(resolve => {
+                const r = indexedDB.open('auth', 1); r.onsuccess = () => resolve(r.result); });
+                const value = await new Promise(resolve => { const r = db.transaction('tokens').objectStore('tokens').get('demo');
+                    r.onsuccess = () => resolve(r.result); }); db.close(); return value; }''')
+            assert token == 'signed-in'
+            # A reconnect must not overwrite newer live state with the old snapshot.
+            await desktop.page.evaluate("localStorage.current='newer'")
+            await private('restore', saved)
+            assert await desktop.page.evaluate('localStorage.current') == 'newer'
+            (output/'browser-after-restart.png').write_bytes(await asyncio.to_thread(desktop.desktop_image, 'PNG'))
+            await asyncio.sleep(4)
+            await desktop.page.evaluate("sessionStorage.clear();localStorage.clear();document.cookie='demo=;Max-Age=0'")
+            await desktop.page.reload()
+            assert await desktop.page.locator('output').inner_text() == ''
+            assert await desktop.page.evaluate('sessionStorage.demo') is None
+            logout = (await private('checkpoint'))['state']
+            assert logout['storage']['cookies'] == []
+            await desktop.browser.close()
+            await desktop.playwright.stop()
+            (output/'browser-verification.txt').write_text(
+                'PASS: session cookies, localStorage, IndexedDB, per-tab sessionStorage and active tab survive cold browser/service restart; '
+                '>64 KiB private stdin restore; reconnect preserves newer live state; logout stays logged out; PR context excluded\n')
+            print((output/'browser-verification.txt').read_text(), flush=True)
+        finally:
+            if recorder and recorder.returncode is None:
+                recorder.stdin.write(b'q\n')
+                await recorder.stdin.drain()
+                await recorder.wait()
+            service.cancel()
+            await asyncio.gather(service, return_exceptions=True)
+            if desktop.browser and desktop.browser.is_connected():
+                await desktop.browser.close()
+            for owner in (locals().get('previous'), desktop):
+                if owner:
+                    for process in (owner.panel, owner.desktop, owner.display):
+                        if process and process.poll() is None:
+                            process.terminate()
+            server.shutdown()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--wake-only', action='store_true', help='Verify desktop ownership across fresh command processes')
+    parser.add_argument('--persistence-only', action='store_true', help='Verify authenticated browser recovery with real Chromium')
     args = parser.parse_args()
-    asyncio.run(wake_processes(args.output) if args.wake_only else exercise(args.output))
+    asyncio.run(browser_resume(args.output) if args.persistence_only else wake_processes(args.output) if args.wake_only else exercise(args.output))

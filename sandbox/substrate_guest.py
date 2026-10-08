@@ -143,7 +143,8 @@ def computer_operation(uid, body):
     if (not isinstance(body, dict) or set(body) - {'action', 'actor', 'args', 'tab'} or
             not isinstance(body.get('action'), str) or
             not isinstance(body.get('args', {}), dict) or
-            not isinstance(body.get('actor', ''), str) or len(json.dumps(body).encode()) > 65536):
+            not isinstance(body.get('actor', ''), str) or len(json.dumps(body).encode()) >
+            (computer.PRIVATE_BODY_LIMIT if body.get('action') == 'state' and body.get('args', {}).get('browser') == 'restore' else 65536)):
         raise ValueError('Invalid Computer request')
     computer.valid_tab(body.get('tab', ''))
     with COMPUTER_IDLE:
@@ -244,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= (65536 if self.path == '/computer' else MAX_BODY):
+            if not 0 < size <= (computer.PRIVATE_BODY_LIMIT if self.path == '/computer' else MAX_BODY):
                 return self.reply(413, {'error': 'Request too large'})
             self.connection.settimeout(30)
             data = self.rfile.read(size)
@@ -267,10 +268,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(data)
             if self.path == '/computer':
+                if size > 65536 and not (isinstance(body, dict) and body.get('action') == 'state'
+                        and isinstance(body.get('args'), dict) and body['args'].get('browser') == 'restore'):
+                    return self.reply(413, {'error': 'Request too large'})
                 # Do not journal typed text or hold the guest-wide lock while
                 # the desktop acts. Freeze still waits through the reply.
                 with computer_operation(uid, body):
-                    result = computer.request(body, start=body['action'] not in {'state', 'finish', 'release'})
+                    result = computer.request(body, start=computer.starts_service(body))
                     with LOCK:
                         if not hmac.compare_digest(uid, IDENTITY.read_text().strip()):
                             return self.reply(401, {'error': 'Authentication failed'})

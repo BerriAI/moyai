@@ -15,7 +15,8 @@ from app.db import Store
 from app.computer import Computer
 from app.config import MODEL_CATALOG
 from app.durable_runner import DurableRunner
-from app.security import digest
+from app.runner import RunManager
+from app.security import Security, digest
 from app.session_lifecycle import SessionLifecycle
 from app.temporal_runtime import TemporalRunManager
 from test_durable import aio, durable, drive
@@ -326,12 +327,74 @@ async def test_computer_capture_scope_follows_turn_and_workspace_lifetime(durabl
     assert calls == [False, True] and not cloud.machines[0].alive
 
 
+async def test_agent_restore_precedes_launch_on_durable_install(durable):
+    manager, cloud, run_id = durable
+    restored = []
+    async def restore(machine, scope, *, required):
+        assert not cloud.launches and machine.alive and required is False
+        restored.append((machine.object_id, scope))
+    manager.computer = SimpleNamespace(restore=restore)
+    await drive(manager, run_id, phase='monitor')
+    assert restored == [(cloud.machines[0].object_id, run_id)]
+
+
+@pytest.mark.parametrize('block_delivery', ['confirmed', 'unavailable'])
+async def test_corrupt_browser_checkpoint_does_not_abort_nonbrowser_agent_work(durable, monkeypatch, block_delivery):
+    from test_durable import Machine
+    manager, cloud, run_id = durable
+    hub = manager.computer = Computer(manager.settings, manager.store, Security(manager.settings), manager, None)
+    encrypted = 'unreadable-browser-checkpoint'
+    manager.store.execute('INSERT INTO browser_sessions(run_id,encrypted) VALUES(?,?)', (run_id, encrypted))
+    calls = []
+    async def request(machine, body):
+        calls.append(body)
+        if block_delivery == 'unavailable':
+            raise ConnectionError('Private transport unavailable')
+        return {'scope': run_id, 'restored': True}
+    monkeypatch.setattr(Machine, 'computer_request', request)
+    await drive(manager, run_id, phase='monitor')
+    assert len(cloud.launches) == 1
+    assert calls == [{'action': 'state', 'args': {'browser': 'restore', 'scope': run_id, 'blocked': True}}]
+    assert manager.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (run_id,))[0]['encrypted'] == encrypted
+    assert any('browser' in event['message'].lower() for event in manager.store.events(run_id))
+
+
+@pytest.mark.parametrize('boundary', ['save', 'capture_failure', 'idle', 'failed'])
+async def test_browser_auth_is_saved_by_artifact_and_shutdown_lifecycles(durable, monkeypatch, boundary):
+    manager, cloud, run_id = durable
+    manager.settings.sandbox_idle_seconds = 300
+    tick = clock(monkeypatch)
+    await drive(manager, run_id, phase='warm')
+    machine = cloud.machines[0]
+    state = {'storage': {'cookies': [{'name': 'session', 'value': 'signed-in-after-answer'}], 'origins': []},
+             'pages': [], 'active': 0}
+    machine.computer_request = AsyncMock(return_value={'scope': run_id, 'state': state})
+    hub = manager.computer = Computer(manager.settings, manager.store, Security(manager.settings), manager, None)
+    hub.execute = AsyncMock(return_value={'recording': False})
+    hub.sync = AsyncMock()
+    if boundary == 'capture_failure':
+        hub.execute.side_effect = OSError('Capture finalization unavailable')
+    if boundary in {'save', 'capture_failure'}:
+        await RunManager.save_artifact(manager, machine, run_id)
+    else:
+        if boundary == 'failed':
+            manager.fail(run_id, manager.state(run_id), 'Fixture cloud failure')
+            await drive(manager, run_id)
+        else:
+            tick.now += 300
+            await manager.advance(run_id)
+        assert not machine.alive
+    encrypted = manager.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (run_id,))[0]['encrypted']
+    assert 'signed-in-after-answer' not in encrypted
+    assert json.loads(hub.security.decrypt(encrypted)) == {'scope': run_id, 'state': state}
+
+
 async def sleeping_computer(durable):
     manager, cloud, run_id = durable
     await drive(manager, run_id)
     manager.settings.modal_token_id = 'test-token-id'
     manager.settings.modal_token_secret = 'test-token-secret'
-    manager.computer = SimpleNamespace(touched=lambda _: 0,
+    manager.computer = SimpleNamespace(touched=lambda _: 0, restore=AsyncMock(),
         wake=AsyncMock(return_value={'available': True}), save_captures=AsyncMock())
     return manager, cloud, run_id
 
@@ -359,6 +422,7 @@ async def test_computer_wake_preserves_chat_and_deduplicates_without_agent_capab
     assert manager.store.run(run_id)['token_hash'] == ''
     assert manager.store.run(run_id)['status'] == status
     assert manager.store.messages(run_id) == before and len(cloud.launches) == 1
+    manager.computer.restore.assert_awaited_once_with(cloud.machines[-1], run_id)
     manager.computer.wake.assert_awaited_once_with(cloud.machines[-1])
 
 

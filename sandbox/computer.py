@@ -31,6 +31,35 @@ WIDTH, HEIGHT = 1280, 720
 CAPTURES = Path('/workspace/moyai-captures')
 MEDIA_LIMIT = 32 * 1024 * 1024
 MEDIA_TOTAL = 64 * 1024 * 1024
+MAX_BROWSER_STATE = 2 * 1024 * 1024 - 65536
+PRIVATE_BODY_LIMIT = MAX_BROWSER_STATE + 65536
+BROWSER_ACTIVE_TIMEOUT = 1
+BROWSER_STORAGE_TIMEOUT = 5
+BROWSER_PAGE_TIMEOUT = 1
+BROWSER_CLOSE_TIMEOUT = 3
+
+
+def starts_service(body):
+    return body.get('action') not in {'state', 'finish', 'release'} or body.get('args', {}).get('browser') == 'restore'
+
+
+def browser_state(value):
+    """Validate the private checkpoint without ever including its contents in errors."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {'storage', 'pages', 'active'}
+            or not isinstance(value['storage'], dict) or not isinstance(value['pages'], list)
+            or len(value['pages']) > 32 or type(value['active']) is not int
+            or not 0 <= value['active'] < max(1, len(value['pages']))
+            or len(json.dumps(value, allow_nan=False).encode()) > MAX_BROWSER_STATE):
+        raise ValueError('Invalid browser checkpoint.')
+    for page in value['pages']:
+        if (not isinstance(page, dict) or set(page) != {'url', 'session_storage'}
+                or not isinstance(page['url'], str) or not isinstance(page['session_storage'], dict)
+                or any(not isinstance(k, str) or not isinstance(v, str) for k, v in page['session_storage'].items())):
+            raise ValueError('Invalid browser checkpoint.')
+        valid_url(page['url'])
+    return value
 
 
 def capture_name(label, extension):
@@ -180,6 +209,12 @@ class Computer:
         self.recording = None
         self.stopping = False
         self.notice = ''
+        self.browser_scope = ''
+        self.browser_admitted = False
+        self.saved_browser = None
+        self.saved_pages = {}
+        self.browser_partial = False
+        self.browser_blocked = False
 
     async def ensure_desktop(self):
         # Restored snapshots have refreshed Python but retain old OS packages.
@@ -214,24 +249,75 @@ class Computer:
         self.notice = ''
 
     async def open(self):
+        if self.browser_blocked:
+            raise ValueError('Saved browser access is unavailable. The checkpoint is preserved; non-browser work can continue.')
         await self.start_browser()
         if self.context:
             await self.active_page()
             if self.page:
                 return
         else:
-            self.context = await self.browser.new_context(no_viewport=True)
+            saved = self.saved_browser
+            self.context = await self.browser.new_context(no_viewport=True,
+                **({'storage_state': saved['storage']} if saved else {}))
             self.context.on('page', self.new_page)
             self.context.on('close', self.context_closed)
+            if saved and saved['pages']:
+                context = self.context
+                try:
+                    self.page = await self.restore_pages(context, saved)
+                    await self.page.bring_to_front()
+                    await self.refresh_frame()
+                except BaseException:
+                    self.context = self.page = None
+                    self.saved_pages.clear()
+                    try:
+                        await asyncio.wait_for(context.close(), BROWSER_CLOSE_TIMEOUT)
+                    except Exception:
+                        pass  # Preserve the checkpoint and retry in a fresh context.
+                    raise
+                return
         self.page = await self.context.new_page()
         self.page.set_default_timeout(20000)
         await self.page.goto('chrome://newtab/')
         await self.refresh_frame()
 
+    async def restore_pages(self, context, saved):
+        pages = []
+        for entry in saved['pages']:
+            page = await context.new_page()
+            pages.append(page)
+            # Remove this origin-bound initializer after initial navigation so
+            # a later logout or navigation cannot resurrect an old token.
+            session = await context.new_cdp_session(page)
+            await session.send('Page.enable')
+            script = await session.send('Page.addScriptToEvaluateOnNewDocument', {'source': '''(() => {
+                const saved = %s;
+                if (location.origin === new URL(saved.url).origin) {
+                    for (const [key, value] of Object.entries(saved.session_storage)) sessionStorage.setItem(key, value);
+                }
+            })();''' % json.dumps(entry)})
+            try:
+                await page.goto(entry['url'], wait_until='domcontentloaded')
+            except Exception:
+                self.notice = 'A saved browser tab could not reconnect. You can reload it.'
+            finally:
+                if not page.is_closed():
+                    await session.send('Page.removeScriptToEvaluateOnNewDocument', {'identifier': script['identifier']})
+                    await session.detach()
+                    self.saved_pages[page] = entry
+        # Site-created popups and closed pages cannot change saved tab identity.
+        page = next((p for p in [pages[saved['active']], *pages, *context.pages] if not p.is_closed()), None)
+        if page is None:
+            page = await context.new_page()
+            await page.goto('chrome://newtab/')
+        return page
+
     async def start_browser(self):
         await self.ensure_desktop()
         if self.browser and not self.browser.is_connected():
             self.page = self.context = self.browser = self.review_context = None
+            self.saved_pages.clear()
             self.review_pages.clear()
             self.frame_cache.clear()
         if self.browser:
@@ -246,6 +332,38 @@ class Computer:
     def context_closed(self, context):
         if self.context is context:
             self.context = self.page = None
+            self.saved_pages.clear()
+
+    async def checkpoint_page(self, page):
+        try:
+            entry = await asyncio.wait_for(page.evaluate(
+                '({url: location.href, session_storage: Object.fromEntries(Object.entries(sessionStorage))})'), BROWSER_PAGE_TIMEOUT)
+            return entry, False
+        except Exception:
+            previous = self.saved_pages.get(page)
+            # URL alone is not tab identity, and navigation invalidates old tokens.
+            entry = previous if previous and previous['url'] == page.url else {'url': page.url, 'session_storage': {}}
+            return entry, True
+
+    async def checkpoint(self):
+        if self.browser_blocked:
+            raise ValueError('Saved browser access is unavailable. The checkpoint is preserved.')
+        if not self.context:
+            return self.saved_browser
+        try:
+            await asyncio.wait_for(self.active_page(), BROWSER_ACTIVE_TIMEOUT)
+        except TimeoutError:
+            pass  # The last tracked active page remains a valid selection.
+        storage = await asyncio.wait_for(self.context.storage_state(indexed_db=True), BROWSER_STORAGE_TIMEOUT)
+        pages = [page for page in self.context.pages if not page.is_closed() and urlparse(page.url).scheme in {'http', 'https'}]
+        selected = pages[:31] + [self.page] if self.page in pages[32:] else pages[:32]
+        entries = await asyncio.gather(*(self.checkpoint_page(page) for page in selected))
+        saved = {page: entry for page, (entry, _) in zip(selected, entries) if not page.is_closed()}
+        active = list(saved).index(self.page) if self.page in saved else 0
+        self.saved_browser = browser_state({'storage': storage, 'pages': list(saved.values()), 'active': active})
+        self.saved_pages = saved
+        self.browser_partial = len(pages) > 32 or any(partial for _, partial in entries)
+        return self.saved_browser
 
     async def active_page(self):
         """Follow the tab/window the person selected before semantic agent tools."""
@@ -622,16 +740,46 @@ class Computer:
 
     async def command(self, body):
         action, actor = body.get('action'), body.get('actor', 'agent')
+        if action == 'state' and body.get('args', {}).get('browser') in {'restore', 'checkpoint'}:
+            action = body['args']['browser']
         tab = valid_tab(body.get('tab', ''))
         if tab and actor == 'agent':
             raise ValueError('Only a signed-in person can use pull request tabs.')
         if action == 'finish' and body.get('args', {}).get('all') is True:
             self.stopping = True
-        if self.stopping and action not in {'state', 'finish'}:
+        if action == 'checkpoint' and body.get('args', {}).get('releasing') is True:
+            self.stopping = True
+        if self.stopping and action not in {'state', 'finish', 'checkpoint'}:
             raise ValueError('This workspace is shutting down. Start a new response to use Computer again.')
         if action == 'state':
             return await self.state(tab)
         async with self.lock:
+            if action in {'restore', 'checkpoint'}:
+                scope = body.get('args', {}).get('scope')
+                if tab or not isinstance(scope, str) or not re.fullmatch(r'[a-f0-9]{32}', scope):
+                    raise ValueError('Invalid browser checkpoint scope.')
+                if self.browser_scope and self.browser_scope != scope:
+                    raise ValueError('Browser checkpoint belongs to another session.')
+                if action == 'restore':
+                    if body['args'].get('blocked') is True:
+                        self.browser_blocked = True
+                        self.browser_scope = scope
+                    elif not self.browser_admitted or self.browser_blocked:
+                        saved = browser_state(body['args'].get('state'))
+                        if not self.browser_admitted and self.context and saved is not None:
+                            # An agent may have opened a fresh browser after an
+                            # unknown restore outcome. Scope reservation alone
+                            # cannot make that context authoritative for this run.
+                            self.browser_scope, self.browser_blocked = scope, True
+                            await asyncio.wait_for(self.context.close(), BROWSER_CLOSE_TIMEOUT)
+                            self.context = self.page = None
+                            self.saved_pages.clear()
+                        if not self.context:
+                            self.saved_browser = saved
+                        self.browser_scope, self.browser_blocked = scope, False
+                        self.browser_admitted = True
+                    return {'scope': scope, 'restored': not self.browser_blocked}
+                return {'scope': self.browser_scope, 'state': await self.checkpoint(), 'partial': self.browser_partial}
             if self.stopping and action != 'finish':
                 raise ValueError('This workspace is shutting down. Start a new response to use Computer again.')
             self.controls()
@@ -803,7 +951,7 @@ async def serve(desktop=None):
             if not headers.startswith(b'POST /command HTTP/'):
                 raise ValueError('Invalid request')
             length = next(int(line.split(b':', 1)[1]) for line in headers.split(b'\r\n') if line.lower().startswith(b'content-length:'))
-            if not 0 < length <= 65536:
+            if not 0 < length <= PRIVATE_BODY_LIMIT:
                 raise ValueError('Request too large')
             result = await computer.command(json.loads(await reader.readexactly(length)))
             status = 200
@@ -868,12 +1016,12 @@ def bridge():
     # One authenticated private exec carries many commands. No input is logged.
     # The app retires idle handles after 20s, before this 30s idle expiry.
     while select.select([sys.stdin], [], [], 30)[0]:
-        line = sys.stdin.buffer.readline(65537)
-        if not line or len(line) > 65536:
+        line = sys.stdin.buffer.readline(PRIVATE_BODY_LIMIT + 1)
+        if not line or len(line) > PRIVATE_BODY_LIMIT:
             return
         try:
             body = json.loads(line)
-            result = request(body, start=body.get('action') not in {'state', 'finish', 'release'})
+            result = request(body, start=starts_service(body))
         except Exception:
             # Lost/invalid responses end the channel; the caller stops input.
             return
@@ -891,4 +1039,4 @@ if __name__ == '__main__':
         print(json.dumps(capture_read(sys.argv[2])))
     else:
         body = json.loads(sys.argv[2])
-        print(json.dumps(request(body, start=body.get('action') not in {'state', 'finish', 'release'})))
+        print(json.dumps(request(body, start=starts_service(body))))

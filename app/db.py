@@ -57,6 +57,7 @@ class Store:
                     operation_id TEXT NOT NULL, snapshot TEXT NOT NULL,
                     result TEXT NOT NULL DEFAULT 'null', status TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS browser_sessions (run_id TEXT PRIMARY KEY, encrypted TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS native_sessions (
                     run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
                     turn_id INTEGER NOT NULL, actor_id TEXT NOT NULL,

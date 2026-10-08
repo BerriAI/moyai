@@ -125,6 +125,7 @@ class SessionLifecycle:
                         raise HTTPException(409, 'Stop this session and its agents, wait for cleanup to finish, then delete it.')
                 conn.execute("UPDATE runs SET deleted_at=?,token_hash='' WHERE id=? OR parent_run_id=?", (now(), run_id, run_id))
                 conn.execute("DELETE FROM native_sessions WHERE run_id IN (SELECT id FROM runs WHERE id=? OR parent_run_id=?)", (run_id, run_id))
+                conn.execute("DELETE FROM browser_sessions WHERE run_id IN (SELECT id FROM runs WHERE id=? OR parent_run_id=?)", (run_id, run_id))
                 conn.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND run_id IN (SELECT id FROM runs WHERE id=? OR parent_run_id=?)", (run_id, run_id))
         return {'id': run_id, 'deleted': True}
 

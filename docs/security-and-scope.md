@@ -7,7 +7,7 @@
 
 ## Scope and next steps
 
-The current boundary is a single shared internal workspace. A GitHub App supports the configured repository, including private code, with direct PR creation in authorized repositories. Per-user app grants, a live remote-desktop viewer, and multi-instance database storage are not included. Files and conversation resume between turns; running processes and live browser tabs do not.
+The current boundary is a single shared internal workspace. A GitHub App supports the configured repository, including private code, with direct PR creation in authorized repositories. Per-user app grants, a live remote-desktop viewer, and multi-instance database storage are not included. Files and conversation resume between turns. The main Computer browser restores its session's encrypted authentication and tabs; running processes do not resume.
 
 For a broader team rollout, extend the existing Google SSO with per-user session authorization, move orchestration to a durable worker service with Postgres, and verify live writes against explicitly authorized disposable destinations. Keep a budget-limited LiteLLM key: request-count and output limits do not substitute for a currency budget. Network egress from the sandbox is not restricted to an allowlist, and downloaded source/app content remains untrusted input to the agent.
 

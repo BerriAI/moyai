@@ -1,6 +1,7 @@
 """Private Modal exec proxy. No exposed CDP/VNC endpoint or browser tokens."""
 import asyncio
 import base64
+import hashlib
 import json
 import time
 from contextlib import asynccontextmanager
@@ -11,10 +12,19 @@ from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
 
 from . import captures
+from sandbox.computer import browser_state, PRIVATE_BODY_LIMIT
 
 
 TAB_PATTERN = r'^(?:https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*|)$'
 TAB_UPDATE_NOTICE = 'This workspace browser needs a restart to support PR tabs. Open the PR in GitHub for now.'
+BROWSER_CHECKPOINT_TIMEOUT = 10
+BROWSER_PARTIAL_NOTICE = 'Browser access was saved, but some tab data was unavailable. Up to 32 tabs can be restored.'
+
+
+class BrowserRestoreError(HTTPException):
+    """A known saved-access fault, distinct from an interrupted desktop read."""
+    def __init__(self, detail):
+        super().__init__(503, detail)
 
 
 class Command(BaseModel):
@@ -55,7 +65,7 @@ class DesktopConnection:
                 self.process.stdin.write((json.dumps(body)+'\n').encode())
                 await self.process.stdin.drain.aio()
                 line = await self.reader.__anext__()
-                if len(line) > 2 * 1024 * 1024:
+                if len(line) > PRIVATE_BODY_LIMIT:
                     raise ValueError('Computer response too large.')
                 result = json.loads(line)
                 if not isinstance(result, dict):
@@ -82,7 +92,89 @@ class Computer:
         self.releasing = {}
         self.connections = {}
         self.connection_lock = asyncio.Lock()
+        self.checkpoint_locks = {}
+        self.checkpoint_times = {}
+        self.restore_failures = {}
         store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')
+
+    def restore_error(self, connection, run_id, fingerprint, detail):
+        self.restore_failures[run_id] = (connection.identity, fingerprint, time.monotonic() + 10, detail)
+        return BrowserRestoreError(detail)
+
+    async def restore_connection(self, connection, run_id):
+        rows = self.store.rows('SELECT encrypted FROM browser_sessions WHERE run_id=?', (run_id,))
+        encrypted = rows[0]['encrypted'] if rows else None
+        fingerprint = hashlib.sha256(encrypted.encode()).digest() if encrypted is not None else None
+        failure = self.restore_failures.get(run_id)
+        # Check authoritative data first: a repaired row or replacement computer
+        # must recover immediately, even during a known-failure retry delay.
+        if failure and failure[:2] == (connection.identity, fingerprint) and time.monotonic() < failure[2]:
+            raise BrowserRestoreError(failure[3])
+        self.restore_failures.pop(run_id, None)
+        state = None
+        if rows:
+            try:
+                saved = json.loads(self.security.decrypt(rows[0]['encrypted']))
+                if saved['scope'] != run_id:
+                    raise ValueError('Wrong browser scope')
+                state = browser_state(saved['state'])
+            except Exception:
+                try:
+                    await connection.request({'action': 'state', 'args': {'browser': 'restore', 'scope': run_id, 'blocked': True}})
+                except Exception:
+                    pass  # An unbound/legacy runtime cannot publish over this row.
+                raise self.restore_error(connection, run_id, fingerprint,
+                    'Saved browser access could not be restored. The checkpoint is preserved.') from None
+        try:
+            result = await connection.request({'action': 'state', 'args': {'browser': 'restore', 'scope': run_id, 'state': state}})
+        except HTTPException:
+            if rows:
+                raise
+            return  # A legacy live runtime can remain usable until its next start.
+        if result.get('error'):
+            raise self.restore_error(connection, run_id, fingerprint,
+                'Browser access could not be restored. The checkpoint is preserved.')
+        if state is not None and (result.get('scope') != run_id or result.get('restored') is not True):
+            raise self.restore_error(connection, run_id, fingerprint,
+                'The workspace browser needs an update to restore saved access.')
+
+    async def restore(self, sandbox, run_id, *, required=True):
+        connection = DesktopConnection(sandbox, sandbox.object_id)
+        try:
+            await self.restore_connection(connection, run_id)
+        except HTTPException:
+            if required:
+                raise
+            self.store.event(run_id, 'error', 'Saved browser access could not be restored. The checkpoint is preserved; non-browser work can continue.')
+        finally:
+            await connection.close()
+
+    async def checkpoint(self, sandbox, run_id, *, releasing=False):
+        async with self.checkpoint_locks.setdefault(run_id, asyncio.Lock()):
+            self.checkpoint_times[run_id] = time.monotonic()
+            connection = DesktopConnection(sandbox, sandbox.object_id)
+            try:
+                result = await connection.request({'action': 'state', 'args': {'browser': 'checkpoint', 'scope': run_id,
+                    **({'releasing': True} if releasing else {})}})
+            finally:
+                await connection.close()
+            if result.get('error'):
+                raise HTTPException(503, 'Browser access could not be saved. The previous checkpoint is preserved.')
+            if result.get('scope') != run_id or result.get('state') is None:
+                return  # Legacy/unopened browser is not evidence of a logout.
+            try:
+                state = browser_state(result['state'])
+                encrypted = self.security.encrypt(json.dumps({'scope': run_id, 'state': state}, allow_nan=False))
+            except Exception:
+                raise HTTPException(503, 'Browser access could not be saved. The previous checkpoint is preserved.') from None
+            # A replacement or deletion may have committed during the export.
+            self.store.execute('''INSERT INTO browser_sessions(run_id,encrypted)
+                SELECT id,? FROM runs WHERE id=? AND sandbox_id=? AND deleted_at=''
+                ON CONFLICT(run_id) DO UPDATE SET encrypted=excluded.encrypted''',
+                (encrypted, run_id, sandbox.object_id))
+            await self.manager.persist()
+            self.checkpoint_times[run_id] = time.monotonic()
+            return result.get('partial') is True
 
     def touched(self, run_id):
         rows = self.store.rows('SELECT touched FROM computer_activity WHERE run_id=?', (run_id,))
@@ -135,6 +227,13 @@ class Computer:
                             raise HTTPException(503, 'Computer connections are busy. Try again shortly.')
                         await self.connections.pop(min(idle)[1]).close()
                     connection = self.connections[key] = DesktopConnection(sandbox, identity)
+                    try:
+                        if not self.shutting_down(run['id'], identity):
+                            await self.restore_connection(connection, run['id'])
+                    except BaseException:
+                        self.connections.pop(key, None)
+                        await connection.close()
+                        raise
             if connection:
                 connection.active = True
         try:
@@ -208,6 +307,14 @@ class Computer:
         if releasing:
             self.releasing[run_id] = sandbox.object_id
         try:
+            # Give authentication its own bounded attempt before slow media work,
+            # leaving most of the enclosing shutdown budget for saved captures.
+            async with asyncio.timeout(BROWSER_CHECKPOINT_TIMEOUT):
+                if await self.checkpoint(sandbox, run_id, releasing=releasing):
+                    self.store.event(run_id, 'error', BROWSER_PARTIAL_NOTICE)
+        except Exception:
+            self.store.event(run_id, 'error', 'Browser access could not be saved. The previous browser checkpoint is preserved.')
+        try:
             result = await self.execute(sandbox, 'request', json.dumps({'action': 'finish', 'args': {'all': releasing}}))
             if result.get('error'):
                 self.store.event(run_id, 'error', 'Browser recording could not be finalized before shutdown.' if releasing else
@@ -233,10 +340,18 @@ class Computer:
                                 value = {'available': False, 'tab': tab, 'notice': TAB_UPDATE_NOTICE}
                             value['has_sandbox'] = connection is not None
                             if connection:
+                                if time.monotonic() - self.checkpoint_times.get(run_id, 0) >= 10:
+                                    try:
+                                        if await self.checkpoint(connection.sandbox, run_id):
+                                            value['notice'] = BROWSER_PARTIAL_NOTICE
+                                    except Exception:
+                                        value['notice'] = 'Browser access could not be saved yet. Keeping the previous checkpoint.'
                                 try:
                                     await self.sync(connection.sandbox, run_id, value.get('media', []))
                                 except Exception:
                                     value['notice'] = 'A capture could not be saved to the app yet. Keeping the workspace copy and retrying.'
+                    except BrowserRestoreError:
+                        raise
                     except Exception:
                         raise HTTPException(503, 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.') from None
                     if len(self.cache) >= 32:
@@ -307,6 +422,12 @@ class Computer:
                         result = await connection.request({**body.model_dump(), 'actor': actor})
                         if result.get('error'):
                             raise HTTPException(409, result['error'])
+                        if body.action == 'release':
+                            try:
+                                if await self.checkpoint(connection.sandbox, run_id):
+                                    result['notice'] = BROWSER_PARTIAL_NOTICE
+                            except Exception:
+                                result['notice'] = 'Browser access could not be saved yet. Keeping the previous checkpoint.'
                         if body.action != 'release':
                             self.store.execute('INSERT INTO computer_activity VALUES(?,?) ON CONFLICT(run_id) DO UPDATE SET touched=excluded.touched', (run_id, time.time()))
                         if body.action in {'screenshot', 'record_stop'}:

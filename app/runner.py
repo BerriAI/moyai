@@ -443,6 +443,8 @@ class RunManager:
         # runner files, preserving all user workspace files and agent history.
         if snapshot_id:
             await refresh_sandbox_files(sandbox)
+        if getattr(self, 'computer', None):
+            await self.computer.restore(sandbox, run_id, required=False)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
         self.store.update_run(run_id, status="running")
         from .harnesses import resolve

@@ -240,7 +240,14 @@ def runner(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("completed,expected_status", [(True, "completed"), (False, "failed")])
 async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch, completed, expected_status):
+    from unittest.mock import AsyncMock
+
     sandbox = FakeSandbox(completed=completed)
+    restored = []
+    async def restore(machine, scope, *, required):
+        assert machine is sandbox and sandbox.spec is None and required is False
+        restored.append(scope)
+    runner.computer = SimpleNamespace(restore=restore, save_captures=AsyncMock())
     async def create(**kwargs):
         assert kwargs["timeout"] == 86400  # Modal's machine lifetime; no overall turn cap
         assert kwargs["cpu"] == 2 and kwargs["memory"] == 4096
@@ -249,6 +256,7 @@ async def test_cloud_lifecycle_collects_result_and_cleans_up(runner, monkeypatch
     run = runner.store.create_run("Run tests", "", "modal", [])
     await runner.execute(run)
     result = runner.store.run(run["id"])
+    assert restored == [run['id']]
     assert result["status"] == expected_status
     assert result["sandbox_id"] == sandbox.object_id
     assert result["token_hash"] == ""

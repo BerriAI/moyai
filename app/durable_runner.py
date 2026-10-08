@@ -167,6 +167,7 @@ class DurableRunner(RunManager):
                 return 'capacity' if result == 'capacity' else True
             sandbox = await self.sandbox(state)
             await refresh_sandbox_files(sandbox)
+            await self.computer.restore(sandbox, run_id)
             result = await self.computer.wake(sandbox)
             if result.get('error') or not result.get('available'):
                 raise HTTPException(503, 'Computer could not start.')
@@ -507,6 +508,8 @@ class DurableRunner(RunManager):
             sandbox = await self.sandbox(state)
             # Refresh protocol adapters on snapshots from older releases.
             await refresh_sandbox_files(sandbox)
+            if getattr(self, 'computer', None):
+                await self.computer.restore(sandbox, run_id, required=False)
             message = self.store.rows('SELECT content FROM messages WHERE id=?', (state['message_id'],))[0]
             spec = self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
                               'continuation': state['segment'] > 0})

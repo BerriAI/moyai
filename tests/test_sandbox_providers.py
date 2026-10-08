@@ -430,6 +430,11 @@ async def test_computer_rpc_bounds_and_uid_recheck_prevent_forwarding(transport,
         with pytest.raises(RuntimeError, match=status):
             await sandbox.computer_request(body)
     assert calls == []
+    restore = {'action': 'state', 'args': {'browser': 'restore', 'scope': 'a' * 32,
+        'state': {'storage': {'cookies': [], 'origins': [{'origin': 'https://example.test',
+            'localStorage': [{'name': 'saved-login', 'value': 'x' * 90000}]}]}, 'pages': [], 'active': 0}}}
+    assert await sandbox.computer_request(restore) == {}
+    assert calls == [restore]  # The signed private channel admits a realistic saved browser state.
     def replaced(body, **kwargs):
         guest.IDENTITY.write_text('replacement-actor')
         calls.append(body)
@@ -437,7 +442,7 @@ async def test_computer_rpc_bounds_and_uid_recheck_prevent_forwarding(transport,
     monkeypatch.setattr(guest.computer, 'request', replaced)
     with pytest.raises(RuntimeError, match='401'):
         await sandbox.computer_request({'action': 'state'})
-    assert len(calls) == 1 and guest.COMPUTER_PENDING == 0
+    assert len(calls) == 2 and guest.COMPUTER_PENDING == 0
 
 
 async def test_computer_rpc_allows_guest_reads_but_freeze_waits_for_completion(transport, monkeypatch):

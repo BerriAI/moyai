@@ -39,6 +39,7 @@ jobs:
           mkdir -p desktop-proof
           docker run --rm --shm-size=1g -v "$PWD:/app:ro" -v "$PWD/desktop-proof:/proof" moyai-desktop python /app/scripts/computer_desktop_smoke.py --wake-only --output /proof
           docker run --rm --shm-size=1g -v "$PWD:/app:ro" -v "$PWD/desktop-proof:/proof" moyai-desktop python /app/scripts/computer_desktop_smoke.py --output /proof
+          docker run --rm --shm-size=1g -v "$PWD:/app:ro" -v "$PWD/desktop-proof:/proof" moyai-desktop python /app/scripts/computer_desktop_smoke.py --persistence-only --output /proof
       - name: Save desktop screenshot and real recording
         if: always()
         uses: actions/upload-artifact@v4
