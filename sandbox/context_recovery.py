@@ -2,8 +2,10 @@
 import time
 try:
     from .context_store import ContextUnavailable
+    from .sdk_failure import report_failure
 except ImportError:
     from context_store import ContextUnavailable
+    from sdk_failure import report_failure
 
 
 def maintain_context(agent, *, refresh=False):
@@ -46,7 +48,7 @@ def run_with_context_recovery(agent, prompt, history, invoke):
             result = None
         pressure = getattr(ctx.relay, 'context_required', None)
         if not pressure:
-            return result
+            return report_failure(agent, result)
         # User stop/steering/credentials/rotation win over maintenance.
         if agent.stopped.is_set():
             return result or {'completed': False, 'interrupted': True,

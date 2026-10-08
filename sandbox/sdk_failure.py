@@ -87,7 +87,7 @@ def failure_summary(diagnostic):
     return label + ' stopped (' + ', '.join(parts) + '). Saved tool receipts are preserved.'
 
 
-def report_failure(agent, sdk, details):
+def failure_diagnostic(agent, sdk, details):
     diagnostic = {'version': 1, 'sdk': sdk, 'source': 'incomplete_turn', **details,
                   'pending_tools': len(agent.journal.pending),
                   'boundary_failed': bool(getattr(agent, 'boundary_failed', False))}
@@ -101,7 +101,13 @@ def report_failure(agent, sdk, details):
             diagnostic['broker_request_id'] = request_id
         if (http := status(broker.get('http_status'))) is not None:
             diagnostic.setdefault('http_status', http)
-    reporter = getattr(agent.context.activity, 'failure', None)
-    if reporter is not None:
-        reporter(failure_summary(diagnostic), diagnostic)
     return diagnostic
+
+
+def report_failure(agent, result):
+    # Only the recovery owner knows whether an attempt is terminal.
+    diagnostic = result.get('sdk_failure') if isinstance(result, dict) else None
+    reporter = getattr(agent.context.activity, 'failure', None)
+    if diagnostic and reporter is not None:
+        reporter(failure_summary(diagnostic), diagnostic)
+    return result

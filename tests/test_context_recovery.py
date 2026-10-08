@@ -213,3 +213,60 @@ def test_old_unknown_outcome_does_not_block_new_question_recovery(tmp_path):
         assert store.pending == {'old-runtime:write'} and not agent.journal.pending
     finally:
         store.close()
+
+
+@pytest.mark.parametrize('harness', ['codex', 'claude-agent-sdk'])
+@pytest.mark.parametrize('final_failure', [False, True])
+def test_native_context_handoff_reports_only_terminal_failure(tmp_path, monkeypatch, harness, final_failure):
+    from sandbox.activity import ActivityReporter
+    from sandbox.harness_registry import create_agent
+    from test_codex_sdk import install_codex_client, sdk_event
+    from claude_agent_sdk import ResultMessage
+    original, summaries = runtime(tmp_path)
+    store, relay = original.context_store, original.context.relay
+    relay.url = 'http://127.0.0.1:1234'
+    events, attempts = [], []
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-capability')
+    agent = create_agent(harness, spec={'model': 'openai/gpt-6-astra' if harness == 'codex' else 'anthropic/claude-opus-5-5'},
+        relay=relay, config={'mcp_servers': {'workspace': {'command': 'python', 'args': []}}},
+        activity=ActivityReporter(lambda *args: events.append(args)), step=lambda: None,
+        cwd=str(tmp_path), context_store=store)
+    monkeypatch.setattr(agent, 'validate', lambda: None)
+
+    def begin():
+        attempts.append(True)
+        if len(attempts) == 1:
+            relay.context_required = {'input_tokens': 20000, 'input_budget': 10000}
+        return len(attempts) == 1 or final_failure
+
+    async def codex_stream():
+        failed = begin()
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed' if failed else 'completed',
+            **({'error': {'codexErrorInfo': 'contextWindowExceeded'}} if failed else {})}})
+
+    class ClaudeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def query(self, prompt): pass
+        async def receive_response(self):
+            failed = begin()
+            yield ResultMessage(subtype='error_during_execution' if failed else 'success',
+                duration_ms=1, duration_api_ms=1, is_error=failed, num_turns=1,
+                session_id='fixture', result='private-error' if failed else 'done')
+
+    if harness == 'codex':
+        install_codex_client(monkeypatch, agent, codex_stream)
+    else:
+        monkeypatch.setattr('claude_agent_sdk.ClaudeSDKClient', ClaudeClient)
+    try:
+        result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
+        assert len(attempts) == 2 and len(summaries) == 1
+        assert result['completed'] is not final_failure
+        errors = [event for event in events if event[0] == 'error']
+        assert len(errors) == int(final_failure)
+        assert ('sdk_failure' in result) is final_failure
+        assert 'private-error' not in json.dumps([result, events])
+    finally:
+        agent.close()
+        store.close()

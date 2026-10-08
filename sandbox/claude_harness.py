@@ -11,12 +11,12 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .native_session import NativeSession, MAX_BYTES
-    from .sdk_failure import claude_details, exception_details, report_failure, failure_summary
+    from .sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from native_session import NativeSession, MAX_BYTES
-    from sdk_failure import claude_details, exception_details, report_failure, failure_summary
+    from sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
@@ -227,7 +227,7 @@ class ClaudeAgent(HarnessAgent):
                 self.native.finish(self.transcript.payload())
         if result is not None and not completed:
             failure = {**claude_details(result), **failure}
-        diagnostic = report_failure(self, 'claude-agent-sdk', failure) if not completed and not interrupted else None
+        diagnostic = failure_diagnostic(self, 'claude-agent-sdk', failure) if not completed and not interrupted else None
         return {'completed': completed, 'interrupted': interrupted,
                 'failed': not completed and not interrupted, 'messages': self.journal.messages,
                 **({'sdk_failure': diagnostic} if diagnostic else {}),

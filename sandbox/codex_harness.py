@@ -11,12 +11,12 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from .harness_dependencies import prepare_codex
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
-    from .sdk_failure import codex_details, exception_details, report_failure, failure_summary
+    from .sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from harness_dependencies import prepare_codex
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
-    from sdk_failure import codex_details, exception_details, report_failure, failure_summary
+    from sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
 
 
 RECEIPT_TIMEOUT_SECONDS = 10
@@ -261,7 +261,7 @@ class CodexAgent(HarnessAgent):
             # Commentary already belongs to the journal; only confirmed final
             # items are committed here, once per native identity, not per text.
             answer = '\n'.join(final_text or [item['text'] for item in message_items.values() if item.get('text')])
-        diagnostic = report_failure(self, 'codex', failure) if not completed and not interrupted else None
+        diagnostic = failure_diagnostic(self, 'codex', failure) if not completed and not interrupted else None
         return {'completed': bool(completed), 'interrupted': interrupted,
                 'failed': not completed and not interrupted, 'messages': self.journal.messages,
                 **({'sdk_failure': diagnostic} if diagnostic else {}),
