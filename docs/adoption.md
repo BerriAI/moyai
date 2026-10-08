@@ -1,7 +1,7 @@
 # Usage analytics
 
-Organization administrators can open **Settings → Administration → Spend & usage → Human activity**.
-The report shares the Spend & usage date range, refresh, and export controls. Existing `#adoption` links open this tab on the consolidated `#spend` page.
+Organization administrators can open **Settings → Administration → Spend & usage → Users**.
+Team activity and spend by user share one tab, date range, refresh, and CSV export. User filters narrow the spend table and sessions; human activity remains team-wide. Existing `#adoption` links open the Users tab on the consolidated `#spend` page.
 The page queries `GET /api/admin/adoption?start=YYYY-MM-DD&end=YYYY-MM-DD`.
 It uses the selected Spend & usage range, supports up to 93 UTC calendar days, and rejects future dates.
 

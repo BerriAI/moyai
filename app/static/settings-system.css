@@ -379,6 +379,8 @@
 .settings-view #content .analytics-section h2 { font-size:.933333rem;margin:0 0 20px;font-weight:550; }
 .settings-view #content .analytics-section .section-header { margin-bottom:16px;display:flex;justify-content:space-between;flex-wrap:wrap; }
 .settings-view #content .analytics-section .section-header h2 { margin:0; }
+.settings-view #content .analytics-description { margin:0 0 16px; }
+.settings-view .analytics-page .spend-users-table :is(th,td):not(:first-child) { white-space:nowrap;overflow-wrap:normal; }
 .analytics-metrics { display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:24px;margin:0 0 24px; }
 .analytics-metrics>div { display:flex;flex-direction:column;gap:4px; }
 .analytics-metrics span { color:var(--settings-muted);font-size:var(--settings-caption); }

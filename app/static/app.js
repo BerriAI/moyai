@@ -247,7 +247,7 @@ function bindComposer(input,form){
   autoSize(input);
 }
 async function navigate(view) {
-  if(view==='adoption'){spendAnalyticsState.tab='activity';view='spend';}
+  if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
   setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);

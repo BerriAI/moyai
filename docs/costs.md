@@ -7,17 +7,16 @@
 
 ## Spend dashboard
 
-**Settings → Administration → Spend & usage** (`#spend`) gives administrators five tabs:
+**Settings → Administration → Spend & usage** (`#spend`) gives administrators four tabs:
 
 - **Overall:** recorded infrastructure and model costs, active sessions, and model requests over time.
-- **Users:** daily active users and a sortable table of costs, sessions, requests, tokens, cost per session, and share of LLM spend. Filter a user to inspect their sessions.
+- **Users:** team-wide human requests and active teammates, followed by a sortable spend table with costs, sessions, model requests, tokens, and share of LLM spend. Filter a user to inspect their costs and sessions; activity remains team-wide.
 - **Usage history:** daily model costs, a cumulative cost line, a model filter, and exact request details.
-- **Human activity:** human chat submissions, a seven-day moving average, and active teammates.
 - **Infrastructure:** existing provider sync, monthly bills and estimates, coverage, and Slack identity controls.
 
-Use the date menu for presets or a custom UTC range of up to 93 days. **Export CSV** exports the current report and user/model filter. Charts and daily exports use the full scoped ledger; the request-detail disclosure remains limited to the latest 500 requests. An active session can appear on multiple days, while the period total counts it once. Unknown costs stay visibly unpriced, and averages use recorded costs only.
+Use the date menu for presets or a custom UTC range of up to 93 days. **Export CSV** exports the current report and user/model filter. The Users export includes the selected spend rows and a separate, labeled team activity section. If activity cannot load, spend stays available with an **Export spend CSV** action. Charts and daily exports use the full scoped ledger; the request-detail disclosure remains limited to the latest 500 requests. An active session can appear on multiple days, while the period total counts it once. Unknown costs stay visibly unpriced, and averages use recorded costs only.
 
-Members retain **Settings → Workspace → Spend** for their own model spend and established linked Slack activity. Organization charts and infrastructure controls require an administrator report from the server. Human chat submissions have their own **Human activity** tab within the same page, because one human submission can produce many model requests. Existing `#adoption` links open that tab.
+Members retain **Settings → Workspace → Spend** for their own model spend and established linked Slack activity. Organization charts and infrastructure controls require an administrator report from the server. The **Users** tab brings human activity and model spend together while distinguishing human submissions from model requests: one human submission can produce many model requests. Existing `#adoption` links open the combined Users tab.
 
 For a local visual demo with synthetic data, run `node scripts/settings_ui_preview.cjs --port 8953` and open `http://127.0.0.1:8953/#spend`. This preview does not contact providers or exercise production authentication and billing writes.
 
