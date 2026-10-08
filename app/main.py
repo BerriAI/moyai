@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
+from .model_routing import session_routing
 from .connectors import Connectors, ConnectorError, TOOLS
 from .db import Store, now
 from .blob_storage import ObjectStorage
@@ -1061,6 +1062,7 @@ def create_app(settings: Settings | None = None):
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.
         payload['metadata'] = {'moyai_request_id': request_id}
+        payload.update(session_routing(selected_model, run))
         wants_stream = bool(payload.get('stream'))
         # Streaming headers precede generation and cannot contain its final
         # charge. Ask for a completed response, then adapt it to Hermes' SSE

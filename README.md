@@ -33,6 +33,10 @@ GPT-6 Astra (`openai/gpt-6-astra`) uses [Ultrafast mode](https://docs.litellm.ai
 
 Moyai uses [LiteLLM](https://github.com/BerriAI/litellm) for inference, so it can run on any of the 100+ providers LiteLLM supports. Point it at your [LiteLLM gateway](https://docs.litellm.ai/), switch models between messages, and spend is tracked per teammate. Provider keys stay on the server, and the sandbox never sees them.
 
+Choose **DeepSeek V4.1 Flash** in the model picker or ask Moyai to use it in an existing conversation. The catalog uses `fireworks_ai/deepseek-v4p1-flash`; your gateway must expose that alias and its context limits through `/model/info`. Pricing depends on the provider and cache usage: cached-input rates do not apply to uncached input or output tokens.
+
+For Fireworks models, Moyai sends a server-generated session-affinity hint so repeated prefixes can reuse the same replica's prompt cache. Keep prompts and tool definitions stable to benefit; cache hits depend on provider routing and eviction and are not guaranteed.
+
 ## See it in action
 
 <img width="1196" height="720" alt="moyai" src="https://github.com/user-attachments/assets/2de74e6a-c37c-48d6-8a99-de2166c88626" />
