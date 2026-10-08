@@ -162,11 +162,11 @@ TOOLS = {
     'github_update_ruleset_reviewers': ('github', True, RulesetReviewers, 'Change required reviewing teams/file patterns in one repository branch ruleset when requested by the user. Read github_ruleset first and pass its revision. Preserves approval count, code owner review, status checks and all other rules/settings. Requires GitHub Administration write access. Cannot edit inherited organization rulesets. On an uncertain result, read the ruleset before retrying; never retry blindly.'),
     'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Pass an entry’s id as repository_id in checkout and PR tools. Names are display labels.'),
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
-    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
+    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
     'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
-    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR created by this session. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
-    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR created by this session, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
+    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open Moyai PR created by any chat in this workspace under the current GitHub connection. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
+    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open Moyai PR created by any chat in this workspace under the current GitHub connection, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
 }
 
@@ -579,14 +579,16 @@ class GitHub(GitHubRepositories):
                                             json={'message': args.title, 'tree': created_tree['sha'], 'parents': [args.base_sha]})
         return created_commit['sha']
 
-    def owned_publication(self, run, target, number, version):
-        for row in self.store.rows('SELECT * FROM github_publications WHERE run_id=? AND result!=?', (run['id'], '')):
-            result = json.loads(row['result'])
-            if result.get('repository_id') == target and result.get('number') == number:
-                if row['connection_version'] != version:
-                    raise ConnectorError('The GitHub installation changed since this PR was published.')
+    def owned_publication(self, target, number, version):
+        # Provenance belongs to the workspace connection, not the requesting chat.
+        for row in self.store.rows('SELECT * FROM github_publications WHERE connection_version=? AND result!=?', (version, '')):
+            try:
+                result = json.loads(row['result'])
+            except ValueError:
+                continue
+            if isinstance(result, dict) and result.get('repository_id') == target and result.get('number') == number:
                 return row
-        raise ConnectorError('Only PRs published by this session can be updated or commented on.')
+        raise ConnectorError('Only confirmed Moyai PRs published in this workspace under the current GitHub connection can be updated or commented on.')
 
     async def owned_pr(self, token, target, number, publication):
         pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
@@ -616,7 +618,7 @@ class GitHub(GitHubRepositories):
         target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
-        publication = self.owned_publication(run, target, args.number, version)
+        publication = self.owned_publication(target, args.number, version)
         row = self.followup(run, tool, args, version, target)
         if row['result']:
             return self.receipt(row['result'], target)
@@ -648,7 +650,7 @@ class GitHub(GitHubRepositories):
         target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
-        publication = self.owned_publication(run, target, args.number, version)
+        publication = self.owned_publication(target, args.number, version)
         row = self.followup(run, tool, args, version, target)
         if row['result']:
             return self.receipt(row['result'], target)

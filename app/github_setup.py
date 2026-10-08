@@ -168,7 +168,7 @@ def routes(connectors, security, store, settings):
         return HTMLResponse('<!doctype html><html><head><meta charset="utf-8"><title>Connect GitHub · Moyai</title>'
             '<link rel="stylesheet" href="/static/style.css"></head><body><main style="max-width:720px;margin:60px auto;padding:24px">'
             '<h1>Connect GitHub for your organization</h1><p>Organization: <strong>' + html.escape(owner) + '</strong>. Select repositories on GitHub; manage the selection in Moyai afterward.</p>'
-            '<p>Moyai can read code, create normal pull requests, and update or comment on PRs created by the current session without an administrator approval step. It cannot approve or merge pull requests, '
+            '<p>Moyai can read code, create normal pull requests, and update or comment on Moyai PRs created by any chat in this workspace under the current GitHub connection without an administrator approval step. It cannot approve or merge pull requests, '
             'enable auto-merge, or change workflow and access-control files.</p>'
             '<p>Moyai can inspect repository rulesets and change their required reviewing teams and file patterns when requested. '
             'Ruleset edits preserve approval counts, code owner review, status checks and other settings. '
