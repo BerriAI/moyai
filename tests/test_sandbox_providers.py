@@ -4,19 +4,48 @@ import json
 from pathlib import Path
 import sys
 import threading
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+import modal
+from modal._utils.name_utils import check_object_name
 import pytest
 
 from app.config import Settings
 from app.computer import Command
 from app.db import Store
 from app.runner import RunManager
+from app.sandboxes.modal import ModalProvider
 from app.sandboxes.substrate import SubstrateProvider, Sandbox
 from app.sandboxes.proto import ateapi_pb2 as pb
 from sandbox import substrate_guest as guest
 from tests.test_workspace import workspace
+
+
+async def test_modal_names_preserve_existing_identity_and_bound_computer_operations(monkeypatch):
+    clients = SimpleNamespace(get=AsyncMock(return_value='client'))
+    settings = Settings(_env_file=None)
+    create, find = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(modal.App, 'lookup', SimpleNamespace(aio=AsyncMock(return_value='app')))
+    monkeypatch.setattr(modal.Sandbox, 'create', SimpleNamespace(aio=create))
+    monkeypatch.setattr(modal.Sandbox, 'from_name', SimpleNamespace(aio=find))
+    names = ['moyai-' + 'a' * 32 + '-123-0', 'a' * 64, 'a' * 65,
+             'moyai-' + 'a' * 32 + '-computer-' + 'b' * 32 + '-0',
+             'moyai-' + 'a' * 32 + '-computer-' + 'b' * 32 + '-1']
+    identities = []
+    for name in names:
+        provider = ModalProvider(settings, clients)
+        provider.image = lambda: 'image'
+        await provider.create(name=name)
+        identity = create.call_args.kwargs['name']
+        check_object_name(identity, 'Sandbox')
+        if len(name) <= 64:
+            assert identity == name
+        await ModalProvider(settings, clients).find(name)
+        assert find.call_args.args == (settings.modal_app_name, identity)
+        identities.append(identity)
+    assert len(set(identities)) == len(names)
 
 
 def key():

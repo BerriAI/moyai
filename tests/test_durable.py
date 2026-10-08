@@ -6,6 +6,7 @@ import sys
 from types import SimpleNamespace
 
 import modal
+from modal._utils.name_utils import check_object_name
 import pytest
 
 from app.config import MODEL_CATALOG, Settings
@@ -84,6 +85,7 @@ class Cloud:
         return 'app'
 
     async def create(self, **kwargs):
+        check_object_name(kwargs['name'], 'Sandbox')
         machine = Machine(self, kwargs['name'], len(self.machines))
         self.machines.append(machine)
         return machine

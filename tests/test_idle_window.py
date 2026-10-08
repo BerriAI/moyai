@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import modal
 from fastapi import HTTPException
 
 from app.db import Store
@@ -542,6 +543,27 @@ async def test_computer_start_failure_cleans_up_and_retry_preserves_chat(durable
     await drive(manager, run_id, phase='warm')
     assert not manager.state(run_id).get('computer_error')
     assert manager.store.messages(run_id) == before and len(cloud.launches) == 1
+
+
+async def test_invalid_computer_provision_preserves_and_drains_queued_chat(durable, monkeypatch):
+    manager, cloud, run_id = await sleeping_computer(durable)
+    before = manager.store.messages(run_id)
+    await manager.wake_computer(run_id)
+    manager.store.enqueue_message(run_id, 'Continue the saved task', 'wake-followup')
+    create = AsyncMock(side_effect=modal.exception.InvalidError('private provider detail'))
+    monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(create))
+    assert await manager.advance(run_id) is True
+    assert manager.state(run_id)['phase'] == 'warm_cleanup'
+    assert 'private provider detail' not in json.dumps(manager.state(run_id))
+    assert await manager.advance(run_id) is True
+    assert manager.state(run_id)['phase'] == 'idle'
+    assert manager.store.messages(run_id)[:-1] == before
+    assert manager.store.messages(run_id)[-1]['status'] == 'queued'
+    monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(cloud.create))
+    await drive(manager, run_id)
+    assert len(answers(manager, run_id)) == 2
+    assert len(cloud.launches) == 2
+    assert all(message['status'] == 'completed' for message in manager.store.messages(run_id))
 
 
 async def test_recover_dispatches_computer_intent_on_a_cancelled_session(durable):

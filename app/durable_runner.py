@@ -178,7 +178,7 @@ class DurableRunner(RunManager):
             state.update(phase='waiting_environment', environment_build=pending.build_id)
             self.save(run_id, state)
             return {'retry_seconds': 5}
-        except (LostExecution, ValueError, HTTPException, modal.exception.ImageBuildError):
+        except (LostExecution, ValueError, HTTPException, modal.exception.ImageBuildError, modal.exception.InvalidError):
             # No synthetic message, answer, model invocation or chat failure.
             state.update(phase='warm_cleanup', computer_error='The computer could not start. Try waking it again.')
             self.save(run_id, state)
