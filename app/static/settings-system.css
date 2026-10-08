@@ -137,6 +137,8 @@
 .settings-view .automation-history-row { grid-template-columns: minmax(140px,1fr) minmax(90px,.5fr) minmax(0,2fr); overflow-wrap: anywhere; }
 .settings-view .memory-controls { margin: 0; border-radius: var(--settings-radius) var(--settings-radius) 0 0; padding: 20px 24px; background: var(--settings-subtle); border-color: var(--settings-line); }
 .settings-view .memory-learning { padding: 18px 24px; margin: 0 0 16px; border: 1px solid var(--settings-line); border-top: 0; border-radius: 0 0 var(--settings-radius) var(--settings-radius); }
+.settings-view .memory-learning label { line-height: 1.5; }
+.settings-view .memory-learning>[data-slot="native-select-wrapper"] { width: min(100%,320px); flex-shrink: 0; }
 .settings-view .memory-privacy { margin-bottom: 24px; color: var(--settings-muted); }
 .settings-view .memory-review { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-block: 16px; }
 .settings-view .memory-review p { flex: 1 1 240px; margin: 0; }
@@ -294,6 +296,7 @@
   .settings-view .memory-controls,.settings-view .memory-learning { padding: 20px; flex-wrap: wrap; }
   .settings-view .memory-controls button { white-space: normal; }
   .settings-view .memory-learning { flex-direction: column; align-items: stretch; gap: 12px; }
+  .settings-view .memory-learning>[data-slot="native-select-wrapper"] { width: 100%; }
   .settings-view .memory-learning select { max-width: 100%; }
   .settings-view .memory-filter input { width: 100%; }
   .settings-view .environment-explainer { grid-template-columns: 1fr; }

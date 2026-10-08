@@ -45,6 +45,54 @@ async function assertTableTextContained(page) {
 }
 
 for (const width of [1440, 1024, 768, 320]) {
+  test(`memory preference label, field and arrow stay aligned at ${width}px`, async t => {
+    const page = await pageFor(t, 'memory', 'populated', width);
+    const control = page.getByLabel('How new memories are saved', { exact: true });
+    const aligned = async () => {
+      const boxes = await page.locator('.memory-learning').evaluate(row => {
+        const box = el => el.getBoundingClientRect().toJSON();
+        return {
+          row: box(row), label: box(row.querySelector('label')), select: box(row.querySelector('select')),
+          wrapper: box(row.querySelector('[data-slot="native-select-wrapper"]')),
+          arrow: box(row.querySelector('[data-slot="native-select-icon"]')),
+          heading: box(document.querySelector('.memory-controls>div')),
+          action: box(document.querySelector('#memory-toggle')),
+        };
+      });
+      const { row, label, select, wrapper, arrow, heading, action } = boxes;
+      assert.ok(Math.abs(wrapper.width - select.width) <= 1, 'The wrapper follows the field width');
+      assert.ok(arrow.left >= select.left && arrow.right <= select.right, 'The arrow stays inside the field');
+      assert.ok(Math.abs(arrow.y + arrow.height / 2 - select.y - select.height / 2) <= 1, 'The arrow is vertically centered');
+      assert.ok(Math.abs(label.x - heading.x) <= 1, 'The label shares the heading leading edge');
+      assert.ok(select.right <= row.right && select.left >= row.left, 'The field stays inside its row');
+      if (width > 650) {
+        assert.ok(Math.abs(select.right - action.right) <= 1, 'The field shares the action trailing edge');
+        assert.ok(Math.abs(label.y + label.height / 2 - select.y - select.height / 2) <= 1, 'Desktop label and field share a center line');
+        assert.ok(label.height < 24, 'The desktop label remains on one line');
+      } else {
+        assert.ok(label.bottom < select.top, 'The mobile field stacks below its label');
+        assert.ok(Math.abs(label.left - select.left) <= 1, 'The mobile field and label share a leading edge');
+        assert.ok(Math.abs(select.right - row.right + 21) <= 1, 'The mobile field fills the padded row');
+      }
+    };
+    await aligned();
+    await control.selectOption('manual');
+    await page.waitForFunction(() => document.querySelector('#memory-learning')?.disabled === false && document.querySelector('#memory-learning').value === 'manual');
+    await page.reload();
+    await control.waitFor();
+    assert.equal(await control.inputValue(), 'manual', 'The selected saving mode persists');
+    await aligned();
+    await page.getByRole('button', { name: 'Pause memory', exact: true }).click();
+    await page.getByRole('button', { name: 'Resume memory', exact: true }).waitFor();
+    assert.equal(await control.isDisabled(), true);
+    await aligned();
+    await page.getByRole('button', { name: 'Resume memory', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#memory-learning')?.disabled === false);
+    await control.selectOption('auto');
+    await page.waitForFunction(() => document.querySelector('#memory-learning')?.disabled === false && document.querySelector('#memory-learning').value === 'auto');
+    await aligned();
+  });
+
   test(`library rows keep their leading edge and compact actions at ${width}px`, async t => {
     const page = await pageFor(t, 'skills', 'populated', width);
     for (const route of ['skills', 'secrets']) {
