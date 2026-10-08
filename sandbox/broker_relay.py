@@ -11,6 +11,7 @@ import urllib.request
 from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import nullcontext
+from collections import Counter
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
@@ -38,6 +39,7 @@ class BrokerRelay:
         self.last_error = ''
         self.last_failure = None
         self.uncertain_tool = False
+        self.retry_safe_tools = frozenset()
         self.model_failed = False
         self.failure_lock = threading.Lock()
         self.wait_group = ''
@@ -92,18 +94,24 @@ class BrokerRelay:
                 response_started, response_bytes = False, 0
                 response_headers, response_status = {}, None
                 request_started = time.monotonic()
+                tool_read = False
 
                 def record_failure(exc, *, headers=None, status=None, message=None):
                     diagnostic = failure(route, request_id, exc, headers=headers,
                         status=status, response_started=response_started, response_bytes=response_bytes)
                     diagnostic.update(occurred_at=time.time(), duration_ms=round((time.monotonic() - request_started) * 1000))
                     with relay.failure_lock:
-                        if message is not None:
-                            relay.last_error = message
-                        relay.last_failure = diagnostic
-                        relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
-                        if route in MODEL_ROUTES:
-                            relay.model_failed = True
+                        if tool_read:
+                            # A confirmed safe read cannot create uncertainty or
+                            # overwrite a concurrent model/write failure.
+                            diagnostic['uncertain_tool'] = False
+                        else:
+                            if message is not None:
+                                relay.last_error = message
+                            relay.last_failure = diagnostic
+                            relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
+                            if route in MODEL_ROUTES:
+                                relay.model_failed = True
                     if report_error:
                         report_error(diagnostic)
                 if self.path == '/v1/messages?beta=true':
@@ -156,6 +164,7 @@ class BrokerRelay:
                     if self.path == '/tools/call':
                         try:
                             name = json.loads(raw).get('name')
+                            tool_read = isinstance(name, str) and name in relay.retry_safe_tools
                             control_call = name in {'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
                             # These broker operations only read repository/PR
                             # metadata. Git mutations happen after their reply.
@@ -163,24 +172,31 @@ class BrokerRelay:
                                                and name in {'github_checkout', 'github_repository'})
                         except (ValueError, AttributeError):
                             pass
-                    if repository_read or (self.command == 'GET' and self.path in {'/tools', '/v1/models'}):
+                    if tool_read or repository_read or (self.command == 'GET' and self.path in {'/tools', '/v1/models'}):
                         if self.path == '/tools' or repository_read:
                             relay.startup_failure = None
                         request_id = uuid4().hex
                         request = urllib.request.Request(remote.rstrip('/') + self.path,
-                            data=seal(token, route, raw) if repository_read else None,
+                            data=seal(token, route, raw) if repository_read or tool_read else None,
                             headers={'Authorization': 'Bearer ' + token, 'X-Moyai-Request-ID': request_id,
-                                     **({'Content-Type': CONTENT_TYPE} if repository_read else {})}, method=self.command)
+                                     **({'Content-Type': CONTENT_TYPE} if repository_read or tool_read else {})}, method=self.command)
                         try:
-                            read = _read_with_reconnect if repository_read else read_with_reconnect
+                            read = _read_with_reconnect if repository_read or tool_read else read_with_reconnect
                             # GitHub metadata fans out to several upstream reads;
                             # preserve its former 90s allowance per lookup.
-                            options = {'budget': REPOSITORY_METADATA_BUDGET, 'attempt_timeout': 90} if repository_read else {}
-                            status, content_type, body = read(request,
-                                lambda response: (response.status, response.headers.get('Content-Type', 'application/json'),
-                                                  response.read(MAX_BODY + 1)),
-                                stage='repository_metadata' if repository_read else 'workspace_tools', notify=notify, **options)
+                            options = {'budget': REPOSITORY_METADATA_BUDGET, 'attempt_timeout': 90} if repository_read or tool_read else {}
+                            def read_reply(response):
+                                body = response.read(MAX_BODY + 1)
+                                if len(body) <= MAX_BODY and response.length:
+                                    raise http.client.IncompleteRead(body, response.length)
+                                return response.status, response.headers.get('Content-Type', 'application/json'), body
+                            status, content_type, body = read(request, read_reply,
+                                stage='tool_read' if tool_read else 'repository_metadata' if repository_read else 'workspace_tools',
+                                notify=notify, **options)
                         except StartupUnavailable as exc:
+                            if tool_read:
+                                record_failure(exc, status=503)
+                                return self.error(503, 'Workspace services are temporarily unavailable. This read can be retried.')
                             if self.path == '/tools' or repository_read:
                                 relay.startup_failure = exc
                             return self.error(503, str(exc))
@@ -188,6 +204,19 @@ class BrokerRelay:
                             relay.startup_failure = None
                         if len(body) > MAX_BODY:
                             return self.error(502, 'Workspace service reply exceeds size limit.')
+                        if self.path == '/tools':
+                            # Only the authenticated broker's explicit declarations
+                            # authorize replay. readOnlyHint alone can include
+                            # context-selection effects; caller annotations do not count.
+                            try:
+                                catalog = json.loads(body)
+                                names = Counter(tool['name'] for tool in catalog)
+                                relay.retry_safe_tools = frozenset(tool['name'] for tool in catalog
+                                    if isinstance(tool['name'], str) and names[tool['name']] == 1
+                                    and tool.get('annotations', {}).get('readOnlyHint') is True
+                                    and tool.get('annotations', {}).get('idempotentHint') is True)
+                            except (ValueError, KeyError, TypeError, AttributeError):
+                                relay.retry_safe_tools = frozenset()
                         response_status, response_bytes = status, len(body)
                         self.send_response(status)
                         self.send_header('Content-Type', content_type)

@@ -116,8 +116,10 @@ class AgentCoordinator:
     def tools(self, run):
         if not self.available(run):
             return []
+        # Result/artifact reads have no selection effects and can reconnect safely.
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': read_only}} for name, (schema, read_only, description) in TOOLS.items()]
+                 'annotations': {'readOnlyHint': read_only, 'idempotentHint': read_only}}
+                for name, (schema, read_only, description) in TOOLS.items()]
 
     def group(self, parent_id, group_id):
         rows = self.store.rows('SELECT * FROM agent_groups WHERE id=? AND parent_id=?', (group_id, parent_id))

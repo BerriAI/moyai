@@ -327,6 +327,17 @@ def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypa
     assert proof['final_response'] == 'yield-test-complete'
 
 
+def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 2000, 'read-outage')
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert not proof['faults'] and not proof['transport_errors']
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == 2
+    assert proof['read_attempts'] == 2 and proof['upstream_requests'] == 3
+    assert (tmp_path / 'workspace' / 'writes').read_text() == 'once\n'
+    assert proof['final_response'] == 'yield-test-complete'
+
+
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
                       context_rounds=1, compact_rejections=0):
@@ -339,7 +350,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     from sandbox.broker_transport import unseal
     capability = 'yield-fixture-capability'
     release = threading.Event()
-    calls, requests, steps, events, faults, diagnostics = [], [], [], [], [], []
+    calls, requests, steps, events, faults, diagnostics, read_attempts = [], [], [], [], [], [], []
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     settlement = outcome.startswith('settle-')
@@ -347,6 +358,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     transport = outcome.startswith('settle-transport-') or outcome == 'settle-context-transport-preview'
     context_case = outcome.startswith('settle-context')
     finish_during_compaction = outcome == 'settle-context-during-compaction'
+    read_outage = outcome == 'read-outage'
     receipt_during_compaction = threading.Event()
     compactions = []
     corrections = []
@@ -419,6 +431,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 return self.reply({'input_budget': 200000})
             assert self.path == '/tools'
             self.reply([{'name': 'slow_echo', 'description': 'Wait for a local fixture signal.',
+                **({'annotations': {'readOnlyHint': True, 'idempotentHint': True}} if read_outage else {}),
                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
 
         def do_POST(self):
@@ -429,6 +442,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     assert not agent.journal.pending
                 return self.reply({})
             if self.path == '/tools/call':
+                read_attempts.append(body)
+                if read_outage and len(read_attempts) == 1:
+                    return self.reply({}, 502)
                 calls.append(body)
                 progress('Tool started; it waits for an admitted model poll')
                 if not release.wait(timeout=50):
@@ -472,6 +488,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     'cmd': shlex.quote(sys.executable) + ' command.py', 'tty': True,
                     'login': False, 'yield_time_ms': 1000}) + '));' if settlement else
                     'text(await tools.mcp__moyai__slow_echo({}));')
+                if read_outage:
+                    code = 'text(await tools.exec_command({cmd: "printf \'once\\n\' >> writes; printf write-receipt", login: false}));' + code
                 if yield_ms is not None and not settlement:
                     code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
                 output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
@@ -515,6 +533,11 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                         'session_id': int(sessions[-1]), 'yield_time_ms': 20000 if context_case else 1000,
                         'chars': '\u0003' if preview else ''}) + '));'}
             elif sequence == 2:
+                if read_outage and not calls:
+                    faults.append('Safe read returned before recovery')
+                    return send_response(self, {'type': 'message', 'id': 'unrecovered', 'role': 'assistant',
+                        'phase': 'final_answer', 'status': 'completed', 'content': [
+                            {'type': 'output_text', 'text': 'read-outage-unrecovered'}]}, sequence)
                 assert len(calls) == 1 and agent.journal.pending
                 assert steps == [0], 'Lifecycle must not run while the nested tool is pending'
                 assert agent.model_calls == 2, 'Polling must count toward the model-call cap'
@@ -526,7 +549,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 release.set()
             else:
                 if not settlement:
-                    assert not agent.journal.pending and agent.journal.completed_tools == 1
+                    assert not agent.journal.pending and agent.journal.completed_tools == 1 + int(read_outage)
                 assert 'slow-tool-complete' in json.dumps(body)
                 output = {'type': 'message', 'id': 'answer', 'role': 'assistant', 'phase': 'final_answer',
                           'status': 'completed', 'content': [{'type': 'output_text', 'text': 'yield-test-complete'}]}
@@ -575,7 +598,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       'messages': agent.journal.messages, 'final_response': str(exc)}
         assert calls == ([] if settlement else [{'name': 'slow_echo', 'arguments': {}}])
         receipts = [m for m in result['messages'] if m['role'] == 'tool']
-        assert all('slow-tool-complete' in receipt['content'] for receipt in receipts)
+        assert all('slow-tool-complete' in receipt['content'] or
+                   (read_outage and 'write-receipt' in receipt['content']) for receipt in receipts)
         proof = {key: result[key] for key in ('completed', 'interrupted', 'failed', 'final_response')}
         proof.update(boundary_failed=agent.boundary_failed, model_calls=agent.model_calls,
             upstream_requests=len(requests), lifecycle_steps=steps,
@@ -585,6 +609,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
             native_clients=len(native_clients), native_threads=len(native_threads),
             transport_attempt=agent.transport_attempt, native_compactions=len(compactions),
+            read_attempts=len(read_attempts),
             receipt_during_compaction=receipt_during_compaction.is_set(),
             corrections_delivered=len(corrections),
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))

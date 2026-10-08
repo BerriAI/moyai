@@ -208,12 +208,50 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             await manager.shutdown()
 
 
-async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable):
+async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable, tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler
+    from sandbox.startup import _read_with_reconnect
+    from sandbox.transport_recovery import recovery_marker
+    from test_broker_transport import diagnostic_relay
+    from test_context_recovery import runtime
     from test_durable import transport_failure_report
     manager, cloud, run_id = durable
     cloud.saving_before_answer = False
     command = cloud.command
     failure = transport_failure_report()
+    # Obtain the actual safe-read -> model outage classification and checkpoint;
+    # only Modal execution remains synthetic in this Temporal restart test.
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps([{'name': 'agents_results', 'annotations': {
+                'readOnlyHint': True, 'idempotentHint': True}}]).encode())
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(b'{}')
+    def bounded_read(request, reader, **options):
+        return _read_with_reconnect(request, reader, **{**options, 'budget': 0.01})
+    monkeypatch.setattr('sandbox.broker_relay._read_with_reconnect', bounded_read)
+    agent, _ = runtime(tmp_path)
+    try:
+        with diagnostic_relay(Edge) as (relay, client, diagnostics):
+            agent.context.relay = relay
+            assert client.get('/tools').status_code == 200
+            agent.journal.tool_started('results', 'agents_results', {})
+            response = client.post('/tools/call', json={'name': 'agents_results', 'arguments': {}})
+            agent.journal.tool_finished('results', f'Tool failed (HTTP {response.status_code}).')
+            assert not relay.uncertain_tool and not relay.last_error
+            assert response.status_code == 503
+            assert client.post('/v1/responses', json={}).status_code == 502
+            marker = recovery_marker(agent, {'failed': True})
+            assert marker and marker['failure'] == diagnostics[-1]
+            failure['final']['transport_retry'] = marker
+    finally:
+        agent.context_store.close()
     failed_directory = None
 
     async def model_outage(machine, action, directory, value, **kwargs):
