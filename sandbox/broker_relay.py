@@ -51,6 +51,7 @@ class BrokerRelay:
         self.context_required = None
         self.context_recovery = False
         self.native_compacting = False
+        self.live_compaction = False
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -349,6 +350,7 @@ class BrokerRelay:
                                     stage='context_window', notify=self.notify)
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
             raise ValueError('The broker did not return a usable compaction window.')
+        self.live_compaction = value.get('live_compaction') is True
         return value
 
     def native(self, body):

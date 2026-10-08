@@ -497,6 +497,205 @@ def test_catalog_covers_upstream_harness_enum():
     assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE', 'CODEX'} == {h.name for h in litellm.Harness}
 
 
+def test_native_compaction_controls_keep_other_runtime_settings():
+    pytest.importorskip('litellm.harness')
+    from sandbox.harness_bindings import opencode_options, tool_loop_options
+    server = {'command': '/prepared/python', 'args': ['bridge.py'], 'env': {'FIXTURE': '1'}}
+    config = {'mcp_servers': {'workspace': server}}
+    assert 'compaction' not in opencode_options(config).config
+    options = opencode_options({**config, 'live_compaction': True})
+    assert options.config['compaction'] == {'auto': False, 'prune': False}
+    assert options.config['mcp']['moyai'] == {'type': 'local',
+        'command': ['/prepared/python', 'bridge.py'], 'environment': {'FIXTURE': '1'}, 'enabled': True}
+    assert tool_loop_options({}).completion_kwargs == {'num_retries': 0}
+
+
+def test_real_deepagents_disables_blocking_summary_in_main_and_children():
+    pytest.importorskip('litellm.harness')
+    pytest.importorskip('deepagents')
+    pytest.importorskip('langchain_litellm')
+    import subprocess
+    import sys
+    # The supported profile registration is process-scoped, like each sandbox
+    # runtime. Use a fresh process to verify both capability choices honestly.
+    result = subprocess.run([sys.executable, '-c', r"""
+from langchain_litellm import ChatLiteLLM
+import deepagents
+import deepagents.graph
+import deepagents.middleware.subagents
+from sandbox.harness_bindings import deepagents_options
+middleware = []
+def capture(original):
+    def build(*args, **kwargs):
+        middleware.append({item.name for item in kwargs['middleware']})
+        return original(*args, **kwargs)
+    return build
+for module in (deepagents.graph, deepagents.middleware.subagents):
+    module.create_agent = capture(module.create_agent)
+model = ChatLiteLLM(model='litellm_proxy/fixture-model',
+    api_base='http://127.0.0.1:1/v1', api_key='synthetic-only')
+for enabled in (False, True):
+    middleware.clear()
+    deepagents_options({'live_compaction': enabled})
+    deepagents.create_deep_agent(model=model)
+    assert len(middleware) >= 2
+    assert all(('SummarizationMiddleware' in names) is not enabled for names in middleware)
+    assert all({'FilesystemMiddleware', 'PatchToolCallsMiddleware'} <= names for names in middleware)
+    assert any('SubAgentMiddleware' in names for names in middleware)
+try:
+    deepagents_options({'live_compaction': False})
+except RuntimeError as error:
+    assert 'Restart the runtime' in str(error)
+else:
+    raise AssertionError('Lost capability must require a fresh runtime')
+"""], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+BACKGROUND_STEPS = 32
+BACKGROUND_RECEIPT_REPEATS = 4000
+
+
+def background_chat_response(body, message, sequence):
+    finish = 'tool_calls' if message.get('tool_calls') else 'stop'
+    common = {'id': f'background-{sequence}', 'created': 1, 'model': body['model']}
+    if not body.get('stream'):
+        return httpx.Response(200, json={**common, 'object': 'chat.completion',
+            'choices': [{'index': 0, 'message': message, 'finish_reason': finish}],
+            'usage': {'prompt_tokens': len(json.dumps(body)) // 4, 'completion_tokens': 50, 'total_tokens': 100}})
+    if message.get('tool_calls'):
+        message['tool_calls'][0]['index'] = 0
+    chunks = [{**common, 'object': 'chat.completion.chunk', 'choices': [choice]} for choice in (
+        {'index': 0, 'delta': message, 'finish_reason': None},
+        {'index': 0, 'delta': {}, 'finish_reason': finish})]
+    return httpx.Response(200, content=''.join('data: ' + json.dumps(chunk) + '\n\n' for chunk in chunks)
+        + 'data: [DONE]\n\n', headers={'Content-Type': 'text/event-stream'})
+
+
+def background_litellm_worker():
+    """One native process, matching the lifetime of public SDK profile settings."""
+    import os
+    import sys
+    from types import SimpleNamespace
+    import litellm
+    from sandbox import litellm_harness
+    from sandbox.context_store import ContextStore
+    from sandbox.harness_registry import create_agent
+    job = json.load(sys.stdin)
+    directory = Path(job['directory'])
+    os.environ['WORKSPACE_RUN_TOKEN'] = job['capability']
+    events, native_sessions = [], []
+    def background_step(step: int, tail: str) -> str:
+        """Record one completed fixture step and return its complete receipt."""
+        with (directory / 'executions.txt').open('a') as output:
+            output.write(str(step) + '\n')
+        return f'receipt-{step} ' + tail + ' x' * BACKGROUND_RECEIPT_REPEATS
+    binding = litellm_harness.RUNTIME_BINDINGS[job['harness']]
+    litellm_harness.RUNTIME_BINDINGS[job['harness']] = SimpleNamespace(
+        sandbox_factory=binding.sandbox_factory, in_process=binding.in_process,
+        instructions=binding.instructions, options_factory=binding.options_factory,
+        tools=lambda cwd, config: [background_step] if binding.in_process else [])
+    factory = litellm.aagent_session
+    def capture(*args, **kwargs):
+        session = factory(*args, **kwargs)
+        native_sessions.append(session)
+        return session
+    litellm.aagent_session = capture
+    relay = BrokerRelay(job['remote'], job['capability']).start()
+    store = ContextStore(directory.parent / 'live-context.sqlite3', job['run_id'])
+    store.initialize([])
+    agent = create_agent(job['harness'], spec={'model': job['model'], 'timeout': 90, 'max_iterations': 50},
+        relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': job['capability']}}}},
+        activity=SimpleNamespace(start=lambda *args: events.append(('start', args[0])),
+            complete=lambda *args: events.append(('complete', args[0])), commentary=lambda text: None),
+        step=lambda: None, cwd=str(directory), context_store=store)
+    try:
+        result = agent.run_conversation('Perform each fixture step once, preserving all new results.',
+            conversation_history=[], system_message='Execute the requested fixture tools and retain their receipts.')
+        print('BACKGROUND_PROOF ' + json.dumps({'completed': result['completed'],
+            'final_response': result['final_response'], 'sessions': len(native_sessions), 'events': events,
+            'pending': bool(store.pending or agent.journal.pending),
+            'summary_visible': job['summary_marker'] in ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))}))
+    finally:
+        agent.close()
+        store.close()
+        relay.close()
+
+
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+def test_real_litellm_background_compaction_preserves_native_tools(workspace, tmp_path, monkeypatch, harness):
+    """Pinned runtimes keep executing tools through the real broker while summarizing."""
+    pytest.importorskip('litellm.harness')
+    import importlib.metadata
+    import shlex
+    import shutil
+    import subprocess
+    import sys
+    import litellm
+    from sandbox.harness_dependencies import LITELLM_REVISION, runtime_version
+    from test_codex_sdk_transport import background_gateway
+
+    revision = subprocess.check_output(['git', '-C', str(Path(litellm.__file__).parent.parent),
+                                       'rev-parse', 'HEAD'], text=True).strip()
+    assert revision == LITELLM_REVISION
+    if harness == 'opencode':
+        if not shutil.which('opencode'):
+            pytest.skip('Pinned OpenCode binary is not installed')
+        assert runtime_version('opencode') == '1.18.35'
+    if harness == 'deepagents':
+        pytest.importorskip('deepagents')
+        assert importlib.metadata.version('deepagents') == '0.7.22'
+        assert importlib.metadata.version('langchain-litellm') == '0.11.0'
+    directory = tmp_path / 'live-tools'
+    directory.mkdir()
+    executions = directory / 'executions.txt'
+    steps = 0
+
+    def upstream(body, state):
+        nonlocal steps
+        names = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
+        tool_name = 'bash' if harness == 'opencode' else 'background_step'
+        message = {'role': 'assistant', 'content': 'background-tools-ok'}
+        if tool_name in names and steps < BACKGROUND_STEPS:
+            steps += 1
+            arguments = {'step': steps, 'tail': state.tail_marker}
+            if harness == 'opencode':
+                script = ('import pathlib; pathlib.Path("executions.txt").open("a").write('
+                    + repr(str(steps) + '\n') + '); print(' + repr(f'receipt-{steps} ' + state.tail_marker)
+                    + f" + ' x' * {BACKGROUND_RECEIPT_REPEATS})")
+                arguments = {'command': shlex.quote(sys.executable) + ' -c ' + shlex.quote(script),
+                             'description': f'Write receipt {steps}'}
+            message['content'] = None
+            message['tool_calls'] = [{'id': f'background-{steps}', 'type': 'function',
+                'function': {'name': tool_name, 'arguments': json.dumps(arguments)}}]
+        return background_chat_response(body, message, len(state.requests))
+
+    with background_gateway(tmp_path, monkeypatch, workspace, harness, upstream) as state:
+        job = {'harness': harness, 'directory': str(directory), 'remote': state.relay.remote,
+            'capability': state.capability, 'model': state.app.state.settings.agent_model,
+            'run_id': state.run['id'], 'summary_marker': state.summary_marker}
+        script = 'import sys; sys.path.insert(0, ' + repr(str(Path(__file__).parent)) + "); from test_harnesses import background_litellm_worker; background_litellm_worker()"
+        result = subprocess.run([sys.executable, '-c', script], input=json.dumps(job),
+            capture_output=True, text=True, timeout=120)
+        assert result.returncode == 0, result.stdout + result.stderr
+        proof = json.loads(next(line.removeprefix('BACKGROUND_PROOF ') for line in result.stdout.splitlines()
+                                if line.startswith('BACKGROUND_PROOF ')))
+        assert proof['completed'], (proof, len(state.requests), len(state.summaries), state.held_calls, len(state.projections))
+        assert proof['sessions'] == 1, 'Compaction restarted the native session'
+        assert state.held_calls >= 2 and state.projections and not state.faults
+        assert state.tail_marker not in json.dumps(state.summaries[0])
+        assert executions.read_text().splitlines() == [str(index) for index in range(1, BACKGROUND_STEPS + 1)]
+        started = [call for event, call in proof['events'] if event == 'start']
+        completed = [call for event, call in proof['events'] if event == 'complete']
+        assert len(started) == len(set(started)) == BACKGROUND_STEPS and sorted(started) == sorted(completed)
+        assert not proof['pending'] and not proof['summary_visible']
+        assert state.summary_marker not in json.dumps(state.original)
+        print(f'{harness}: {len(state.requests)} foreground calls, {state.held_calls} while summary held, '
+              f'{len(state.projections)} projected calls, {BACKGROUND_STEPS} tool receipts, one native session')
+
+
 @pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
 @pytest.mark.parametrize('boundary', ['startup', 'later_stream'])
 def test_real_litellm_first_request_fence_retains_each_prompt(tmp_path, monkeypatch, harness, boundary):

@@ -238,6 +238,7 @@ def create_app(settings: Settings | None = None):
             await memory_review.close()
             await spend.recovery.close()
             await harness_gateway.maintenance.close()
+            await harness_gateway.live_context.close()
             await computer.close()
             await session_pull_requests.close()
             await session_titles.close()
@@ -1065,10 +1066,11 @@ def create_app(settings: Settings | None = None):
         if model_slots.locked():
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
+        prepared = await prepare_model(run_id, request)
         async with model_slots:
-            return await forward_model(run_id, request)
+            return await forward_model(run_id, request, *prepared)
 
-    async def forward_model(run_id: str, request: Request):
+    async def prepare_model(run_id: str, request: Request):
         run = require_run(run_id, request)
         try:
             selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])
@@ -1100,14 +1102,23 @@ def create_app(settings: Settings | None = None):
                 if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
         try:
-            checked_budget = await context_budget.check(payload, scope=run_id + '/v1/chat/completions')
+            payload, checked_budget = await harness_gateway.live_context.prepare(
+                run, request, payload, '/v1/chat/completions')
         except ContextPressure as exc:
             store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
             await checkpoints.flush()
             raise
-        require_run(run_id, request)
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
-                                 (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
+        return run, body, payload, checked_budget
+
+    async def forward_model(run_id: str, request: Request, run, body, payload, checked_budget):
+        selected_model = payload['model']
+        harness_gateway.live_context.require_current(run, request, selected_model)
+        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
+            "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
+            "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ? "
+            "AND active_user_id IS ? AND active_model IS ? AND (coalesce(active_model,'')!='' OR model IS ?)",
+            (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3,
+             run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
         request_id = spend.begin(run, selected_model)
@@ -1122,12 +1133,14 @@ def create_app(settings: Settings | None = None):
         payload.pop('stream_options', None)
         await checkpoints.flush()
         capture = UsageCapture(False)
-        status = 'unknown'
+        status = 'failed'
         trace_started = time.time_ns()
         trace_response = {}
         gateway_id = ''
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
+                harness_gateway.live_context.require_current(run, request, selected_model)
+                status = 'unknown'
                 async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
                                          json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
                     gateway_id = spend.headers(request_id, upstream, False)

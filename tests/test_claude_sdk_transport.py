@@ -17,6 +17,11 @@ from sandbox.context_store import ContextStore
 from test_workspace import workspace as broker_workspace
 
 
+def test_claude_background_compaction_keeps_running_sdk_and_new_tail(tmp_path, monkeypatch, broker_workspace):
+    from test_codex_sdk_transport import native_background_case
+    native_background_case(tmp_path, monkeypatch, broker_workspace, 'claude-agent-sdk', progress=print)
+
+
 def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
     """Real SDK/MCP recovery proof, also callable by the local recording demo."""
     from sandbox.broker_relay import BrokerRelay

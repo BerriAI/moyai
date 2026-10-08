@@ -171,7 +171,8 @@ class ClaudeAgent(HarnessAgent):
             # The SDK accepts a minimum 100k window. A percentage also covers
             # smaller deployments. Neither setting caps generated output.
             window = max(100_000, self.compaction_window)
-            env.update(DISABLE_COMPACT='0', DISABLE_AUTO_COMPACT='0',
+            background = getattr(ctx.relay, 'live_compaction', False)
+            env.update(DISABLE_COMPACT='1' if background else '0', DISABLE_AUTO_COMPACT='1' if background else '0',
                 CLAUDE_CODE_AUTO_COMPACT_WINDOW=str(window),
                 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=str(max(1, min(80, self.compaction_window * 80 // window))))
         return ClaudeAgentOptions(

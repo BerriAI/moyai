@@ -11,7 +11,9 @@ from types import SimpleNamespace
 import pytest
 
 from sandbox.codex_harness import CodexAgent
+from sandbox.broker_relay import BrokerRelay
 from sandbox.context_store import ContextStore, ContextUnavailable
+from test_workspace import workspace as broker_workspace
 
 
 def send_response(handler, output, sequence, input_tokens=500):
@@ -30,6 +32,284 @@ def send_response(handler, output, sequence, input_tokens=500):
     handler.send_header('Content-Length', str(len(raw)))
     handler.end_headers()
     handler.wfile.write(raw)
+
+
+def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upstream,
+                       progress=lambda text: None):
+    """Real broker/relay and a delayed provider, shared by installed SDK proofs."""
+    import asyncio
+    from contextlib import contextmanager
+    import httpx
+    from app.context_budget import ModelContextLimits
+    from app.context_compaction import INSTRUCTIONS, PRIVATE_INSTRUCTIONS
+    from app.security import digest
+    from sandbox.broker_transport import unseal
+
+    @contextmanager
+    def running():
+        app, client = broker_workspace
+        model = 'anthropic/claude-opus-5-5' if harness == 'claude-agent-sdk' else 'openai/gpt-6-astra'
+        capability = 'background-fixture-capability'
+        app.state.settings.agent_model = model
+        app.state.settings.litellm_api_base = 'http://background-provider.test'
+        app.state.settings.max_agent_iterations = 100
+        run = app.state.store.create_run('Continue each tool once.', '', 'modal', [],
+            harness=harness, model=model, chat_enabled=True, user_id='google:background-fixture')
+        app.state.store.claim_message(run['id'])
+        app.state.store.update_run(run['id'], status='running', token_hash=digest(capability))
+        async def limits(model):
+            window = 280000 if harness == 'claude-agent-sdk' else 200000
+            return ModelContextLimits(context_window=window, max_input_tokens=window,
+                                      max_output_tokens=128000, default_output_tokens=4096)
+        monkeypatch.setattr(app.state.context_budget, 'limits', limits)
+        state = SimpleNamespace(app=app, run=run, requests=[], original=[], summaries=[],
+            service_requests=[], counter_requests=[], public_summaries=0,
+            held_calls=0, projections=[], summary_started=threading.Event(),
+            release=threading.Event(), summary_done=False, tail_marker='', faults=[],
+            summary_marker='private-background-summary-marker', message_seq=0)
+
+        async def upstream(request):
+            state.service_requests.append(request.url.path)
+            body = json.loads(request.content)
+            if request.url.path == '/utils/token_counter':
+                state.counter_requests.append(body)
+                count = sum(len(block['text'].encode()) for message in body['messages']
+                    for block in message['content'] if block['type'] == 'text')
+                return httpx.Response(200, json={'total_tokens': max(1, count),
+                                                'tokenizer_type': 'fixture_utf8'})
+            assert request.url.path in {'/v1/messages', '/v1/responses',
+                                         '/v1/chat/completions', '/chat/completions'}
+            instructions = body.get('messages', [{}])[0].get('content', '')
+            if isinstance(instructions, str) and instructions.startswith(PRIVATE_INSTRUCTIONS):
+                state.summaries.append(body)
+                if len(state.summaries) == 1:
+                    state.summary_started.set()
+                    progress('Background summary started; foreground inference remains available.')
+                    try:
+                        async with asyncio.timeout(20):
+                            while not state.release.is_set():
+                                await asyncio.sleep(0.005)
+                    finally:
+                        state.summary_done = True
+                source = json.dumps(body)
+                sessions = re.findall(r'session_id\\*"\s*:\s*(\d+)', source)
+                summary = state.summary_marker + ' Preserve the task and completed tools. '
+                if sessions:
+                    summary += 'The original command is still running: ' + json.dumps({'session_id': int(sessions[0])})
+                if state.tail_marker and state.tail_marker in source:
+                    summary += ' ' + state.tail_marker
+                return httpx.Response(200, json={'choices': [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': summary}}],
+                    'usage': {'prompt_tokens': 500, 'completion_tokens': 50, 'total_tokens': 550}})
+            if isinstance(instructions, str) and instructions.startswith(INSTRUCTIONS):
+                state.public_summaries += 1
+                return httpx.Response(200, json={'choices': [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': 'Completed fixture tools remain in their saved receipts.'}}],
+                    'usage': {'prompt_tokens': 500, 'completion_tokens': 20, 'total_tokens': 520}})
+            state.requests.append(body)
+            if state.summary_started.is_set() and not state.summary_done:
+                state.held_calls += 1
+                if not state.tail_marker:
+                    state.tail_marker = 'tail-added-while-summarizing'
+                progress(f'Foreground request {len(state.requests)} proceeds while summary is held.')
+                if state.held_calls >= 2:
+                    state.release.set()
+            text = json.dumps(body)
+            if state.summary_marker in text:
+                assert state.tail_marker in text, 'Installing the prefix summary discarded the new tail'
+                state.projections.append(body)
+            return on_upstream(body, state)
+
+        original_init = httpx.AsyncClient.__init__
+        def initialize_client(self, *args, **kwargs):
+            kwargs['mounts'] = {**(kwargs.get('mounts') or {}),
+                               'http://background-provider.test': httpx.MockTransport(upstream)}
+            original_init(self, *args, **kwargs)
+        monkeypatch.setattr(httpx.AsyncClient, '__init__', initialize_client)
+
+        class Bridge(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def forward(self):
+                raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                if self.path in {'/v1/responses', '/v1/messages', '/v1/chat/completions'}:
+                    state.original.append(json.loads(unseal(capability, self.path, raw)))
+                headers = {name: self.headers[name] for name in
+                    ('Authorization', 'Content-Type', 'anthropic-version', 'anthropic-beta') if name in self.headers}
+                response = client.request(self.command, '/broker/' + run['id'] + self.path,
+                                          content=raw, headers=headers)
+                if response.status_code >= 400:
+                    progress(f'Fixture broker {self.path}: HTTP {response.status_code} {response.text[:250]}')
+                    if state.original:
+                        progress('Requested output allowance: ' + str(state.original[-1].get('max_tokens')))
+                self.send_response(response.status_code)
+                for name, value in response.headers.items():
+                    if name.lower() not in {'content-length', 'connection', 'transfer-encoding'}:
+                        self.send_header(name, value)
+                self.send_header('Content-Length', str(len(response.content)))
+                self.end_headers()
+                self.wfile.write(response.content)
+            do_GET = do_POST = forward
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Bridge)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
+        relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', capability,
+                            report_error=state.faults.append).start()
+        state.relay, state.capability = relay, capability
+        try:
+            yield state
+        finally:
+            state.release.set()
+            relay.close()
+            server.shutdown()
+            server.server_close()
+    return running()
+
+
+def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, progress=lambda text: None,
+                           *, expect_background=True):
+    """A held summary overlaps real native tools without replacing their runtime."""
+    from dataclasses import replace
+    from io import BytesIO
+    import httpx
+    from sandbox.claude_harness import ClaudeAgent
+    from test_claude_native_compaction import send_message
+
+    workspace = tmp_path / 'native-tools'
+    workspace.mkdir()
+    executions = workspace / 'executions.txt'
+    (workspace / 'held.py').write_text(
+        'import pathlib,time\n'
+        'with pathlib.Path("executions.txt").open("a") as f: f.write("held\\n")\n'
+        'while not pathlib.Path("release").exists(): time.sleep(0.02)\n'
+        'print("original-command-finished", flush=True)\n')
+    events, sessions = [], []
+    command_session = None
+    codex = harness == 'codex'
+    tool_steps = 16 if codex else 24
+    # Each Codex receipt includes the command input and output. Keep those
+    # increments small enough for two more calls inside the 25% headroom.
+    # Claude's native Read truncates long lines; give it enough real reads
+    # to exercise the projected history after crossing the same threshold.
+    receipt_repeats = 2500 if codex else 4500
+
+    def upstream(body, state):
+        nonlocal command_session
+        sequence = len(state.requests)
+        pipe = SimpleNamespace(server=state, wfile=BytesIO(), send_response=lambda *a: None,
+            send_header=lambda *a: None, end_headers=lambda: None)
+        text = json.dumps(body)
+        if codex:
+            sessions.append(state.original[-1]['client_metadata']['thread_id'])
+            handles = re.findall(r'session_id\\*"\s*:\s*(\d+)', text)
+            if handles and command_session is None:
+                command_session = int(handles[0])
+            if sequence == 1:
+                code = 'text(await tools.exec_command(' + json.dumps({
+                    'cmd': shlex.quote(sys.executable) + ' held.py', 'tty': True,
+                    'login': False, 'yield_time_ms': 1000}) + '));'
+            elif sequence <= tool_steps + 1:
+                step = sequence - 1
+                script = ('import pathlib; '
+                    f'pathlib.Path("executions.txt").open("a").write("step-{step}\\n"); '
+                    + 'print(' + repr(f'receipt-{step} ' + state.tail_marker + ' x' * receipt_repeats) + ')')
+                code = 'text(await tools.exec_command(' + json.dumps({
+                    'cmd': shlex.quote(sys.executable) + ' -c ' + shlex.quote(script),
+                    'login': False, 'yield_time_ms': 1000, 'max_output_tokens': 5000}) + '));'
+            elif sequence == tool_steps + 2:
+                assert (state.projections or not expect_background) and command_session in [int(value) for value in handles]
+                (workspace / 'release').touch()
+                code = 'text(await tools.write_stdin(' + json.dumps({
+                    'session_id': command_session, 'chars': '', 'yield_time_ms': 1000}) + '));'
+            else:
+                assert sequence == tool_steps + 3 and 'original-command-finished' in text
+                code = None
+            block = ({'type': 'custom_tool_call', 'id': f'code_{sequence}', 'call_id': f'code_{sequence}',
+                'name': 'exec', 'namespace': 'functions', 'input': code} if code else
+                {'type': 'message', 'id': 'final', 'role': 'assistant', 'phase': 'final_answer',
+                 'status': 'completed', 'content': [{'type': 'output_text', 'text': 'background-native-ok'}]})
+            send_response(pipe, block, sequence, input_tokens=len(text) // 4)
+        else:
+            sessions.append(json.loads(state.original[-1]['metadata']['user_id'])['session_id'])
+            if sequence <= tool_steps:
+                receipt = workspace / f'receipt-{sequence}.txt'
+                receipt.write_text(f'receipt-{sequence} ' + state.tail_marker + ' x' * receipt_repeats)
+                block = {'type': 'tool_use', 'id': f'read_{sequence}', 'name': 'Read',
+                         'input': {'file_path': str(receipt)}}
+            else:
+                assert sequence == tool_steps + 1 and (state.projections or not expect_background)
+                block = {'type': 'text', 'text': 'background-native-ok'}
+            send_message(pipe, body, block, {'input_tokens': len(text) // 4, 'output_tokens': 100})
+        return httpx.Response(200, content=pipe.wfile.getvalue(), headers={'Content-Type': 'text/event-stream'})
+
+    with background_gateway(tmp_path, monkeypatch, broker_workspace, harness, upstream, progress) as state:
+        store = ContextStore(tmp_path / 'native-context.sqlite3', state.run['id'])
+        store.initialize([])
+        cls = CodexAgent if codex else ClaudeAgent
+        agent = cls(spec={'model': state.app.state.settings.agent_model, 'timeout': 60,
+            'max_iterations': tool_steps + 10},
+            relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
+            activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
+                complete=lambda *args: events.append(('complete', args)), commentary=progress),
+            step=lambda: None, cwd=str(workspace), definition=None, context_store=store)
+        if not codex:
+            options = agent.options
+            agent.options = lambda system: replace(options(system), tools=['Read'], allowed_tools=['Read'], mcp_servers={})
+        try:
+            from sandbox.context_store import ContextUnavailable
+            try:
+                result = agent.run_conversation('Perform the fixture steps once and preserve the current task.',
+                    conversation_history=[], system_message='Keep each tool receipt. Do not repeat completed actions.')
+            except ContextUnavailable as exc:
+                if expect_background:
+                    raise
+                result = {'completed': False, 'final_response': str(exc)}
+            if not expect_background:
+                assert not result['completed'], 'This baseline completed; do not label it a reproduced failure'
+                assert not state.summaries and not state.held_calls and not state.projections
+                pending = len(store.pending)
+                progress(f'BASELINE {harness}: {len(state.requests)} foreground calls, '
+                         f'{len(state.service_requests)} total provider requests, {pending} pending tool(s); '
+                         + result['final_response'])
+                return {'completed': False, 'foreground_calls': len(state.requests), 'overlap': 0,
+                        'provider_calls': len(state.service_requests), 'pending': pending,
+                        'failure': result['final_response'], 'projections': 0}
+            assert result['completed'], (result['final_response'], state.faults, len(state.requests), len(state.summaries))
+            assert result['final_response'] == 'background-native-ok'
+            assert state.held_calls >= 2 and state.projections and not state.faults
+            assert len(state.original) == len(state.requests) == tool_steps + (3 if codex else 1)
+            assert len(state.service_requests) == (len(state.requests) + len(state.summaries)
+                                                   + state.public_summaries + len(state.counter_requests))
+            assert len(set(sessions)) == 1, 'Compaction replaced the native runtime'
+            assert not store.pending
+            started = [args[0] for kind, args in events if kind == 'start']
+            completed = [args[0] for kind, args in events if kind == 'complete']
+            assert len(started) == len(set(started)) == tool_steps + int(codex)
+            assert sorted(started) == sorted(completed)
+            assert state.tail_marker not in json.dumps(state.summaries[0])
+            assert state.summary_marker not in json.dumps(state.original)
+            assert state.summary_marker not in ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
+            if codex:
+                assert 'You are performing a CONTEXT CHECKPOINT COMPACTION.' not in json.dumps(state.original)
+                assert executions.read_text().splitlines() == ['held', *[f'step-{i}' for i in range(1, tool_steps + 1)]]
+            else:
+                assert agent.native_compactions == 0
+            progress(f'PASS {harness}: {len(state.requests)} foreground calls, {state.held_calls} while summary held; '
+                     f'{len(state.service_requests)} total provider requests; {len(completed)} receipts, '
+                     'one native session, preserved new tail.')
+            return {'foreground_calls': len(state.requests), 'overlap': state.held_calls,
+                    'provider_calls': len(state.service_requests),
+                    'receipts': len(completed), 'projections': len(state.projections)}
+        finally:
+            (workspace / 'release').touch()
+            agent.close()
+            store.close()
+
+
+def test_codex_background_compaction_preserves_running_command(tmp_path, monkeypatch, broker_workspace):
+    native_background_case(tmp_path, monkeypatch, broker_workspace, 'codex', progress=print)
 
 
 @pytest.mark.parametrize('outcome', [
