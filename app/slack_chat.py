@@ -11,6 +11,7 @@ from uuid import uuid4
 from agentchat.models import Message, Sender
 
 from .db import now
+from .file_links import file_link
 from .progress import active_turn
 from .pr_delivery import link_captures, select_captures, select_prs
 from .security import digest
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 USER_MENTION = re.compile(r'<@([UW][A-Z0-9]{7,30})(?:\|[^>\n]*)?>')
 
 
-def slack_text(text, mentions=frozenset()):
+def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
     """Format replies without letting model text trigger Slack mentions/unfurls.
 
     Only user IDs in ``mentions`` (already mentioned by people in the thread)
@@ -37,16 +38,28 @@ def slack_text(text, mentions=frozenset()):
         return f'<@{match[1]}>' if match[1] in mentions else match[0]
     def link(match):
         label, url = match.groups()
+        if not url.startswith(('https://', 'http://')):
+            url = file_link(public_url, run_id, html.unescape(url))
+            if not url:
+                return match[0]
+            url = html.escape(url, quote=False)
         if len(url) > 1500:
             return label
         return '<' + url + '|' + label.replace('|', '¦') + '>'
-    # Preserve code verbatim; convert only the surrounding Markdown.
+    # Preserve fenced examples; standalone inline Markdown filenames are links.
     pieces = re.split(r'(```[\s\S]*?```|`[^`\n]+`)', text)
     for i in range(0, len(pieces), 2):
-        value = re.sub(r'!?\[([^\]\n]+)\]\((https?://[^\s)<>]+)\)', link, pieces[i])
+        value = re.sub(r'!?\[([^\]\n]+)\]\(([^\s)<>]+)\)', link, pieces[i])
         value = re.sub(r'&lt;@([UW][A-Z0-9]{7,30})&gt;', mention, value)
         value = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', value, flags=re.M)
         pieces[i] = re.sub(r'\*\*(.+?)\*\*', r'*\1*', value)
+    for i in range(1, len(pieces), 2):
+        if pieces[i].startswith('```'):
+            continue
+        label = pieces[i][1:-1]
+        url = file_link(public_url, run_id, html.unescape(label))
+        if url:
+            pieces[i] = '<' + html.escape(url, quote=False) + '|' + label.replace('|', '¦') + '>'
     return ''.join(pieces)
 
 
@@ -56,6 +69,12 @@ def split_reply(text, limit=2600):
         end = len(text) if len(text) <= limit else text.rfind('\n', 0, limit)
         if end < limit // 2 and len(text) > limit:
             end = limit
+        # A generated file URL may occupy most of a chunk. Keep Slack's link
+        # token intact when a long paragraph would otherwise split it in two.
+        for match in re.finditer(r'<https?://[^>]+>', text):
+            if match.start() < end < match.end() and match.end() - match.start() <= limit:
+                end = match.start() or match.end()
+                break
         part, text = text[:end], text[end:].lstrip('\n')
         in_fence = opened ^ (part.count('```') % 2 == 1)
         chunks.append(('```\n' if opened else '') + part + ('\n```' if in_fence else ''))
@@ -391,19 +410,34 @@ class SlackChat:
                 if binding['channel'].startswith('D') and not conn.execute(
                     "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():
                     value += '\n\nThis conversation also appears in Moyai, where signed-in BerriAI teammates can view it.'
+                mentions = self.mentionable_in(conn, run_id)
+                parts = reply_parts(value, lambda text: slack_text(
+                    text, mentions, public_url=self.settings.public_url, run_id=run_id), split_reply)
+                table_parts = parts if any(blocks for _, blocks in parts) else None
                 if media:
                     self.queue(conn, run_id, f"answer:{message['id']}:media", 'answer',
                                'Saved demo captures.\n\n' + self.link(run_id),
                                {'captures': [item.model_dump() for item in media]})
-                mentions = self.mentionable_in(conn, run_id)
-                chunks = reply_parts(value, lambda text: slack_text(text, mentions), split_reply)
-                for index, (chunk, blocks) in enumerate(chunks):
+                chunks = split_reply(slack_text(value, self.mentionable_in(conn, run_id),
+                                               public_url=self.settings.public_url, run_id=run_id))
+                for index, chunk in enumerate(chunks):
                     suffix = '\n\n' + self.link(run_id) if index == len(chunks) - 1 else ''
-                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
-                    if blocks:
-                        metadata['blocks'] = blocks
-                    self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
+                    metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else None
+                    if table_parts:
+                        # Queue the structured answer once; text chunks remain the fallback.
+                        if index == 0:
+                            self.queue_table_parts(conn, run_id, message['id'], table_parts, prs)
+                    else:
+                        self.queue(conn, run_id, f"answer:{message['id']}:{index}", 'answer', chunk + suffix, metadata)
             conn.execute('UPDATE slack_threads SET last_message_id=? WHERE run_id=?', (message['id'], run_id))
+
+    def queue_table_parts(self, conn, run_id, message_id, parts, prs):
+        for index, (chunk, blocks) in enumerate(parts):
+            suffix = '\n\n' + self.link(run_id) if index == len(parts) - 1 else ''
+            metadata = {'pull_requests': [pr.model_dump() for pr in prs]} if suffix and prs else {}
+            if blocks:
+                metadata['blocks'] = blocks
+            self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
 
     def collect(self):
         enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled

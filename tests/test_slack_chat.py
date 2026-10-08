@@ -1217,11 +1217,13 @@ def test_deleted_slack_binding_cannot_continue_or_be_readopted(slack_app):
 
 def test_answer_delivers_native_table_in_thread_with_session_link(slack_app):
     app, _, run_id = start(slack_app)
-    finish(app, run_id, 'Measurements\n\n| Phase | Time |\n| --- | ---: |\n| ASGI entry | 3.32 |')
+    finish(app, run_id, '[Measurements](/workspace/report.md)\n\n| Phase | Time |\n| --- | ---: |\n| ASGI entry | 3.32 |')
     # Each outbox message is rate limited; wait for the prose before the table.
     wait_for(lambda: any('Measurements' in message.get('text', '') for message in slack_app[3]))
     wait_for(lambda: any(any(b['type'] == 'table' for b in message.get('blocks', []))
                          for message in slack_app[3]))
+    prose = next(message for message in slack_app[3] if 'Measurements' in message.get('text', ''))
+    assert f'#run={run_id}&amp;file=%2Fworkspace%2Freport.md|Measurements>' in prose['text']
     posted = next(message for message in slack_app[3]
                   if any(b['type'] == 'table' for b in message.get('blocks', [])))
     assert posted['channel'] == 'C12345678' and posted['thread_ts'] == ROOT
