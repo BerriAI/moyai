@@ -10,11 +10,11 @@ import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import httpx
 
 from app.config import Settings
-from app.main import create_app
 
 
 async def evaluate(model, directory):
@@ -22,6 +22,11 @@ async def evaluate(model, directory):
     values.update(data_dir=directory, public_url='http://127.0.0.1:8797', agent_model=model,
         litellm_api_base=os.environ['GATEWAY_BASE_URL'], litellm_api_key=os.environ['GATEWAY_API_KEY'],
         session_titles_enabled=False, auto_prepare_repositories=False, memory_review_idle_seconds=0)
+    # app.main constructs a module-level app during import. Isolate that too,
+    # before it can inspect production paths or initialize cloud storage.
+    with patch.dict(os.environ, {'DATA_DIR': str(directory / 'bootstrap'),
+                                 'PUBLIC_URL': values['public_url']}, clear=True):
+        from app.main import create_app
     app = create_app(Settings(_env_file=None, **values))
     store, memory, service = app.state.store, app.state.memory, app.state.memory_review
     owner = store.identity({'method': 'local', 'role': 'admin'})
