@@ -106,6 +106,21 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 .model-picker select:focus-visible { outline: none; }
 .model-picker:focus-within { outline: 2px solid var(--purple); outline-offset: 1px; }
 .model-picker select:disabled { cursor: default; opacity: .55; }
+/* Custom model menu uses the top layer so composers cannot clip it. */
+.custom-model-picker { padding: 0; }
+.custom-model-picker select[hidden] { display: none; }
+.model-picker-trigger { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; height: 28px; padding: 0 6px 0 8px; border: 0; border-radius: 7px; background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+.model-picker-value { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-trigger:hover { background: var(--soft); }
+.model-picker-trigger:focus-visible { outline: 2px solid var(--purple); outline-offset: 1px; }
+.model-picker-trigger:disabled { opacity: .55; cursor: default; }
+.model-picker-menu { position: fixed; inset: auto; margin: 0; padding: 4px; width: max-content; min-width: 200px; max-width: calc(100vw - 16px); max-height: min(320px, calc(100dvh - 16px)); overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: white; color: var(--text); box-shadow: 0 8px 24px #28282b26; }
+.model-picker-menu [role="option"] { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 36px; padding: 8px; border: 0; border-radius: 4px; background: transparent; color: var(--text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.model-picker-menu [role="option"] > span:not(.model-picker-check) { overflow-wrap: anywhere; }
+.model-picker-menu [role="option"]:hover, .model-picker-menu [role="option"]:focus-visible { background: var(--soft); outline: 2px solid var(--purple); outline-offset: -2px; }
+.model-picker-menu [aria-selected="true"] { background: var(--brand-selected); }
+.model-picker-check { margin-left: auto; width: 16px; color: var(--purple); }
+@media (max-width: 480px) { .model-picker-value { max-width: 104px; } .model-picker-menu [role="option"] { min-height: 44px; } }
 .picker-chevron { display: inline-flex; color: #a9a4b1; pointer-events: none; }
 .composer-model { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 0 8px; color: #3f3a47; }
 .composer-model .harness-logo { width: 14px; height: 14px; flex: none; }
