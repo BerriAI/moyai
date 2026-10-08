@@ -313,6 +313,45 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
         assert result['sdk_failure']['exception_type'] == 'TimeoutError'
 
 
+@pytest.mark.parametrize('outcome', ['receipt', 'unknown', 'stop', 'deadline'])
+def test_context_receipt_drain_preserves_unknowns_and_respects_stop(codex_agent, monkeypatch, outcome):
+    from openai_codex.errors import TransportClosedError
+    agent, events, store = codex_agent
+    started, finished = native_item('commandExecution')
+    agent.record_item(started, completed=False)
+    monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.15)
+    reads = []
+
+    class Client:
+        async def next_turn_notification(self, turn_id):
+            reads.append(turn_id)
+            if len(reads) == 1:
+                # Even an output for this exact ID is not a durable receipt.
+                return sdk_event('rawResponseItem/completed', {'item': {
+                    'type': 'custom_tool_call_output', 'call_id': started['id'],
+                    'output': 'raw-private-marker'}})
+            if outcome == 'stop':
+                agent.interrupt()
+            if outcome == 'receipt' and turn_id == 'original':
+                return sdk_event('item/completed', {'item': finished})
+            raise TransportClosedError('Turn is no longer streaming')
+
+    async def drain():
+        if outcome == 'deadline':
+            # The enclosing task deadline wins over the receipt grace period.
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(0.02):
+                    await agent.settle_context_receipts(Client(), ['settlement', 'original'])
+        else:
+            await agent.settle_context_receipts(Client(), ['settlement', 'original'])
+
+    asyncio.run(drain())
+    assert bool(agent.journal.pending) == bool(store.pending) == (outcome != 'receipt')
+    assert agent.journal.completed_tools == int(outcome == 'receipt')
+    assert agent.model_calls == 0
+    assert 'raw-private-marker' not in json.dumps([agent.journal.messages, events, store.history()])
+
+
 def test_native_restart_accepts_reused_message_ids(codex_agent, monkeypatch):
     agent, events, store = codex_agent
     invocation = 0

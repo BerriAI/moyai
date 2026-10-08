@@ -408,7 +408,7 @@ class DurableRunner(RunManager):
     def startup_retry_allowed(self, run, state):
         marker = state.get('result', {}).get('startup_retry')
         return (isinstance(marker, dict) and marker.get('version') == 1
-                and marker.get('stage') in {'workspace_tools', 'attachments', 'repository_metadata'}
+                and marker.get('stage') in {'workspace_tools', 'attachments', 'repository_metadata', 'context_window'}
                 and marker.get('reason') in {'network', 'HTTP 408', 'HTTP 425', 'HTTP 429',
                                              'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504'}
                 and state.get('exit_code') == 75 and not state.get('execution_started')

@@ -71,7 +71,7 @@ def run(spec):
     try:
         return run_agent(spec, relay)
     except StartupUnavailable as exc:
-        # This typed result is produced only before run_conversation. Never
+        # This typed result is produced only before journal/model work. Never
         # infer replay safety from a generic process failure or missing answer.
         emit('final', str(exc), completed=False,
              startup_retry={'version': 1, 'stage': exc.stage, 'reason': exc.reason})
@@ -232,15 +232,22 @@ def _run_agent(spec, relay):
                       "The files may be from an older turn. Use the saved chat below for context, inspect files before claiming "
                       "changes exist, and verify external actions before considering a retry.\n\nCURRENT REQUEST:\n" + prompt)
         prompt += resumed_context(spec)
-        emit('status', 'Workspace connected. Starting agent work.', {'activity_version': 1, 'phase': 'execution_started'})
-        relay.steering = steering
         def steering_update():
             global ACTIVITY_INPUT_ID
             if getattr(steering, 'latest_input_id', None) is not None:
                 ACTIVITY_INPUT_ID = steering.latest_input_id
             emit('status', 'Updating the current task with your message.' if not steering.requested else
                  'Saving before switching requester or model.', {'activity_version': 1, 'phase': 'steering'})
-        steering.listen(agent, steering_update)
+        def start_execution():
+            # Context reads may reconnect before any journal/input/model work.
+            # Publish readiness once; later goal rounds remain executing.
+            relay.on_context_ready = None
+            emit('status', 'Workspace connected. Starting agent work.', {'activity_version': 1, 'phase': 'execution_started'})
+            relay.steering = steering
+            steering.listen(agent, steering_update)
+        relay.on_context_ready = start_execution
+        if not definition.durable_context or goal.control_reply:
+            start_execution()
         system_message = (
             "You are Moyai, an internal engineering agent in an ongoing chat session. Work only within /workspace. "
             "You may read saved conversation references under /session when the current prompt points to them. "

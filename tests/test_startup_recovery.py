@@ -244,6 +244,91 @@ def test_reconnecting_capability_still_works_and_stop_revokes_it(workspace):
     assert client.get(f'/broker/{run_id}/tools', headers=headers).status_code == 401
 
 
+@pytest.mark.parametrize('harness,outcome', [
+    (harness, outcome) for harness in ('codex', 'claude-agent-sdk', 'opencode', 'deepagents', 'tool-loop')
+    for outcome in ('transient', 'exhausted')
+] + [('codex', outcome) for outcome in ('401', '403', 'invalid', 'late', 'followup', 'control', 'timeout')])
+def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, outcome):
+    from sandbox.context_store import ContextStore
+    from sandbox.harness_registry import resolve
+    from importlib import import_module
+    events, reads, invocations = [], [], []
+    def started():
+        return sum(data.get('phase') == 'execution_started' for _, data, _ in events)
+    class Gateway(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            assert self.path == '/context/window'
+            assert self.headers['Authorization'] == 'Bearer test-token'
+            reads.append(started())
+            unavailable = outcome == 'exhausted' or (outcome == 'transient' and len(reads) == 1) or (
+                outcome == 'late' and len(reads) > 1)
+            self.send_response(int(outcome) if outcome in {'401', '403'} else 502 if unavailable else 200)
+            self.end_headers()
+            self.wfile.write(json.dumps({'input_budget': 0 if outcome == 'invalid' else
+                                        64000 if not invocations else 32000}).encode())
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{}')  # Optional maintenance/native state unavailable.
+    async def invoke(runtime, prompt, system_message):
+        assert started() == 1
+        invocations.append(runtime.compaction_window)
+        runtime.journal.tool_started('write-once', 'write', {})
+        runtime.journal.tool_finished('write-once', 'saved-receipt')
+        runtime.journal.finish('Done')
+        return {'completed': True, 'final_response': 'Done', 'messages': runtime.journal.messages,
+                **({'pending_steer': 'Continue'} if len(invocations) == 1 and outcome in {'late', 'followup'} else {})}
+    definition = resolve(harness)
+    runtime_type = getattr(import_module('sandbox.' + definition.module), definition.factory)
+    monkeypatch.setattr(runtime_type, 'validate', lambda self: None)  # Dependencies are covered by SDK tests.
+    monkeypatch.setattr(runtime_type, '_run', invoke)  # Scripted inference, real startup/journal/HTTP.
+    if harness == 'opencode':
+        monkeypatch.setattr(runtime_type, 'prepare_native', lambda *args: None)
+    monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
+    monkeypatch.setattr(agent, 'emit', lambda kind, message, data=None, **extra: events.append((kind, data or {}, extra)))
+    monkeypatch.setattr(agent, 'computer_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
+    monkeypatch.setattr('sandbox.broker_relay.read_with_reconnect', lambda request, reader, **kwargs:
+        read_with_reconnect(request, reader, **kwargs, budget=0 if outcome in {'exhausted', 'late'} else 5,
+                            sleep=lambda seconds: None))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
+    monkeypatch.chdir(tmp_path)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    spec = {'run_id': 'context-startup', 'broker_url': f'http://127.0.0.1:{server.server_port}',
+            'repo_url': '', 'harness': harness, 'model': 'test', 'max_iterations': 0,
+            'timeout': 0.000001 if outcome == 'timeout' else None,
+            'prompt': '/goal status' if outcome == 'control' else 'Do the task'}
+    try:
+        if outcome in {'401', '403', 'invalid'}:
+            with pytest.raises(ValueError if outcome == 'invalid' else urllib.error.HTTPError):
+                agent.run(spec)
+            assert reads == [0] and not invocations and not started()
+        else:
+            assert agent.run(spec) == (75 if outcome == 'exhausted' else 1 if outcome in {'late', 'timeout'} else 0)
+            final = next(extra for kind, _, extra in reversed(events) if kind == 'final')
+            assert bool(final.get('startup_retry')) is (outcome == 'exhausted')
+            assert started() == (0 if outcome == 'exhausted' else 1)
+            if outcome == 'exhausted':
+                assert final['startup_retry'] == {'version': 1, 'stage': 'context_window', 'reason': 'HTTP 502'}
+                assert reads == [0] and not invocations
+            elif outcome in {'control', 'timeout'}:
+                assert not invocations and len(reads) == (0 if outcome == 'control' else 1)
+            else:
+                assert invocations == ([64000, 32000] if outcome == 'followup' else [64000])
+                assert reads == ([0, 0] if outcome == 'transient' else [0, 1])
+                store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
+                try:
+                    assert 'saved-receipt' in json.dumps(store.history()) and not store.pending
+                finally:
+                    store.close()
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
 def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     events, calls, workspace_tools = [], [], []
     class FakeAgent:
@@ -330,7 +415,7 @@ async def fail_startup_once(manager, cloud, run_id, *, report=None):
     return command
 
 
-@pytest.mark.parametrize('stage', ['workspace_tools', 'repository_metadata'])
+@pytest.mark.parametrize('stage', ['workspace_tools', 'repository_metadata', 'context_window'])
 async def test_retry_survives_restart_and_preserves_turn_model_author_queue_and_inputs(durable, stage):
     manager, cloud, run_id = durable
     manager.store.execute("UPDATE messages SET user_id='google:alice' WHERE run_id=?", (run_id,))
@@ -359,9 +444,10 @@ async def test_retry_survives_restart_and_preserves_turn_model_author_queue_and_
 
 
 @pytest.mark.parametrize('unsafe', ['model_started','execution_started','exit_code','marker','missing_baseline'])
-async def test_unknown_or_executed_work_is_never_relaunched(durable, unsafe):
+@pytest.mark.parametrize('stage', ['workspace_tools', 'context_window'])
+async def test_unknown_or_executed_work_is_never_relaunched(durable, unsafe, stage):
     manager, cloud, run_id = durable
-    report = startup_report()
+    report = startup_report(stage=stage)
     await drive(manager, run_id, phase='monitor')
     if unsafe == 'model_started':
         manager.store.execute('UPDATE runs SET turn_model_calls=1 WHERE id=?', (run_id,))
@@ -383,9 +469,10 @@ async def test_unknown_or_executed_work_is_never_relaunched(durable, unsafe):
 
 
 @pytest.mark.parametrize('stop', [True, False])
-async def test_stopping_or_recovery_deadline_prevents_another_launch(durable, stop):
+@pytest.mark.parametrize('stage', ['workspace_tools', 'context_window'])
+async def test_stopping_or_recovery_deadline_prevents_another_launch(durable, stop, stage):
     manager, cloud, run_id = durable
-    await fail_startup_once(manager, cloud, run_id)
+    await fail_startup_once(manager, cloud, run_id, report=startup_report(stage=stage))
     if stop:
         manager.store.update_run(run_id, status='stopping')
     else:

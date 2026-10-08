@@ -71,6 +71,13 @@ Responses and Chat Completions for durable summary generation. For Astra it must
 also preserve native Responses items such as `additional_tools`, tool namespaces,
 custom tool calls/outputs and streamed completion events.
 
+When context rejection ends a Codex turn with yielded tools still pending, the
+adapter keeps that native client alive for a bounded receipt grace period (up to
+10 seconds, within the original task deadline). It drains late tool completions
+from both the failed turn and any preceding settlement turn before closing the
+client and compacting. This issues no model or tool calls. User Stop still wins;
+missing receipts remain unresolved and continue to block automatic restart.
+
 ## Claude Agent SDK
 
 `sandbox/claude_harness.py` calls the pinned Python **`ClaudeSDKClient`** directly.
