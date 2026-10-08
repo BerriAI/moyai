@@ -472,7 +472,7 @@ class Computer:
                         self.notice = 'Recording saved automatically at its time or size limit.'
                     except RuntimeError as exc:
                         self.notice = str(exc)
-            await asyncio.sleep(.1)
+            await asyncio.sleep(.05 if self.controls() else .1)
 
     def media(self):
         return capture_list()
@@ -521,7 +521,7 @@ class Computer:
             except Exception:
                 self.notice = 'Desktop handoff is reconnecting. Check the screen before continuing.'
 
-    async def state(self, tab=''):
+    async def state(self, tab='', *, include_frame=True):
         page = self.page_for(tab)
         if page and tab:
             await self.refresh_frame(tab)
@@ -532,7 +532,7 @@ class Computer:
         controller = self.controls()
         recording = bool(self.recording and self.recording.get('tab', '') == tab)
         return {'available': available, 'surface': 'browser' if tab else 'desktop', 'tab': tab, 'width': WIDTH, 'height': HEIGHT,
-                'frame': frame, 'frame_at': stamp, 'url': page.url if page else '',
+                **({'frame': frame, 'frame_at': stamp} if include_frame else {}), 'url': page.url if page else '',
                 'controller': controller, 'controller_tab': self.controller_tab, 'recording': recording,
                 'recording_elsewhere': bool(self.recording and not recording),
                 'recording_name': self.recording['path'].name if recording else '',
@@ -711,8 +711,12 @@ class Computer:
                     await self.desktop_input(args['events'])
                     self.foreground_tab = ''
                     self.lease_until = time.monotonic()+60
-                    await self.refresh_frame()
-                    return await self.state()
+                    # The existing frame loop captures independently. Input must
+                    # not wait for encoding and returning a full desktop JPEG.
+                    include_frame = args.get('frame') is not False
+                    if include_frame:
+                        await self.refresh_frame()
+                    return await self.state(include_frame=include_frame)
             if tab:
                 page = self.page_for(tab)
                 if not page and action == 'open':

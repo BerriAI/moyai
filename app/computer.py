@@ -238,7 +238,7 @@ class Computer:
                                 except Exception:
                                     value['notice'] = 'A capture could not be saved to the app yet. Keeping the workspace copy and retrying.'
                     except Exception:
-                        value = {'available': False, 'tab': tab, 'notice': 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.'}
+                        raise HTTPException(503, 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.') from None
                     if len(self.cache) >= 32:
                         self.cache.pop(min(self.cache, key=lambda key: self.cache[key][0]), None)
                     self.cache[run_id, tab] = (time.monotonic(), run.get('sandbox_id'), value)
@@ -259,6 +259,8 @@ class Computer:
             run, actor = self.authorize(request, run_id, mutation=True)
             if len(json.dumps(body.args)) > 16000:
                 raise HTTPException(413, 'Computer command too large.')
+            # Input only updates activity, persisted by the two-second checkpoint watcher.
+            request.state.defer_activity_checkpoint = body.action == 'input'
             async with self.locks.setdefault(run_id, asyncio.Lock()):
                 try:
                     run = self.store.run(run_id)

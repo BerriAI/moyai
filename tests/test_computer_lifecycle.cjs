@@ -13,14 +13,15 @@ function node(){
     querySelector(s){if(!children.has(s))children.set(s,node());return children.get(s);},querySelectorAll(){return [];},append(el){this.child=el;}};
 }
 function browser(api){
-  const timers=new Map(),intervals=new Map();let next=0;
+  const timers=new Map(),intervals=new Map();let next=0,now=0;
   const document={hidden:false,createElement:node,addEventListener(name,fn){this[name]=fn;}};
-  const context={window:{},document,setTimeout:(fn,delay)=>{timers.set(++next,{fn,delay});return next;},
+  const context={window:{},document,performance:{now:()=>now},setTimeout:(fn,delay)=>{timers.set(++next,{fn,at:now+delay});return next;},
     clearTimeout:id=>timers.delete(id),setInterval:fn=>{intervals.set(++next,fn);return next;},clearInterval:id=>intervals.delete(id)};
   vm.createContext(context);vm.runInContext(fs.readFileSync(process.env.COMPUTER_SOURCE||'app/static/computer.js','utf8'),context);
   const view=context.window.MoyaiComputer.create({api,escape:s=>s});
   return {view,document,async renew(){for(const fn of intervals.values())fn();await tick();},async flush(delay=25){
-    for(const [id,timer] of [...timers])if(timer.delay<=delay){timers.delete(id);timer.fn();}
+    now+=delay;
+    for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}
     await tick();
   }};
 }
@@ -73,6 +74,7 @@ test('direct text, shortcuts, composition and paste reach the desktop in order',
     {type:'key',key:'Control+l'},{type:'text',text:'https://example.com'},{type:'key',key:'Enter'},
     {type:'text',text:'日本'},{type:'paste',text:'+demo@example.com\nsecond line'},{type:'key',key:'Shift+Tab'},{type:'key',key:'Backspace'}
   ]);
+  assert.equal(commands[0].args.frame,false,'Native input opts into acknowledgments without a screenshot');
   assert.equal(input.value,'');
   key(input,'Escape',{ctrlKey:true,altKey:true});
   assert.equal(host.child.querySelector('[data-control]').focused,true);view.close();
@@ -87,11 +89,106 @@ test('input waits behind an in-flight batch and close discards unsent input',asy
   });
   const host=node();await view.open('one',host);const input=host.child.querySelector('[data-keyboard]');
   type(input,'a');await flush();type(input,'b');key(input,'Enter');await flush();
-  assert.equal(commands.length,1);finishInput();await tick();await flush();
+  assert.equal(commands.length,1);finishInput();await tick();
+  assert.equal(commands.length,2,'Accepted input drains immediately after acknowledgment');
   assert.deepEqual(commands[1].args.events,[{type:'text',text:'b'},{type:'key',key:'Enter'}]);
   type(input,'must not cross sessions');view.close();await tick();assert.equal(commands.length,2);
   finishInput();await tick();
   assert.equal(commands[2].action,'release');assert.match(commands[2].path,/\/one\/computer$/);
+});
+
+test('one poll stays live during input and newer frames survive metadata or legacy acknowledgments',async()=>{
+  for(const legacy of [false,true]){
+    let reads=0,finishPoll,finishInput;
+    const state=(image,stamp)=>({...frame(image),tab:'',frame_at:stamp});
+    const metadata=state('unused',0);delete metadata.frame;delete metadata.frame_at;
+    const {view,document,flush}=browser(async(path,options)=>{
+      if(!options)return ++reads===1?state('initial',1):new Promise(resolve=>finishPoll=resolve);
+      if(JSON.parse(options.body).action==='input')return new Promise(resolve=>finishInput=resolve);
+      return metadata;
+    });
+    const host=node();await view.open('one',host);
+    const screen=host.child.querySelector('[data-screen]');
+    type(host.child.querySelector('[data-keyboard]'),'first');await flush(20);await flush(100);
+    assert.equal(reads,2,'Polling continues while the input acknowledgment is pending');
+    document.visibilitychange();document.visibilitychange();await flush(100);
+    assert.equal(reads,2,'Visibility notifications cannot start overlapping reads');
+    finishPoll(state('newest',3));await tick();
+    assert.equal(screen.src,'data:image/jpeg;base64,newest');
+    finishInput(legacy?state('stale-input',2):metadata);await tick();
+    assert.equal(screen.src,'data:image/jpeg;base64,newest');assert.equal(screen.hidden,false);
+    await flush(100);finishPoll(state('stale-poll',2));await tick();
+    assert.equal(screen.src,'data:image/jpeg;base64,newest');
+    await flush(100);finishPoll({...metadata,available:false});await tick();
+    assert.equal(screen.hidden,true,'An unavailable desktop cannot retain its previous image');
+    view.close();await tick();
+  }
+});
+
+test('continuous acknowledged input does not postpone the next frame poll',async()=>{
+  let reads=0,finishPoll;
+  const metadata={...frame(),tab:''};delete metadata.frame;
+  const {view,flush}=browser(async(path,options)=>{
+    if(options)return metadata;
+    return ++reads===1?{...frame('initial'),tab:'',frame_at:1}:new Promise(resolve=>finishPoll=resolve);
+  });
+  const host=node();await view.open('one',host);const input=host.child.querySelector('[data-keyboard]');
+  for(let i=0;i<8;i++){type(input,'x');await flush(20);}
+  assert.ok(reads>1,'Continuous input cannot starve the scheduled poll');
+  finishPoll({...frame('updated'),tab:'',frame_at:2});await tick();
+  assert.equal(host.child.querySelector('[data-screen]').src,'data:image/jpeg;base64,updated');
+  assert.equal(host.child.querySelector('[data-screen]').hidden,false);
+  view.close();await tick();
+});
+
+test('a failed refresh preserves control and queued input until their acknowledgments',async()=>{
+  let reads=0;const commands=[],acks=[];
+  const metadata={...frame(),tab:''};delete metadata.frame;
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options){
+      if(++reads===2)throw new Error('Computer is reconnecting');
+      return {...frame('read-'+reads),tab:'',frame_at:reads};
+    }
+    const command=JSON.parse(options.body);
+    if(command.action!=='input')return metadata;
+    commands.push(command);return new Promise(resolve=>acks.push(resolve));
+  });
+  const host=node();await view.open('one',host);const input=host.child.querySelector('[data-keyboard]');
+  type(input,'first');await flush(20);type(input,'queued');await flush(100);
+  assert.match(host.child.querySelector('[data-notice]').textContent,/reconnecting/);
+  assert.equal(host.child.querySelector('[data-screen]').src,'data:image/jpeg;base64,read-1');
+  assert.equal(input.readOnly,false);assert.equal(commands.length,1);
+  acks.shift()(metadata);await tick();assert.equal(commands.length,2);
+  assert.deepEqual(commands[1].args.events,[{type:'text',text:'queued'}]);
+  acks.shift()(metadata);await tick();await flush(100);
+  assert.equal(host.child.querySelector('[data-screen]').src,'data:image/jpeg;base64,read-3');
+  assert.equal(input.readOnly,false);assert.equal(commands.length,2);
+  assert.equal(host.child.querySelector('[data-control]').textContent,'Release control');view.close();await tick();
+});
+
+for(const shuttingDown of [false,true])test(`polling ${shuttingDown?'shutdown':'lease loss'} fences a late input acknowledgment`,async()=>{
+  let reads=0,writes=0,finishInput;
+  const metadata={...frame(),tab:''};delete metadata.frame;
+  const {view,flush}=browser(async(path,options)=>{
+    if(!options){
+      const lost=++reads>1;
+      return {...frame('screen',lost&&!shuttingDown?'other':'owner'),tab:'',frame_at:reads,shutting_down:lost&&shuttingDown};
+    }
+    if(JSON.parse(options.body).action==='input'){
+      writes++;return new Promise(resolve=>finishInput=resolve);
+    }
+    return metadata;
+  });
+  const host=node();await view.open('one',host);const input=host.child.querySelector('[data-keyboard]');
+  type(input,'sent');await flush(20);type(input,'queued');await flush(100);
+  assert.equal(input.readOnly,true);
+  finishInput(metadata);await tick();type(input,'later');await flush(20);
+  assert.equal(writes,1);assert.equal(input.readOnly,true);
+  if(shuttingDown){
+    assert.equal(host.child.querySelector('[data-control]').disabled,true);
+    assert.equal(host.child.querySelector('[data-status]').textContent,'Shutting down…');
+  }else assert.equal(host.child.querySelector('[data-control]').textContent,'Someone has control');
+  view.close();await tick();
 });
 
 test('lease loss and uncertain failures discard queued input without replay',async()=>{
@@ -163,9 +260,10 @@ test('Unicode paste is split into bounded batches without losing text',async()=>
 });
 
 test('release drains accepted input in order and permits no further typing',async()=>{
-  const commands=[];let finish;
+  const commands=[],inputArgs=[];let finish;
   const {view,flush}=browser(async(path,options)=>{
     if(!options)return frame();const command=JSON.parse(options.body);commands.push(command.action);
+    if(command.action==='input')inputArgs.push(command.args);
     if(command.action==='input'&&commands.length===1)await new Promise(resolve=>finish=resolve);
     return frame(undefined,command.action==='release'?'':'owner');
   });
@@ -174,6 +272,7 @@ test('release drains accepted input in order and permits no further typing',asyn
   const release=host.child.querySelector('[data-control]').onclick();
   type(input,'later');await flush();assert.deepEqual(commands,['input']);
   finish();await release;await flush();assert.deepEqual(commands,['input','input','release']);
+  assert.ok(inputArgs.every(args=>args.frame===false),'Both ordinary and release-drained input omit frames');
   assert.equal(input.readOnly,true);view.close();
 });
 

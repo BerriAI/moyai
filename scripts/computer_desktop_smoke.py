@@ -81,7 +81,9 @@ async def exercise(output: Path) -> None:
             raise RuntimeError(result['error'])
         return result
     async def inputs(*events):
-        return await command('input', {'events': list(events)})
+        result = await command('input', {'events': list(events), 'frame': False})
+        assert 'frame' not in result and result['surface'] == 'desktop'
+        return result
     def key(value):
         return {'type': 'key', 'key': value}
     def text(value):

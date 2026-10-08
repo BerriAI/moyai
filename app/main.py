@@ -311,7 +311,9 @@ def create_app(settings: Settings | None = None):
         if length < 0 or length > limit:
             return JSONResponse({"detail": "Request too large"}, status_code=413)
         response = await call_next(request)
-        if request.method in {"POST", "DELETE", "PUT", "PATCH"} or request.url.path.startswith(("/oauth/", "/auth/")):
+        if (request.method in {"POST", "DELETE", "PUT", "PATCH"} or request.url.path.startswith(("/oauth/", "/auth/"))) and not getattr(
+            request.state, 'defer_activity_checkpoint', False
+        ):
             try:
                 await checkpoints.flush()
             except Exception:

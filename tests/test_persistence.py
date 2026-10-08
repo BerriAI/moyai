@@ -1,11 +1,15 @@
 import asyncio
 import sqlite3
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from app.config import Settings
 from app.db import Store
 from app.persistence import Checkpoints, restore_checkpoint
+from test_workspace import workspace
 
 
 async def test_checkpoint_restores_committed_database_and_results(tmp_path):
@@ -61,6 +65,56 @@ async def test_writes_during_commit_are_not_lost_and_failed_commits_retry(tmp_pa
     with sqlite3.connect(settings.checkpoint_dir / "workspace.db") as conn:
         assert conn.execute("SELECT status FROM runs WHERE id=?", (run["id"],)).fetchone()[0] == "completed"
     assert attempts == 3
+
+
+async def test_computer_input_acknowledges_before_cloud_commit_and_keeps_activity(workspace, tmp_path):
+    app, client = workspace
+    hub, store = app.state.computer, app.state.store
+    checkpoints = app.state.automations.checkpoints
+    original_settings = checkpoints.settings
+    checkpoints.settings = original_settings.model_copy(update={'checkpoint_dir': tmp_path / 'checkpoint'})
+    entered, release = asyncio.Event(), asyncio.Event()
+    commits, failing = [], False
+    async def commit():
+        commits.append(True)
+        entered.set()
+        await release.wait()
+        if failing:
+            raise RuntimeError('Simulated volume failure')
+    checkpoints.commit = commit
+    run = store.create_run('Responsive input', '', 'modal', [], chat_enabled=True)
+    url = f"/api/runs/{run['id']}/computer"
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=AsyncMock(return_value={})))
+    hub.execute = AsyncMock(return_value=[])
+    pending = None
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=app.state.settings.public_url,
+                                    cookies=client.cookies, headers=client.headers) as browser:
+            response = await asyncio.wait_for(browser.post(url, json={'action': 'input', 'args': {'events': []}}), 1)
+            assert response.status_code == 200 and not commits
+            touched = hub.touched(run['id'])
+            assert touched > 0 and checkpoints.saved_generation != store.generation
+            pending = asyncio.create_task(checkpoints.flush())
+            await asyncio.wait_for(entered.wait(), 1)
+            assert not pending.done()
+            release.set()
+            await pending
+            with sqlite3.connect(checkpoints.settings.checkpoint_dir / 'workspace.db') as conn:
+                assert conn.execute('SELECT touched FROM computer_activity WHERE run_id=?', (run['id'],)).fetchone()[0] == touched
+
+            failing = True
+            assert (await browser.post(url, json={'action': 'input', 'args': {'events': []}})).status_code == 200
+            assert len(commits) == 1 and checkpoints.saved_generation != store.generation
+            for action in ('claim', 'release', 'screenshot', 'record_stop'):
+                result = await browser.post(url, json={'action': action})
+                assert result.status_code == 503 and 'persistence' in result.json()['detail']
+            result = await browser.patch('/api/organization', json={'name': 'Still durable'})
+            assert result.status_code == 503 and len(commits) == 6
+    finally:
+        release.set()
+        if pending:
+            await asyncio.gather(pending, return_exceptions=True)
+        checkpoints.settings = original_settings
 
 
 def test_modal_proxy_accepts_only_configured_public_host(tmp_path):

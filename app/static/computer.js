@@ -2,7 +2,7 @@
 window.MoyaiComputer = {
   create({api, escape:esc, onCapture}) {
     let dialog, runId, timer, leaseTimer, inputTimer, compositionTimer, current;
-    let busy=false, changingControl=false, active=false, composing=false, closing=false, browserTab='', version=0, revision=0;
+    let busy=false, inputInFlight=false, polling=null, changingControl=false, active=false, composing=false, closing=false, browserTab='', version=0, revision=0;
     let queue=[], pointer=null, inputError='', wakeError='', releasing=Promise.resolve(), pending=Promise.resolve();
     const q=selector=>dialog.querySelector(selector);
     const own=()=>!!(current?.controller && current.controller===current.actor && (current.controller_tab||'')===browserTab);
@@ -24,22 +24,31 @@ window.MoyaiComputer = {
         method:'POST',body:JSON.stringify({action:'release',tab})
       })).catch(()=>{});
       dialog?.querySelectorAll('video').forEach(video=>video.pause());
-      dialog?.remove();dialog=null;current=null;busy=false;changingControl=false;closing=false;inputError='';wakeError='';
+      dialog?.remove();dialog=null;current=null;busy=false;inputInFlight=false;polling=null;changingControl=false;closing=false;inputError='';wakeError='';
     }
     function render(data){
-      const controlled=own();
+      const controlled=own()&&current?.available&&!current.shutting_down&&current.surface===surface();
       if(browserTab&&(data.tab!==browserTab||(data.available&&data.surface!=='browser'))){
         data={available:false,has_sandbox:false,notice:'This workspace needs an updated browser. Open the PR in GitHub until the workspace browser restarts.'};
       }
+      // Input acknowledgements carry control state; only frame reads carry pixels.
+      // An older guest may still attach a frame to its delayed acknowledgement.
+      if(data.available&&current?.available&&data.surface===current.surface&&(data.tab||'')===(current.tab||'')&&
+          (!('frame' in data)||(data.frame&&data.frame_at&&current.frame_at&&data.frame_at<current.frame_at))){
+        data={...data,frame:current.frame,frame_at:current.frame_at};
+      }
       current=data;
-      if(controlled&&(!own()||!data.available||data.shutting_down||data.surface!==surface()))discardInput();
+      if(controlled&&(!own()||!data.available||data.shutting_down||data.surface!==surface())){
+        revision++;discardInput();
+        if(!changingControl&&!closing)inputError='Control changed. Check the desktop, then take or resume control.';
+      }
       if(browserTab)q('[data-address]').textContent=data.url||browserTab;
       const starting=data.starting&&!data.has_sandbox;
       q('[data-status]').textContent=data.shutting_down?'Shutting down…':data.waking?'Waking up…':starting?'Starting workspace…':data.recording?'● Recording':data.available?(browserTab?'Live browser':'Live desktop'):(browserTab?'Workspace browser':'Workspace computer');
       q('[data-status]').classList.toggle('recording',!!data.recording);
       q('[data-screen]').hidden=!data.frame;
       q('[data-empty]').hidden=!!data.frame;
-      if(data.frame)q('[data-screen]').src='data:image/jpeg;base64,'+data.frame;
+      if(data.frame&&q('[data-screen]').src!=='data:image/jpeg;base64,'+data.frame)q('[data-screen]').src='data:image/jpeg;base64,'+data.frame;
       q('[data-screen]').classList.toggle('controlled',canInput());
       q('[data-keyboard]').readOnly=!canInput();
       q('[data-keyboard]').tabIndex=canInput()?0:-1;
@@ -63,11 +72,14 @@ window.MoyaiComputer = {
       }
     }
     async function poll(){
-      clearTimeout(timer);if(!active||document.hidden||busy||changingControl||closing)return;
-      const v=version, r=revision;
+      clearTimeout(timer);if(!active||document.hidden||(busy&&!inputInFlight)||changingControl||closing||polling===version)return;
+      const v=version, r=revision, started=performance.now();polling=v;
       try{const data=await api(`/api/runs/${runId}/computer${browserTab?'?tab='+encodeURIComponent(browserTab):''}`);if(v===version&&r===revision&&active)render(data);}
       catch(error){if(v===version&&r===revision)q('[data-notice]').textContent=error.message;}
-      finally{if(v===version&&active)timer=setTimeout(poll,own()?100:1000);}
+      finally{
+        if(polling===v)polling=null;
+        if(v===version&&active)timer=setTimeout(poll,own()?Math.max(0,50-(performance.now()-started)):1000);
+      }
     }
     function scheduleInput(){
       if(!inputTimer&&queue.length&&canInput()&&!busy)inputTimer=setTimeout(flushInput,20);
@@ -106,16 +118,18 @@ window.MoyaiComputer = {
       inputTimer=null;
       if(busy||!canInput()||!queue.length)return;
       const events=takeInput();
-      if(events.length)send('input',{events});
+      if(events.length)send('input',{events,...(!browserTab?{frame:false}:{})});
     }
     function send(action,args={}){
-      const v=version, id=runId, tab=browserTab;
-      busy=true;revision++;clearTimeout(timer);
+      const v=version, id=runId, tab=browserTab, liveInput=action==='input'&&!tab;
+      busy=true;inputInFlight=liveInput;
+      if(!liveInput){revision++;clearTimeout(timer);}
+      const r=revision;
       if(current)render(current);
       const operation=(async()=>{
         try{
           const data=await api(`/api/runs/${id}/computer`,{method:'POST',body:JSON.stringify({action,args,tab})});
-          if(v!==version||!active)return false;
+          if(v!==version||(liveInput&&r!==revision)||!active)return false;
           if('available' in data)render(data);
           else if(current)render({...current,captures:data.captures||current.captures});
           return true;
@@ -123,7 +137,11 @@ window.MoyaiComputer = {
           if(v===version&&active){if(action==='wake')wakeError=error.message;else pauseInput(error.message);}
           return false;
         }finally{
-          if(v===version&&active){busy=false;if(current)render(current);scheduleInput();timer=setTimeout(poll,own()?100:1000);}
+          if(v===version&&active){
+            busy=false;inputInFlight=false;if(current)render(current);
+            flushInput();
+            if(!liveInput)timer=setTimeout(poll,own()?50:1000);
+          }
         }
       })();
       pending=operation;
@@ -143,7 +161,7 @@ window.MoyaiComputer = {
           while(queue.length&&own()&&current.available&&!inputError){
             const events=takeInput();
             if(!events.length)break;
-            await send('input',{events});
+            await send('input',{events,...(!browserTab?{frame:false}:{})});
             if(v!==version||!active||closing)return false;
           }
           discardInput();

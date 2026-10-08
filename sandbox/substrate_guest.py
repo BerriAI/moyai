@@ -140,11 +140,12 @@ def job_path(value):
 @contextmanager
 def computer_operation(uid, body):
     global COMPUTER_PENDING
-    if (not isinstance(body, dict) or set(body) - {'action', 'actor', 'args'} or
+    if (not isinstance(body, dict) or set(body) - {'action', 'actor', 'args', 'tab'} or
             not isinstance(body.get('action'), str) or
             not isinstance(body.get('args', {}), dict) or
             not isinstance(body.get('actor', ''), str) or len(json.dumps(body).encode()) > 65536):
         raise ValueError('Invalid Computer request')
+    computer.valid_tab(body.get('tab', ''))
     with COMPUTER_IDLE:
         if not hmac.compare_digest(uid, IDENTITY.read_text().strip()):
             raise PermissionError('Actor identity changed')

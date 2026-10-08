@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
 from app.config import Settings
+from app.computer import Command
 from app.db import Store
 from app.runner import RunManager
 from app.sandboxes.substrate import SubstrateProvider, Sandbox
@@ -375,17 +376,20 @@ async def test_control_tls_negotiates_http2_and_verifies_private_ca(tmp_path):
         assert await negotiated == 'h2'
 
 
-async def test_computer_rpc_uses_signed_transport_without_execution_journals(transport, monkeypatch):
+@pytest.mark.parametrize('tab', ['', 'https://github.com/BerriAI/moyai/pull/42'])
+async def test_computer_rpc_uses_signed_transport_without_execution_journals(transport, monkeypatch, tab):
     sandbox, tmp = transport
     calls = []
     def request(body, *, start):
         calls.append((body, start))
         return {'surface': 'desktop', 'controller': body.get('actor', '')}
     monkeypatch.setattr(guest.computer, 'request', request)
-    assert (await sandbox.computer_request({'action': 'state'}))['surface'] == 'desktop'
-    body = {'action': 'input', 'actor': 'test-person', 'args': {'events': [{'type': 'text', 'text': 'test input'}]}}
+    state = {'action': 'state', 'tab': tab}
+    assert (await sandbox.computer_request(state))['surface'] == 'desktop'
+    body = {**Command(action='input', tab=tab, args={'events': [{'type': 'text', 'text': 'test input'}]}).model_dump(),
+            'actor': 'test-person'}
     assert (await sandbox.computer_request(body))['controller'] == 'test-person'
-    assert calls == [({'action': 'state'}, False), (body, True)]
+    assert calls == [(state, False), (body, True)]
     assert not (tmp / 'runtime' / 'jobs').exists()
 
 
@@ -420,7 +424,9 @@ async def test_computer_rpc_bounds_and_uid_recheck_prevent_forwarding(transport,
     calls = []
     monkeypatch.setattr(guest.computer, 'request', lambda body, **kwargs: calls.append(body) or {})
     for body, status in [({'action': 'input', 'args': {'text': 'x' * 65536}}, '413'),
-                         ({'action': 'state', 'unexpected': True}, 'Restart this workspace')]:
+                         ({'action': 'state', 'unexpected': True}, 'Restart this workspace'),
+                         *[({'action': 'state', 'tab': tab}, 'Restart this workspace') for tab in
+                           (None, 42, 'https://github.com/BerriAI/moyai/pull/01', 'https://example.com/')]]:
         with pytest.raises(RuntimeError, match=status):
             await sandbox.computer_request(body)
     assert calls == []

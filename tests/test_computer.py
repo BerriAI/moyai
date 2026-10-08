@@ -228,6 +228,34 @@ async def test_desktop_batches_validate_before_execution_and_preserve_native_ord
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('frame_mode', [False, True, None])
+async def test_native_input_frame_opt_in_preserves_default_state(monkeypatch, tmp_path, frame_mode):
+    monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
+    c = computer.Computer()
+    c.desktop = SimpleNamespace(poll=lambda: None)
+    c.controller, c.lease_until = 'owner', computer.time.monotonic()+60
+    c.frame, c.frame_at = 'cached-screen', 7
+    c.ensure_desktop, c.desktop_input = AsyncMock(), AsyncMock()
+    async def capture():
+        assert frame_mode is not False, 'Native input must not wait for image capture'
+        c.frame, c.frame_at = 'fresh-screen', 8
+    c.refresh_frame = AsyncMock(side_effect=capture)
+    events = [{'type': 'text', 'text': 'ordered input'}]
+    args = {'events': events, **({'frame': frame_mode} if frame_mode is not None else {})}
+    reply = await c.command({'actor': 'owner', 'action': 'input', 'args': args})
+    c.desktop_input.assert_awaited_once_with(events)
+    assert reply['controller'] == 'owner' and reply['surface'] == 'desktop' and reply['available']
+    if frame_mode is False:
+        c.refresh_frame.assert_not_awaited()
+        assert 'frame' not in reply and 'frame_at' not in reply
+    else:
+        c.refresh_frame.assert_awaited_once()
+        assert reply['frame'] == 'fresh-screen' and reply['frame_at'] == 8
+    state = await c.state()
+    assert state['frame'] == c.frame and state['frame_at'] == c.frame_at
+
+
+@pytest.mark.asyncio
 async def test_agent_follows_human_selected_tab_and_closed_tabs():
     c = computer.Computer()
     def page(visible, focused, closed=False):
@@ -361,6 +389,30 @@ def test_loopback_request_does_not_retry_unknown_input_delivery(monkeypatch):
 
 PR_TAB = 'https://github.com/BerriAI/moyai/pull/145'
 OTHER_TAB = 'https://github.com/BerriAI/moyai/pull/151'
+
+
+@pytest.mark.parametrize('tab', ['', PR_TAB])
+def test_failed_refresh_keeps_last_successful_cache_and_retries(workspace, monkeypatch, tab):
+    app, client, rid, url = cloud(workspace)
+    hub = app.state.computer
+    clock = [100]
+    monkeypatch.setattr('app.computer.time', SimpleNamespace(monotonic=lambda: clock[0]))
+    state = {'available': True, 'tab': tab, 'controller': 'owner', 'frame': 'first'}
+    transport = AsyncMock(side_effect=[state, ConnectionError('private provider error'), {**state, 'frame': 'recovered'}])
+    hub.sandbox = AsyncMock(return_value=SimpleNamespace(computer_request=transport))
+    assert client.get(url, params={'tab': tab}).json()['frame'] == 'first'
+    cached = hub.cache[rid, tab]
+    assert client.get(url, params={'tab': tab}).json()['frame'] == 'first'
+    assert transport.await_count == 1
+    clock[0] += .1
+    response = client.get(url, params={'tab': tab})
+    assert response.status_code == 503
+    assert response.json() == {'detail': 'Computer is reconnecting or this sandbox has shut down. Saved captures are still available.'}
+    assert hub.cache[rid, tab] is cached and cached[2]['frame'] == 'first'
+    recovered = client.get(url, params={'tab': tab}).json()
+    assert recovered['available'] and recovered['has_sandbox'] and recovered['frame'] == 'recovered'
+    assert client.get(url, params={'tab': tab}).json()['frame'] == 'recovered'
+    assert transport.await_count == 3
 
 
 def test_named_computer_routes_scope_frames_and_invalidate_shared_lease(workspace):
@@ -1161,9 +1213,10 @@ def test_wake_distinguishes_sleep_transport_failure_and_legacy_runtime(workspace
     assert client.get(url).json()['can_wake'] is True
     hub.cache.clear()
     hub.sandbox = AsyncMock(side_effect=ConnectionError('private provider error'))
-    state = client.get(url).json()
-    assert state['can_wake'] is False
-    assert 'private provider error' not in str(state)
+    response = client.get(url)
+    assert response.status_code == 503 and not hub.cache
+    assert 'private provider error' not in response.text
+    assert 'can_wake' not in response.json() and 'available' not in response.json()
 
 
 @pytest.mark.parametrize('phase', ['prepare', 'provision', 'waiting_environment', 'waiting_children'])
