@@ -165,7 +165,13 @@ def test_unsettled_turn_discards_final_candidates_but_keeps_commentary(codex_age
     assert result['failed'] == (outcome != 'interrupted')
     assert assistant_prose(result['messages']) == ['Saved update.']
     assert_public_messages(result, events, store, saved=['Saved update.'], commentary=['Saved update.'],
-        response='Codex stopped before completing the response. Saved tool receipts are preserved.')
+        response={
+            'failed-status': 'Codex stopped (failed). Saved tool receipts are preserved.',
+            'provider-error': 'Codex stopped (RuntimeError). Saved tool receipts are preserved.',
+            'interrupted': 'Codex stopped before completing the response. Saved tool receipts are preserved.',
+            'pending-tool': 'Codex stopped (incomplete turn, 1 unresolved tool(s)). Saved tool receipts are preserved.',
+            'boundary-failed': 'Codex stopped (incomplete turn). Saved tool receipts are preserved.',
+        }[outcome])
     assert bool(store.pending) == (outcome == 'pending-tool')
 
 
@@ -379,7 +385,7 @@ def test_each_invocation_uses_disposable_native_state_and_preserves_public_recei
 
 
 @pytest.mark.parametrize('outer_marker_first', [False, True])
-def test_code_mode_group_barrier_requires_outer_marker_and_nested_receipt(codex_agent, monkeypatch, outer_marker_first):
+def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(codex_agent, monkeypatch, outer_marker_first):
     agent, _, _ = codex_agent
     notifications, processed = queue.Queue(), queue.Queue()
     stepped = threading.Event()
@@ -423,10 +429,18 @@ def test_code_mode_group_barrier_requires_outer_marker_and_nested_receipt(codex_
             first, second = (outer, nested) if outer_marker_first else (nested, outer)
             notifications.put(first)
             assert processed.get(timeout=2) == first.method
-            assert not stepped.wait(0.05) and not boundary.done()
+            assert not stepped.wait(0.05)
+            if outer_marker_first:
+                assert boundary.result(timeout=2) is True
+                assert agent.journal.pending and agent.model_calls == 1
+            else:
+                assert not boundary.done()
             notifications.put(second)
             assert processed.get(timeout=2) == second.method
             assert boundary.result(timeout=2) is True
+            if outer_marker_first:
+                assert agent.before_model(request) is True
+            assert stepped.is_set()
             notifications.put(terminal)
             result = run.result(timeout=2)
         finally:
@@ -435,6 +449,45 @@ def test_code_mode_group_barrier_requires_outer_marker_and_nested_receipt(codex_
     receipts = [message for message in result['messages'] if message.get('role') == 'tool']
     assert len(receipts) == 1 and receipts[0]['tool_call_id'] == 'native-call'
     assert 'private-marker' not in json.dumps(result)
+
+
+def test_polling_counts_toward_limit_without_checkpointing_live_tools(codex_agent, monkeypatch):
+    from sandbox.transport_recovery import recovery_marker
+    agent, _, store = codex_agent
+    agent.context.spec['max_iterations'] = 2
+    maintenance = []
+    monkeypatch.setattr(codex_harness, 'maintain_context', lambda *_: maintenance.append(True))
+    agent.record_item(native_item('commandExecution')[0], completed=False)
+    agent.completed.add('outer')
+    agent.context = agent.context.__class__(agent.context.spec, agent.context.relay, agent.context.config,
+        agent.context.activity, lambda: pytest.fail('Cannot checkpoint a running tool'), agent.context.cwd)
+    request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': 'outer'}]})
+    assert agent.before_model(request) and agent.before_model(request)
+    assert not agent.before_model(request)
+    assert agent.model_calls == 2 and not maintenance
+    assert agent.boundary_reason == 'model call limit reached'
+    assert agent.journal.pending and store.pending
+    assert recovery_marker(agent, {'failed': True}) is None
+
+
+@pytest.mark.parametrize('body', [None, [], {'input': None},
+    {'input': [{'type': 'custom_tool_call_output', 'call_id': []}]},
+    {'input': [{'type': 'function_call_output'}]}])
+def test_invalid_model_input_fails_closed_with_a_reason(codex_agent, body):
+    agent, _, _ = codex_agent
+    assert not agent.before_model(json.dumps(body))
+    assert agent.boundary_failed and agent.boundary_reason == 'invalid model request'
+    assert agent.model_calls == 0
+
+
+def test_stop_wakes_a_missing_output_notification_wait(codex_agent):
+    agent, _, _ = codex_agent
+    request = json.dumps({'input': [{'type': 'function_call_output', 'call_id': 'missing'}]})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(agent.before_model, request)
+        agent.interrupt()
+        assert pending.result(timeout=1) is False
+    assert not agent.boundary_failed and agent.model_calls == 0
 
 
 @pytest.mark.parametrize('installed', [None, '0.1.0', '0.161.0'])
@@ -454,3 +507,43 @@ def test_snapshot_repair_installs_only_pinned_codex_sdk(monkeypatch, installed):
     assert len(calls) == (installed != '0.161.0')
     if calls:
         assert calls[0][1:] == ['-m', 'pip', 'install', 'openai-codex==0.161.0']
+
+
+@pytest.mark.parametrize('source', ['notification', 'turn', 'exception'])
+def test_codex_persists_safe_native_failure_metadata(codex_agent, monkeypatch, source):
+    agent, events, _ = codex_agent
+    error = {'message': 'private-provider-body', 'additionalDetails': 'private-stderr',
+             'codexErrorInfo': {'httpConnectionFailed': {'httpStatusCode': 409}}}
+    async def stream():
+        if source == 'exception':
+            raise TimeoutError('private-provider-body')
+        if source == 'notification':
+            yield sdk_event('error', {'error': error, 'willRetry': False})
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed',
+            **({'error': error} if source == 'turn' else {})}})
+    install_codex_client(monkeypatch, agent, stream)
+    result = agent.run_conversation('Read the file', conversation_history=[], system_message='Moyai')
+    failure = result['sdk_failure']
+    assert result['failed'] and failure['sdk'] == 'codex'
+    if source == 'exception':
+        assert failure['exception_type'] == 'TimeoutError'
+    else:
+        assert failure['code'] == 'httpConnectionFailed' and failure['http_status'] == 409
+        assert 'HTTP 409' in result['final_response']
+        if source == 'notification':
+            assert failure['will_retry'] is False
+    assert [event[2]['phase'] for event in events if event[0] == 'error'] == ['sdk_failure']
+    assert 'private-' not in json.dumps([result, events])
+
+
+def test_retried_codex_notification_does_not_fail_success(codex_agent, monkeypatch):
+    agent, events, _ = codex_agent
+    async def stream():
+        yield sdk_event('error', {'error': {'codexErrorInfo': 'serverOverloaded'}, 'willRetry': True})
+        yield sdk_event('item/completed', {'item': {
+            'id': 'answer', 'type': 'agentMessage', 'phase': 'final_answer', 'text': 'Done.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+    install_codex_client(monkeypatch, agent, stream)
+    result = agent.run_conversation('Read', conversation_history=[], system_message='Moyai')
+    assert result['completed'] and result['final_response'] == 'Done.'
+    assert 'sdk_failure' not in result and not [e for e in events if e[0] == 'error']

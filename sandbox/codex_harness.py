@@ -11,10 +11,12 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from .harness_dependencies import prepare_codex
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
+    from .sdk_failure import codex_details, exception_details, report_failure, failure_summary
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from harness_dependencies import prepare_codex
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
+    from sdk_failure import codex_details, exception_details, report_failure, failure_summary
 
 
 RECEIPT_TIMEOUT_SECONDS = 10
@@ -38,6 +40,7 @@ class CodexAgent(HarnessAgent):
         self.completed = set()
         self.compaction_window = None
         self.boundary_failed = False
+        self.boundary_reason = ''
         self.model_calls = 0
         relay.before_model = self.before_model
         relay.context_recovery = True
@@ -49,33 +52,52 @@ class CodexAgent(HarnessAgent):
     def interrupt(self):
         # The host invokes this at a settled tool boundary. User Stop separately
         # revokes the broker capability and terminates the enclosing sandbox.
-        self.stopped.set()
+        with self.receipts:
+            self.stopped.set()
+            self.receipts.notify_all()
 
     def before_model(self, request=None):
         with self.receipts:
+            if self.stopped.is_set() or self.boundary_failed:
+                return False
             if request is not None:
                 try:
                     items = json.loads(request).get('input', [])
+                    if not isinstance(items, (list, str)):
+                        raise ValueError('Invalid input')
                     expected = {item['call_id'] for item in items if isinstance(item, dict)
                                 and item.get('type') in {'function_call_output', 'custom_tool_call_output'}}
-                except (ValueError, TypeError, KeyError):
+                    if not all(isinstance(call_id, str) and call_id for call_id in expected):
+                        raise ValueError('Invalid call ID')
+                except (ValueError, TypeError, KeyError, AttributeError):
                     self.boundary_failed = True
+                    self.boundary_reason = 'invalid model request'
                     return False
                 # HTTP and app-server notifications arrive on different threads.
                 # Input IDs are only a barrier; wire text never becomes a receipt.
-                if not self.receipts.wait_for(lambda: expected <= self.completed and not self.journal.pending,
+                # A code-mode output may yield while nested tools are still live.
+                # Let the model poll them; lifecycle work below must still wait.
+                if not self.receipts.wait_for(lambda: expected <= self.completed or self.stopped.is_set(),
                                               timeout=RECEIPT_TIMEOUT_SECONDS):
                     self.boundary_failed = True
+                    self.boundary_reason = 'native output notification timed out'
                     return False
+            if self.stopped.is_set():
+                return False
             if self.journal and not self.journal.pending:
                 self.context.step()
-                limit = self.context.spec.get('max_iterations')
-                if limit and self.model_calls >= limit:
-                    self.boundary_failed = True
                 if not self.stopped.is_set() and not self.boundary_failed:
                     maintain_context(self)
-                    self.model_calls += 1
-            return not self.stopped.is_set() and not self.boundary_failed
+            if self.stopped.is_set() or self.boundary_failed:
+                return False
+            # Polling is inference too. Pending work cannot bypass the turn cap.
+            limit = self.context.spec.get('max_iterations')
+            if limit and self.model_calls >= limit:
+                self.boundary_failed = True
+                self.boundary_reason = 'model call limit reached'
+                return False
+            self.model_calls += 1
+            return True
 
     def sdk_config(self, home):
         from openai_codex import CodexConfig
@@ -158,6 +180,7 @@ class CodexAgent(HarnessAgent):
         self.validate()
         self.stopped.clear()
         self.boundary_failed = False
+        self.boundary_reason = ''
         self.model_calls = 0
         conversation_history = prepare_context(self, conversation_history)
         self.journal = TurnJournal(conversation_history, prompt, self.context_store)
@@ -171,6 +194,7 @@ class CodexAgent(HarnessAgent):
         self.journal.call_namespace = uuid4().hex
         message_items = {}
         finished, answer = False, ''
+        failure = {}
         # Native transcripts are private, disposable state. Only Moyai's public
         # journal crosses requester/model changes and filesystem checkpoints.
         try:
@@ -196,8 +220,8 @@ class CodexAgent(HarnessAgent):
                                 item = payload.get('item', {})
                                 if item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
                                     # Astra's code-mode outer call ID differs from
-                                    # nested tool item IDs. This event follows all
-                                    # nested receipts on the same ordered stream.
+                                    # nested tool item IDs. A yielded outer output
+                                    # does not settle its nested tool receipts.
                                     with self.receipts:
                                         self.completed.add(item['call_id'])
                                         self.receipts.notify_all()
@@ -213,12 +237,19 @@ class CodexAgent(HarnessAgent):
                                         self.context.activity.commentary(text)
                                 else:
                                     self.record_item(item, completed=event.method == 'item/completed')
+                            elif event.method == 'error':
+                                failure.update(codex_details(payload.get('error'), will_retry=payload.get('willRetry')))
                             elif event.method == 'turn/completed':
                                 finished = payload['turn']['status'] == 'completed'
+                                if not finished:
+                                    failure['native_status'] = (payload['turn']['status']
+                                        if payload['turn']['status'] in {'failed', 'interrupted'} else 'unknown')
+                                    if payload['turn'].get('error'):
+                                        failure.update(codex_details(payload['turn']['error']))
                                 break
-        except Exception:
-            # Preserve receipts without exposing provider payloads or native logs.
-            pass
+        except Exception as exc:
+            finished = False
+            failure.update(exception_details(exc))
         interrupted = self.stopped.is_set()
         completed = finished and not interrupted and not self.boundary_failed and not self.journal.pending
         if completed:
@@ -230,9 +261,12 @@ class CodexAgent(HarnessAgent):
             # Commentary already belongs to the journal; only confirmed final
             # items are committed here, once per native identity, not per text.
             answer = '\n'.join(final_text or [item['text'] for item in message_items.values() if item.get('text')])
+        diagnostic = report_failure(self, 'codex', failure) if not completed and not interrupted else None
         return {'completed': bool(completed), 'interrupted': interrupted,
                 'failed': not completed and not interrupted, 'messages': self.journal.messages,
-                'final_response': answer if completed else 'Codex stopped before completing the response. Saved tool receipts are preserved.'}
+                **({'sdk_failure': diagnostic} if diagnostic else {}),
+                'final_response': (answer if completed else failure_summary(diagnostic) if diagnostic else
+                    'Codex stopped before completing the response. Saved tool receipts are preserved.')}
 
     def close(self):
         self.context.relay.before_model = None

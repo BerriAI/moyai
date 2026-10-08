@@ -282,3 +282,18 @@ def test_focus_envelope_is_bounded_and_never_becomes_a_chat_update():
     reporter.commentary('<status>API_KEY=secret-marker</status>Visible message')
     assert events[-1][1] == 'Visible message'
     assert '<status>' not in json.dumps(events) and 'secret-marker' not in json.dumps(events)
+
+
+def test_unknown_native_fields_and_messages_do_not_enter_diagnostics():
+    from types import SimpleNamespace
+    from sandbox.sdk_failure import exception_details, codex_details, claude_details
+    assert codex_details({'codexErrorInfo': {'private-payload': {'httpStatusCode': 'secret'}},
+                          'message': 'secret'}) == {'source': 'native_error'}
+    assert claude_details(SimpleNamespace(subtype='private-subtype', is_error=True,
+        terminal_reason='private-reason', errors=['secret'], api_error_status=True)) == {
+            'source': 'native_result', 'native_status': 'unknown', 'is_error': True, 'error_count': 1}
+    cause = ConnectionResetError(54, 'private-network-body')
+    error = RuntimeError('private-exception-body')
+    error.__cause__ = cause
+    assert exception_details(error) == {'source': 'exception', 'exception_type': 'RuntimeError',
+                                        'cause_type': 'ConnectionResetError'}

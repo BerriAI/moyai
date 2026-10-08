@@ -460,3 +460,31 @@ def test_supervisor_launch_marker_prevents_second_execution_after_finished_or_ab
     supervise(directory, command)
     assert status(directory)['state'] == 'uncertain'
     assert counter.read_text() == 'x'
+
+
+async def test_sdk_diagnostics_survive_durable_result_and_activity_storage(durable):
+    manager, cloud, run_id = durable
+    diagnostic = {'version': 1, 'sdk': 'codex', 'source': 'native_error',
+                  'code': 'httpConnectionFailed', 'http_status': 409, 'will_retry': False,
+                  'pending_tools': 1, 'boundary_failed': True,
+                  'boundary_reason': 'native output notification timed out', 'model_calls': 2}
+    original = cloud.command
+    async def command(machine, action, directory, value, **kwargs):
+        result = await original(machine, action, directory, value, **kwargs)
+        if action == 'read':
+            report = json.loads(result)
+            report['final'].update(completed=False, sdk_failure=diagnostic, message='Codex stopped (HTTP 409).')
+            report['exit_code'] = 1
+            report['events'] = [{'kind': 'error', 'message': 'Codex stopped (HTTP 409).',
+                                 'data': {'activity_version': 1, 'phase': 'sdk_failure', **diagnostic}}]
+            return json.dumps(report)
+        return result
+    manager.command = command
+    await drive(manager, run_id, phase='checkpointed')
+    persisted = json.loads(manager.store.run(run_id)['pending_result'])
+    assert persisted['sdk_failure'] == diagnostic and persisted['completed'] is False
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'failed'
+    assert len(cloud.launches) == 1, 'Diagnostic metadata alone must never authorize replay'
+    event = next(e for e in manager.store.events(run_id) if e['data'].get('phase') == 'sdk_failure')
+    assert all(event['data'][key] == value for key, value in diagnostic.items())

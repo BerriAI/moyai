@@ -124,6 +124,10 @@ class ActivityReporter:
             except Exception:
                 pass
 
+    def failure(self, message, diagnostic):
+        # Only the SDK diagnostic builder supplies this body-free record.
+        self.emit('error', message, {'activity_version': 1, 'phase': 'sdk_failure', **diagnostic})
+
     def commentary(self, text, *args, **kwargs):
         # Hermes' interim callback contains public assistant text, never its
         # separate reasoning_callback. Strip tagged reasoning defensively too.

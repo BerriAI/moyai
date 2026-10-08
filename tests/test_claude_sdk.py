@@ -182,3 +182,42 @@ def test_incomplete_native_mirror_never_becomes_a_new_checkpoint(monkeypatch, tm
         assert ('commit' in actions) == (mirror == 'complete')
     finally:
         agent.context_store.close()
+
+
+@pytest.mark.parametrize('source', ['http', 'result', 'exception', 'cleanup'])
+def test_claude_failure_metadata_replaces_private_result_and_stderr(monkeypatch, tmp_path, source):
+    from claude_agent_sdk import ResultMessage, ProcessError
+    from sandbox.activity import ActivityReporter
+    agent, _ = make_agent(monkeypatch, tmp_path)
+    events = []
+    activity = ActivityReporter(lambda *args: events.append(args))
+    agent.context = agent.context.__class__(agent.context.spec, agent.context.relay, agent.context.config,
+        activity, agent.context.step, agent.context.cwd)
+    agent.context.relay.last_failure = {'http_status': 502, 'request_id': 'broker-request-123',
+                                       'body': 'private-broker-body'}
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args):
+            if source == 'cleanup':
+                raise ProcessError('private-process-body', exit_code=2, stderr='private-stderr')
+        async def query(self, prompt): pass
+        async def receive_response(self):
+            if source == 'exception':
+                raise ProcessError('private-process-body', exit_code=2, stderr='private-stderr')
+            yield ResultMessage(subtype='error_during_execution' if source == 'result' else 'success',
+                duration_ms=1, duration_api_ms=1, is_error=source != 'cleanup', num_turns=1,
+                session_id='session', result='private-result-body', errors=['private-errors-body'],
+                api_error_status=502 if source == 'http' else None)
+    monkeypatch.setattr('claude_agent_sdk.ClaudeSDKClient', Client)
+    monkeypatch.setattr(agent, 'validate', lambda: None)
+    result = agent.run_conversation('Read', conversation_history=[], system_message='Moyai')
+    failure = result['sdk_failure']
+    assert result['failed'] and not result['completed']
+    assert failure['broker_request_id'] == 'broker-request-123' and failure['http_status'] == 502
+    if source in {'exception', 'cleanup'}:
+        assert failure['exception_type'] == 'ProcessError' and failure['exit_code'] == 2
+    else:
+        assert failure['error_count'] == 1
+    assert len([event for event in events if event[0] == 'error']) == 1
+    assert 'private-' not in json.dumps([result, events])

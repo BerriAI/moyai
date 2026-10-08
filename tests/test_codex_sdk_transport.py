@@ -1,5 +1,6 @@
 """Published Codex runtime, real native/MCP tools, and synthetic Responses inference."""
 import json
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -147,8 +148,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert 'untrusted-project-instructions-marker' not in serialized
         assert not marker.exists()
         # Astra's native tool catalog selects code mode. These outer call IDs
-        # differ from nested tool receipt IDs; all must settle before the relay
-        # allows another inference request or asks Moyai to checkpoint.
+        # differ from nested tool receipt IDs. Their outputs must be observed
+        # before inference; nested tools must settle before checkpointing.
         catalog = [tool for body in requests for item in body.get('input', [])
                    if item.get('type') == 'additional_tools' for tool in item['tools']]
         assert any(tool.get('name') == 'functions' for tool in catalog)
@@ -168,6 +169,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             assert len(requests) == (1 if outcome == 'interrupt' else 2)
             assert len(attempts) == 2
             assert not calls
+            if outcome == 'provider-error':
+                assert result['sdk_failure']['http_status'] == 503
             return
         assert result['completed'] and result['final_response'] == 'codex-transport-ok'
         assert (workspace / 'receipt.txt').read_text() == 'codex-file-ok\n'
@@ -195,6 +198,156 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert not store.pending
     finally:
         agent.close()
+        store.close()
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize('yield_ms,outcome', [(1000, 'complete'), (None, 'complete'), (1000, 'interrupt')])
+def test_native_code_mode_yield_polls_live_tool_without_checkpointing(tmp_path, monkeypatch, yield_ms, outcome):
+    proof = native_yield_case(tmp_path, monkeypatch, yield_ms, outcome)
+    assert not proof['faults'] and not proof['transport_errors']
+    assert proof['completed'] is (outcome == 'complete'), proof
+    assert proof['interrupted'] is (outcome == 'interrupt')
+    assert not proof['failed'] and not proof['boundary_failed']
+    assert proof['model_calls'] == proof['upstream_requests'] == (3 if outcome == 'complete' else 2)
+    assert proof['lifecycle_steps'] == [0, 1]
+    assert proof['tool_executions'] == proof['completed_receipts'] == 1
+    assert proof['tool_events'] == ['start', 'complete']
+    assert not proof['pending_tools'] and not proof['sdk_failure']
+
+
+def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
+                      agent_class=CodexAgent, progress=lambda text: None):
+    """Real Codex + MCP + relay, including the default ~30-second exec yield.
+
+    The tool waits for the next model request to reach the upstream server.
+    Requiring nested completion before admitting that request deadlocks.
+    """
+    from sandbox.broker_relay import BrokerRelay
+    from sandbox.broker_transport import unseal
+    capability = 'yield-fixture-capability'
+    release = threading.Event()
+    calls, requests, steps, events, faults, diagnostics = [], [], [], [], [], []
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
+    agent = None
+    native_errors = []
+    from openai_codex.async_client import AsyncCodexClient
+    from sandbox.sdk_failure import codex_details
+    class ObservedClient(AsyncCodexClient):
+        async def next_turn_notification(self, turn_id):
+            event = await super().next_turn_notification(turn_id)
+            if event.method == 'error':
+                payload = event.payload.model_dump(mode='json', by_alias=True)
+                detail = codex_details(payload.get('error'), will_retry=payload.get('willRetry'))
+                native_errors.append(detail)
+                progress('Native SDK error: ' + json.dumps(detail))
+            return event
+    monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', ObservedClient)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+
+        def reply(self, value):
+            body = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except ConnectionError:
+                pass  # The baseline SDK exits with the fixture tool unresolved.
+
+        def do_GET(self):
+            if self.path == '/context/window':
+                return self.reply({'input_budget': 200000})
+            assert self.path == '/tools'
+            self.reply([{'name': 'slow_echo', 'description': 'Wait for a local fixture signal.',
+                'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
+
+        def do_POST(self):
+            raw = self.rfile.read(int(self.headers['Content-Length']))
+            body = json.loads(unseal(capability, self.path, raw))
+            if self.path == '/context/maintenance':
+                if agent.journal is not None:
+                    assert not agent.journal.pending
+                return self.reply({})
+            if self.path == '/tools/call':
+                calls.append(body)
+                progress('Tool started; it waits for an admitted model poll')
+                if not release.wait(timeout=50):
+                    faults.append('Model polling was blocked while the tool was running')
+                return self.reply({'text': 'slow-tool-complete'})
+            assert self.path == '/v1/responses'
+            requests.append(body)
+            sequence = len(requests)
+            progress(f'Model request {sequence} admitted; pending tools: {len(agent.journal.pending)}')
+            if sequence == 1:
+                code = 'text(await tools.mcp__moyai__slow_echo({}));'
+                if yield_ms is not None:
+                    code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
+                output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
+                          'name': 'exec', 'namespace': 'functions', 'input': code}
+            elif sequence == 2:
+                assert len(calls) == 1 and agent.journal.pending
+                assert steps == [0], 'Lifecycle must not run while the nested tool is pending'
+                assert agent.model_calls == 2, 'Polling must count toward the model-call cap'
+                cells = re.findall(r'Script running with cell ID ([0-9]+)', json.dumps(body))
+                assert cells, 'The native runtime must actually yield'
+                output = {'type': 'function_call', 'id': 'wait_2', 'call_id': 'outer_2',
+                          'name': 'wait', 'namespace': 'functions',
+                          'arguments': json.dumps({'cell_id': cells[-1], 'yield_time_ms': 1000})}
+                release.set()
+            else:
+                assert not agent.journal.pending and agent.journal.completed_tools == 1
+                assert 'slow-tool-complete' in json.dumps(body)
+                output = {'type': 'message', 'id': 'answer', 'role': 'assistant', 'phase': 'final_answer',
+                          'status': 'completed', 'content': [{'type': 'output_text', 'text': 'yield-test-complete'}]}
+            send_response(self, output, sequence)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', capability,
+                        report_error=diagnostics.append).start()
+    store = ContextStore(tmp_path / 'context.sqlite3', 'yield-test')
+    store.initialize([])
+
+    def step():
+        assert not agent.journal.pending
+        steps.append(agent.journal.completed_tools)
+        progress(f'Settled lifecycle check; completed tools: {agent.journal.completed_tools}')
+        if outcome == 'interrupt' and agent.journal.completed_tools:
+            agent.interrupt()
+
+    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60, 'max_iterations': 6},
+        relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
+        activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
+            complete=lambda *args: events.append(('complete', args)), commentary=lambda text: None),
+        step=step, cwd=str(workspace), definition=None, context_store=store)
+    try:
+        result = agent.run_conversation('Run the local slow tool once.', conversation_history=[],
+                                        system_message='Local yield regression fixture.')
+        assert calls == [{'name': 'slow_echo', 'arguments': {}}]
+        receipts = [m for m in result['messages'] if m['role'] == 'tool']
+        assert all('slow-tool-complete' in receipt['content'] for receipt in receipts)
+        proof = {key: result[key] for key in ('completed', 'interrupted', 'failed', 'final_response')}
+        proof.update(boundary_failed=agent.boundary_failed, model_calls=agent.model_calls,
+            upstream_requests=len(requests), lifecycle_steps=steps, tool_executions=len(calls),
+            completed_receipts=len(receipts), pending_tools=len(store.pending),
+            tool_events=[kind for kind, _ in events], faults=faults, transport_errors=diagnostics,
+            sdk_failure=result.get('sdk_failure'), native_errors=native_errors)
+        progress('Result: ' + json.dumps({key: proof[key] for key in (
+            'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
+        return proof
+    finally:
+        release.set()
+        agent.close()
+        relay.close()
         store.close()
         server.shutdown()
         server.server_close()

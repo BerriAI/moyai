@@ -183,7 +183,8 @@ def _run_agent(spec, relay):
             goal.step(agent)
         if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
-    harness_activity = SimpleNamespace(start=activity.start, complete=tool_complete, commentary=activity.commentary)
+    harness_activity = SimpleNamespace(start=activity.start, complete=tool_complete,
+                                       commentary=activity.commentary, failure=activity.failure)
     # Keep restored history outside every repository and downloadable artifact.
     # Otherwise an agent's `git add -A` could commit the private conversation.
     history_path = Path("/session/conversation.json")
@@ -406,6 +407,7 @@ def _run_agent(spec, relay):
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
              **({'transport_retry': transport_retry} if transport_retry else {}),
              **({'transport_failure': relay.last_failure} if getattr(relay, 'last_failure', None) else {}),
+             **({'sdk_failure': result['sdk_failure']} if result.get('sdk_failure') else {}),
              steering_applied=steering.receipts() if hasattr(steering, 'receipts') else [])
         (artifacts / "result.md").write_text(summary)
         goal.save()

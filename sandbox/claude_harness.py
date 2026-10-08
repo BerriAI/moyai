@@ -11,10 +11,12 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .native_session import NativeSession, MAX_BYTES
+    from .sdk_failure import claude_details, exception_details, report_failure, failure_summary
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, TurnJournal
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from native_session import NativeSession, MAX_BYTES
+    from sdk_failure import claude_details, exception_details, report_failure, failure_summary
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
@@ -188,6 +190,7 @@ class ClaudeAgent(HarnessAgent):
     async def _run(self, prompt, system_message):
         from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage, SystemMessage
         result = None
+        failure = {}
         # A confirmed context rejection retires the prior transcript before
         # run_with_context_recovery starts a fresh SDK with public receipts.
         if self.native is not None and not self.native.resumed:
@@ -210,22 +213,26 @@ class ClaudeAgent(HarnessAgent):
                                 self.transcript.valid = False
                         elif isinstance(message, ResultMessage):
                             result = message
-        except Exception:
-            # Never expose SDK stderr or provider payloads in public activity.
-            # Preserve receipts after failure; no automatic replay or fallback.
-            pass
+        except Exception as exc:
+            failure.update(exception_details(exc))
         interrupted = self.stopped.is_set()
-        completed = bool(result and result.subtype == 'success' and not result.is_error and not interrupted)
-        answer = result.result if result else ''
+        completed = bool(result and result.subtype == 'success' and not result.is_error
+                         and not interrupted and not failure and not self.journal.pending)
+        answer = result.result if completed else ''
         if completed:
             answer = answer or ''.join(self.pending_text)
             self.journal.finish(answer)
             if (self.transcript is not None and self.transcript.valid and self.transcript.appended and self.transcript.records
                     and result.session_id == self.transcript.session_id and not self.journal.pending):
                 self.native.finish(self.transcript.payload())
+        if result is not None and not completed:
+            failure = {**claude_details(result), **failure}
+        diagnostic = report_failure(self, 'claude-agent-sdk', failure) if not completed and not interrupted else None
         return {'completed': completed, 'interrupted': interrupted,
                 'failed': not completed and not interrupted, 'messages': self.journal.messages,
-                'final_response': answer or 'Claude Agent SDK stopped before completing the response.'}
+                **({'sdk_failure': diagnostic} if diagnostic else {}),
+                'final_response': (answer if completed else failure_summary(diagnostic) if diagnostic else
+                    'Claude Agent SDK stopped before completing the response.')}
 
     def close(self):
         self.context.relay.before_model = None
