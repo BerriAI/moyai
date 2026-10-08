@@ -123,7 +123,8 @@ def test_native_gateway_preserves_discovered_tool_references(workspace, monkeypa
      b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_test","status":"completed","usage":{"input_tokens":11,"output_tokens":3,"cost":0.01234567890123456789}}}\n\n'),
 ])
 @pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'openai/gpt-6.1-sol', 'anthropic/claude-opus-5-5', 'fireworks_ai/glm-5p3'])
-def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, monkeypatch, route, body, wire, model):
+@pytest.mark.parametrize('requested_tier', [None, 'default', 'ultrafast'])
+def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, monkeypatch, route, body, wire, model, requested_tier):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     app.state.settings.litellm_api_key = 'server-only-key'
@@ -138,6 +139,10 @@ def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, mon
         assert payload['tools'] == body['tools']
         assert payload['model'] == model
         assert payload['stream'] is True
+        if route == 'responses' and model == 'openai/gpt-6-astra':
+            assert payload['service_tier'] == 'ultrafast'
+        else:
+            assert 'service_tier' not in payload
         assert 'api_base' not in payload and 'api_key' not in payload
         return httpx.Response(200, content=wire, headers={'Content-Type': 'text/event-stream'})
     actual = httpx.AsyncClient
@@ -146,6 +151,8 @@ def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, mon
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     url = f"/broker/{run['id']}/v1/{route}"
     payload = {**body, 'stream': True, 'model': 'override', 'api_key': 'override', 'api_base': 'https://evil.example'}
+    if requested_tier is not None:
+        payload['service_tier'] = requested_tier
     assert client.post(url, json=payload).status_code == 401
     response = client.post(url, json=payload, headers={'Authorization': 'Bearer cap'})
     assert response.status_code == 200 and response.content == wire
@@ -166,14 +173,22 @@ def test_native_error_event_is_not_accounted_as_success():
 
 
 @pytest.mark.parametrize('route', ['messages', 'responses'])
-def test_native_nonstream_response_bytes_unchanged(workspace, monkeypatch, route):
+@pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'openai/gpt-6.1-sol'])
+def test_native_nonstream_response_bytes_unchanged(workspace, monkeypatch, route, model):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
-    wire = b'{"id":"native-id", "usage":{"input_tokens":2,"output_tokens":1},"status":"completed"}'
+    wire = b'{"id":"native-id", "usage":{"input_tokens":2,"output_tokens":1},"status":"completed","service_tier":"ultrafast"}'
+    def upstream(request):
+        payload = json.loads(request.content)
+        if route == 'responses' and model == 'openai/gpt-6-astra':
+            assert payload['service_tier'] == 'ultrafast'
+        else:
+            assert 'service_tier' not in payload
+        return httpx.Response(200, content=wire)
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
-        transport=httpx.MockTransport(lambda req: httpx.Response(200, content=wire)), **kw))
-    run = app.state.store.create_run('test native', '', 'modal', [])
+        transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('test native', '', 'modal', [], model=model)
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer cap'},
                            json={'messages': [], 'input': [], 'stream': False})

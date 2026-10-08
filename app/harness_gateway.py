@@ -55,6 +55,8 @@ def authorized_payload(body, route, model, context):
             payload['instructions'] = context + '\n\n' + (payload.get('instructions') or '')
     if route == '/v1/responses':
         payload['store'] = False
+        if model == 'openai/gpt-6-astra':
+            payload['service_tier'] = 'ultrafast'
     return payload
 
 
