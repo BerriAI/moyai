@@ -45,6 +45,47 @@ async function assertTableTextContained(page) {
 }
 
 for (const width of [1440, 1024, 768, 320]) {
+  test(`analytics headings and metric summaries have clear spacing at ${width}px`, async t => {
+    const page = await pageFor(t, 'spend', 'populated', width);
+    for (const tab of ['leaderboard', 'users', 'overall']) {
+      await page.locator(`#spend-tab-${tab}`).click();
+      await page.locator('.analytics-metrics').first().waitFor();
+      if (tab === 'leaderboard') {
+        assert.deepEqual(await page.locator('.analytics-metrics strong').allTextContents(), ['16', '18', '7']);
+      }
+      const summaries = await page.locator('.analytics-metrics').evaluateAll(summaries => summaries.map(summary => {
+        const box = el => el.getBoundingClientRect().toJSON();
+        const heading = summary.parentElement.querySelector(':scope > h2');
+        const description = summary.previousElementSibling.tagName === 'P' ? summary.previousElementSibling : null;
+        return {
+          summary: box(summary), heading: box(heading), description: description && box(description),
+          metrics: [...summary.children].map(metric => ({
+            box: box(metric), label: box(metric.querySelector('span')), value: box(metric.querySelector('strong')),
+            note: metric.querySelector('small') && box(metric.querySelector('small')),
+          })),
+        };
+      }));
+      for (const { summary, heading, description, metrics } of summaries) {
+        if (description) {
+          const headingGap = description.top - heading.bottom;
+          const metricsGap = summary.top - description.bottom;
+          assert.ok(headingGap >= 4 && headingGap <= 10, `${tab}: title and description stay together`);
+          assert.ok(metricsGap >= 16 && metricsGap <= 24, `${tab}: metrics are separated from the introduction`);
+        }
+        assert.ok(Math.abs(summary.left - heading.left) <= 1, `${tab}: heading and metrics share a leading edge`);
+        for (const metric of metrics) {
+          assert.ok(metric.value.top >= metric.label.bottom, `${tab}: metric value follows its label`);
+          if (metric.note) assert.ok(metric.note.top >= metric.value.bottom, `${tab}: supporting text follows its value`);
+          assert.ok(metric.box.left >= summary.left && metric.box.right <= summary.right + 1, `${tab}: columns fit their summary`);
+          for (const peer of metrics.filter(peer => Math.abs(peer.box.top - metric.box.top) <= 1)) {
+            assert.ok(Math.abs(peer.value.top - metric.value.top) <= 1, `${tab}: values in the same row align`);
+          }
+        }
+      }
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${tab}: no page overflow`);
+    }
+  });
+
   test(`memory preference label, field and arrow stay aligned at ${width}px`, async t => {
     const page = await pageFor(t, 'memory', 'populated', width);
     const control = page.getByLabel('How new memories are saved', { exact: true });

@@ -387,6 +387,7 @@
 .analytics-date-form small { grid-column:1/-1; }
 .settings-view #content .analytics-section { margin:0 0 48px;padding:0;min-width:0; }
 .settings-view #content .analytics-section h2 { font-size:.933333rem;margin:0 0 20px;font-weight:550; }
+.settings-view #content .analytics-section>h2:has(+.analytics-description) { margin-bottom:8px; }
 .settings-view #content .analytics-section .section-header { margin-bottom:16px;display:flex;justify-content:space-between;flex-wrap:wrap; }
 .settings-view #content .analytics-section .section-header h2 { margin:0; }
 .settings-view #content .analytics-description { margin:0 0 16px; }
