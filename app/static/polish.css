@@ -293,7 +293,7 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .composer:focus-within { border-color: #dedede; box-shadow: 0 1px 2px #0000000d, 0 6px 18px #0000000b; }
 .composer textarea, .reply-composer textarea { font-size: 15px; line-height: 22px; padding: 16px 18px 6px; min-height: 62px; color: #1f1f1f; }
 .composer textarea::placeholder { color: #9a9a9a; }
-.composer-caption { display: none; }
+.composer-caption { display: flex; }
 @media (max-width: 480px) { .chat-message.user { max-width: 88%; } }
 
 /* Home */
