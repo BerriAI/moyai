@@ -80,6 +80,15 @@ for (const width of [1440, 1024, 768, 320]) {
     await page.locator('#spend-tab-prs').click();
     const table = page.locator('.analytics-pr-table');
     await table.waitFor();
+    const filter = page.locator('#spend-pr-status');
+    const textRight = await filter.evaluate(select => {
+      const style = getComputedStyle(select);
+      const context = document.createElement('canvas').getContext('2d');
+      context.font = style.font;
+      return select.getBoundingClientRect().left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft) + context.measureText(select.selectedOptions[0].textContent).width;
+    });
+    const arrow = await page.locator('.analytics-pr-filters [data-slot="native-select-icon"]').boundingBox();
+    assert.ok(textRight + 4 <= arrow.x, 'The selected status leaves space for its arrow');
     await assertTableTextContained(page);
     const region = page.getByRole('region', { name: 'Pull requests first tracked in selected dates', exact: true });
     const bounds = await table.boundingBox();

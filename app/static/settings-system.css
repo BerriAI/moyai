@@ -59,7 +59,7 @@
 .settings-view button.quiet { color: var(--settings-muted); background: transparent; border-color: transparent; }
 .settings-view button.danger { color: var(--settings-danger); }
 .settings-view :is(#content,[data-slot="dialog-content"]) :is(input:not([type=checkbox]):not([type=radio]),select,textarea) { border: 1px solid var(--settings-control-border); border-radius: var(--settings-control-radius); padding: 9px 12px; min-width: 0; background: var(--settings-surface); }
-.settings-view :is(#content,[data-slot="dialog-content"]) select[data-slot="native-select"] { padding-inline-end: 36px; }
+.settings-view :is(#content,[data-slot="dialog-content"]) [data-slot="native-select-wrapper"] select[data-slot="native-select"] { padding-inline-end: 36px; }
 .settings-view textarea { width: 100%; line-height: 1.6; }
 .settings-view input::placeholder,.settings-view textarea::placeholder { color: var(--settings-muted); }
 .settings-view :is(button,a,input,select,textarea,summary):focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 3px; }
