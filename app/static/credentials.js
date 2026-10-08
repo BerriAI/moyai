@@ -3,6 +3,7 @@ let credentialDialogGeneration=0;
 // Keep run links strict: credentials are identifiers, never values or arbitrary URLs.
 function parseSessionLink(hash){
   if(typeof hash!=='string')return null;
+  const fileLink=globalThis.MoyaiFiles?.sessionLink(hash);if(fileLink)return fileLink;
   const match=/^#run=([a-f0-9]{32})(?:&credential=([a-f0-9]{32})&generation=(0|[1-9][0-9]{0,14}))?$/.exec(hash);
   return match?{runId:match[1],credentialId:match[2]||'',generation:match[3]===undefined?null:Number(match[3]),hash}:null;
 }

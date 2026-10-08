@@ -230,3 +230,13 @@ def test_cancelled_google_login_preserves_credential_target_for_retry(sso):
     response = client.get(callback + '&error=access_denied', follow_redirects=False)
     assert response.headers['location'] == '/?signin=cancelled' + target[1:]
     assert client.get('/api/session').json()['authenticated'] is False
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_google_login_preserves_markdown_file_target(sso, cancelled):
+    from app.file_links import file_link
+    _, client, _ = sso
+    target = file_link('https://workspace.example', 'a' * 32, '/workspace/' + 'nested/' * 30 + 'report%20one.md').removeprefix('https://workspace.example')
+    callback, _, _ = begin(sso, target)
+    response = client.get(callback + ('&error=access_denied' if cancelled else ''), follow_redirects=False)
+    assert response.headers['location'] == ('/?signin=cancelled' + target[1:] if cancelled else target)
