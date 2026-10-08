@@ -15,7 +15,7 @@ jobs:
       - name: Test startup and migration guards
         run: uv run --python 3.13 pytest -q --tb=line tests/test_docker_start.py tests/test_render.py tests/test_workspace_image.py tests/test_persistence.py
       - name: Test secure access recovery and broker transport
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py tests/test_mcp_bridge.py
       - name: Test personal memory ownership, capture and privacy
         run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py
       - name: Test instant session metadata and chat routing

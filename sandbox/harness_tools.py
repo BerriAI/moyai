@@ -5,8 +5,9 @@ from pathlib import Path
 
 
 def tools_for(cwd, config):
-    from mcp import ClientSession, StdioServerParameters
+    from mcp import ClientSession, McpError, StdioServerParameters
     from mcp.client.stdio import stdio_client
+    from mcp.types import INTERNAL_ERROR
 
     async def workspace_tools() -> str:
         """List currently authorized workspace tool names, descriptions and input schemas."""
@@ -14,7 +15,14 @@ def tools_for(cwd, config):
 
     async def workspace_call(name: str, arguments_json: str) -> str:
         """Call one authorized workspace tool. Pass arguments as a JSON object string; discover its schema with workspace_tools first."""
-        return await invoke(name, json.loads(arguments_json))
+        try:
+            arguments = json.loads(arguments_json)
+            if not isinstance(arguments, dict):
+                raise ValueError('Expected object')
+        except (ValueError, TypeError):
+            return json.dumps({'isError': True, 'content': [{'type': 'text',
+                'text': 'arguments_json must be a valid JSON object. No tool was called.'}]})
+        return await invoke(name, arguments)
 
     async def invoke(name, arguments):
         server = config['mcp_servers']['workspace']
@@ -22,10 +30,23 @@ def tools_for(cwd, config):
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as client:
                 await client.initialize()
-                result = await client.call_tool(name, arguments) if name else await client.list_tools()
-                if getattr(result, 'isError', False):
-                    raise RuntimeError('Workspace tool failed; the action was not confirmed. Do not retry writes automatically.')
-                return result.model_dump_json()
+                # Populate the SDK's schema cache before an action: call_tool
+                # otherwise discovers tools after execution, risking its receipt.
+                try:
+                    catalog = await client.list_tools()
+                except McpError as exc:
+                    if exc.error.code != INTERNAL_ERROR:
+                        raise
+                    return json.dumps({'isError': True, 'content': [{'type': 'text',
+                        'text': 'Workspace tool discovery failed. No tool action was attempted. '
+                                'Check the workspace connection and call workspace_tools before trying again.'}]})
+                if not name:
+                    return catalog.model_dump_json()
+                if name not in {tool.name for tool in catalog.tools}:
+                    return json.dumps({'isError': True, 'content': [{'type': 'text',
+                        'text': 'Tool is not in the authorized catalog. No tool action was attempted. '
+                                'Use workspace_tools to discover available tools.'}]})
+                return (await client.call_tool(name, arguments)).model_dump_json()
 
     def resolve(path):
         root = Path(cwd).resolve()

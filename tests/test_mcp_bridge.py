@@ -1,11 +1,15 @@
+import asyncio
 import json
 import os
 import shlex
 from pathlib import Path
 import subprocess
 import sys
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+
+import pytest
 
 from app.security import digest
 from test_broker_transport import diagnostic_relay
@@ -92,7 +96,8 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
                      {'name':'skills_search','arguments':{'query':'benchmark','turn_id':1}}]
 
 
-def test_skill_validation_remains_a_tool_error_through_broker_and_mcp(workspace):
+@pytest.mark.parametrize('harness', ['stdio', 'deepagents', 'tool-loop'])
+def test_skill_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harness):
     app, client = workspace
     sign_in(app, client)
     run = active(app)
@@ -102,6 +107,13 @@ def test_skill_validation_remains_a_tool_error_through_broker_and_mcp(workspace)
 
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
+
+        def do_GET(self):
+            response = client.get('/broker/' + run['id'] + self.path,
+                headers={'Authorization': self.headers['Authorization']})
+            self.send_response(response.status_code)
+            self.end_headers()
+            self.wfile.write(response.content)
 
         def do_POST(self):
             assert self.path == '/tools/call'
@@ -127,15 +139,102 @@ def test_skill_validation_remains_a_tool_error_through_broker_and_mcp(workspace)
                 saved = relay.last_failure
                 assert relay.last_error and relay.uncertain_tool and len(diagnostics) == 1
                 app.state.store.update_run(run['id'], token_hash=digest(capability))
-            result = subprocess.run([sys.executable, str(script)],
-                input='\n'.join(json.dumps(message) for message in messages) + '\n',
-                text=True, capture_output=True, timeout=10,
-                env={'PATH': os.environ['PATH'], 'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability})
-            assert result.returncode == 0, result.stderr
-            rejected, recovered = [json.loads(line)['result'] for line in result.stdout.splitlines()]
+            env = {'PATH': os.environ['PATH'], 'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}
+            if harness == 'stdio':
+                result = subprocess.run([sys.executable, str(script)],
+                    input='\n'.join(json.dumps(message) for message in messages) + '\n',
+                    text=True, capture_output=True, timeout=10, env=env)
+                assert result.returncode == 0, result.stderr
+                assert 'private-input-marker' not in result.stdout + result.stderr
+                rejected, recovered = [json.loads(line)['result'] for line in result.stdout.splitlines()]
+            else:
+                from sandbox.harness_bindings import RUNTIME_BINDINGS
+                config = {'mcp_servers': {'workspace': {'command': sys.executable, 'args': [str(script)], 'env': env}}}
+                workspace_call = RUNTIME_BINDINGS[harness].tools(str(app.state.settings.data_dir), config)[1]
+
+                async def invoke() -> list[object]:
+                    return [json.loads(await workspace_call(message['params']['name'],
+                        json.dumps(message['params']['arguments']))) for message in messages]
+
+                rejected, recovered = asyncio.run(invoke())
             assert relay.last_failure == saved
             assert bool(relay.last_error) == relay.uncertain_tool == existing_failure
             assert len(diagnostics) == int(existing_failure)
             assert rejected['isError'] and 'Invalid skill arguments' in rejected['content'][0]['text']
             assert not recovered['isError'] and json.loads(recovered['content'][0]['text'])['loaded']
-            assert 'private-input-marker' not in result.stdout + result.stderr
+            assert 'private-input-marker' not in json.dumps([rejected, recovered])
+
+
+@pytest.mark.parametrize('arguments', ['{private-input-marker', '[]', 'null', '"private-input-marker"', '1', 'true'])
+def test_workspace_call_rejects_nonobject_arguments_without_starting_mcp(arguments: str) -> None:
+    from sandbox.harness_tools import tools_for
+    # No server configuration: rejected arguments must never attempt a call.
+    result = json.loads(asyncio.run(tools_for('/workspace', {})[1]('fixture', arguments)))
+    assert result['isError']
+    assert result['content'][0]['text'] == 'arguments_json must be a valid JSON object. No tool was called.'
+    assert 'private-input-marker' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('tool_index', [0, 1])
+def test_workspace_call_preserves_mcp_transport_failure(tool_index: int) -> None:
+    from sandbox.harness_tools import tools_for
+    # Initialize successfully, then close the MCP transport during discovery.
+    server = """import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['method'] == 'tools/list': break
+    if request['method'] == 'initialize':
+        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{'protocolVersion':'2025-03-26',
+            'capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}}}), flush=True)
+"""
+    config = {'mcp_servers': {'workspace': {'command': sys.executable, 'args': ['-c', server]}}}
+    with pytest.raises(ExceptionGroup):
+        tool = tools_for('/workspace', config)[tool_index]
+        asyncio.run(tool(*(['fixture', '{}'] if tool_index else [])))
+
+
+@pytest.mark.parametrize('harness', ['deepagents', 'tool-loop'])
+@pytest.mark.parametrize('status', [401, 503])
+@pytest.mark.parametrize('tool_index', [0, 1])
+def test_workspace_discovery_failure_precedes_actions_and_can_recover(
+        monkeypatch: pytest.MonkeyPatch, harness: str, status: int, tool_index: int) -> None:
+    from sandbox.harness_bindings import RUNTIME_BINDINGS
+    from sandbox.startup import read_with_reconnect
+    # Exercise real retry exhaustion without spending the production 45 seconds.
+    monkeypatch.setattr('sandbox.broker_relay.read_with_reconnect', partial(read_with_reconnect, budget=0))
+    requests = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            requests.append(('GET', self.path))
+            self.send_response(status if len(requests) == 1 else 200)
+            self.end_headers()
+            self.wfile.write(b'private-provider-body' if len(requests) == 1 else json.dumps([
+                {'name': 'fixture', 'description': 'Fixture', 'inputSchema': {'type': 'object'}}]).encode())
+        def do_POST(self):
+            requests.append(('POST', self.path))
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"saved":true}')
+    script = Path(__file__).resolve().parents[1] / 'sandbox' / 'mcp_bridge.py'
+    with diagnostic_relay(Edge) as (relay, _, diagnostics):
+        config = {'mcp_servers': {'workspace': {'command': sys.executable, 'args': [str(script)],
+            'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'private-capability'}}}}
+        tool = RUNTIME_BINDINGS[harness].tools('/workspace', config)[tool_index]
+        args = ['fixture', '{}'] if tool_index else []
+        rejected = json.loads(asyncio.run(tool(*args)))
+        assert rejected['isError'] and 'No tool action was attempted' in rejected['content'][0]['text']
+        assert 'private' not in json.dumps(rejected) and 'tools' not in rejected
+        assert requests == [('GET', '/tools')]
+        recovered = json.loads(asyncio.run(tool(*args)))
+        if tool_index:
+            assert not recovered['isError'] and json.loads(recovered['content'][0]['text'])['saved']
+        else:
+            assert 'fixture' in {tool['name'] for tool in recovered['tools']}
+        assert requests == [('GET', '/tools'), ('GET', '/tools')] + ([('POST', '/tools/call')] if tool_index else [])
+        assert len(diagnostics) == int(status == 401)
+        if tool_index:
+            unknown = json.loads(asyncio.run(tool('unadvertised', '{}')))
+            assert unknown['isError'] and 'not in the authorized catalog' in unknown['content'][0]['text']
+            assert requests[-1] == ('GET', '/tools') and len(requests) == 4
