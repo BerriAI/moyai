@@ -17,6 +17,7 @@ from .skill_tools import (SAVE_TOOL, READ_TOOL, SaveSkill, ReadSkillFile, bundle
 
 LIBRARY_LIMITS = {'personal': 50, 'organization': 200}
 MAX_SEARCH_MATCHES = 5
+SkillIcon = Literal['auto', 'cube', 'team', 'code', 'review', 'search', 'document', 'chart', 'design', 'video', 'chat', 'automation', 'target']
 
 
 class SkillForm(BaseModel):
@@ -25,6 +26,7 @@ class SkillForm(BaseModel):
     description: str = Field(min_length=3, max_length=320)
     instructions: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=3, max_length=32000)
     scope: Literal['personal', 'organization']
+    icon: SkillIcon = 'auto'
     revision: int = Field(default=0, ge=0)
     client_id: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
 
@@ -121,6 +123,8 @@ class Skills:
                     actor_id TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
                 );
             ''')
+            if 'icon' not in {row[1] for row in conn.execute('PRAGMA table_info(skills)')}:
+                conn.execute("ALTER TABLE skills ADD COLUMN icon TEXT NOT NULL DEFAULT 'auto'")
 
     def visible(self, row, actor):
         return row['scope'] == 'organization' or self.same_requester(row['owner_id'], actor)
@@ -129,7 +133,7 @@ class Skills:
         return admin if row['scope'] == 'organization' else row['owner_id'] == actor
 
     def metadata(self, row, actor='', admin=False):
-        return {**{k:row[k] for k in ('id','name','description','scope','revision','archived','created_at','updated_at')},
+        return {**{k:row[k] for k in ('id','name','description','scope','icon','revision','archived','created_at','updated_at')},
                 'reference':('org:' if row['scope']=='organization' else 'personal:')+row['name'],
                 'can_manage':self.manageable(row,actor,admin)}
 
@@ -188,20 +192,21 @@ class Skills:
                         raise HTTPException(409,'This skill changed. Reopen it before saving.')
                     if old['namespace'] != namespace and conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
                         raise HTTPException(409,'The destination skill library is full.')
-                    conn.execute('UPDATE skills SET name=?,description=?,encrypted=?,scope=?,namespace=?,revision=revision+1,updated_at=? WHERE id=?',
-                                 (body.name,body.description,self.security.encrypt(body.instructions),body.scope,namespace,now(),skill_id))
+                    icon = body.icon if 'icon' in body.model_fields_set else old['icon']
+                    conn.execute('UPDATE skills SET name=?,description=?,encrypted=?,scope=?,namespace=?,icon=?,revision=revision+1,updated_at=? WHERE id=?',
+                                 (body.name,body.description,self.security.encrypt(body.instructions),body.scope,namespace,icon,now(),skill_id))
                 else:
                     prior = conn.execute('SELECT * FROM skills WHERE owner_id=? AND client_id=?',(actor,body.client_id)).fetchone()
                     if prior:
-                        if (prior['archived'] or any(prior[k]!=getattr(body,k) for k in ('name','description','scope'))
+                        if (prior['archived'] or any(prior[k]!=getattr(body,k) for k in ('name','description','scope','icon'))
                                 or self.security.decrypt(prior['encrypted'])!=body.instructions):
                             raise HTTPException(409,'This save was already used. Reopen the form.')
                         return prior['id']
                     if conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
                         raise HTTPException(409,'The skill library is full. Reuse or edit an existing skill.')
                     skill_id = uuid4().hex
-                    conn.execute('INSERT INTO skills(id,name,description,encrypted,scope,owner_id,namespace,created_at,updated_at,client_id) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                                 (skill_id,body.name,body.description,self.security.encrypt(body.instructions),body.scope,actor,namespace,now(),now(),body.client_id))
+                    conn.execute('INSERT INTO skills(id,name,description,encrypted,scope,owner_id,namespace,created_at,updated_at,client_id,icon) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                 (skill_id,body.name,body.description,self.security.encrypt(body.instructions),body.scope,actor,namespace,now(),now(),body.client_id,body.icon))
                 self.audit(conn,skill_id,actor,'saved '+body.scope)
         except sqlite3.IntegrityError:
             raise HTTPException(409,'That skill name is already in this library, including archived skills. Choose another name or edit the existing skill.') from None

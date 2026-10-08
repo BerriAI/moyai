@@ -85,7 +85,7 @@ function bindInlineSkillPicker(input, form) {
     const empty = loading ? 'Loading your skills…' : error || (skills?.length ? 'No matching skills. Try another name.' : 'No skills yet. Add one in your Skills library.');
     popup.innerHTML = `<div class="skill-inline-heading"><span>✦ Commands & skills</span><small>Built-in · Personal · Organization</small></div>
       <div id="${listId}" class="skill-inline-list" role="listbox" aria-label="Available commands and skills">${matches.map((skill, index) =>
-        `<button type="button" role="option" tabindex="-1" id="${listId}-${index}" aria-selected="${index === selected}" data-skill-index="${index}" class="skill-inline-option"><span class="skill-inline-icon" aria-hidden="true">✦</span><span class="skill-inline-copy"><span class="skill-inline-name">/${esc(skill.name)}<small>${skill.builtin ? 'Built-in' : skill.scope === 'personal' ? 'Personal' : 'Organization'}</small></span><span class="skill-inline-description">${esc(skill.description)}</span></span></button>`
+        `<button type="button" role="option" tabindex="-1" id="${listId}-${index}" aria-selected="${index === selected}" data-skill-index="${index}" class="skill-inline-option"><span class="skill-inline-icon" aria-hidden="true">${skillIcon(skill)}</span><span class="skill-inline-copy"><span class="skill-inline-name">/${esc(skill.name)}<small>${skill.builtin ? 'Built-in' : skill.scope === 'personal' ? 'Personal' : 'Organization'}</small></span><span class="skill-inline-description">${esc(skill.description)}</span></span></button>`
       ).join('')}</div>${!matches.length || error ? `<p class="skill-inline-empty" role="status">${esc(empty)}</p>` : ''}
       <div class="skill-inline-footer"><span>${matches.length ? '↑ ↓ navigate · Enter select · Esc close' : 'Type / followed by a skill name'}</span><button type="button" class="quiet" data-skill-library>${error ? 'Retry' : 'Skills library ↗'}</button></div>`;
     popup.hidden = false;
@@ -121,6 +121,7 @@ function bindInlineSkillPicker(input, form) {
     const value = skillCompletion(input.value, current, skill);
     if (input.maxLength > 0 && value.length > input.maxLength) {toast('Shorten your message before adding this skill.'); return;}
     const caret = current.start + completionToken(skill).length + 1;
+    input.setSkillCatalog?.([skill]);
     input.value = value;
     input.focus();
     input.setSelectionRange(caret, caret);

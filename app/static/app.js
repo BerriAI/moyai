@@ -240,6 +240,7 @@ function setView(view,title){
 }
 function autoSize(input){input.style.height='auto';input.style.height=Math.min(input.scrollHeight,200)+'px';}
 function bindComposer(input,form){
+  input=bindSkillEditor(input,form);
   input.addEventListener('input',()=>autoSize(input));
   const skills=bindInlineSkillPicker(input,form);state.skillComposer=skills;
   state.attachments=bindAttachments(input,form,input.id==='prompt'?'new':state.selected);

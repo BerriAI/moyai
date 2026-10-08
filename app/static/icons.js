@@ -1,6 +1,12 @@
 /* Small line icons shared by the shell. Decorative only: callers keep accessible labels. */
 (function(root){
   const paths={
+    cube:'<path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Zm0 9 8-4.5M12 12 4 7.5M12 12v9M8 5.25l8 4.5"/>',
+    code:'<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/>',
+    chart:'<path d="M4 3v17h17M8 16v-5m5 5V7m5 9V4"/>',
+    design:'<path d="m4 16 11-11 4 4L8 20H4v-4Zm9-9 4 4M16 4l1-1a2 2 0 0 1 3 3l-1 1"/>',
+    video:'<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m10 9 5 3-5 3V9Z"/>',
+    target:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
     pull:'<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/><path d="M6 7v10M18 17V9a4 4 0 0 0-4-4h-2m3-3-3 3 3 3"/>',
     copy:'<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
     check:'<path d="m5 12 4 4L19 6"/>',

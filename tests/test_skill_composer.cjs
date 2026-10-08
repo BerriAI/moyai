@@ -31,6 +31,8 @@ function fixture(api = async () => ({skills:catalog})) {
     toast:()=>{},Event:class{constructor(type){this.type=type;}},
   };
   vm.createContext(ctx);
+  vm.runInContext(readFileSync('app/static/icons.js','utf8').replace("if(typeof document!=='undefined'){",'if(false){'),ctx);
+  vm.runInContext(readFileSync('app/static/skill-icons.js','utf8'),ctx);
   vm.runInContext(readFileSync('app/static/goal-status.js','utf8'),ctx);
   vm.runInContext(readFileSync('app/static/skill-composer.js','utf8'),ctx);
   const controller = ctx.bindInlineSkillPicker(input,form);
