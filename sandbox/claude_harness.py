@@ -20,6 +20,10 @@ except ImportError:
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
+# Native image results, hook callbacks and transcript mirrors can exceed the
+# SDK's 1 MiB JSON-line default. Leave room for their encoding/envelopes while
+# keeping a finite per-message bound; this does not change model context limits.
+SDK_MAX_BUFFER_SIZE = 16 * 1024 * 1024
 
 
 class ClaudeTranscript:
@@ -156,6 +160,7 @@ class ClaudeAgent(HarnessAgent):
                 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=str(max(1, min(80, self.compaction_window * 80 // window))))
         return ClaudeAgentOptions(
             model=ctx.spec['model'], cwd=ctx.cwd,
+            max_buffer_size=SDK_MAX_BUFFER_SIZE,
             system_prompt=system_message + '\nUse ToolSearch to discover Moyai MCP tools before calling them. Do not start detached work.',
             tools=NATIVE_TOOLS, allowed_tools=[*NATIVE_TOOLS, 'mcp__moyai__*'],
             permission_mode='dontAsk', setting_sources=[], strict_mcp_config=True,
@@ -215,6 +220,12 @@ class ClaudeAgent(HarnessAgent):
                             result = message
         except Exception as exc:
             failure.update(exception_details(exc))
+            # Match only the SDK's fixed limit error, never publish JSON lines
+            # (which can contain private tool results) or arbitrary stderr.
+            from claude_agent_sdk import CLIJSONDecodeError
+            if (isinstance(exc, CLIJSONDecodeError)
+                    and exc.line == f'JSON message exceeded maximum buffer size of {SDK_MAX_BUFFER_SIZE} bytes'):
+                failure.update(code='sdk_message_buffer_exceeded', buffer_limit_bytes=SDK_MAX_BUFFER_SIZE)
         interrupted = self.stopped.is_set()
         completed = bool(result and result.subtype == 'success' and not result.is_error
                          and not interrupted and not failure and not self.journal.pending)
