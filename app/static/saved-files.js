@@ -25,6 +25,15 @@
     const matches=files.filter(file=>file.workspace_path&&file.name===path);
     return matches.length===1?matches[0]:null;
   }
+  function sessionLink(hash){
+    if(typeof hash!=='string'||hash.length>1600)return null;
+    const match=/^#run=([a-f0-9]{32})&file=([^&#\s]+)$/.exec(hash);
+    if(!match||match[0]!==hash)return null;
+    let fileRef;try{fileRef=decodeURIComponent(match[2]);}catch{return null;}
+    const location=reference(fileRef);
+    if(fileRef.length>1024||!location||!/\.(md|markdown)$/i.test(location.path))return null;
+    return {runId:match[1],fileRef,hash};
+  }
   function decorateReferences(container,files,{runId,onOpen}={}){
     if(!container)return;
     container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code').forEach(node=>{
@@ -166,5 +175,5 @@
     });
     return {sync,decorate,reset,open};
   }
-  return {reference,resolve,decorate:decorateReferences,preview,reveal,create};
+  return {reference,resolve,sessionLink,decorate:decorateReferences,preview,reveal,create};
 });

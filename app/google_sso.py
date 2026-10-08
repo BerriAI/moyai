@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .security import digest
+from .file_links import valid_file_return_path
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -23,7 +24,7 @@ COOKIE = "google_login"
 
 
 class SignInStart(BaseModel):
-    return_to: str = Field(default="/#tasks", max_length=200)
+    return_to: str = Field(default="/#tasks", max_length=1600)
 
 
 class GoogleSignIn:
@@ -105,7 +106,8 @@ class GoogleSignIn:
                 raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
             self.attempts.append(now)
             state, browser, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
-            return_to = body.return_to if re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32}(?:&credential=[a-f0-9]{32}&generation=(?:0|[1-9][0-9]{0,14}))?)", body.return_to) else "/#tasks"
+            allowed = re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32}(?:&credential=[a-f0-9]{32}&generation=(?:0|[1-9][0-9]{0,14}))?)", body.return_to)
+            return_to = body.return_to if allowed or valid_file_return_path(body.return_to) else "/#tasks"
             self.store.execute("DELETE FROM login_states WHERE expires<?", (time.time(),))
             self.store.execute("INSERT INTO login_states VALUES(?,?,?,?,?,?)",
                                (digest(state), digest(browser), nonce, verifier, return_to, time.time() + 600))

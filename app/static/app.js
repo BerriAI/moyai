@@ -352,7 +352,8 @@ async function openRun(id,hash='#run='+id){
   const titleEdits=state.titleEdits||0;
   stopStream();const version=++state.pageVersion;state.selected=id;
   if(link?.runId===id&&link.credentialId)state.credentialLink={...link,pageVersion:version};
-  history.replaceState(null,'',state.credentialLink?.hash||'#run='+id);
+  const targetHash=link?.runId===id?link.hash:'#run='+id;
+  history.replaceState(null,'',targetHash);
   let run;
   try{run=await api(`/api/runs/${id}`);}catch(error){
     if(version!==state.pageVersion)return;
@@ -362,8 +363,8 @@ async function openRun(id,hash='#run='+id){
   if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;
   if(sessionEdits!==(state.sessionEdits||0))return openRun(id,hash);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
-  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',state.credentialLink?.hash||'#run='+id);
-  if(run.chat_enabled){renderChat(run);return;}
+  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',targetHash);
+  if(run.chat_enabled){renderChat(run);if(link?.fileRef)await openLinkedFile(link,version);return;}
   $('#content').innerHTML=`<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div><div class="timeline" id="timeline">${run.events.map(eventHTML).join('')}</div><div id="approvals"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':(run.sandbox_provider==='substrate'?'Substrate sandbox':'Modal sandbox')}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated sandbox supplied by your selected provider.'}</div></aside></div>`;
   bindSessionHeaderActions(run);
@@ -372,6 +373,8 @@ async function openRun(id,hash='#run='+id){
   if($('#retry'))$('#retry').onclick=async()=>{await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));};
   renderApprovals(run.approvals || []);
   savedFiles.sync(run);
+  if(link?.fileRef)await openLinkedFile(link,version);
+  if(version!==state.pageVersion)return;
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncPullRequests(run);
   if(!terminal.has(run.status) || run.active){
     const cursor=run.events.at(-1)?.id||0; const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
@@ -389,6 +392,15 @@ function toggleDetails(open){
 function initializeChatControls(){
   $('#chat-working').insertAdjacentHTML('beforebegin','<section id="goal-status" class="goal-status" aria-label="Session goal" hidden></section>');
   $('#session-details .activity-panel').innerHTML='<h3>Current activity</h3><p id="activity-summary"></p><details class="activity-history"><summary>Tool history <span id="activity-count"></span></summary><div id="activity-history"></div></details>';
+}
+async function openLinkedFile(link,version){
+  const current=()=>version===state.pageVersion&&state.selected===link.runId;
+  try{
+    const catalog=await api(`/api/runs/${link.runId}/files`);if(!current())return;
+    const file=MoyaiFiles.resolve(link.fileRef,catalog.files);
+    if(!file)throw new Error('This file is not available in this session’s saved files. Open Files to browse the available results.');
+    await savedFiles.open(file,link.fileRef);
+  }catch(error){if(current()){workspacePanel?.open('files');toast(error.message);}}
 }
 function renderChat(run){
   const id=run.id;
