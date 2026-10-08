@@ -78,7 +78,7 @@ function bindSpendPRControls(data,tab,request){
   }
 }
 function paintSpendPRPanel(data,tab,request){
-  const restore=preserveSpendView();
+  const restore=preserveSpendView(false);
   const html=spendPRPanel(tab);
   if($('#spend-panel').innerHTML!==html)$('#spend-panel').innerHTML=html;
   bindSpendPRControls(data,tab,request);

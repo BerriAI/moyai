@@ -26,10 +26,10 @@ function bindSpendFilters(){
   $('#sync-spend').onclick=async()=>{const button=$('#sync-spend');button.disabled=true;button.textContent='Refreshing…';try{await renderSpend();}catch(e){showError(e);button.disabled=false;button.textContent='Refresh';}};
 }
 function spendContext(start=spendState.start,end=spendState.end){return [state.pageVersion,state.role,start,end].join('/');}
-function preserveSpendView(){
+function preserveSpendView(preserveValues=true){
   const root=$('#content'),active=document.activeElement;
   if(typeof document.querySelectorAll!=='function')return ()=>{};
-  const nodes=[...document.querySelectorAll('#content [id]')].map(el=>({id:el.id,open:el.open,value:el.matches?.('input,select,textarea')?el.value:undefined,top:el.scrollTop,left:el.scrollLeft}));
+  const nodes=[...document.querySelectorAll('#content [id]')].map(el=>({id:el.id,open:el.open,value:preserveValues&&el.matches?.('input,select,textarea')?el.value:undefined,top:el.scrollTop,left:el.scrollLeft}));
   const details=[...document.querySelectorAll('#content details')].map(el=>({label:el.querySelector('summary')?.textContent,open:el.open}));
   const scrollers=[...document.querySelectorAll('#content .spend-table-wrap')].map(el=>({label:el.getAttribute('aria-label'),left:el.scrollLeft,top:el.scrollTop}));
   const focus=active?.id,start=active?.selectionStart,end=active?.selectionEnd,top=root.scrollTop;

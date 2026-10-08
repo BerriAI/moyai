@@ -578,3 +578,22 @@ test('old PR completion is rejected while a different date range is still loadin
   assert.equal(e.get('#spend-panel').innerHTML,'unmounted');
   finishSpend({...data,start:'2026-10-03'});await pending;await settle();
 });
+
+test('clearing PR filters does not restore the previous DOM values over the new state',async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'prs');await settle();
+  const search=c.$('#spend-pr-search'),status=c.$('#spend-pr-status'),panel=c.$('#spend-panel');
+  Object.assign(search,{id:'spend-pr-search',matches:()=>true,value:'missing phrase'});
+  Object.assign(status,{id:'spend-pr-status',matches:()=>true,value:'open'});
+  const query=c.document.querySelectorAll;
+  c.document.querySelectorAll=selector=>selector==='#content [id]'?[search,status]:query(selector);
+  c.document.getElementById=id=>e.get('#'+id);
+  let html=panel.innerHTML;
+  Object.defineProperty(panel,'innerHTML',{get:()=>html,set:value=>{
+    html=value;search.value=/id="spend-pr-search"[^>]*value="([^"]*)"/.exec(value)?.[1]||'';
+    status.value=/<option value="([^"]*)" selected>/.exec(value)?.[1]||'';
+  }});
+  search.oninput();status.onchange();e.get('#spend-pr-clear').onclick();
+  assert.equal(search.value,'');assert.equal(status.value,'');
+  assert.match(panel.innerHTML,/Keep saved filters/);
+});
