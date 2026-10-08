@@ -13,7 +13,7 @@ function harness() {
 }
 function menuHarness(chat) {
   const h=harness(),c=h.context,nodes=new Map();let button,pending;
-  const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{focus(){},setAttribute(){},addEventListener(){},getBoundingClientRect:()=>({right:300,bottom:50})});return nodes.get(selector);};
+  const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{focus(){},setAttribute(){},addEventListener(){},closest:()=>null,getBoundingClientRect:()=>({right:300,bottom:50})});return nodes.get(selector);};
   const menu={innerHTML:'',style:{},offsetWidth:200,offsetHeight:120,querySelector:node,matches:()=>false,
     hidePopover(){},showPopover(){},insertAdjacentHTML(_,html){this.innerHTML+=html;}};
   const detail={id:'one',chat_enabled:chat,archived:false};
@@ -26,6 +26,43 @@ function menuHarness(chat) {
   c.bindSessionHeaderActions(detail);
   return {...h,menu,detail,button,archive:()=>{node('[data-archive-session]').onclick();return pending;}};
 }
+test('sidebar menu opens beside its session row, aligned with the row top',()=>{
+  const {context:c,menu,detail,button}=menuHarness(true);
+  const row={left:8,right:280,top:200,bottom:260};
+  button.closest=selector=>selector==='.parent-session'?{getBoundingClientRect:()=>row}:null;
+  button.getBoundingClientRect=()=>({right:276,bottom:233});
+  c.showSessionActions(detail,button);
+  assert.equal(Number.parseFloat(menu.style.top),row.top);
+  assert.ok(Number.parseFloat(menu.style.left)>row.right,'Menu must not cover the session row');
+  assert.ok(Number.parseFloat(menu.style.left)+menu.offsetWidth<=c.innerWidth-8);
+});
+test('narrow sidebar menu falls back below the trigger and remains within the viewport',()=>{
+  const {context:c,menu,detail,button}=menuHarness(true);
+  c.innerWidth=320;
+  button.closest=()=>({getBoundingClientRect:()=>({right:288,top:200,bottom:260})});
+  button.getBoundingClientRect=()=>({right:280,bottom:233});
+  c.showSessionActions(detail,button);
+  assert.ok(Number.parseFloat(menu.style.top)>=233);
+  assert.ok(Number.parseFloat(menu.style.left)>=8);
+  assert.ok(Number.parseFloat(menu.style.left)+menu.offsetWidth<=c.innerWidth-8);
+});
+test('a sidebar menu near the bottom shifts up to keep every action visible',()=>{
+  const {context:c,menu,detail,button}=menuHarness(true);
+  const row={right:280,top:540,bottom:600};
+  button.closest=()=>({getBoundingClientRect:()=>row});
+  button.getBoundingClientRect=()=>({right:276,bottom:573});
+  c.showSessionActions(detail,button);
+  assert.ok(Number.parseFloat(menu.style.left)>row.right);
+  assert.ok(Number.parseFloat(menu.style.top)<row.top);
+  assert.equal(Number.parseFloat(menu.style.top)+menu.offsetHeight,c.innerHeight-8);
+});
+test('session-header menu stays below its trigger and inside the right edge',()=>{
+  const {context:c,menu,button}=menuHarness(true);
+  button.getBoundingClientRect=()=>({right:798,bottom:40});
+  button.onclick();
+  assert.ok(Number.parseFloat(menu.style.top)>=40);
+  assert.equal(Number.parseFloat(menu.style.left)+menu.offsetWidth,c.innerWidth-8);
+});
 for(const chat of [false,true])for(const origin of ['header','sidebar'])test(`${chat?'chat':'legacy'} header tracks archive and restore started from the ${origin}`,async()=>{
   const {context:c,state,menu,button,archive,calls}=menuHarness(chat);
   if(origin==='header')button.onclick();else c.showSessionActions(state.runs[0],button);

@@ -177,9 +177,13 @@ function showSessionActions(run,button){
     }
   };
   const rect=button.getBoundingClientRect();
+  const row=button.closest('.parent-session')?.getBoundingClientRect();
   menu.showPopover({source:button});
-  menu.style.left=Math.max(8,Math.min(rect.right-menu.offsetWidth,innerWidth-menu.offsetWidth-8))+'px';
-  menu.style.top=Math.max(8,Math.min(rect.bottom+4,innerHeight-menu.offsetHeight-8))+'px';
+  const beside=row&&row.right+8+menu.offsetWidth<=innerWidth-8;
+  const left=beside?row.right+8:rect.right-menu.offsetWidth;
+  const top=beside?row.top:rect.bottom+4;
+  menu.style.left=Math.max(8,Math.min(left,innerWidth-menu.offsetWidth-8))+'px';
+  menu.style.top=Math.max(8,Math.min(top,innerHeight-menu.offsetHeight-8))+'px';
   menu.querySelector('button').focus();
 }
 
