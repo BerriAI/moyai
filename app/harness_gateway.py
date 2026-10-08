@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 from .spend import UsageCapture
+from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
 from .broker_diagnostics import upstream_headers
@@ -59,14 +60,17 @@ def authorized_payload(body, route, model, context):
 
 class NativeUsageCapture(UsageCapture):
     """Observe native usage fields; never rewrite the response bytes."""
-    def __init__(self, streaming: bool, *, route: str) -> None:
+    def __init__(self, streaming: bool, *, route: str, content: NativeModelContent | None = None) -> None:
         super().__init__(streaming)
         self.route = route
         self.failed = False
+        self.content = content
 
     def consume(self, value):
         if not isinstance(value, dict):
             return
+        if self.content is not None:
+            self.content.consume(value)
         kind = value.get('type')
         if kind in {'error', 'response.failed', 'response.incomplete'} or value.get('status') in {'failed', 'incomplete'}:
             self.failed = True
@@ -176,6 +180,7 @@ class HarnessGateway:
         request_id = None
         gateway_id = ''
         capture = None
+        content = None
         status = 'failed'
         started = time.time_ns()
         finished = False
@@ -194,9 +199,11 @@ class HarnessGateway:
                     self.spend.finish(request_id, capture, status)
                     if status == 'completed' and capture and not compact:
                         self.context_budget.remember(payload, capture.usage, run_id + route)
-                    # Only usage/status: native output can contain private reasoning.
-                    self.tracing.model(run, request_id, started, [],
-                        capture.response if capture else {}, status, gateway_id=gateway_id)
+                    response = capture.response if capture else {}
+                    if content is not None:
+                        response = {**response, 'choices': content.choices}
+                    self.tracing.model(run, request_id, started, content.messages if content else [],
+                        response, status, gateway_id=gateway_id)
                     await self.checkpoints.flush()
             finally:
                 self.model_slots.release()
@@ -250,7 +257,9 @@ class HarnessGateway:
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
-            capture = NativeUsageCapture(bool(payload.get('stream')), route=route)
+            if self.tracing.enabled and not compact:
+                content = NativeModelContent(payload, route)
+            capture = NativeUsageCapture(bool(payload.get('stream')), route=route, content=content)
             headers = {'Authorization': 'Bearer ' + self.settings.litellm_api_key,
                        'x-litellm-call-id': request_id,
                        'x-litellm-spend-logs-metadata': json.dumps({'moyai_request_id': request_id})}

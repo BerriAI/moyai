@@ -176,6 +176,189 @@ def test_model_broker_emits_span_without_rerouting_or_exposing_system_prompts(wo
     assert 'Hello' in span.attributes['input.value'] and 'Done' in span.attributes['output.value']
 
 
+@pytest.mark.parametrize('route', ['messages', 'responses'])
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_native_model_content_preserves_wire_and_spend(workspace, monkeypatch, route, stream, enabled):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    app.state.settings.litellm_api_key = 'configured-secret'
+    tracing = app.state.tracing
+    tracing.enabled = enabled
+    tracing.processor = Processor()
+    if not enabled:
+        def unexpected_capture(*args):
+            pytest.fail('Disabled tracing must not retain native content')
+        monkeypatch.setattr('app.harness_gateway.NativeModelContent', unexpected_capture)
+    run = active(app)
+    public = 'Hello configured-secret <think>private-thought</think>world'
+    usage = {'input_tokens': 12, 'output_tokens': 3}
+    if route == 'messages':
+        value = {'id': 'provider-id', 'content': [
+            {'type': 'text', 'text': public},
+            {'type': 'thinking', 'thinking': 'private-reasoning', 'signature': 'private-signature'},
+            {'type': 'tool_use', 'name': 'read_file', 'input': {'path': 'private-arguments'}}], 'usage': usage}
+        frames = [{'type': 'message_start', 'message': {'id': 'provider-id', 'content': [], 'usage': usage}},
+                  {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+                  *[{'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': part}}
+                    for part in ['Hello configured-', 'secret <thi', 'nk>private-thought</think>world']],
+                  {'type': 'content_block_delta', 'index': 1,
+                   'delta': {'type': 'thinking_delta', 'thinking': 'private-reasoning'}},
+                  {'type': 'content_block_start', 'index': 2, 'content_block': value['content'][2]},
+                  {'type': 'message_delta', 'usage': usage, 'x_litellm_response_cost': '0.00123'},
+                  {'type': 'message_stop'}]
+    else:
+        value = {'id': 'provider-id', 'output': [
+            {'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': 'private-reasoning'}]},
+            {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': public}]},
+            {'type': 'function_call', 'name': 'read_file', 'arguments': 'private-arguments'}], 'usage': usage,
+            'x_litellm_response_cost': '0.00123'}
+        frames = [*({'type': 'response.output_text.delta', 'delta': part}
+                    for part in ['Hello configured-', 'secret <thi', 'nk>private-thought</think>world']),
+                  {'type': 'response.output_item.added', 'item': value['output'][2]},
+                  {'type': 'response.completed', 'response': value}]
+    wire = (''.join('data: ' + json.dumps(frame) + '\n\n' for frame in frames).encode()
+            if stream else json.dumps(value).encode())
+
+    class Chunks(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for start in range(0, len(wire), 17):
+                yield wire[start:start + 17]
+
+    def gateway(request):
+        return httpx.Response(200, stream=Chunks(), headers={'x-litellm-response-cost': '0.00123'})
+    real = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient',
+                        lambda **kw: real(transport=httpx.MockTransport(gateway), **kw))
+    messages = [{'role': 'system', 'content': 'private-system'},
+                {'role': 'developer', 'content': 'private-developer'},
+                {'role': 'user', 'content': [
+                    {'type': 'text' if route == 'messages' else 'input_text', 'text': 'Inspect configured-secret'},
+                    {'type': 'tool_result', 'content': 'private-result'}]}]
+    response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer capability'},
+                           json={'messages' if route == 'messages' else 'input': messages, 'stream': stream})
+    assert response.status_code == 200, response.text
+    assert response.content == wire
+    row = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))[0]
+    assert row['status'] == 'completed' and row['cost'] == '0.00123'
+    assert row['prompt_tokens'] == 12 and row['completion_tokens'] == 3
+    if not enabled:
+        assert tracing.processor.spans == []
+        return
+    assert len(tracing.processor.spans) == 1
+    attrs = tracing.processor.spans[0].attributes
+    assert json.loads(attrs['input.value']) == [{'role': 'user', 'content': 'Inspect [redacted]'}]
+    assert json.loads(attrs['output.value']) == [
+        {'role': 'assistant', 'content': 'Hello [redacted] world', 'tool_names': ['read_file']}]
+    assert json.loads(attrs['gen_ai.output.messages'])[0]['parts'] == [
+        {'type': 'text', 'content': 'Hello [redacted] world'}]
+    assert 'private-' not in str(attrs) and 'configured-secret' not in str(attrs)
+    assert attrs['gen_ai.usage.total_tokens'] == 15
+
+
+@pytest.mark.parametrize('route,terminal', [('messages', None), ('responses', None),
+                                          ('responses', 'failed'), ('responses', 'incomplete')])
+def test_native_partial_stream_exports_observed_text_without_claiming_success(workspace, monkeypatch, route, terminal):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    tracing = app.state.tracing
+    tracing.enabled = True
+    tracing.processor = Processor()
+    run = active(app)
+    event = ({'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'Partial answer'}}
+             if route == 'messages' else {'type': 'response.output_text.delta', 'delta': 'Partial answer'})
+    wire = ('data: ' + json.dumps(event) + '\n\n').encode()
+    if terminal:
+        wire += ('data: ' + json.dumps({'type': 'response.' + terminal,
+                                       'response': {'status': terminal, 'output': []}}) + '\n\n').encode()
+    real = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: real(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, content=wire)), **kw))
+    response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer capability'},
+        json={'messages': [{'role': 'user', 'content': 'Hello'}], 'input': 'Hello', 'stream': True})
+    assert response.content == wire
+    attrs = tracing.processor.spans[0].attributes
+    assert attrs['moyai.status'] == 'failed'
+    assert json.loads(attrs['output.value'])[0]['content'] == 'Partial answer'
+    assert json.loads(attrs['input.value'])[0]['content'] == 'Hello'
+    row = app.state.store.rows('SELECT status,cost FROM model_requests WHERE run_id=?', (run['id'],))[0]
+    assert row == {'status': 'failed', 'cost': None}
+
+
+@pytest.mark.parametrize('status', ['failed', 'incomplete'])
+@pytest.mark.parametrize('snapshot', [[], [{'type': 'reasoning', 'summary': 'private'}],
+    [{'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Partial'}]}]])
+def test_unsuccessful_snapshot_cannot_erase_or_shorten_observed_output(status, snapshot):
+    from app.native_trace import NativeModelContent
+    content = NativeModelContent({}, '/v1/responses')
+    content.consume({'type': 'response.output_text.delta', 'delta': 'Partial answer'})
+    content.consume({'type': 'response.output_item.added', 'item': {'type': 'function_call', 'name': 'read_file'}})
+    event = {'type': 'response.' + status, 'response': {'status': status, 'output': snapshot}}
+    content.consume(event)
+    assert content.choices == [{'message': {'content': 'Partial answer',
+                                            'tool_calls': [{'function': {'name': 'read_file'}}]}}]
+    # With no stream, the same partial snapshot is still useful evidence.
+    snapshot_only = NativeModelContent({}, '/v1/responses')
+    snapshot_only.consume(event)
+    assert snapshot_only.choices == ([{'message': {'content': 'Partial', 'tool_calls': []}}]
+                                     if snapshot and snapshot[0]['type'] == 'message' else [])
+
+
+@pytest.mark.parametrize('route', ['/v1/messages', '/v1/responses'])
+def test_native_projection_bounds_and_private_blocks_never_enter_usage(route):
+    from app.harness_gateway import NativeUsageCapture
+    from app.native_trace import LIMIT, OMITTED, NativeModelContent
+
+    field = 'messages' if route == '/v1/messages' else 'input'
+    messages = [{'role': 'user', 'content': str(i)} for i in range(8)]
+    content = NativeModelContent({field: messages}, route)
+    assert [m['content'] for m in content.messages] == ['3', '4', '5', '6', '7']
+    for values in [[{'role': 'user', 'content': 'private-prefix' + 'x' * LIMIT}],
+                   [{'role': 'user', 'content': 'x' * 3500} for _ in range(5)]]:
+        assert NativeModelContent({field: values}, route).messages == [{'role': 'user', 'content': OMITTED}]
+    private = [None, 'private-string', {'type': []}, {'type': 'image', 'source': 'private-image'},
+               {'type': 'reasoning', 'summary': 'private-reasoning'},
+               {'type': 'tool_result', 'content': 'private-result'}, {'type': 'text', 'text': {'private': 1}}]
+    assert NativeModelContent({field: [{'role': 'user', 'content': private}]}, route).messages == []
+    blocks = [{'type': 'text' if route == '/v1/messages' else 'output_text',
+               'text': 'private-prefix' + 'x' * LIMIT}, *private]
+    tools = [{'type': 'tool_use' if route == '/v1/messages' else 'custom_tool_call',
+              'name': 'read_file', 'arguments': 'private-arguments'} for _ in range(101)]
+    value = ({'content': blocks + tools} if route == '/v1/messages' else
+             {'output': [{'type': 'message', 'role': 'assistant', 'content': blocks}, *tools]})
+    capture = NativeUsageCapture(False, route=route, content=content)
+    capture.feed(json.dumps({**value, 'usage': {'input_tokens': 2, 'output_tokens': 1}}).encode())
+    capture.finish()
+    assert content.choices[0]['message']['content'] == OMITTED
+    assert len(content.choices[0]['message']['tool_calls']) == 100
+    assert 'private-' not in json.dumps(content.choices)
+    assert capture.response == {'usage': {'input_tokens': 2, 'output_tokens': 1,
+                                        'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3}}
+
+
+def test_internal_compaction_traces_remain_content_free(workspace, monkeypatch):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    tracing = app.state.tracing
+    tracing.enabled = True
+    tracing.processor = Processor()
+    run = active(app)
+    def unexpected_capture(*args):
+        pytest.fail('Compaction must not retain private trace content')
+    monkeypatch.setattr('app.harness_gateway.NativeModelContent', unexpected_capture)
+    from test_context_gateway import summary_response
+    real = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: real(
+        transport=httpx.MockTransport(lambda request: summary_response('private-summary')), **kw))
+    response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer capability'},
+        json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'private-journal'}]})
+    assert response.status_code == 200
+    attrs = tracing.processor.spans[0].attributes
+    assert attrs['input.value'] == attrs['output.value'] == '[]'
+    assert 'private-' not in str(attrs)
+    assert attrs['gen_ai.usage.input_tokens'] == 100
+
+
 @pytest.mark.parametrize('route,model', [('chat/completions', 'openai/gpt-6-astra'),
                                         ('chat/completions', 'anthropic/claude-opus-5-5'),
                                         ('responses', 'openai/gpt-6-astra'),

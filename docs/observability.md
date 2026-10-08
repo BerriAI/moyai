@@ -90,6 +90,16 @@ Turns started from Slack set `agent.source.type=slack`, `agent.source.url`
 (the thread permalink) and `agent.source.title` (the thread's first message)
 on the agent span, so Lens shows a "Slack thread" link at the top of the trace.
 
+Native Messages and Responses model spans include the last five user text
+messages, public assistant text and requested tool names, for both JSON and
+streaming responses. Streaming deltas are assembled before redaction; completed
+Responses snapshots replace those deltas so text is exported once. Failed and
+incomplete snapshots preserve any text and tool names already received. Text capture
+is bounded at 16,000 characters per input/output aggregate; overflowing text is
+omitted as a whole. Tool arguments and results remain in their separate tool
+spans. Internal context-compaction calls export usage and status only. Capture
+uses the existing inference connection and does not add a network hop.
+
 System prompts, loaded skills, private reasoning, images and credential-tool
 payloads are excluded. Known credentials and common secret fields are redacted;
 ordinary task/tool text is sent to the configured gateway. Text is capped at
