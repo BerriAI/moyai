@@ -31,8 +31,15 @@ async def checkpoint_wait(durable, phase):
     state.pop('result', None)
     if phase == 'waiting_children':
         state['wait_group'] = 'existing-workers'
+        handed_off = False
+        def handoff(*args):
+            nonlocal handed_off
+            handed_off = True
+            return True
         manager.coordinator = SimpleNamespace(results=lambda *a: {
-            'group_id':'existing-workers', 'settled':False, 'children':[{'summary':'Still working'}]},
+            'group_id':'existing-workers', 'settled':handed_off, 'children':[{'summary':'Worker results'}]},
+            pending_group=lambda *a: None if handed_off else 'existing-workers',
+            group=lambda *a: None, settled=lambda *a: True, handoff=handoff,
             cancel_children=AsyncMock())
     else:
         state['wait_credential'] = 'existing-key-request'
@@ -67,7 +74,8 @@ async def test_checkpointed_steering_resumes_same_turn_and_survives_worker_resta
     assert packet['input']['content'].startswith('What is the status?')
     assert successor.store.run(run_id)['active_message_id'] == original
     successor.message_queue.live_control(run_id, original, [target['id']])
-    # Lose the worker after native delivery too. Finish the same execution once.
+    # Lose the worker after native delivery too. Worker results still need a
+    # handoff and another coordinator segment before the task can finish.
     last = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
     last.coordinator, last.credentials = manager.coordinator, manager.credentials
     await drive(last, run_id)
@@ -76,7 +84,8 @@ async def test_checkpointed_steering_resumes_same_turn_and_survives_worker_resta
     assert all(m['status'] == 'completed' for m in messages)
     assert messages[1]['steering_parent_id'] == original
     assert messages[-1]['content'] == 'Saved answer'
-    assert len(cloud.launches) == 2 and len(cloud.machines) == 2
+    expected_segments = 3 if phase == 'waiting_children' else 2
+    assert len(cloud.launches) == len(cloud.machines) == expected_segments
     assert len(last.store.rows("SELECT id FROM events WHERE run_id=? AND message='Response started'", (run_id,))) == 1
     if manager.coordinator:
         manager.coordinator.cancel_children.assert_not_awaited()

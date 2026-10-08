@@ -14,7 +14,7 @@ import modal
 from fastapi import HTTPException
 from .environments import EnvironmentPending
 
-from .runner import RunManager, SAVE_WARNING, TERMINAL, safe_error_detail, refresh_sandbox_files
+from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files
 from .security import digest
 from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
@@ -459,6 +459,17 @@ class DurableRunner(RunManager):
             raise RuntimeError('Sandbox supervisor command failed')
         return output
 
+    def guard_agent_completion(self, run_id, result):
+        # A native final ends one model segment, not outstanding delegation.
+        # Query persisted groups: steering can change turns, and workers may
+        # settle after this segment received partial results. Only handoff (or
+        # explicit cancellation) discharges the obligation to gather results.
+        if self.coordinator and completed_response(self.store.run(run_id), result):
+            group = self.coordinator.pending_group(run_id)
+            if group:
+                return {**result, 'completed': False, 'continuation': True, 'wait_group': group}
+        return result
+
     async def step(self, run_id, state):
         phase = state['phase']
         run = self.store.run(run_id)
@@ -582,7 +593,8 @@ class DurableRunner(RunManager):
                     if report['final'].get('completed') or report['final'].get('steer_message_id'):
                         self.acknowledge_credential(run_id, state)
                     self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
-                    state['result'] = {**report['final'], 'message_id': state['message_id']}
+                    state['result'] = self.guard_agent_completion(
+                        run_id, {**report['final'], 'message_id': state['message_id']})
                     attempts = report['final'].get('transport_attempt')
                     if type(attempts) is int and attempts >= 0:
                         state['transport_attempt'] = max(state.get('transport_attempt', 0),
@@ -669,7 +681,12 @@ class DurableRunner(RunManager):
                 conn.execute("UPDATE runs SET snapshot_id=?,checkpoint_error='',pending_result=? WHERE id=?",
                              (snapshot.object_id, '' if result.get('transport_retry') else json.dumps(result), run_id))
         elif phase == 'checkpointed':
-            result = state['result']
+            # Also cover receipts checkpointed before this safeguard existed.
+            result = self.guard_agent_completion(run_id, state['result'])
+            if result != state['result']:
+                state['result'] = result
+                self.save(run_id, state)
+                self.receive_result(run_id, result)
             if result.get('transport_retry'):
                 if state['exit_code'] == 75 and valid_retry(result['transport_retry']) and not result.get('completed'):
                     self.wait_for_transport(run_id, state)

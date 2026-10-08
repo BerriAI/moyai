@@ -106,6 +106,113 @@ async def test_parent_releases_capacity_and_resumes_after_children_across_restar
     assert len([m for m in manager.store.messages(run_id) if m['role'] == 'assistant']) == 1
 
 
+@pytest.mark.parametrize('settle_before_reply', [False, True])
+async def test_early_final_after_steering_keeps_worker_handoff_across_restart(durable, settle_before_reply):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    group = result['group_id']
+    child = coordinator.children(group)[0]['id']
+    await pause_parent(manager, root, group)
+    original = manager.state(root)['message_id']
+    target, _ = manager.store.enqueue_message(root, 'Apply the design skill and browser-test the migration.',
+                                              'design-correction', user_id='google:tin')
+    manager.message_queue.change(root, target['id'], 'google:tin', False, 0, 'steer')
+    await drive(manager, root, phase='monitor')
+    assert cloud.machines[-1].spec['agent_results']['settled'] is False
+    packet = manager.message_queue.live_control(root, original, [])
+    assert packet['input']['id'] == target['id']
+    manager.message_queue.live_control(root, original, [target['id']])
+    parent = cloud.machines[-1]
+    parent.operations[manager.directory(manager.state(root))].update(
+        message="I've read the skill. I'll apply it throughout the migration.")
+    if settle_before_reply:
+        await drive(manager, child)
+    await drive(manager, root, phase='checkpointed')
+    # The native turn ended, but neither the UI nor the scheduler may call the
+    # original task complete before a durable handoff of the worker results.
+    pending = json.loads(manager.store.run(root)['pending_result'])
+    assert pending['completed'] is False
+    assert pending['continuation'] is True and pending['wait_group'] == group
+    assert not [m for m in manager.store.messages(root) if m['role'] == 'assistant']
+    manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    coordinator = attach(manager)
+    await drive(manager, root, phase='waiting_children')
+    assert manager.state(root)['message_id'] == original
+    assert manager.store.messages(root)[0]['status'] == 'running'
+    assert not parent.alive
+    if not settle_before_reply:
+        assert await manager.advance(root) == 'children'
+        await drive(manager, child)
+    await drive(manager, root, phase='monitor')
+    assert cloud.machines[-1].spec['agent_results']['result_scope'] == 'handoff'
+    assert cloud.machines[-1].spec['agent_results']['children'][0]['summary'] == 'Saved answer'
+    cloud.machines[-1].operations[manager.directory(manager.state(root))].update(
+        message='Integrated worker changes and verified the migration.')
+    await drive(manager, root)
+    messages = manager.store.messages(root)
+    assert [m['content'] for m in messages if m['role'] == 'assistant'] == [
+        'Integrated worker changes and verified the migration.']
+    assert all(m['status'] == 'completed' for m in messages)
+    assert messages[1]['steering_parent_id'] == original
+    assert len(coordinator.children(group)) == 1
+    assert len(cloud.launches) == 4  # Initial parent, correction, child, integration.
+
+
+async def test_new_requester_turn_keeps_the_existing_worker_obligation(durable):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    group = result['group_id']
+    await pause_parent(manager, root, group)
+    target, _ = manager.store.enqueue_message(root, 'Also check accessibility.', 'new-requester', user_id='teammate')
+    manager.message_queue.change(root, target['id'], 'teammate', False, 0, 'steer')
+    await drive(manager, root)
+    assert manager.store.messages(root)[0]['status'] == 'steered'
+    await drive(manager, root, phase='monitor')
+    assert manager.state(root)['message_id'] == target['id']
+    assert not manager.state(root).get('resume_group')
+    await drive(manager, root, phase='waiting_children')
+    assert manager.state(root)['wait_group'] == group
+    await drive(manager, coordinator.children(group)[0]['id'])
+    await drive(manager, root)
+    assert coordinator.results(root, group)['result_scope'] == 'handoff'
+    assert len([m for m in manager.store.messages(root) if m['role'] == 'assistant']) == 1
+
+
+async def test_old_completed_checkpoint_rechecks_outstanding_workers(durable):
+    manager, cloud, root = durable
+    _, result, _ = await launch(durable, count=1)
+    await drive(manager, root, phase='checkpointed')
+    state = manager.state(root)
+    # Simulate an answer saved by an older server, before completion guarding.
+    state['result'].update(completed=True, continuation=False)
+    state['result'].pop('wait_group', None)
+    manager.save(root, state)
+    manager.store.update_run(root, pending_result=json.dumps(state['result']))
+    successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    attach(successor)
+    await drive(successor, root, phase='waiting_children')
+    assert successor.state(root)['wait_group'] == result['group_id']
+    assert successor.store.messages(root)[0]['status'] == 'running'
+    assert not [m for m in successor.store.messages(root) if m['role'] == 'assistant']
+
+
+@pytest.mark.parametrize('ending', ['cancel_group', 'stop', 'failure'])
+async def test_completion_guard_respects_cancellation_and_failure(durable, ending):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    if ending == 'cancel_group':
+        await coordinator.cancel_group(root, result['group_id'])
+    elif ending == 'stop':
+        await manager.cancel(root)
+    else:
+        cloud.machines[0].operations[cloud.launches[0]].update(completed=False, message='Model failed')
+    await drive(manager, root)
+    assert manager.store.run(root)['status'] == {
+        'cancel_group': 'idle', 'stop': 'cancelled', 'failure': 'failed'}[ending]
+    assert len(cloud.launches) == 1
+    assert coordinator.group(root, result['group_id'])['status'] == 'cancelled'
+
+
 async def test_hundred_active_slots_queue_the_101st_and_waiting_parent_is_free(durable):
     manager, cloud, root = durable
     manager.settings.max_concurrent_runs = 100

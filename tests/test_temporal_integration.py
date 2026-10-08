@@ -57,7 +57,8 @@ async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable
             await manager.shutdown()
 
 
-async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(durable):
+@pytest.mark.parametrize('early_final', [False, True])
+async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(durable, early_final):
     manager, cloud, root = durable
     manager.settings.temporal_enabled = True
     manager.settings.max_concurrent_runs = 100
@@ -72,7 +73,10 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
         peak = max(peak, sum(m.alive for m in cloud.machines))
         if action == 'read' and machine.spec.get('run_id') != root and not release_children:
             return json.dumps({'state': 'running', 'events': [], 'cursor': 0})
-        return await original_command(machine, action, directory, value, **kwargs)
+        output = await original_command(machine, action, directory, value, **kwargs)
+        if action == 'start' and machine.spec.get('agent_results', {}).get('settled') is False:
+            machine.operations[directory]['message'] = "I've read the skill. I'll apply it."
+        return output
 
     cloud.finished = False
     manager.command = command
@@ -94,6 +98,21 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
             children = manager.coordinator.children(result['group_id'])
             await eventually(lambda: all(manager.state(c['id']).get('phase') == 'monitor' for c in children), seconds=30)
             assert sum(m.alive for m in cloud.machines) == 5
+            if early_final:
+                cloud.finished = False
+                original_message = manager.state(root)['message_id']
+                target, _ = manager.store.enqueue_message(root, 'Apply the design skill.', 'design-correction')
+                manager.message_queue.change(root, target['id'], '', False, 0, 'steer')
+                manager.submit(manager.store.run(root))
+                # Simulate the native receipt for the same-turn correction.
+                await eventually(lambda: manager.state(root).get('phase') == 'monitor', seconds=30)
+                packet = manager.message_queue.live_control(root, original_message, [])
+                assert packet['input']['id'] == target['id']
+                manager.message_queue.live_control(root, original_message, [target['id']])
+                cloud.finished = True
+                await eventually(lambda: manager.state(root).get('phase') == 'waiting_children', seconds=30)
+                assert manager.state(root)['message_id'] == original_message
+                assert not [m for m in manager.store.messages(root) if m['role'] == 'assistant']
             await manager.shutdown()
             successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
             successor.coordinator = AgentCoordinator(successor.store, successor.settings, successor)
@@ -102,7 +121,7 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
             release_children = True
             await successor.recover()
             await eventually(lambda: successor.store.run(root)['status'] == 'idle', seconds=60)
-            assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 7
+            assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == (8 if early_final else 7)
             assert peak >= 5
             assert len([m for m in successor.store.messages(root) if m['role'] == 'assistant']) == 1
             handle = env.client.get_workflow_handle('moyai-session-' + root)

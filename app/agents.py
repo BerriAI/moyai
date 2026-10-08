@@ -128,6 +128,12 @@ class AgentCoordinator:
     def children(self, group_id):
         return self.store.rows('SELECT id,agent_label,status,summary,error,checkpoint_error,created_at,updated_at FROM runs WHERE agent_group_id=? ORDER BY created_at,id', (group_id,))
 
+    def pending_group(self, parent_id):
+        """A worker finishing does not discharge the parent's result handoff."""
+        groups = self.store.rows("""SELECT id FROM agent_groups WHERE parent_id=?
+            AND status IN ('preparing','running') ORDER BY created_at,id LIMIT 1""", (parent_id,))
+        return groups[0]['id'] if groups else None
+
     @staticmethod
     def unsettled_in(conn, group_id):
         return conn.execute("""SELECT 1 FROM runs r WHERE r.id IN (
