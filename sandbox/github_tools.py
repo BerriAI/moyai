@@ -117,7 +117,7 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
         data['number'] = number
     (target / '.git/moyai.json').write_text(json.dumps(data))
     return {**data, 'directory': str(target), 'reused': False,
-            'instruction': ('Use github_update_pull_request to publish follow-up edits to this PR.' if number is not None else
+            'instruction': ('Use github_update_pull_request to publish follow-up edits to this PR. An external PR requires explicit requester approval through github_request_pull_request_write_access for this saved chat.' if number is not None else
                             'Use github_create_pull_request to publish actual files as a normal PR without an administrator approval step.')
                            + ' Git push is unavailable.'}
 

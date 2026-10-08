@@ -180,6 +180,7 @@ def create_app(settings: Settings | None = None):
     manager.coordinator = coordinator
     credentials = Credentials(store, security, settings, manager, checkpoints)
     manager.credentials = credentials
+    connectors.github_requester_match = credentials.same_requester
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
     from .model_slots import ModelSlots
@@ -566,12 +567,23 @@ def create_app(settings: Settings | None = None):
                 'pr_summary': pr_summary,
                 "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
                 'pull_requests': pr_summary['pull_requests'],
+                'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+
+    from .github_write_access import WriteDecision
+
+    @app.post('/api/runs/{run_id}/pr-write-access/{access_id}')
+    async def decide_pr_write_access(run_id: str, access_id: str, body: WriteDecision, request: Request):
+        security.require(request, mutation=True)
+        actor = store.identity(security.session_info(request))
+        result = await connectors.github.decide_write_access(run_id, access_id, actor, body.decision)
+        await checkpoints.flush()
+        return result
 
     @app.get('/api/runs/{run_id}/pull-request')
     async def read_pull_request(run_id: str, request: Request, url: str = Query(max_length=512)):
@@ -921,6 +933,8 @@ def create_app(settings: Settings | None = None):
                       else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
+            if body.name == 'github_request_pull_request_write_access':
+                await checkpoints.flush()
             return result
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
