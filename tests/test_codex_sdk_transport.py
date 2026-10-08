@@ -295,6 +295,14 @@ def test_native_settlement_collects_late_command_receipts(tmp_path, monkeypatch,
         '1 unresolved tool(s)). Saved tool receipts are preserved.' if limited else 'yield-test-complete')
 
 
+def test_context_rejection_collects_late_native_receipt_before_restart(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-context')
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['tool_executions'] == proof['completed_receipts'] == 1
+    assert proof['upstream_requests'] == 3
+    assert proof['final_response'] == 'yield-test-complete'
+
+
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
@@ -319,7 +327,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 ' pathlib.Path("preview-port").write_text(str(server.server_port))\n'
                 ' print("preview-ready", flush=True)\n server.serve_forever()\n'
                 if outcome == 'settle-preview' else
-                ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n') +
+                ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n'
+                + (' time.sleep(0.3)\n' if outcome == 'settle-context' else '')) +
             'finally:\n print("slow-tool-complete", flush=True)\n')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
@@ -338,6 +347,11 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
 
         async def next_turn_notification(self, turn_id):
             event = await super().next_turn_notification(turn_id)
+            if (outcome == 'settle-context' and event.method == 'turn/completed'
+                    and agent.context.relay.context_required):
+                # Finish only after the failed turn: recovery must keep the
+                # original runtime alive to obtain this command's receipt.
+                (workspace / 'release').touch()
             if event.method == 'error':
                 payload = event.payload.model_dump(mode='json', by_alias=True)
                 detail = codex_details(payload.get('error'), will_retry=payload.get('willRetry'))
@@ -349,9 +363,11 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
 
-        def reply(self, value):
+        def reply(self, value, status=200):
             body = json.dumps(value).encode()
-            self.send_response(200)
+            self.send_response(status)
+            if status == 409:
+                self.send_header('X-Moyai-Context', 'compact')
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
@@ -395,6 +411,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                           'name': 'exec', 'namespace': 'functions', 'input': code}
             elif settlement and sequence == 2:
                 assert agent.journal.pending and steps == [0]
+                if outcome == 'settle-context':
+                    return self.reply({'detail': {'code': 'context_compaction_required',
+                        'input_tokens': 300000, 'input_budget': 200000}}, 409)
                 if outcome == 'settle-preview':
                     from urllib.request import urlopen
                     port = (workspace / 'preview-port').read_text()
@@ -404,7 +423,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 output = {'type': 'message', 'id': 'premature', 'role': 'assistant',
                     'phase': 'final_answer', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
-            elif settlement and sequence == 3:
+            elif settlement and sequence == 3 and outcome != 'settle-context':
                 assert agent.journal.pending and agent.model_calls == 3
                 sessions = re.findall(r'session_id\\?"\s*:\s*(\d+)', json.dumps(body))
                 assert sessions, 'Native command must return a running session'
@@ -439,6 +458,13 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                         report_error=diagnostics.append).start()
     store = ContextStore(tmp_path / 'context.sqlite3', 'yield-test')
     store.initialize([])
+    if outcome == 'settle-context':
+        def compact(previous, entries, **kwargs):
+            assert not agent.journal.pending
+            assert 'slow-tool-complete' in json.dumps(entries)
+            return {'summary': 'The command already ran once: slow-tool-complete. Answer the user.',
+                    'through_seq': entries[-1]['seq']}
+        relay.compact = compact
 
     def step():
         assert not agent.journal.pending

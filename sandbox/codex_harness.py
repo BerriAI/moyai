@@ -190,6 +190,34 @@ class CodexAgent(HarnessAgent):
         return run_with_context_recovery(self, prompt, conversation_history,
             lambda current: asyncio.run(self._run(current, system_message)))
 
+    async def settle_context_receipts(self, client, turn_ids):
+        """Keep the native runtime alive for late receipts before a handoff.
+
+        A failed inference turn can finish while its yielded commands are still
+        running. The SDK's completed turn queue remains readable, but reports
+        TransportClosedError whenever it is temporarily empty. Closing the
+        client here would discard those commands' eventual completion events.
+        """
+        from openai_codex.errors import TransportClosedError
+        try:
+            async with asyncio.timeout(RECEIPT_TIMEOUT_SECONDS):
+                while self.journal.pending and not self.stopped.is_set():
+                    for turn_id in turn_ids:
+                        while self.journal.pending and not self.stopped.is_set():
+                            try:
+                                event = await client.next_turn_notification(turn_id)
+                            except TransportClosedError:
+                                break
+                            if event.method == 'item/completed':
+                                payload = event.payload.model_dump(mode='json', by_alias=True)
+                                self.record_item(payload['item'], completed=True)
+                    if self.journal.pending:
+                        await asyncio.sleep(0.05)
+        except TimeoutError:
+            # The shared recovery gate still rejects genuinely unknown outcomes.
+            # Neither elapsed time nor raw output IDs are completion receipts.
+            pass
+
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
         from openai_codex.errors import InvalidRequestError, TransportClosedError
@@ -294,6 +322,12 @@ class CodexAgent(HarnessAgent):
                                         if payload['turn']['status'] in {'failed', 'interrupted'} else 'unknown')
                                     if payload['turn'].get('error'):
                                         failure.update(codex_details(payload['turn']['error']))
+                                if (getattr(self.context.relay, 'context_required', None)
+                                        and self.journal.pending and not self.stopped.is_set()):
+                                    finished = False
+                                    await self.settle_context_receipts(client,
+                                        [turn.turn.id] + ([settlement_turn] if settlement_turn else []))
+                                    break
                                 if (finished and self.journal.pending and not settlement_turn
                                         and not self.stopped.is_set() and not self.boundary_failed):
                                     # One settlement turn shares this invocation's
