@@ -1,12 +1,18 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.db import Store
+from app.main import create_app
 from app.security import digest
 from app.spend import UsageCapture, money, stamp, completion_events
 from test_workspace import workspace
@@ -362,3 +368,333 @@ def test_usage_capture_preserves_reported_reasoning_zero_and_omits_missing_break
     assert capture.usage['reasoning_tokens'] == 0
     capture.consume({'usage': {'completion_tokens_details': 'malformed'}})
     assert 'reasoning_tokens' not in capture.usage
+
+
+def recovery_request(app: FastAPI, *, status: str = 'interrupted') -> dict[str, object]:
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1/'
+    app.state.settings.litellm_api_key = 'recovery-fixture-key'
+    run = active(app)
+    request_id = app.state.spend.begin(run, run['model'])
+    if status != 'pending':
+        capture = UsageCapture(False)
+        capture.consume({'usage': {'prompt_tokens': 11, 'completion_tokens': 3, 'total_tokens': 14}})
+        app.state.spend.finish(request_id, capture, status)
+    return app.state.store.rows('SELECT * FROM model_requests WHERE id=?', (request_id,))[0]
+
+
+def recovery_receipt(row: dict[str, object], **changes: object) -> dict[str, object]:
+    return {'request_id': 'provider-' + str(row['id']), 'litellm_call_id': row['id'],
+            'api_key': row['key_hash'], 'spend': '0.01234567890123456789', 'status': 'success',
+            'metadata': {'litellm_call_id': row['id'],
+                         'spend_logs_metadata': {'moyai_request_id': row['id']}}, **changes}
+
+
+def recovery_page(rows: list[dict[str, object]], **changes: object) -> dict[str, object]:
+    return {'data': rows, 'total': len(rows), 'page': 1, 'page_size': 1000,
+            'total_pages': 1 if rows else 0, 'total_is_capped': False, **changes}
+
+
+@pytest.mark.parametrize('receipt_status', ['success', 'failure'])
+async def test_cost_recovery_is_exact_persistent_and_never_overwrites_attribution(
+        workspace: tuple[FastAPI, TestClient], receipt_status: str) -> None:
+    app, _ = workspace
+    row = recovery_request(app)
+    observed: list[str] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        assert request.method == 'GET' and str(request.url).startswith('https://gateway.example/spend/logs/v2?')
+        assert request.headers['authorization'] == 'Bearer recovery-fixture-key'
+        assert request.url.params['request_id'] == row['id']
+        assert request.url.params['api_key'] == row['key_hash']
+        for field in ('start_date', 'end_date'):
+            datetime.strptime(request.url.params[field], '%Y-%m-%d %H:%M:%S')
+        observed.append(request.method)
+        item = recovery_receipt(row, status=receipt_status)
+        if receipt_status == 'failure':
+            item['metadata'] = {'litellm_call_id': row['id'], 'spend_logs_metadata': None}
+        return httpx.Response(200, json=recovery_page([item]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        await app.state.spend.recovery.process(client, row)
+        await app.state.spend.recovery.process(client, row)
+    settled = app.state.store.rows('SELECT * FROM model_requests')[0]
+    assert settled['cost'] == '0.01234567890123456789'
+    assert settled['cost_receipt_id'] == 'provider-' + str(row['id'])
+    for field in ('user_id', 'run_id', 'message_id', 'model', 'created_at', 'status', 'total_tokens'):
+        assert settled[field] == row[field]
+    app.state.spend.headers(row['id'], httpx.Response(200, headers={'x-litellm-response-cost': '0'}), True)
+    app.state.spend.headers(row['id'], httpx.Response(200, headers={'x-litellm-response-cost': '999'}), False)
+    capture = UsageCapture(False)
+    capture.consume({'usage': {'cost': 999}})
+    app.state.spend.finish(row['id'], capture, 'interrupted')
+    report = app.state.spend.report()
+    assert report['total']['spend'] == settled['cost'] and report['priced_requests'] == 1
+    assert report['request_details'][0]['cost_status'] == 'settled'
+    assert report['request_details'][0]['cost_source'] == settled['cost_source']
+    assert Store(app.state.settings.data_dir).rows('SELECT cost FROM model_requests')[0]['cost'] == settled['cost']
+    assert observed and set(observed) == {'GET'}
+
+
+@pytest.mark.parametrize('change', ['key', 'gateway', 'legacy'])
+async def test_cost_recovery_never_queries_a_different_scope(
+        workspace: tuple[FastAPI, TestClient], change: str) -> None:
+    app, _ = workspace
+    row = recovery_request(app)
+    if change == 'key':
+        app.state.settings.litellm_api_key = 'replacement-fixture-key'
+    elif change == 'gateway':
+        app.state.settings.litellm_api_base = 'https://other-gateway.example/v1'
+    else:
+        app.state.store.execute("UPDATE model_requests SET gateway_scope='' WHERE id=?", (row['id'],))
+        row['gateway_scope'] = ''
+
+    def forbidden(request: httpx.Request) -> httpx.Response:
+        pytest.fail('An unavailable original credential or gateway must not trigger lookup')
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(forbidden)) as client:
+        await app.state.spend.recovery.process(client, row)
+    assert app.state.store.rows('SELECT cost FROM model_requests')[0]['cost'] is None
+    assert app.state.spend.report()['request_details'][0]['cost_status'] == 'unresolved'
+
+
+@pytest.mark.parametrize('change', ['key', 'gateway'])
+async def test_cost_recovery_rechecks_scope_after_http_await(
+        workspace: tuple[FastAPI, TestClient], change: str) -> None:
+    app, _ = workspace
+    row = recovery_request(app)
+
+    async def gateway(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0)
+        if change == 'key':
+            app.state.settings.litellm_api_key = 'replacement-fixture-key'
+        else:
+            app.state.settings.litellm_api_base = 'https://other-gateway.example/v1'
+        return httpx.Response(200, json=recovery_page([recovery_receipt(row)]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        await app.state.spend.recovery.process(client, row)
+    assert app.state.store.rows('SELECT cost FROM model_requests')[0]['cost'] is None
+    assert app.state.spend.report()['request_details'][0]['cost_status'] == 'unresolved'
+
+
+@pytest.mark.parametrize('case', [
+    'multiple', 'incomplete', 'capped', 'conflicting', 'wrong_key', 'wrong_call',
+    'zero', 'negative', 'nonfinite', 'boolean', 'missing_cost', 'unknown_status',
+])
+async def test_cost_recovery_rejects_unsafe_receipts(
+        workspace: tuple[FastAPI, TestClient], case: str) -> None:
+    app, _ = workspace
+    row = recovery_request(app)
+    item = recovery_receipt(row)
+    page = recovery_page([item])
+    if case == 'multiple':
+        page = recovery_page([item, recovery_receipt(row, request_id='another-provider-attempt')])
+    elif case == 'incomplete':
+        page.update(total=2, page_size=1, total_pages=2)
+    elif case == 'capped':
+        page['total_is_capped'] = True
+    elif case == 'conflicting':
+        item['metadata'] = {'spend_logs_metadata': {'moyai_request_id': 'another-moyai-request'}}
+    elif case == 'wrong_key':
+        item['api_key'] = digest('foreign-fixture-key')
+    elif case == 'wrong_call':
+        item['litellm_call_id'] = 'unrelated-call'
+    elif case == 'unknown_status':
+        item['status'] = 'pending'
+    else:
+        item['spend'] = {'zero': 0, 'negative': -1, 'nonfinite': 'Infinity',
+                         'boolean': True, 'missing_cost': None}[case]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=page))) as client:
+        await app.state.spend.recovery.process(client, row)
+    saved = app.state.store.rows('SELECT * FROM model_requests')[0]
+    assert saved['cost'] is None and saved['cost_receipt_id'] == ''
+    assert saved['cost_recovery_error'] and saved['cost_recovery_attempts'] == 1
+    assert datetime.fromisoformat(saved['cost_next_attempt_at']) > datetime.now(timezone.utc)
+    public = app.state.spend.report()['request_details'][0]
+    assert public['cost_status'] == 'unresolved'
+    assert 'key_hash' not in public and 'gateway_scope' not in public
+
+
+async def test_cost_recovery_receipt_cannot_price_two_requests(
+        workspace: tuple[FastAPI, TestClient]) -> None:
+    app, _ = workspace
+    first, second = recovery_request(app), recovery_request(app)
+    rows = {row['id']: row for row in (first, second)}
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        item = recovery_receipt(rows[request.url.params['request_id']], request_id='one-provider-receipt')
+        return httpx.Response(200, json=recovery_page([item]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        await app.state.spend.recovery.process(client, first)
+        await app.state.spend.recovery.process(client, second)
+    saved = {row['id']: row for row in app.state.store.rows('SELECT * FROM model_requests')}
+    assert saved[first['id']]['cost'] == '0.01234567890123456789'
+    assert saved[second['id']]['cost'] is None and saved[second['id']]['cost_recovery_error']
+    assert app.state.spend.report()['priced_requests'] == 1
+
+
+async def test_cost_recovery_retries_delayed_receipts_without_querying_inflight_requests(
+        workspace: tuple[FastAPI, TestClient]) -> None:
+    app, _ = workspace
+    row = recovery_request(app)
+    inflight = recovery_request(app, status='pending')
+    calls: list[str] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.params['request_id'])
+        return httpx.Response(200, json=recovery_page([] if len(calls) == 1 else [recovery_receipt(row)]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        await app.state.spend.recovery.process(client, row)
+        waiting = app.state.store.rows('SELECT * FROM model_requests WHERE id=?', (row['id'],))[0]
+        assert waiting['cost'] is None and waiting['cost_recovery_attempts'] == 1
+        assert datetime.fromisoformat(waiting['cost_next_attempt_at']) > datetime.now(timezone.utc)
+        report = app.state.spend.report()
+        assert report['total']['pending_costs'] == 2 and report['total']['missing_costs'] == 0
+        await app.state.spend.recovery.poll(client)
+        assert calls == [row['id']]
+        app.state.store.execute("UPDATE model_requests SET cost_next_attempt_at='2000-01-01T00:00:00+00:00'")
+        await app.state.spend.recovery.poll(client)
+    assert calls == [row['id'], row['id']] and inflight['id'] not in calls
+    assert app.state.store.rows('SELECT cost FROM model_requests WHERE id=?', (row['id'],))[0]['cost'] is not None
+
+
+async def test_cost_recovery_marks_interrupted_requests_before_session_recovery(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = create_app(Settings(_env_file=None, data_dir=tmp_path, litellm_api_key='',
+                             modal_token_id='', modal_token_secret='', session_titles_enabled=False))
+    prior = recovery_request(app, status='pending')
+    app.state.settings.litellm_api_key = ''
+    newly_started: list[str] = []
+
+    async def recover() -> None:
+        row = app.state.store.rows('SELECT * FROM model_requests WHERE id=?', (prior['id'],))[0]
+        assert row['status'] == 'interrupted' and row['cost'] is None
+        # A resumed session can submit fresh inference as soon as recovery starts.
+        newly_started.append(app.state.spend.begin(app.state.store.run(prior['run_id']), 'test-model'))
+
+    async def idle() -> None:
+        return None
+
+    monkeypatch.setattr(app.state.manager, 'recover', recover)
+    monkeypatch.setattr(app.state.spend.recovery, 'watch', idle)
+    for owner in (app.state.identities, app.state.environments, app.state.automations,
+                  app.state.tracing, app.state.spend.infrastructure, app.state.session_titles):
+        monkeypatch.setattr(owner, 'start', lambda: None)
+    monkeypatch.setattr(app.state.slack, 'recover', lambda: None)
+    async with app.router.lifespan_context(app):
+        row = app.state.store.rows('SELECT status,cost FROM model_requests WHERE id=?', (newly_started[0],))[0]
+        assert row == {'status': 'pending', 'cost': None}
+
+
+@pytest.mark.parametrize('fault', [401, 403, 429, 302, 'timeout', 'malformed', 'oversized', 'nested'])
+async def test_cost_recovery_faults_remain_unknown_and_retry_without_leaking_diagnostics(
+        workspace: tuple[FastAPI, TestClient], fault: int | str) -> None:
+    app, _ = workspace
+    row = recovery_request(app)
+    calls: list[str] = []
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if fault == 'timeout':
+            raise httpx.ReadTimeout('private upstream detail')
+        if fault == 'malformed':
+            return httpx.Response(200, content=b'private malformed payload')
+        if fault == 'oversized':
+            return httpx.Response(200, content=b' ' * (256 * 1024 + 1))
+        if fault == 'nested':
+            return httpx.Response(200, content=b'[' * 2000 + b']' * 2000)
+        return httpx.Response(fault, headers={'Location': 'https://unexpected.example'}, text='private upstream detail')
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway), follow_redirects=True) as client:
+        await app.state.spend.recovery.process(client, row)
+    result = app.state.store.rows('SELECT * FROM model_requests')[0]
+    assert result['cost'] is None and result['cost_recovery_attempts'] == 1
+    assert result['cost_recovery_error'] and 'private' not in json.dumps(result)
+    assert len(calls) == 1 and calls[0].startswith('https://gateway.example/')
+
+
+async def test_cost_recovery_checkpoint_survives_a_new_app_and_migration_is_idempotent(
+        workspace: tuple[FastAPI, TestClient], tmp_path: Path) -> None:
+    from app.persistence import Checkpoints, restore_checkpoint
+    app, _ = workspace
+    row = recovery_request(app)
+    settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path / 'saved'})
+
+    async def commit() -> None:
+        return None
+
+    await Checkpoints(app.state.store, settings, commit=commit).flush()
+    restored_settings = settings.model_copy(update={
+        'data_dir': tmp_path / 'restored',
+        'encryption_key': (settings.data_dir / 'encryption.key').read_text().strip(),
+    })
+    restore_checkpoint(restored_settings)
+    # Construction runs schema upgrades on the restored database twice.
+    restored_settings.checkpoint_dir = None
+    create_app(restored_settings)
+    restored = create_app(restored_settings)
+    copied = restored.state.store.rows('SELECT * FROM model_requests')[0]
+    assert copied == row
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        raw = json.dumps(recovery_page([recovery_receipt(row)]))
+        # The gateway emits a JSON number, including digits beyond binary float precision.
+        return httpx.Response(200, content=raw.replace('"0.01234567890123456789"', '0.01234567890123456789'))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        await restored.state.spend.recovery.process(client, copied)
+    assert restored.state.spend.report()['total']['spend'] == '0.01234567890123456789'
+    assert app.state.spend.report()['total']['spend'] == '0'
+
+
+async def test_cost_recovery_disk_wait_does_not_block_streaming_loop(
+        workspace: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    app, _ = workspace
+    row = recovery_request(app)
+    release = threading.Event()
+    settle = app.state.spend.settle_receipt
+
+    def slow_settle(*args: str) -> bool:
+        # Only the event loop can release this simulated disk wait.
+        assert release.wait(2), 'Recovery blocked the event loop'
+        return settle(*args)
+
+    def gateway(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=recovery_page([recovery_receipt(row)]))
+
+    monkeypatch.setattr(app.state.spend, 'settle_receipt', slow_settle)
+    timer = asyncio.get_running_loop().call_later(0.05, release.set)
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+            await app.state.spend.recovery.process(client, row)
+    finally:
+        timer.cancel()
+        release.set()
+    assert app.state.store.rows('SELECT cost FROM model_requests')[0]['cost'] == '0.01234567890123456789'
+
+
+async def test_cost_recovery_shutdown_joins_an_outstanding_database_write() -> None:
+    import threading
+    from app.spend_recovery import database
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def write() -> None:
+        started.set()
+        assert release.wait(2)
+        finished.set()
+
+    task = asyncio.create_task(database(write))
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()

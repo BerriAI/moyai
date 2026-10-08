@@ -224,6 +224,31 @@ async def test_child_cost_rollup_does_not_duplicate_global_spend(durable):
     assert all('cost' not in c for c in coordinator.view(root, include_costs=False)['groups'][0]['children'])
 
 
+async def test_agent_billing_states_match_spend_and_stay_hidden_from_members(
+        durable: tuple[TemporalRunManager, object, str]) -> None:
+    manager, _, root = durable
+    coordinator, result, _ = await launch(durable, count=2)
+    manager.settings.litellm_api_key = 'agent-recovery-fixture-key'
+    manager.settings.litellm_api_base = 'https://gateway.example/v1'
+    spend = Spend(manager.store, manager.settings, None, None)
+    runs = [root] + [child['id'] for child in coordinator.children(result['group_id'])]
+    requests = [spend.begin(manager.store.run(run_id), 'test-model') for run_id in runs]
+    for request_id in requests:
+        spend.finish(request_id, None, 'interrupted')
+    manager.store.execute("UPDATE model_requests SET cost_recovery_error='receipt_access_denied' WHERE id=?", (requests[1],))
+    manager.store.execute("UPDATE model_requests SET cost='0.2' WHERE id=?", (requests[2],))
+    for pending, missing in ((1, 1), (0, 2)):
+        total, view = spend.report()['total'], coordinator.view(root)
+        for value in (total, view):
+            assert (value['pending_costs'], value['missing_costs'], value['spend']) == (pending, missing, '0.2')
+        children = {child['id']: child['cost'] for child in view['groups'][0]['children']}
+        assert children[runs[1]]['missing_costs'] == 1 and children[runs[2]]['spend'] == '0.2'
+        manager.settings.litellm_api_key = 'rotated-agent-fixture-key'
+    hidden = coordinator.view(root, include_costs=False)
+    assert hidden['spend'] is None and hidden['pending_costs'] == hidden['missing_costs'] == 0
+    assert all('cost' not in child for child in hidden['groups'][0]['children'])
+
+
 def test_agent_wait_interrupts_only_after_trusted_delegation_and_complete_tools():
     relay = SimpleNamespace(wait_group='')
     agent = SimpleNamespace(interrupt=lambda: calls.append('interrupt'))

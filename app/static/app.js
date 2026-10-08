@@ -543,7 +543,7 @@ function renderAgentDetails(team){
   const target=$('#agent-details');if(!target)return;
   const signature=JSON.stringify(team);if(target.dataset.team===signature)return;target.dataset.team=signature;
   const children=(team?.groups||[]).flatMap(g=>g.children);
-  target.innerHTML=children.length?`<section class="agent-summary"><h3>Parallel agents</h3><p>${children.filter(c=>['idle','completed'].includes(c.status)).length} of ${children.length} ready · Open agents from the sidebar.</p>${team.spend!==null?`<p>${dollars(team.spend)} including parent${team.missing_costs?' · some costs missing':''}</p>`:''}</section>`:'';
+  target.innerHTML=children.length?`<section class="agent-summary"><h3>Parallel agents</h3><p>${children.filter(c=>['idle','completed'].includes(c.status)).length} of ${children.length} ready · Open agents from the sidebar.</p>${team.spend!==null?`<p>${dollars(team.spend)} including parent${team.missing_costs?' · some costs missing':team.pending_costs?' · some costs pending':''}</p>`:''}</section>`:'';
   const parent=state.runs.find(r=>r.id===state.selected);
   if(parent&&children.length){
     parent.children=children.map(child=>({...parent.children?.find(c=>c.id===child.id),...child,parent_run_id:parent.id,mode:parent.mode}));

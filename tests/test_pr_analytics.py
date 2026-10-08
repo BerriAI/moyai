@@ -2,6 +2,10 @@ import asyncio
 import json
 from datetime import date
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+import pytest
+
 from app.pr_analytics import report
 from app.db import Store
 from app.session_pull_requests import SessionPullRequests
@@ -33,6 +37,33 @@ def receipt(store: Store, run: dict[str, object], number: int, *, tracked: str =
 def cost(store: Store, run_id: str, identity: str, amount: str | None, status: str = 'completed') -> None:
     store.execute('''INSERT INTO model_requests(id,key_hash,run_id,user_id,model,created_at,cost,status)
         VALUES(?,'fixture',?,'','fixture','2026-09-01T00:00:00+00:00',?,?)''', (identity, run_id, amount, status))
+
+
+async def test_pr_cost_states_match_spend_through_receipt_delay_and_key_rotation(
+        workspace: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = workspace
+    app.state.settings.litellm_api_key = 'pr-recovery-fixture-key'
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    store, spend = app.state.store, app.state.spend
+    run = store.create_run('Billing state', '', 'demo', [], user_id=person(store, 'alice'))
+    receipt(store, run, 100)
+    ids = [spend.begin(run, 'test-model') for _ in range(3)]
+    for request_id in ids:
+        spend.finish(request_id, None, 'interrupted')
+    store.execute("UPDATE model_requests SET cost_recovery_error='receipt_access_denied' WHERE id=?", (ids[1],))
+    store.execute("UPDATE model_requests SET cost='0.2' WHERE id=?", (ids[2],))
+    service, _, responses = sidebar_github(app, monkeypatch)
+    responses[100] = pr_response(100, state='closed', merged=True, merged_at='2026-10-03T00:00:00Z')
+    try:
+        for pending, missing in ((1, 1), (0, 2)):
+            data = await refreshed_report(service)
+            total = spend.report()['total']
+            for view in (data['pull_requests'][0], data['leaderboard'][0], total):
+                assert (view['pending_costs'], view['missing_costs'], view['spend']) == (pending, missing, '0.2')
+                assert 'key_hash' not in view and 'gateway_scope' not in view
+            app.state.settings.litellm_api_key = 'rotated-pr-fixture-key'
+    finally:
+        await service.close()
 
 
 async def refreshed_report(service: SessionPullRequests) -> dict[str, object]:

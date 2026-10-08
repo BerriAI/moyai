@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .db import now
 from .runner import TERMINAL
 from .security import digest
+from .spend import cost_status, gateway_scope
 
 
 class Arguments(BaseModel):
@@ -386,14 +387,19 @@ class AgentCoordinator:
         run = self.store.run(run_id)
         groups = [self.results(run_id, r['id'], latest=True) for r in self.store.rows('SELECT id FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,))]
         ids = [run_id] + [c['id'] for g in groups for c in g['children']]
-        requests = self.store.rows('SELECT run_id,cost,status FROM model_requests WHERE run_id IN (' + ','.join('?' for _ in ids) + ')',
+        requests = self.store.rows('SELECT run_id,cost,status,key_hash,gateway_scope,cost_recovery_error FROM model_requests WHERE run_id IN (' + ','.join('?' for _ in ids) + ')',
                                    tuple(ids)) if include_costs else []
         costs = {}
+        key_hash = digest(self.settings.litellm_api_key) if self.settings.litellm_api_key else ''
+        scope = gateway_scope(self.settings.litellm_api_base)
         for row in requests:
-            bucket = costs.setdefault(row['run_id'], {'spend': Decimal(0), 'requests': 0, 'missing_costs': 0})
+            bucket = costs.setdefault(row['run_id'], {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0})
             bucket['spend'] += Decimal(row['cost'] or '0')
             bucket['requests'] += 1
-            bucket['missing_costs'] += row['cost'] is None
+            billing = cost_status(row, key_hash=key_hash, gateway_scope=scope,
+                                  enabled=self.settings.litellm_spend_recovery_enabled)
+            bucket['pending_costs'] += billing == 'pending'
+            bucket['missing_costs'] += billing == 'unresolved'
         for group in groups:
             for child in group['children']:
                 value = costs.get(child['id'], {})
@@ -403,4 +409,5 @@ class AgentCoordinator:
                 child.pop('summary')
         return {'parent_id': run['parent_run_id'], 'groups': groups,
                 'spend': str(sum((c['spend'] for c in costs.values()), Decimal(0))) if include_costs else None,
+                'pending_costs': sum(c['pending_costs'] for c in costs.values()),
                 'missing_costs': sum(c['missing_costs'] for c in costs.values())}

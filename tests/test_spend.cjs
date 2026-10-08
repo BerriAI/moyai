@@ -93,8 +93,9 @@ test('personal empty state and unpriced requests are clear', async () => {
   assert.match(elements.get('#content').innerHTML, /Ready to track usage/);
   data.total = {spend:'0', requests:2, pending_costs:1, missing_costs:1};
   await context.renderSpend();
-  assert.match(elements.get('#content').innerHTML, /1 requests are in progress; 1 returned no final cost/);
+  assert.match(elements.get('#content').innerHTML, /1 costs await confirmation; 1 costs are unavailable/);
   assert.match(elements.get('#content').innerHTML, /Missing costs are not treated as free/);
+  vm.runInContext('clearTimeout(spendState.timer)',context);
 });
 
 test('spend loading clears old totals and delayed responses cannot replace a different page', async () => {
@@ -468,4 +469,20 @@ test('contributors with creations and no merges remain useful and each drilldown
   const robin=exported.find(row=>row[0]==='Robin');
   assert.equal(robin[exported[0].indexOf('Cost per merged PR USD (linked spend / merged PRs)')],null);
   assert.equal(robin[exported[0].indexOf('Cost coverage')],'No merged PRs');
+});
+
+for (const scope of ['personal','organization']) test(scope+' request costs distinguish pending billing from execution', async () => {
+  const {context,elements,data}=setup(scope);
+  data.request_details=[
+    {id:'pending',run_id:'session-1',created_at:'2026-10-07',model:'test-model',status:'interrupted',cost:null,cost_status:'pending'},
+    {id:'settled',run_id:'session-1',created_at:'2026-10-07',model:'test-model',status:'failed',cost:'0.0123456789',cost_status:'settled',cost_source:'gateway_recovery'},
+    {id:'denied',run_id:'session-1',created_at:'2026-10-07',model:'test-model',status:'completed',cost:null,cost_status:'unresolved',cost_recovery_error:'receipt_access_denied'},
+  ];
+  await context.renderSpend();
+  const html=scope==='organization'?context.spendRequests(data):elements.get('#content').innerHTML;
+  assert.match(html,/Cost pending/);
+  assert.match(html,/Recovered receipt/);
+  assert.match(html,/\$0\.0123456789/);
+  assert.match(html,/Receipt access required/);
+  assert.doesNotMatch(html,/In progress/);
 });

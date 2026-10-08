@@ -7,7 +7,8 @@ from decimal import Decimal
 from pydantic import BaseModel, Field, ValidationError
 
 from .session_pull_requests import Receipt, SessionPullRequests
-from .spend import period, stamp
+from .security import digest
+from .spend import cost_status, gateway_scope, period, stamp
 
 
 class LinkedSpend(BaseModel):
@@ -68,7 +69,8 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
         runs = {row['id']: dict(row) for row in conn.execute('''SELECT id,parent_run_id,display_title,prompt,deleted_at
             FROM runs WHERE id IN (SELECT run_id FROM github_publications)
             OR id IN (SELECT parent_run_id FROM runs WHERE id IN (SELECT run_id FROM github_publications))''')}
-        ledger = [dict(row) for row in conn.execute('''SELECT q.run_id,q.cost,q.status,r.parent_run_id
+        ledger = [dict(row) for row in conn.execute('''SELECT q.run_id,q.cost,q.status,r.parent_run_id,
+            q.key_hash,q.gateway_scope,q.cost_recovery_error
             FROM model_requests q JOIN runs r ON r.id=q.run_id
             WHERE r.id IN (SELECT run_id FROM github_publications)
             OR r.parent_run_id IN (SELECT run_id FROM github_publications)
@@ -88,11 +90,15 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
             receipt_ids[receipt.url.casefold()].add(receipt.repository_id)
 
     family_costs: dict[str, LinkedSpend] = defaultdict(LinkedSpend)
+    settings = service.github.settings
+    key_hash = digest(settings.litellm_api_key) if settings.litellm_api_key else ''
+    scope = gateway_scope(settings.litellm_api_base)
     for row in ledger:
         family = row['parent_run_id'] or row['run_id']
+        billing = cost_status(row, key_hash=key_hash, gateway_scope=scope,
+                              enabled=settings.litellm_spend_recovery_enabled)
         family_costs[family].add(LinkedSpend(spend=Decimal(row['cost'] or '0'), requests=1,
-            pending_costs=int(row['cost'] is None and row['status'] == 'pending'),
-            missing_costs=int(row['cost'] is None and row['status'] != 'pending')))
+            pending_costs=int(billing == 'pending'), missing_costs=int(billing == 'unresolved')))
 
     def actor(row: dict[str, object]) -> Contributor:
         identity = row['actor_id']

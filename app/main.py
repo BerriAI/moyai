@@ -208,6 +208,9 @@ def create_app(settings: Settings | None = None):
 
     @asynccontextmanager
     async def lifespan(app):
+        # Close the previous process's attempts before session recovery can
+        # dispatch fresh inference; accounting recovery preserves this outcome.
+        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         harness_gateway.maintenance.recover()
         await manager.recover()
         await checkpoints.flush()
@@ -215,7 +218,7 @@ def create_app(settings: Settings | None = None):
         identities.start()
         environments.start()
         automations.start()
-        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
+        spend.recovery.start()
         watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
         tracing.start()
         infrastructure.start()
@@ -223,6 +226,7 @@ def create_app(settings: Settings | None = None):
         try:
             yield
         finally:
+            await spend.recovery.close()
             await harness_gateway.maintenance.close()
             await computer.close()
             await session_pull_requests.close()
