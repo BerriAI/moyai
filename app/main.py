@@ -5,6 +5,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
@@ -415,6 +416,12 @@ def create_app(settings: Settings | None = None):
                 "execution_connected": manager.ready.is_set() if settings.temporal_enabled else True,
                 "checkpoint_interval_seconds": settings.temporal_checkpoint_seconds if settings.temporal_enabled else None,
                 "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
+
+    @app.get('/api/admin/pull-requests')
+    async def pull_request_analytics(request: Request, start: date | None = None, end: date | None = None):
+        security.require(request, admin=True)
+        from .pr_analytics import report
+        return report(session_pull_requests, start, end)
 
     @app.get("/api/organization")
     async def organization(request: Request):

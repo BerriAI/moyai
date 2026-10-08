@@ -23,6 +23,10 @@ jobs:
           node-version: '22'
       - name: Test session search and sidebar interactions
         run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs tests/test_harness_picker.cjs tests/test_automation_editor.cjs
+      - name: Test PR correlation and leaderboard
+        run: |
+          uv run --python 3.13 pytest -q --tb=line tests/test_pr_analytics.py tests/test_pr_delivery.py tests/test_personal_spend.py
+          node --test tests/test_spend.cjs
       - name: Test native Codex runtime and model defaults
         run: uv run --python 3.13 pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_config.py tests/test_models.py tests/test_claude_sdk.py
       - name: Test persistent context and real SDK continuation

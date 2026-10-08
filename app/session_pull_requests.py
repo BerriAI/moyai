@@ -3,10 +3,11 @@ import asyncio
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
 
 from cryptography.fernet import InvalidToken
-from pydantic import Field, StrictBool, ValidationError
+from pydantic import Field, StrictBool, ValidationError, field_validator, model_validator
 
 from .connector_errors import ConnectorError
 from .github_repositories import positive_id
@@ -21,6 +22,30 @@ class Snapshot(PullRequest):
     state: Literal['open', 'closed', 'merged']
     draft: StrictBool
     review_requested: StrictBool
+    created_at: str | None = None
+    merged_at: str | None = None
+
+    @field_validator('created_at', 'merged_at', mode='before')
+    @classmethod
+    def timestamp(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError('GitHub timestamps must be timezone-aware strings.')
+        parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            raise ValueError('GitHub timestamps must include a timezone.')
+        try:
+            return parsed.astimezone(timezone.utc).isoformat()
+        except OverflowError:
+            raise ValueError('GitHub timestamp is outside the supported date range.') from None
+
+    @model_validator(mode='after')
+    def merge_date(self):
+        if self.merged_at is not None and (self.state != 'merged'
+                or (self.created_at is not None and self.merged_at < self.created_at)):
+            raise ValueError('GitHub merge time does not match the PR state.')
+        return self
 
 
 @dataclass
@@ -44,6 +69,10 @@ class SessionPullRequests:
         self.slots = asyncio.Semaphore(4)
         self.closed = False
         self.cursor = 0
+        self.store.execute('''CREATE TABLE IF NOT EXISTS github_pr_snapshots (
+            connection_version TEXT NOT NULL, repository_id INTEGER NOT NULL, number INTEGER NOT NULL,
+            snapshot TEXT NOT NULL, observed_at TEXT NOT NULL,
+            PRIMARY KEY(connection_version,repository_id,number))''')
 
     def context(self):
         if not self.github.connectors.allowed('github_pull_request'):
@@ -56,6 +85,39 @@ class SessionPullRequests:
             return self.github.connection_version(), credentials
         except (ConnectorError, InvalidToken, ValueError, TypeError, AttributeError):
             return None
+
+    def _cached(self, key):
+        cached = self.cache.get(key)
+        if cached:
+            self.cache.move_to_end(key)
+            return cached
+        rows = self.store.rows('''SELECT snapshot FROM github_pr_snapshots
+            WHERE connection_version=? AND repository_id=? AND number=?''', key)
+        if rows:
+            try:
+                value = Snapshot.model_validate_json(rows[0]['snapshot']) if rows[0]['snapshot'] else None
+                if value and value.number != key[2]:
+                    return None
+                # Restored observations never claim fresh status. They do not
+                # consume an in-memory slot until a refresh can be scheduled.
+                return Cached(value)
+            except ValidationError:
+                pass
+        return None
+
+    def status(self, receipt, context):
+        """Resolve a receipt through current access before reading its status."""
+        if not context:
+            return None, None, None
+        version, credentials = context
+        try:
+            target = self.github.target(receipt.repository_id or receipt.repository, credentials)
+        except (ConnectorError, KeyError, TypeError, ValueError):
+            # Legacy migration remains owned by the normal GitHub connection.
+            key = (version, 0, 0) if 'repository_ids' not in credentials else None
+            return None, key, None
+        key = (version, target, receipt.number)
+        return target, key, self._cached(key)
 
     def summaries(self, run_ids):
         result = {identity: {'open': 0, 'merged': 0, 'closed': 0, 'unknown': 0,
@@ -89,22 +151,9 @@ class SessionPullRequests:
         # Prefer permanent receipts before considering their legacy duplicates.
         # This affects presentation only; target() still owns every access check.
         for row, receipt in sorted(parsed, key=lambda entry: entry[1].repository_id is None):
-            target, key, cached = None, None, None
-            if context:
-                version, credentials = context
-                try:
-                    target = self.github.target(receipt.repository_id or receipt.repository, credentials)
-                except (ConnectorError, KeyError, TypeError, ValueError):
-                    # Existing installations using names migrate through the same
-                    # owner as normal GitHub tools; no receipt URL is requested.
-                    if 'repository_ids' not in credentials:
-                        wanted.append((version, 0, 0))
-                else:
-                    key = (version, target, receipt.number)
-                    cached = self.cache.get(key)
-                    if cached:
-                        self.cache.move_to_end(key)
-                    wanted.append(key)
+            target, key, cached = self.status(receipt, context)
+            if key:
+                wanted.append(key)
             snapshot = cached.value if cached else None
             stale = bool(cached and (cached.failed or (snapshot and cached.fresh_until <= clock)))
             item = {**receipt.model_dump(exclude={'repository_id'}),
@@ -122,7 +171,15 @@ class SessionPullRequests:
                 summary[item['state']] += 1
                 summary['stale'] |= stale
                 summary['pull_requests'].append(item)
-        keys = list(dict.fromkeys(wanted))
+        self.queue_refreshes(wanted)
+        for summary in result.values():
+            ready = [pr for pr in summary['pull_requests'] if pr['state'] == 'open' and not pr['draft']]
+            if ready and not summary['stale'] and not summary['unknown']:
+                summary['label'] = 'Review PR' if any(pr['review_requested'] for pr in ready) else 'PR is ready'
+        return result
+
+    def queue_refreshes(self, keys):
+        keys = list(dict.fromkeys(keys))
         if keys and len(self.pending) < self.MAX_PENDING:
             start = self.cursor % len(keys)
             for offset in range(len(keys)):
@@ -131,14 +188,9 @@ class SessionPullRequests:
                 self.cursor = position + 1
                 if len(self.pending) >= self.MAX_PENDING:
                     break
-        for summary in result.values():
-            ready = [pr for pr in summary['pull_requests'] if pr['state'] == 'open' and not pr['draft']]
-            if ready and not summary['stale'] and not summary['unknown']:
-                summary['label'] = 'Review PR' if any(pr['review_requested'] for pr in ready) else 'PR is ready'
-        return result
 
     def schedule(self, key):
-        cached = self.cache.get(key)
+        cached = self._cached(key)
         if (self.closed or key in self.pending or len(self.pending) >= self.MAX_PENDING
                 or (cached and cached.retry_at > time.monotonic())):
             return
@@ -149,7 +201,7 @@ class SessionPullRequests:
                 if expired is None:
                     return  # Do not evict cooldowns and defeat the poll rate limit.
                 self.cache.pop(expired)
-            self.cache[key] = Cached()
+            self.cache[key] = cached or Cached()
         task = asyncio.create_task(self.refresh(key))
         self.pending[key] = task
         task.add_done_callback(lambda finished: self.finished(key, finished))
@@ -185,6 +237,13 @@ class SessionPullRequests:
                 current = self.context()
                 if not current or current[0] != version:
                     return
+                if target:
+                    # Persist a missing observation too, so a restart cannot
+                    # resurrect a previously visible PR after a verified 404.
+                    self.store.execute('''INSERT INTO github_pr_snapshots VALUES(?,?,?,?,?)
+                        ON CONFLICT(connection_version,repository_id,number) DO UPDATE SET
+                        snapshot=excluded.snapshot,observed_at=excluded.observed_at''',
+                        (*key, value.model_dump_json() if value else '', datetime.now(timezone.utc).isoformat()))
                 clock = time.monotonic()
                 self.cache[key] = Cached(value, clock + self.TTL, clock + self.TTL)
         except (ConnectorError, InvalidToken, ValidationError, KeyError, TypeError, ValueError, AttributeError, TimeoutError):
@@ -204,7 +263,8 @@ class SessionPullRequests:
             raise ValueError('GitHub did not confirm the expected PR state.')
         return Snapshot(number=data['number'], repository=repo['full_name'], url=data['html_url'],
                         title=data['title'], state='merged' if merged else data['state'], draft=data['draft'],
-                        review_requested=bool(reviewers or teams))
+                        review_requested=bool(reviewers or teams),
+                        created_at=data.get('created_at'), merged_at=data.get('merged_at'))
 
     async def close(self):
         self.closed = True

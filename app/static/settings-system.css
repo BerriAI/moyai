@@ -459,3 +459,40 @@
 .analytics-average { fill:none;stroke:var(--chart-amber);stroke-width:2;stroke-linejoin:round; }
 .analytics-legend .analytics-average-key { width:12px;height:0;border-top:2px solid var(--chart-amber); }
 .analytics-partial { opacity:.5; }
+/* Pull-request analytics shares the report's table, metrics, and status primitives. */
+.analytics-pr-filters { display:flex;align-items:flex-end;flex-wrap:wrap;gap:12px;margin:20px 0; }
+.analytics-pr-filters label { display:grid;gap:6px;font-size:var(--settings-caption); }
+.analytics-pr-filters label:first-child { flex:1;min-width:180px; }
+.analytics-pr-filters input { width:100%; }
+.settings-view .analytics-page .analytics-pr-table :is(th,td):nth-child(-n+4) { text-align:start; }
+.analytics-pr-table { min-width:900px; }
+.analytics-pr-table td:first-child { min-width:220px;max-width:320px; }
+.analytics-pr-table td:nth-child(4) { min-width:150px;max-width:240px; }
+.analytics-pr-table th small,.analytics-pr-leaderboard th small { display:block;font-weight:400; }
+.settings-view #content .pr-status-neutral { background:var(--settings-subtle);color:var(--settings-muted); }
+.settings-view #content .pr-status-unknown { background:var(--settings-warning-bg);color:var(--settings-warning); }
+.analytics-pr-leaderboard { min-width:980px; }
+.analytics-pr-leaderboard td:first-child { min-width:180px; }
+.settings-view .analytics-page .analytics-pr-leaderboard :is(th,td):nth-child(3) { text-align:start;min-width:200px; }
+.analytics-pr-person { display:flex;gap:12px;align-items:center;min-width:200px; }
+.analytics-pr-rank { width:24px;flex:0 0 24px;color:var(--settings-muted);font-variant-numeric:tabular-nums; }
+.settings-view button.analytics-pr-person-link { padding:0;min-height:24px;border:0;background:none;color:var(--settings-accent);font:inherit;text-align:start; }
+.analytics-pr-status-legend { display:flex;gap:8px 16px;flex-wrap:wrap;margin-bottom:12px;color:var(--settings-muted);font-size:var(--settings-caption); }
+.analytics-pr-status-legend>span { display:flex;align-items:center;gap:6px; }
+.analytics-pr-status-legend i { display:inline-block;width:8px;height:8px;border-radius:2px; }
+.analytics-pr-status-bar { display:flex;min-width:180px;height:8px;border-radius:4px;overflow:hidden;background:var(--settings-subtle); }
+.analytics-pr-status-counts { display:flex;flex-wrap:wrap;gap:0 4px;margin-top:6px;color:var(--settings-muted);font-size:var(--settings-caption); }
+.analytics-pr-status-counts>span { white-space:nowrap; }
+.pr-distribution-merged { background:var(--chart-violet); }
+.pr-distribution-open { background:var(--chart-green); }
+.pr-distribution-draft { background:var(--chart-amber); }
+.pr-distribution-closed { background:var(--settings-muted); }
+.pr-distribution-unknown { background:var(--settings-control-border); }
+.analytics-pr-detail { margin-top:32px; }
+.settings-view #content .analytics-pr-detail h3 { margin:0;font-size:var(--settings-caption);font-weight:500; }
+.settings-view #content .analytics-pr-detail h4 { margin:24px 0 12px;font-size:var(--settings-caption);font-weight:500; }
+@media(max-width:600px){
+ .analytics-pr-filters label { flex:1;min-width:0; }
+ .analytics-pr-filters label:first-child { flex-basis:100%; }
+ .settings-view button.analytics-pr-person-link { min-height:44px; }
+}

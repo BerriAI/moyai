@@ -115,3 +115,17 @@ Open `http://127.0.0.1:8791/#spend`, select September 1–30, 2026, and add a
 monthly bill for another provider. The initial sample values are $44.75 of
 infrastructure + $18.75 of LLM costs = $63.50. Demo data lives separately in
 `.data/cost-demo`. This is a localhost preview, not a deployed billing connection.
+
+### Pull requests and leaderboard
+
+Administrators can open **Spend & usage → Pull requests** to inspect confirmed Moyai PR publication receipts, their requesting contributor, current GitHub status and linked sessions. Search and status filters also apply to CSV export. This table selects PRs first tracked during the chosen UTC dates.
+
+**Leaderboard** ranks contributors by unique PRs merged during the selected dates, including PRs created earlier. **PRs created** uses verified GitHub creation dates; **PRs by status** shows the current status of that creation cohort. A PR created in the period may merge later, so those status counts can differ from the period's merged count. Contributors with creations and no merges remain visible. Select a contributor to inspect both cohorts. Unknown creation dates are reported separately and never inferred from the date Moyai first tracked the PR.
+
+Credit uses the original publication message sender, with established Slack/Google accounting links; shared or missing identities remain unattributed. Duplicate receipts count once by permanent repository ID and PR number. A missing verified merge date never increases the merged count.
+
+**Linked session LLM spend** covers all recorded usage in each linked root session and its direct children, including follow-up work. It is a correlation, not an exact cost allocation to a PR. One session may produce multiple PRs, so per-PR amounts overlap. Contributor rows count each linked session once within that row; rows can still overlap when contributors share a session. Pending and missing prices remain marked. Infrastructure costs are excluded.
+
+**$ per merged PR** divides that contributor's deduplicated linked-session spend behind PRs merged in the selected dates by their merged PR count. The spend is all-time recorded LLM usage, including follow-up work. No merges yields an unavailable ratio rather than zero; pending or missing prices make the ratio partial. Displayed currency rounds to cents, while CSV preserves the decimal report values.
+
+The admin-only `/api/admin/pull-requests` endpoint uses the same `start`/`end` date contract as Spend. Verified GitHub snapshots and merge dates persist in SQLite and the normal database checkpoint. A restart restores them as stale until refreshed. Status reads reuse the current GitHub connection's selected repositories, bounded refresh queue and credential-rotation checks. A disabled connection leaves retained publication history visible with unknown remote status; an inaccessible PR is never inferred to be closed. Deleted sessions retain their financial history but have no navigation link in the report. PRs published outside Moyai's confirmed publication tools are not inferred from chat URLs.

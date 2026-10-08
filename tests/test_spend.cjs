@@ -5,18 +5,21 @@ const vm = require('node:vm');
 
 function setup(scope = 'personal') {
   const elements = new Map(), calls = [];
+  const element=key=>{if(!elements.has(key))elements.set(key,{focus(){},setSelectionRange(){}});return elements.get(key);};
   const total = {spend:'1.25', requests:2, sessions:1, pending_costs:0, missing_costs:0, total_tokens:120, prompt_tokens:100, completion_tokens:20};
   const user = {id:'google:maya', kind:'google', email:'maya@example.com', name:'Maya', ...total};
   const data = {scope, start:'2026-10-01', end:'2026-10-07', total, priced_requests:2,
     identities:[user], users:[user], sessions:[{run_id:'session-1', user_id:user.id, user_name:user.name, title:'Fix dashboard', ...total}],
     models:[{model:'test-model', ...total}], request_details:[], tracked_since:null};
   if (scope === 'organization') data.infrastructure = {pending:false};
+  const prData=prFixture();
   const context = {
-    state:{pageVersion:1, role:'admin',view:'spend'}, URLSearchParams, clearTimeout, setTimeout,
-    $:key=>{if (!elements.has(key)) elements.set(key, {focus(){}}); return elements.get(key);},
+    state:{pageVersion:1, role:'admin',view:'spend'}, URL, URLSearchParams, clearTimeout, setTimeout, CSS:{escape:value=>value},
+    $:element,
     api:async url=>{
       calls.push(url);
-      if (url.startsWith('/api/spend?')) return data;
+      if (url.startsWith('/api/spend?')) {const query=new URL(url,'http://localhost').searchParams;return {...data,start:query.get('start')||data.start,end:query.get('end')||data.end};}
+      if (url.startsWith('/api/admin/pull-requests?')) return prData;
       if (scope === 'organization' && url.startsWith('/api/admin/adoption?')) return activity;
       if (scope === 'organization' && url === '/api/admin/identities/status') return {enabled:false, ready:false, missing_scopes:[]};
       throw new Error('Unexpected request: ' + url);
@@ -26,19 +29,17 @@ function setup(scope = 'personal') {
     renderCostSummary:()=>{assert.equal(scope,'organization'); return '<div>Organization totals</div>';},
     renderInfrastructure:()=>{assert.equal(scope,'organization'); return '<div>Infrastructure costs</div>';},
     bindInfrastructure:()=>{assert.equal(scope,'organization');},
-    document:{querySelectorAll:()=>[]},
+    document:{querySelectorAll:selector=>selector==='[data-spend-tab]'?['overall','users','history','prs','leaderboard','infrastructure'].map(tab=>Object.assign(element('#spend-tab-'+tab),{id:'spend-tab-'+tab,dataset:{spendTab:tab}})):selector==='[data-pr-contributor]'?prData.leaderboard.map(row=>Object.assign(element('#person-'+row.user_id),{dataset:{prContributor:row.user_id}})):[]},
     showError:error=>{throw error;}, toast:()=>{},
   };
   vm.createContext(context);
-  for(const file of ['analytics','adoption','spend-analytics','spend'])vm.runInContext(readFileSync('app/static/'+file+'.js','utf8'), context);
-  const tabs=['overall','users','history','infrastructure'].map(key=>Object.assign(context.$('#spend-tab-'+key),{id:'spend-tab-'+key,dataset:{spendTab:key}}));
-  context.document.querySelectorAll=selector=>selector==='[data-spend-tab]'?tabs:[];
-  return {context, elements, calls, data};
+  for(const file of ['analytics','adoption','spend-prs','spend-analytics','spend'])vm.runInContext(readFileSync('app/static/'+file+'.js','utf8'), context);
+  return {context, elements, calls, data,prData};
 }
 
 test('personal Spend uses server scope even with a stale admin role and user filter', async () => {
   const {context, elements, calls} = setup();
-  vm.runInContext("spendState.user='someone-else';spendAnalyticsState.tab='users'", context);
+  vm.runInContext("spendState.user='someone-else'", context);
   await context.renderSpend();
   const html = elements.get('#content').innerHTML;
   assert.deepEqual(calls, ['/api/spend?']);
@@ -135,6 +136,183 @@ test('an older report cannot overwrite a newer refresh on the same page', async 
   assert.equal(elements.get('#content').innerHTML, current);
 });
 
+function prFixture(){
+  const pr={repository_id:42,number:123,url:'https://github.com/example/moyai/pull/123',title:'Keep saved filters',state:'merged',draft:false,created_at:'2026-10-01T09:00:00Z',tracked_at:'2026-10-02T10:00:00Z',merged_at:'2026-10-05T10:00:00Z',user_id:'google:maya',user_name:'Maya',user_email:'maya@example.com',sessions:[{id:'session-1',title:'Fix dashboard',deleted:false},{id:'deleted-1',title:'Earlier attempt',deleted:true}],spend:'1.250001',requests:4,pending_costs:1,missing_costs:1,stale:false};
+  return {start:'2026-10-01',end:'2026-10-07',timezone:'UTC',currency:'USD',pull_requests:[pr],created_pull_requests:[pr],total_created:1,unknown_created_at:0,merged_pull_requests:[pr],leaderboard:[{user_id:'google:maya',name:'Maya',email:'maya@example.com',created_prs:1,status_counts:{merged:1,open:0,draft:0,closed:0,unknown:0},merged_prs:1,cost_per_merged_pr:pr.spend,sessions:2,spend:pr.spend,requests:4,pending_costs:1,missing_costs:1}],total_merged:1,contributors:1,unknown_status:1,stale_status:1,pending_refresh:false};
+}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+const selectTab=(elements,tab)=>elements.get('#spend-tab-'+tab).onclick();
+
+test('PR reports load lazily and share one scoped response between tabs',async()=>{
+  const {context,elements,calls}=setup('organization');
+  await context.renderSpend();
+  assert.ok(!calls.some(url=>url.includes('pull-requests')));
+  selectTab(elements,'prs');
+  assert.match(elements.get('#content').innerHTML,/Loading pull request analytics/);
+  assert.equal(elements.get('#spend-export').disabled,true);
+  await settle();
+  const html=elements.get('#spend-panel').innerHTML;
+  for(const text of ['Keep saved filters','First tracked in the selected dates','All time · USD','1 pending · 1 missing','Across all tracked PRs: 1 with unknown status','PR costs overlap'])assert.ok(html.includes(text),text);
+  assert.match(html,/href="#run=session-1"/);
+  assert.match(html,/Earlier attempt · Deleted/);
+  assert.doesNotMatch(html,/href="#run=deleted-1"/);
+  assert.equal(elements.get('#spend-export').disabled,false);
+  selectTab(elements,'leaderboard');
+  await settle();
+  assert.match(elements.get('#content').innerHTML,/PR leaderboard/);
+  assert.match(elements.get('#content').innerHTML,/Merged 1/);
+  assert.equal(calls.filter(url=>url.includes('pull-requests')).length,1);
+});
+
+test('PR filters clear an empty result and exports keep exact full report values',async()=>{
+  const {context,elements,prData}=setup('organization');
+  prData.pull_requests=Array.from({length:520},(_,i)=>({...prData.pull_requests[0],number:i+1,url:'https://github.com/example/moyai/pull/'+(i+1),title:i===0?'=Unsafe CSV label':'Change '+i}));
+  await context.renderSpend();selectTab(elements,'prs');await settle();
+  let exported;
+  context.downloadAnalyticsCSV=(filename,rows)=>{exported={filename,rows};};
+  elements.get('#spend-export').onclick();
+  assert.equal(exported.rows.length,521);
+  assert.equal(exported.rows[1][11],'1.250001');
+  assert.match(context.analyticsCSV(exported.rows),/"'=Unsafe CSV label"/);
+  assert.match(exported.filename,/moyai-prs-2026-10-01-2026-10-07.csv/);
+  elements.get('#spend-pr-search').value='missing phrase';
+  elements.get('#spend-pr-search').oninput();
+  assert.match(elements.get('#spend-panel').innerHTML,/No pull requests match these filters/);
+  elements.get('#spend-pr-clear').onclick();
+  assert.match(elements.get('#spend-panel').innerHTML,/Change 519/);
+  elements.get('#spend-pr-status').value='open';
+  elements.get('#spend-pr-status').onchange();
+  assert.match(elements.get('#spend-panel').innerHTML,/No pull requests match these filters/);
+  selectTab(elements,'leaderboard');await settle();
+  elements.get('#spend-export').onclick();
+  assert.equal(exported.rows.length,2);
+  assert.equal(exported.rows[1][exported.rows[0].indexOf('Linked session LLM spend (all time, merged PRs) USD')],'1.250001');
+  assert.equal(exported.rows[1][exported.rows[0].indexOf('Cost per merged PR USD (linked spend / merged PRs)')],'1.250001');
+});
+
+test('PR links allow only canonical GitHub PR destinations and escape text',async()=>{
+  const {context,elements,prData}=setup('organization');
+  prData.pull_requests=[{...prData.pull_requests[0],title:'<img src=x>',url:'javascript:alert(1)',spend:null},{...prData.pull_requests[0],url:'https://github.com@example.net/a/b/pull/123',title:'Wrong host'}];
+  await context.renderSpend();selectTab(elements,'prs');await settle();
+  const html=elements.get('#spend-panel').innerHTML;
+  assert.match(html,/&lt;img src=x>/);
+  assert.doesNotMatch(html,/javascript:|example.net|<img/);
+  assert.match(html,/Unavailable/);
+  for(const url of ['https://github.com/a/b/pull/123?next=evil','https://github.com/a/b/pull/124','http://github.com/a/b/pull/123','https://github.com/a/b/pull/123#x'])assert.equal(context.spendPRURL({url,number:123}),'');
+  assert.equal(context.spendPRURL({url:'https://github.com/a/b/pull/123',number:123}),'https://github.com/a/b/pull/123');
+});
+
+test('shared dates and refresh reload the selected PR report',async()=>{
+  const {context,elements,calls}=setup('organization');
+  await context.renderSpend();selectTab(elements,'leaderboard');await settle();
+  context.$('#spend-start').value='2026-10-03';context.$('#spend-end').value='2026-10-06';
+  elements.get('#spend-filter-form').onsubmit({preventDefault(){}});await settle();
+  assert.equal(calls.filter(url=>url.includes('pull-requests')).at(-1),'/api/admin/pull-requests?start=2026-10-03&end=2026-10-06');
+  await elements.get('#sync-spend').onclick();await settle();
+  assert.equal(calls.filter(url=>url.includes('pull-requests')).length,3);
+  assert.match(elements.get('#spend-panel').innerHTML,/PR leaderboard/);
+});
+
+test('late PR responses cannot repaint another tab or a newer date range',async()=>{
+  const {context,elements,prData}=setup('organization'),original=context.api;
+  const pending=[];
+  context.api=url=>url.includes('pull-requests')?new Promise(resolve=>pending.push(resolve)):original(url);
+  await context.renderSpend();selectTab(elements,'prs');await settle();
+  selectTab(elements,'users');
+  pending[0](prData);await settle();
+  assert.match(elements.get('#content').innerHTML,/LLM spend by user/);
+  assert.equal(context.$('#spend-panel').innerHTML,undefined);
+  selectTab(elements,'prs');await settle();
+  await context.renderSpend();await settle();
+  vm.runInContext("spendState.start='2026-10-03'",context);
+  await context.renderSpend();await settle();
+  pending[2]({...prData,pull_requests:[{...prData.pull_requests[0],title:'New range'}]});await settle();
+  pending[1](prData);await settle();
+  assert.match(elements.get('#spend-panel').innerHTML,/New range/);
+  assert.doesNotMatch(elements.get('#spend-panel').innerHTML,/Keep saved filters/);
+});
+
+test('pending PR requests are shared after switching report tabs and blocked after navigation',async()=>{
+  const {context,elements,prData}=setup('organization'),original=context.api;
+  let finish;
+  context.api=url=>url.includes('pull-requests')?new Promise(resolve=>{finish=resolve;}):original(url);
+  await context.renderSpend();selectTab(elements,'prs');selectTab(elements,'leaderboard');
+  finish(prData);await settle();
+  assert.match(elements.get('#spend-panel').innerHTML,/PR leaderboard/);
+  await context.renderSpend();
+  context.state.pageVersion++;
+  elements.get('#spend-panel').innerHTML='Another page';
+  finish(prData);await settle();
+  assert.equal(elements.get('#spend-panel').innerHTML,'Another page');
+});
+
+test('PR outage is isolated, retry succeeds, and personal scope never requests PR analytics',async()=>{
+  const {context,elements,prData,data,calls}=setup('organization'),original=context.api;
+  context.api=url=>url.includes('pull-requests')?Promise.reject(new Error('<unavailable>')):original(url);
+  await context.renderSpend();selectTab(elements,'prs');await settle();
+  assert.match(elements.get('#spend-panel').innerHTML,/Could not load pull request analytics.*&lt;unavailable>/);
+  assert.equal(elements.get('#spend-export').disabled,true);
+  context.api=original;
+  await elements.get('#spend-pr-retry').onclick();
+  assert.match(elements.get('#spend-panel').innerHTML,/Keep saved filters/);
+  prData.pull_requests=[];prData.leaderboard=[];prData.total_merged=0;prData.contributors=0;
+  await context.renderSpend();await settle();
+  assert.match(elements.get('#spend-panel').innerHTML,/No pull requests were first tracked/);
+  selectTab(elements,'leaderboard');await settle();
+  assert.match(elements.get('#content').innerHTML,/No verified PRs created or merged/);
+  const before=calls.filter(url=>url.includes('pull-requests')).length;
+  data.scope='personal';await context.renderSpend();
+  assert.equal(calls.filter(url=>url.includes('pull-requests')).length,before);
+  assert.doesNotMatch(elements.get('#content').innerHTML,/Leaderboard|Pull requests/);
+});
+
+test('unattributed merged PRs retain their outcome count without a contributor rank',async()=>{
+  const {context,elements,prData}=setup('organization');
+  prData.leaderboard.unshift({...prData.leaderboard[0],user_id:'unattributed',name:'Unattributed',email:'',merged_prs:2});
+  prData.total_merged=3;
+  await context.renderSpend();selectTab(elements,'leaderboard');await settle();
+  const html=elements.get('#spend-panel').innerHTML;
+  assert.match(html,/analytics-pr-rank">—<.*?Unattributed/);
+  assert.match(html,/analytics-pr-rank">1<.*?Maya/);
+  assert.match(html,/Unattributed.*?<td><strong>2<\/strong><\/td>/);
+});
+
+test('leaderboard contributor controls expose only that contributor’s merged PR links',async()=>{
+  const {context,elements,prData}=setup('organization');
+  prData.merged_pull_requests.push({...prData.merged_pull_requests[0],title:'Another contributor PR',user_id:'someone-else'});
+  await context.renderSpend();selectTab(elements,'leaderboard');await settle();
+  elements.get('#person-google:maya').onclick();
+  assert.match(elements.get('#spend-panel').innerHTML,/Pull requests · Maya/);
+  assert.match(elements.get('#spend-panel').innerHTML,/Keep saved filters/);
+  assert.doesNotMatch(elements.get('#spend-panel').innerHTML,/Another contributor PR/);
+  elements.get('#spend-pr-close-contributor').onclick();
+  assert.doesNotMatch(elements.get('#spend-panel').innerHTML,/Pull requests · Maya/);
+});
+
+test('status polling shares an in-flight refresh across tabs and releases export after completion',async()=>{
+  const {context,elements,prData}=setup('organization'),original=context.api,timers=new Map();
+  let timerId=0,finish,requests=0;
+  context.setTimeout=fn=>{timers.set(++timerId,fn);return timerId;};context.clearTimeout=id=>timers.delete(id);
+  prData.pending_refresh=true;
+  context.api=url=>{if(!url.includes('pull-requests'))return original(url);requests++;return requests===1?Promise.resolve(prData):new Promise(resolve=>{finish=resolve;});};
+  await context.renderSpend();selectTab(elements,'prs');await settle();
+  assert.equal(timers.size,1);
+  context.settingsInteractionActive=()=>true;
+  context.document.querySelector=selector=>selector==='#spend-panel'?{contains:active=>active?.id==='spend-pr-search'}:null;
+  context.document.activeElement={id:'spend-pr-search'};
+  const pausedPoll=[...timers.values()][0];timers.clear();pausedPoll();
+  assert.equal(requests,1);
+  context.document.activeElement={id:'spend-tab-prs'};
+  const poll=[...timers.values()][0];timers.clear();poll();
+  assert.equal(elements.get('#spend-export').disabled,true);
+  selectTab(elements,'leaderboard');
+  finish({...prData,pending_refresh:false,total_merged:2});await settle();
+  assert.equal(requests,2);
+  assert.equal(elements.get('#spend-export').disabled,false);
+  assert.match(elements.get('#spend-panel').innerHTML,/PR leaderboard/);
+  assert.equal(timers.size,0);
+});
+
 const activity={start:'2026-10-01',end:'2026-10-07',total_requests:7,active_users:1,daily:[{date:'2026-10-07',requests:7,seven_day_average:1,active_users:1,partial:true}],weekly:{requests:0,previous_requests:0,percent_change:null,delta:0,start:'2026-09-30',end:'2026-10-06',previous_start:'2026-09-23',previous_end:'2026-09-29'}};
 function withActivity(){
   const h=setup('organization'),spendAPI=h.context.api;
@@ -189,11 +367,12 @@ test('human activity errors retain tabs and dates and retry without leaving spen
   assert.equal(elements.get('#spend-export').disabled,false);
 });
 test('delayed human activity cannot overwrite another tab, refreshed date range, or page',async()=>{
-  for(const destination of ['tab','refresh','page']){
+  for(const destination of ['tab','prs','refresh','page']){
     const {context:c,elements}=withActivity();await c.renderSpend();
     let finish;const api=c.api;c.api=url=>url.startsWith('/api/admin/adoption?')?new Promise(resolve=>{finish=resolve;}):api(url);
     const old=elements.get('#spend-tab-users').onclick();
     if(destination==='tab')await elements.get('#spend-tab-history').onclick();
+    if(destination==='prs'){await elements.get('#spend-tab-prs').onclick();await settle();}
     if(destination==='refresh'){c.api=api;await c.renderSpend();}
     if(destination==='page')c.state.pageVersion++;
     c.$('#spend-activity').innerHTML='Current content';
@@ -238,4 +417,55 @@ test('filtering spend keeps team activity and exports both scopes without refetc
   assert.equal(calls.length,previous);
   elements.get('#spend-export').onclick();
   assert.ok(exported.some(row=>row[0]==='maya@example.com'));
+});
+
+
+test('leaderboard shows created-cohort status counts and the exact supplied cost per merged PR',async()=>{
+  const {context,elements,prData}=setup('organization');
+  Object.assign(prData.leaderboard[0],{created_prs:5,status_counts:{merged:1,open:2,draft:1,closed:1,unknown:0},merged_prs:2,cost_per_merged_pr:'3.1415926535897932384626433832'});
+  prData.total_created=5;prData.total_merged=2;prData.unknown_created_at=1;
+  await context.renderSpend();selectTab(elements,'leaderboard');await settle();
+  const html=elements.get('#spend-panel').innerHTML;
+  for(const text of ['PRs created','PRs by status','PRs merged','$ per PR merged','Merged 1','Open 2','Draft 1','Closed 1','$3.14','Partial · 1 pending · 1 missing','1 with unknown creation date'])assert.ok(html.includes(text),text);
+  assert.match(html,/aria-label="Statuses of PRs created in the selected period"/);
+  assert.match(html,/pr-distribution-open" style="width:40%"/);
+  assert.match(html,/Status bars show the current statuses of PRs created in this period/);
+  assert.doesNotMatch(html,/NaN|Infinity|Share of merged PRs/);
+  let exported;context.downloadAnalyticsCSV=(_name,rows)=>{exported=rows;};elements.get('#spend-export').onclick();
+  const column=name=>exported[1][exported[0].indexOf(name)];
+  assert.equal(column('PRs created in period'),5);
+  assert.equal(column('Merged PRs (created in period)'),1);
+  assert.equal(column('Open PRs (created in period)'),2);
+  assert.equal(column('PRs merged in period'),2);
+  assert.equal(column('Cost per merged PR USD (linked spend / merged PRs)'),'3.1415926535897932384626433832');
+  assert.equal(column('Cost coverage'),'Partial');
+});
+
+test('contributors with creations and no merges remain useful and each drilldown labels its date cohort',async()=>{
+  const {context,elements,prData}=setup('organization');
+  const created={...prData.pull_requests[0],number:456,url:'https://github.com/example/moyai/pull/456',user_id:'creator-only',user_name:'Robin',user_email:'robin@example.com',title:'Prepare a new feature',state:'open',draft:true,merged_at:null};
+  prData.created_pull_requests=[created];prData.total_created=1;
+  Object.assign(prData.leaderboard[0],{created_prs:0,status_counts:{merged:0,open:0,draft:0,closed:0,unknown:0}});
+  prData.leaderboard.push({user_id:'creator-only',name:'Robin',email:'robin@example.com',created_prs:1,status_counts:{merged:0,open:0,draft:1,closed:0,unknown:0},merged_prs:0,cost_per_merged_pr:null,spend:'0',sessions:0,requests:0,pending_costs:0,missing_costs:0});
+  await context.renderSpend();selectTab(elements,'leaderboard');await settle();
+  const html=elements.get('#spend-panel').innerHTML;
+  assert.match(html,/No PRs created/);
+  assert.match(html,/Robin/);
+  assert.match(html,/Draft 1/);
+  assert.match(html,/—<small>No merged PRs<\/small>/);
+  elements.get('#person-creator-only').onclick();
+  const detail=elements.get('#spend-panel').innerHTML;
+  assert.match(detail,/Created in period \(1\)/);
+  assert.match(detail,/Merged in period \(0\)/);
+  assert.match(detail,/Prepare a new feature/);
+  assert.doesNotMatch(detail,/Keep saved filters/);
+  assert.match(detail,/No verified PRs merged in this period/);
+  elements.get('#person-google:maya').onclick();
+  assert.match(elements.get('#spend-panel').innerHTML,/Created in period \(0\)/);
+  assert.match(elements.get('#spend-panel').innerHTML,/Merged in period \(1\)/);
+  assert.match(elements.get('#spend-panel').innerHTML,/Keep saved filters/);
+  let exported;context.downloadAnalyticsCSV=(_name,rows)=>{exported=rows;};elements.get('#spend-export').onclick();
+  const robin=exported.find(row=>row[0]==='Robin');
+  assert.equal(robin[exported[0].indexOf('Cost per merged PR USD (linked spend / merged PRs)')],null);
+  assert.equal(robin[exported[0].indexOf('Cost coverage')],'No merged PRs');
 });

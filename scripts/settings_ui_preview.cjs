@@ -55,6 +55,24 @@ function spendFixture(params,personal=false,empty=false){
  const scale=u=>({...u,spend:(Number(u.spend)*ratio).toFixed(2),requests:Math.round(u.requests*ratio),sessions:Math.round((u.sessions||106)*ratio),total_tokens:Math.round(u.total_tokens*ratio)});
  return {...source,scope:personal?'personal':'organization',start,end,daily:days,total:{...scale(source.total),pending_costs:0,missing_costs:days.reduce((n,d)=>n+d.missing_costs,0)},priced_requests:days.reduce((n,d)=>n+d.requests-d.missing_costs,0),users:empty?[]:source.users.map(scale),models:empty?[]:source.models.map(m=>scale({...m,total_tokens:m.requests*3000})),sessions:empty?[]:source.sessions,infrastructure:personal?undefined:source.infrastructure,cost_summary:personal?undefined:{...source.cost_summary,llm:(Number(source.total.spend)*ratio).toFixed(2),total:(Number(source.total.spend)*ratio+source.infrastructure.spend).toFixed(2)}};
 }
+const prTitles=['Keep session titles after reconnect','Add streaming retry coverage','Restore saved model preferences','Fix grouped tool results','Show pending request costs','Preserve repository selection','Make Slack links durable','Improve deployment status','Cache model catalog responses','Handle interrupted uploads','Document sandbox lifecycle','Fix request log dates','Retain review history','Add GitHub connection checks','Support workspace memory search','Improve transcript accessibility','Repair deployment retries','Update contributor documentation','Add request-level tracing','Explore model fallback policy','Replace legacy setup wizard','Investigate intermittent timeouts'];
+const prActors=[0,0,0,0,0,0,1,1,1,1,2,2,2,3,3,4,5,-1,0,-2,2,3];
+const prSessionLedger=new Map();
+const pullRequestRows=prTitles.map((title,i)=>{
+ const actor=prActors[i],user=actor===-2?{id:'user-pr-only',name:'Robin Shah',email:'robin@example.com'}:actor<0?null:spendUsers[actor],sessionId=(i===1?1:i+1).toString(16).padStart(32,'0');
+ if(!prSessionLedger.has(sessionId))prSessionLedger.set(sessionId,{spend:Math.round((9.4+(i%7)*6.13)*100),requests:18+(i%7)*11,pending_costs:i===19?2:0,missing_costs:i===6?1:0});
+ const costs=prSessionLedger.get(sessionId),repo=i%4===0?'platform':'moyai',merged=i<18,state=merged?'merged':i===20?'closed':i===21?'unknown':'open';
+ return {repository_id:repo==='moyai'?2002:2001,number:210+i,url:`https://github.com/example/${repo}/pull/${210+i}`,title,state,draft:i===19,created_at:i===21?null:i%5===0?'2026-09-28T09:00:00Z':`2026-10-${String(i<18?Math.max(1,i%7):1+i%7).padStart(2,'0')}T09:00:00Z`,tracked_at:i%5===0?'2026-09-29T10:00:00Z':`2026-10-${String(1+i%7).padStart(2,'0')}T10:00:00Z`,merged_at:merged?`2026-10-${String(1+i%7).padStart(2,'0')}T15:00:00Z`:null,user_id:user?.id||'unattributed',user_name:user?.name||'Unattributed',user_email:user?.email||'',sessions:[{id:sessionId,title:i===1?prTitles[0]:title,deleted:i===15}],spend:(costs.spend/100).toFixed(2),requests:costs.requests,pending_costs:costs.pending_costs,missing_costs:costs.missing_costs,stale:i===21};
+});
+function pullRequestFixture(params,empty=false){
+ const start=params.get('start')||spend.start,end=params.get('end')||spend.end,inRange=value=>value&&value.slice(0,10)>=start&&value.slice(0,10)<=end;
+ const rows=empty?[]:pullRequestRows,created=rows.filter(row=>inRange(row.created_at)),merged=rows.filter(row=>row.state==='merged'&&inRange(row.merged_at)),people=new Map();
+ const personFor=row=>{if(!people.has(row.user_id))people.set(row.user_id,{user_id:row.user_id,name:row.user_name,email:row.user_email,created_prs:0,status_counts:{merged:0,open:0,draft:0,closed:0,unknown:0},merged_prs:0,session_ids:new Set()});return people.get(row.user_id);};
+ for(const row of created){const person=personFor(row);person.created_prs++;person.status_counts[row.state==='open'&&row.draft?'draft':row.state]++;}
+ for(const row of merged){const person=personFor(row);person.merged_prs++;for(const session of row.sessions)person.session_ids.add(session.id);}
+ const leaderboard=[...people.values()].map(({session_ids,...person})=>{const costs=[...session_ids].map(id=>prSessionLedger.get(id)),spend=costs.reduce((sum,c)=>sum+c.spend,0)/100;return {...person,sessions:session_ids.size,spend:spend.toFixed(2),cost_per_merged_pr:person.merged_prs?(spend/person.merged_prs).toFixed(6):null,requests:costs.reduce((sum,c)=>sum+c.requests,0),pending_costs:costs.reduce((sum,c)=>sum+c.pending_costs,0),missing_costs:costs.reduce((sum,c)=>sum+c.missing_costs,0)};}).sort((a,b)=>b.merged_prs-a.merged_prs||a.name.localeCompare(b.name));
+ return {start,end,timezone:'UTC',currency:'USD',pull_requests:rows.filter(row=>inRange(row.tracked_at)),created_pull_requests:created,total_created:created.length,merged_pull_requests:merged,leaderboard,total_merged:merged.length,contributors:leaderboard.filter(row=>row.user_id!=='unattributed').length,unknown_status:rows.filter(row=>row.state==='unknown').length,unknown_created_at:rows.filter(row=>!row.created_at).length,stale_status:rows.filter(row=>row.stale).length,pending_refresh:false};
+}
 const daily=Array.from({length:30},(_,i)=>({date:new Date(Date.UTC(2026,8,8+i)).toISOString().slice(0,10),requests:[4,8,6,5,12,9,11,8,16,12,18,21,16,19,24,28,18,26,31,29,35,27,42,38,45,34,51,48,58,36][i],active_users:Math.min(6,2+Math.floor(i/6)),partial:i===29}));
 daily.forEach((d,i)=>d.seven_day_average=Number((daily.slice(Math.max(0,i-6),i+1).reduce((n,d)=>n+d.requests,0)/7).toFixed(1)));
 const adoption={start:daily[0].date,end:daily.at(-1).date,total_requests:daily.reduce((n,d)=>n+d.requests,0),active_users:6,daily,weekly:{requests:312,previous_requests:198,percent_change:57.6,delta:114,start:'2026-09-30',end:'2026-10-06',previous_start:'2026-09-23',previous_end:'2026-09-29'}};
@@ -119,6 +137,11 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/automations')return json(res,200,{automations:empty?[]:automations,enabled:true,connected:true,event_choices:{github:[['check_run.completed','Check completed']]},templates:[{name:'My Linear tickets → PR',plugins:['linear','github'],prompt:'Pick a ticket, implement a fix, and prepare a PR.'}]});
  if(p.startsWith('/api/automations/')&&p.endsWith('/state')){const a=automations.find(a=>a.id===p.split('/')[3]);a.paused=body.paused;return json(res,200,{});}
  if(p==='/api/admin/spend')return json(res,200,spend);
+ if(p==='/api/admin/pull-requests'){
+  if(role!=='admin')return json(res,403,{detail:'Administrator access required.'});
+  if(fixture==='pr-error')return json(res,503,{detail:'This preview simulates unavailable PR analytics.'});
+  return json(res,200,pullRequestFixture(url.searchParams,empty));
+ }
  if(p==='/api/spend'){
   const data=spendFixture(url.searchParams,role!=='admin',empty);
   return json(res,data?200:422,data||{detail:'Choose a date range of up to 93 days, with start before end.'});

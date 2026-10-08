@@ -263,12 +263,14 @@ async def test_sidebar_pr_rechecks_connection_policy_selection_and_inflight_rota
     select(app, (202,))
     # Old authorization-key cache entries cannot publish into the new scope.
     assert service.summaries([run_id])[run_id]['unknown'] == 1
+    saved = store.rows('SELECT * FROM github_pr_snapshots')
     async def rotate(method, path, **kwargs):
         select(app, (101,))
         return pr_response()
     monkeypatch.setattr(service.github, 'request', rotate)
     await refreshed(service, [run_id])
     assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert store.rows('SELECT * FROM github_pr_snapshots') == saved
     await service.close()
 
 
@@ -317,6 +319,13 @@ async def test_sidebar_pr_rejects_mismatched_or_incomplete_github_snapshots(work
         pr_response(merged='false'), pr_response(draft='false'), pr_response(state='open', merged=True),
         pr_response(requested_reviewers={}), pr_response(requested_teams=[{'id': False}]),
         {key: value for key, value in pr_response().items() if key != 'merged'},
+        pr_response(created_at='2026-10-07'), pr_response(created_at=123),
+        pr_response(created_at='0001-01-01T00:00:00+14:00'),
+        pr_response(state='closed', merged=True, merged_at='2026-10-07T12:00:00'),
+        pr_response(state='closed', merged=True, merged_at='not a date'),
+        pr_response(merged_at='2026-10-07T12:00:00Z'),
+        pr_response(state='closed', merged=True, created_at='2026-10-07T13:00:00Z',
+                    merged_at='2026-10-07T12:00:00Z'),
     ]
     for response in malformed:
         responses[100] = response
@@ -325,6 +334,88 @@ async def test_sidebar_pr_rejects_mismatched_or_incomplete_github_snapshots(work
         summary = (await refreshed(service, [run_id]))[run_id]
         assert summary['unknown'] == 1 and not summary['label'], response
     await service.close()
+
+
+async def test_pr_status_restores_verified_dates_stale_and_keeps_current_authorization(workspace, monkeypatch):
+    from datetime import datetime
+    from app.connector_errors import ConnectorError
+    from app.db import Store
+    from app.session_pull_requests import Receipt, SessionPullRequests
+    from test_github import select
+    app, _ = workspace
+    store = app.state.store
+    run_id = store.create_run('Retained PR status', '', 'demo', [])['id']
+    publication(app, run_id)
+    service, calls, responses = sidebar_github(app, monkeypatch)
+    responses[100] = pr_response(state='closed', merged=True,
+        created_at='2026-09-30T23:00:00-07:00', merged_at='2026-10-07T23:30:00-07:00')
+    result = (await refreshed(service, [run_id]))[run_id]
+    pr = result['pull_requests'][0]
+    assert pr['created_at'] == '2026-10-01T06:00:00+00:00'
+    assert pr['merged_at'] == '2026-10-08T06:30:00+00:00'
+    receipt = Receipt.model_validate_json(store.rows('SELECT result FROM github_publications')[0]['result'])
+    saved = store.rows('SELECT * FROM github_pr_snapshots')
+    assert len(saved) == 1 and datetime.fromisoformat(saved[0]['observed_at']).utcoffset().total_seconds() == 0
+    await service.close()
+
+    # Open the same SQLite database through a new Store/service, as at startup.
+    reopened = Store(store.path.parent)
+    monkeypatch.setattr(service.github, 'store', reopened)
+    restored = SessionPullRequests(service.github)
+    target, key, cached = restored.status(receipt, restored.context())
+    assert target == 202 and key == (service.github.connection_version(), 202, 100)
+    assert cached.value.merged_at == pr['merged_at'] and cached.fresh_until == 0
+    responses[100] = ConnectorError('Temporary GitHub outage')
+    result = (await refreshed(restored, [run_id]))[run_id]
+    assert result['merged'] == 1 and result['stale']
+    assert result['pull_requests'][0]['merged_at'] == pr['merged_at']
+    for _ in range(3):
+        restored.summaries([run_id])
+    assert len(calls) == 2 and not restored.pending
+    assert reopened.rows('SELECT * FROM github_pr_snapshots') == saved
+
+    reopened.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0)")
+    assert restored.status(receipt, restored.context()) == (None, None, None)
+    reopened.execute("UPDATE connection_policies SET enabled=1 WHERE provider='github'")
+    select(app, (101,))
+    assert restored.summaries([run_id])[run_id]['unknown'] == 1
+    select(app, (202,))
+    assert restored.status(receipt, restored.context())[2] is None
+    await restored.close()
+
+
+async def test_pr_status_missing_observation_survives_restart_without_reviving_merge(workspace, monkeypatch):
+    from app.session_pull_requests import Receipt, SessionPullRequests
+    app, _ = workspace
+    store = app.state.store
+    run_id = store.create_run('Missing PR', '', 'demo', [])['id']
+    publication(app, run_id)
+    service, _, responses = sidebar_github(app, monkeypatch)
+    responses[100] = pr_response(state='closed', merged=True, merged_at='2026-10-07T12:00:00Z')
+    assert (await refreshed(service, [run_id]))[run_id]['merged'] == 1
+    responses[100] = None
+    for cached in service.cache.values():
+        cached.retry_at = 0
+    assert (await refreshed(service, [run_id]))[run_id]['unknown'] == 1
+    assert store.rows('SELECT snapshot FROM github_pr_snapshots') == [{'snapshot': ''}]
+    await service.close()
+    receipt = Receipt.model_validate_json(store.rows('SELECT result FROM github_publications')[0]['result'])
+    restored = SessionPullRequests(service.github)
+    assert restored.status(receipt, restored.context())[2].value is None
+    assert (await refreshed(restored, [run_id]))[run_id]['unknown'] == 1
+    await restored.close()
+
+    # Older merged records may lack timestamps; that does not invent a date.
+    restored = SessionPullRequests(service.github)
+    responses[100] = pr_response(state='closed', merged=True)
+    result = (await refreshed(restored, [run_id]))[run_id]
+    assert result['merged'] == 1
+    assert result['pull_requests'][0]['merged_at'] is None
+    await restored.close()
+    store.execute("UPDATE github_pr_snapshots SET snapshot=?", ('{"state":"merged"}',))
+    restored = SessionPullRequests(service.github)
+    assert restored.status(receipt, restored.context())[2] is None
+    await restored.close()
 
 
 async def test_sidebar_pr_lookup_batches_large_pinned_lists_and_tolerates_bad_connection(workspace, monkeypatch):
