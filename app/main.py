@@ -30,6 +30,7 @@ from .security import Security, digest
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
+from .model_preferences import preferred_model, save_model
 from .access_logging import configure_access_logging
 from .broker_diagnostics import BrokerDiagnosticsMiddleware, upstream_headers
 from .slack import SlackSessions
@@ -412,13 +413,35 @@ def create_app(settings: Settings | None = None):
             missing.append("PUBLIC_URL (reachable HTTPS address)")
         return missing
 
+    class ModelPreference(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        model: str = Field(min_length=1, max_length=120)
+
+    @app.put('/api/settings/model-preference')
+    async def set_model_preference(body: ModelPreference, request: Request):
+        security.require(request, mutation=True)
+        try:
+            selected = settings.resolve_model(body.model)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        actor = store.identity(security.session_info(request))
+        with store.connect() as conn:
+            save_model(conn, actor, selected)
+        await checkpoints.flush()
+        return {'model': selected}
+
+    def user_model(request):
+        actor = store.identity(security.session_info(request))
+        with store.connect() as conn:
+            return preferred_model(conn, settings, actor)
+
     @app.get("/api/config")
     async def config(request: Request):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
         return {"harnesses": choices(), "harness": settings.default_harness(), "cloud_ready": not missing, "missing": missing,
-                "model": settings.resolve_model(), "models": [{**model, "default_harness": settings.default_harness(model["id"])} for model in settings.model_choices()],
+                "model": user_model(request), "models": [{**model, "default_harness": settings.default_harness(model["id"])} for model in settings.model_choices()],
                 "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
@@ -505,8 +528,9 @@ def create_app(settings: Settings | None = None):
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
-            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.default_harness(body.model))
-            model = settings.harness_model(harness, body.model)
+            requested_model = body.model if body.model is not None else user_model(request)
+            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.default_harness(requested_model))
+            model = settings.harness_model(harness, requested_model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if body.mode == "modal" and not metadata_request:
