@@ -52,7 +52,14 @@ class GitHubWriteAccess:
         rows = self.store.rows('''SELECT * FROM github_write_access WHERE run_id=?
             AND connection_version=? AND repository_id=? AND number=? ORDER BY created_at,id''',
             (run['id'], version, target, number))
-        return next((row for row in rows if self.same_write_requester(row['actor_id'], actor)), None)
+        return self.effective_access(rows, actor)
+
+    def effective_access(self, rows, actor):
+        # Identity verification can link previously independent requests later.
+        # A terminal decision must win; a pending alias must not shadow consent.
+        priority = {'revoked': 0, 'denied': 1, 'approved': 2, 'pending': 3}
+        matches = [row for row in rows if self.same_write_requester(row['actor_id'], actor)]
+        return min(matches, key=lambda row: priority[row['status']], default=None)
 
     def access_id(self, run, actor, version, target, number):
         return hashlib.sha256(json.dumps([run['id'], actor, version, target, number]).encode()).hexdigest()
@@ -133,12 +140,24 @@ class GitHubWriteAccess:
                     or row['connection_version'] != self.connection_version()
                     or not self.connectors.allowed('github_request_pull_request_write_access')):
                 raise HTTPException(409, 'The chat or GitHub connection no longer permits this approval.')
+            aliases = conn.execute('''SELECT * FROM github_write_access WHERE run_id=?
+                AND connection_version=? AND repository_id=? AND number=?''',
+                (run_id, row['connection_version'], row['repository_id'], row['number'])).fetchall()
+            aliases = [item for item in aliases if self.same_write_requester(item['actor_id'], actor)]
+            effective = self.effective_access(aliases, actor)
             desired = {'approve': 'approved', 'deny': 'denied', 'revoke': 'revoked'}[decision]
+            if desired == 'approved' and effective['status'] in {'denied', 'revoked'}:
+                raise HTTPException(409, 'This decision is final; access cannot be regranted.')
             if row['status'] != desired:
                 if not ((row['status'] == 'pending' and desired in {'approved', 'denied'})
                         or (row['status'] == 'approved' and desired == 'revoked')):
                     raise HTTPException(409, 'This decision is final; access cannot be regranted.')
                 conn.execute('UPDATE github_write_access SET status=? WHERE id=?', (desired, identity))
+            if desired in {'denied', 'revoked'}:
+                # Persist the decision on all currently verified aliases so a
+                # later stale profile cannot resurrect an older approval.
+                conn.executemany('UPDATE github_write_access SET status=? WHERE id=?',
+                                 [(desired, item['id']) for item in aliases])
         if row['status'] != desired:
             self.store.event(run_id, 'approval', f"PR #{row['number']} write access: {desired}")
         return {'status': desired}

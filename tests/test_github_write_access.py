@@ -402,3 +402,47 @@ def test_inflight_requester_turn_and_connection_guards(external, changed):
     api.on_call = mutate
     assert 'error' in call(external, 'github_update_pull_request', update_args().model_dump()).json()
     assert not [c for c in api.calls if c[0] == 'PATCH' or c[0] == 'POST' and c[1].endswith('/git/commits')]
+
+
+@pytest.mark.parametrize('older_status', ['pending', 'approved', 'denied', 'revoked'])
+@pytest.mark.parametrize('operation', ['update', 'comment'])
+def test_late_identity_link_respects_consent_and_revokes_all_aliases(external, older_status, operation):
+    from app.db import now
+    from test_spend import sign_in
+    app, client, rid, headers, github, api = external
+    actor = sign_in(app, client)
+    store = app.state.store
+    store.execute("""INSERT INTO users(id,kind,email,name,linked_user_id,created_at,updated_at,
+        profile_eligible,profile_checked_at,profile_conflict)
+        VALUES('slack:requester','slack','alice@berri.ai','Slack requester',?,?,?,1,?,0)""",
+        (actor, now(), now(), '2000-01-01T00:00:00+00:00'))
+    store.execute("UPDATE runs SET active_user_id='slack:requester' WHERE id=?", (rid,))
+    slack = call(external).json()
+    # Seed a previously decided Slack request; the profile is stale when the
+    # independent web request arrives.
+    store.execute('UPDATE github_write_access SET status=? WHERE id=?', (older_status, slack['id']))
+    store.execute('UPDATE runs SET active_user_id=? WHERE id=?', (actor, rid))
+    web = approved(external)
+    assert web['id'] != slack['id']
+    store.execute("UPDATE users SET profile_checked_at=? WHERE id='slack:requester'", (now(),))
+
+    args = (update_args() if operation == 'update' else comment_args()).model_dump()
+    name = f'github_{operation}_pull_request'
+    if older_status in {'denied', 'revoked'}:
+        assert call(external).json()['status'] == older_status
+        assert 'error' in call(external, name, args).json()
+        assert decide(external, web['id']).status_code == 409
+    else:
+        assert call(external).json()['status'] == 'approved'
+        assert call(external, name, args).json()['number'] == 100
+
+    assert decide(external, web['id'], 'revoke').json() == {'status': 'revoked'}
+    rows = store.rows('SELECT status FROM github_write_access WHERE run_id=?', (rid,))
+    assert len(rows) == 2
+    assert {r['status'] for r in rows} == {'revoked'}
+    # Even after the verified link expires, neither direct identity can write.
+    store.execute("UPDATE users SET profile_checked_at='2000-01-01T00:00:00+00:00' WHERE id='slack:requester'")
+    for current in (actor, 'slack:requester'):
+        store.execute('UPDATE runs SET active_user_id=? WHERE id=?', (current, rid))
+        args['request_key'] = 'after-revocation-' + current.replace(':', '-')
+        assert 'error' in call(external, name, args).json()
