@@ -165,6 +165,7 @@ class LocalAWS:
             # Local readiness requests also pass through the patched client.
             return await self.transport.handle_async_request(request)
         assert request.headers['X-aws-proxy-auth'] == 'local-endpoint-token'
+        assert request.headers['X-aws-proxy-port'] == '80'
         machine = self.machines[name]
         request.url = request.url.copy_with(scheme='http', host='127.0.0.1', port=int(machine['port']))
         return await self.transport.handle_async_request(request)

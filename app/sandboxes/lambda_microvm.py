@@ -231,7 +231,7 @@ class Sandbox:
         # Never retry execution/Computer input after ambiguous transport errors.
         async with httpx.AsyncClient(timeout=530 if path == '/computer' else 60, follow_redirects=False) as client:
             async with client.stream('POST', 'https://' + url.netloc + path,
-                    json=data, headers={'X-aws-proxy-auth': self.auth}) as response:
+                    json=data, headers={'X-aws-proxy-auth': self.auth, 'X-aws-proxy-port': '80'}) as response:
                 if response.status_code == 404:
                     raise FileNotFoundError('AWS sandbox file or execution not found')
                 if response.status_code != 200:

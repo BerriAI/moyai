@@ -75,6 +75,7 @@ async def test_sdk_contract_and_proxy_auth(settings, monkeypatch):
         def response(request):
             calls.append(request)
             assert request.headers['X-aws-proxy-auth'] == 'jwe-secret'
+            assert request.headers['X-aws-proxy-port'] == '80'
             assert request.url == 'https://mvm-test.lambda-microvm.us-east-1.on.aws/health'
             return httpx.Response(200, json={'version': 1})
         client = httpx.AsyncClient
