@@ -125,7 +125,9 @@ async def test_failure_keeps_fallback_and_does_not_retry(tmp_path,monkeypatch,fa
         return completion('' if failure=='empty' else 'A title\nMore prose')
     gateway(monkeypatch,handler)
     store=Store(tmp_path);run=store.create_run('Fix sidebar','','demo',[],chat_enabled=True)
-    settings=config(tmp_path,session_title_timeout_seconds=0.1)
+    # Include SDK request setup in the budget; 100 ms can expire before the
+    # mocked transport is reached on a loaded CI worker.
+    settings=config(tmp_path,session_title_timeout_seconds=1)
     for _ in range(2):
         service=SessionTitles(store,settings,SimpleNamespace(flush=AsyncMock()));service.start()
         service.schedule(run['id']);await drain(service);await service.close()

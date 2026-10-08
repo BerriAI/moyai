@@ -12,13 +12,13 @@ Moyai also verifies the signed `Cf-Access-Jwt-Assertion` at the origin. A public
 
 Use the account that owns the chosen domain. Enable Zero Trust, review its terms and any billing authorization, and choose the team's `*.cloudflareaccess.com` hostname. The example application hostname below is `moyai.litellm-sandbox.ai`; replace it consistently if another hostname is chosen.
 
-Use the company Google identity provider if configured. Alternatively, select only Cloudflare's One-time PIN method and restrict the employee policy to the existing company email domain; users must then pass Moyai's existing Google sign-in as well. Retain Moyai's allowed-domain and role settings. Confirm MFA enforcement in Google Workspace separately before describing the rollout as enforcing MFA: an email code alone is not an independent MFA factor.
+Use company Google SSO with a dedicated OAuth web client in a company-owned Google Cloud project whose audience is **Internal**. Add the team's `https://<team>.cloudflareaccess.com` origin and exact `/cdn-cgi/access/callback` redirect, store the client secret only in Cloudflare's identity-provider configuration, and enable PKCE. Cloudflare's Google integration supports sign-in without directory access; its Google Workspace integration additionally requires administrator authorization for group membership. Select only this Google provider on the employee application, keep the company-email policy, and retain Moyai's existing Google sign-in and role settings. Confirm MFA enforcement in Google Workspace separately before describing the rollout as enforcing MFA. If One-time PIN is used as an interim login method, an email code alone is not an independent MFA factor.
 
 Create these self-hosted Access applications **before** publishing the DNS/tunnel route:
 
 | Application | Host and path | Policy | Origin check |
 | --- | --- | --- | --- |
-| Moyai employees | `moyai.litellm-sandbox.ai` (all paths) | Allow approved company identities using Google or company-email One-time PIN; short session, e.g. 6 hours. No Everyone or Bypass rule. | Employee application audience, then existing Moyai auth |
+| Moyai employees | `moyai.litellm-sandbox.ai` (all paths) | Allow approved company Google identities; 8-hour session. No Everyone or Bypass rule. | Employee application audience, then existing Moyai auth |
 | Moyai broker | `moyai.litellm-sandbox.ai/broker/*` | **Service Auth**, include only the dedicated Moyai broker service token | Distinct broker application audience plus per-run bearer |
 | Slack events | `moyai.litellm-sandbox.ai/hooks/slack/events` | Bypass Everyone for this path only | POST only; existing Slack signing-secret verification |
 | Slack interactions | `moyai.litellm-sandbox.ai/hooks/slack/interactions` | Bypass Everyone for this path only | POST only; existing Slack signing-secret verification |
