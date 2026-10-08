@@ -43,6 +43,9 @@ def test_drafts_require_explicit_enable_and_keep_identity(workspace, monkeypatch
     next_run=client.post(path,json={'revision':1,'client_id':'fourth-occurrence'}).json()
     assert next_run['run_id'] != run['id']
     assert 'Finished with PR link' in app.state.store.run(next_run['run_id'])['prompt']
+    app.state.session_lifecycle.request_delete(run['id'], owner, False)
+    history = {row['run_id']: row for row in client.get('/api/automations').json()['automations'][0]['history']}
+    assert history[run['id']]['status'] == 'deleting' and history[run['id']]['outcome'] == 'started'
 
 
 def test_ownership_csrf_revision_and_admin_pause(workspace, monkeypatch):

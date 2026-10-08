@@ -422,6 +422,9 @@ def test_session_search_matches_family_history_literal_terms_and_legacy_before_l
     assert rows[parent['id']]['chat_enabled'] and not rows[legacy['id']]['chat_enabled']
     assert rows[parent['id']]['archived'] and rows[parent['id']]['title']
     assert search_sessions(client, caller['id'], query=query + ' absent').json()['sessions'] == []
+    app.state.session_lifecycle.request_delete(parent['id'], actor, True)
+    pending = {row['id']: row for row in search_sessions(client, caller['id'], query=query).json()['sessions']}
+    assert pending[parent['id']]['status'] == 'deleting'
 
 
 @pytest.mark.parametrize('arguments', [{}, {'query': '  '}, {'query': 'x' * 201}, {'query': 'x', 'limit': 0},

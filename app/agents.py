@@ -14,6 +14,7 @@ import zipfile
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .db import now
+from .runner import response_status
 from .security import digest
 from .spend import cost_status, gateway_scope
 
@@ -223,7 +224,7 @@ class AgentCoordinator:
                              (child['agent_group_id'], child['parent_run_id'])).fetchone()
         if not group:
             raise ValueError('This subagent has no saved parent assignment.')
-        parent = conn.execute("SELECT 1 FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id WHERE a.run_id=? AND (r.status='stopping' OR r.deleted_at!='')", (run_id,)).fetchone()
+        parent = conn.execute("SELECT 1 FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id WHERE a.run_id=? AND (r.status='stopping' OR r.deleted_at!='' OR r.deletion_requested_at!='')", (run_id,)).fetchone()
         if parent:
             raise ValueError('Wait for the parent session to finish stopping before messaging this agent.')
         # Upgrade older completed groups lazily before their first direct chat.
@@ -241,7 +242,7 @@ class AgentCoordinator:
         run = self.store.run(parent_id)
         if not run or not self.available(run) or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or not run['active_message_id']:
             raise ValueError('Delegation requires an active Temporal chat turn.')
-        if self.store.rows("SELECT 1 FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id WHERE a.run_id=? AND (r.status='stopping' OR r.deleted_at!='')", (parent_id,)):
+        if self.store.rows("SELECT 1 FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id WHERE a.run_id=? AND (r.status='stopping' OR r.deleted_at!='' OR r.deletion_requested_at!='')", (parent_id,)):
             raise ValueError('Wait for the ancestor session to finish stopping.')
         self.store.root_id(parent_id)  # Orphaned assignments cannot acquire workflow scope.
         return run
@@ -416,7 +417,7 @@ class AgentCoordinator:
                                   enabled=self.settings.litellm_spend_recovery_enabled)
             bucket['pending_costs'] += billing == 'pending'
             bucket['missing_costs'] += billing == 'unresolved'
-        nodes = {row['id']: {key: row[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at')} | {'children': []} for row in family}
+        nodes = {row['id']: {key: row[key] for key in ('id', 'parent_run_id', 'agent_label', 'mode', 'created_at', 'updated_at')} | {'status': response_status(row), 'children': []} for row in family}
         for node in nodes.values():
             if node['id'] != run_id and node['parent_run_id'] in nodes:
                 nodes[node['parent_run_id']]['children'].append(node)

@@ -8,6 +8,8 @@ A self-hosted coding agent for background work. Give it a task from your browser
 
 Search sessions by title, original request, or words inside saved user and assistant messages. Matching excerpts appear in the sidebar, including agent conversations and side chats. Search covers older sessions beyond the recent list and follows your selected My sessions/All sessions view. Archived sessions remain recoverable by asking Moyai in chat.
 
+Confirm **Delete session** once to stop its agents, close their sandboxes, and remove the session for everyone. Cleanup continues if you close the page or the app restarts, and retries automatically when a sandbox provider is temporarily unavailable. New work is blocked while the session shows **Deleting**. Stored conversation data, files, billing records, and backups remain retained; independent side chats remain available.
+
 Ask **“What is this session’s ID?”** or send **`/session-id`** in web chat or Slack
 thread chat to get the current Moyai session ID directly. These standalone requests
 use no model calls, tool searches, or sandbox startup, and leave active work alone.

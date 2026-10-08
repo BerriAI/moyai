@@ -12,6 +12,7 @@ import pytest
 import modal
 from fastapi import HTTPException
 
+from app.agents import AgentCoordinator
 from app.db import Store
 from app.computer import Computer
 from app.config import MODEL_CATALOG
@@ -184,22 +185,46 @@ async def test_lost_warm_machine_must_reacquire_capacity(durable):
 
 
 @pytest.mark.parametrize('phase', ['finish', 'warm'])
-async def test_stop_at_finish_or_during_idle_releases_without_losing_answer(durable, phase):
+@pytest.mark.parametrize('delete', [False, True])
+async def test_stop_at_finish_or_during_idle_releases_without_losing_answer(durable, phase, delete):
     manager, cloud, root = durable
     manager.settings.sandbox_idle_seconds = 300
+    await drive(manager, root, phase='monitor')
+    turn = manager.state(root)['message_id']
+    correction, _ = manager.store.enqueue_message(root, 'Also verify the result', 'correction', send_now=True)
+    assert manager.message_queue.live_control(root, turn, [])['input']['id'] == correction['id']
+    manager.message_queue.acknowledge(root, turn, [correction['id']])
     await drive(manager, root, phase=phase)
     finalized = []
     async def save_captures(machine, run_id, *, releasing):
         assert machine.alive and releasing is True
         finalized.append(run_id)
     manager.computer = SimpleNamespace(locks={}, touched=lambda _: 0, save_captures=save_captures)
-    await manager.cancel(root)
-    await drive(manager, root)
+    lifecycle = None
+    try:
+        if delete:
+            manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+            lifecycle = SessionLifecycle(manager.store, None, manager, SimpleNamespace(flush=AsyncMock()))
+            lifecycle.request_delete(root, '', True)
+            deletion = lifecycle.schedule_delete(root)
+            await asyncio.sleep(0)
+        else:
+            await manager.cancel(root)
+        await drive(manager, root)
+        if delete:
+            await asyncio.wait_for(asyncio.shield(deletion), 5)
+            assert manager.store.run(root)['deleted_at']
+    finally:
+        if lifecycle:
+            await lifecycle.close()
     assert finalized == [root]
     assert not cloud.machines[0].alive
     assert manager.store.run(root)['status'] == 'cancelled'
     assert manager.store.run(root)['token_hash'] == ''
     assert [m['content'] for m in answers(manager, root)] == ['Saved answer']
+    receipt = next(m for m in manager.store.messages(root) if m['id'] == correction['id'])
+    assert receipt['steering_parent_id'] == turn
+    assert receipt['status'] == ('cancelled' if phase == 'finish' else 'completed')
 
 
 async def test_stop_during_reuse_poll_never_launches_queued_message(durable):
@@ -522,6 +547,162 @@ async def test_computer_wake_reserves_capacity_and_blocks_delete_until_cleanup(d
         await manager.wake_computer(run_id)
     assert waking.value.status_code == 404
     assert len(cloud.machines) == 2 and len(cloud.launches) == 1
+
+
+@pytest.mark.parametrize('computer_only', [False, True])
+async def test_confirmed_delete_drains_warm_workspace_and_blocks_new_work(durable, computer_only):
+    manager, cloud, run_id = durable
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    if computer_only:
+        await sleeping_computer(durable)
+        await manager.wake_computer(run_id)
+    else:
+        manager.settings.sandbox_idle_seconds = 300
+    await drive(manager, run_id, phase='warm')
+    saved = answers(manager, run_id)
+    flushed = []
+    async def checkpoint():
+        flushed.append((bool(manager.store.run(run_id)['deleted_at']), any(machine.alive for machine in cloud.machines)))
+    checkpoints = SimpleNamespace(flush=AsyncMock(side_effect=checkpoint))
+    lifecycle = SessionLifecycle(manager.store, None, manager, checkpoints)
+    assert lifecycle.request_delete(run_id, '', True) is False
+    requested = manager.store.run(run_id)['deletion_requested_at']
+    assert requested and not manager.store.run(run_id)['deleted_at']
+    # A completed stop must not reopen admission while deletion is pending.
+    manager.store.update_run(run_id, status='idle')
+    with pytest.raises(ValueError, match='deleted'):
+        manager.store.enqueue_message(run_id, 'Too late', 'after-delete')
+    with pytest.raises(HTTPException) as waking:
+        await manager.wake_computer(run_id)
+    assert waking.value.status_code == 409
+    assert manager.computer_state(run_id)['shutting_down']
+    assert lifecycle.request_delete(run_id, '', True) is False
+    assert manager.store.run(run_id)['deletion_requested_at'] == requested
+    task = lifecycle.schedule_delete(run_id)
+    assert lifecycle.schedule_delete(run_id) is task
+    try:
+        await asyncio.sleep(0)
+        await drive(manager, run_id)
+        await asyncio.wait_for(asyncio.shield(task), 5)
+        assert manager.store.run(run_id)['deleted_at']
+        assert not any(machine.alive for machine in cloud.machines)
+        assert answers(manager, run_id) == saved
+        assert lifecycle.request_delete(run_id, '', True) is True
+        assert flushed[0] == (False, True)
+        assert flushed[-1] == (True, False)
+        if computer_only:
+            manager.computer.save_captures.assert_awaited_once_with(cloud.machines[-1], run_id, releasing=True)
+    finally:
+        await lifecycle.close()
+
+
+@pytest.mark.parametrize('child_state', ['active', 'claimed'])
+async def test_confirmed_delete_stops_active_family_and_retains_independent_session(durable, child_state):
+    manager, cloud, root = durable
+    coordinator, group, _ = await launch(durable, count=1)
+    child = coordinator.children(group['group_id'])[0]['id']
+    cloud.finished = False
+    if child_state == 'claimed':
+        manager.store.claim_message(child)
+    else:
+        await drive(manager, child, phase='monitor')
+    unrelated = new_chat(manager)
+    queued, _ = manager.store.enqueue_message(root, 'Queued follow-up', 'queued-before-delete')
+    lifecycle = SessionLifecycle(manager.store, None, manager, SimpleNamespace(flush=AsyncMock()))
+    lifecycle.request_delete(root, '', True)
+    task = lifecycle.schedule_delete(root)
+    try:
+        await asyncio.sleep(0)
+        for run_id in (root, child):
+            assert manager.store.run(run_id)['deletion_requested_at']
+            if run_id == child and child_state == 'claimed':
+                await manager.advance(run_id)
+            else:
+                await drive(manager, run_id)
+        await asyncio.wait_for(asyncio.shield(task), 5)
+        assert all(manager.store.run(run_id)['deleted_at'] for run_id in (root, child))
+        assert all(not machine.alive for machine in cloud.machines)
+        assert manager.store.rows('SELECT status FROM messages WHERE id=?', (queued['id'],))[0]['status'] == 'cancelled'
+        assert coordinator.group(root, group['group_id'])['status'] == 'cancelled'
+        assert all(manager.store.messages(run_id) for run_id in (root, child))
+        assert not manager.store.run(unrelated)['deletion_requested_at']
+        assert not manager.store.run(unrelated)['deleted_at']
+    finally:
+        await lifecycle.close()
+
+
+@pytest.mark.parametrize('old_journal', [False, True])
+async def test_delete_recovers_agent_create_ack_lost_before_worker_restart(durable, monkeypatch, old_journal):
+    manager, cloud, run_id = durable
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    async def create(**kwargs):
+        await cloud.create(**kwargs)
+        raise ConnectionError('Create acknowledgement lost')
+    monkeypatch.setattr('app.sandboxes.modal.modal.Sandbox.create', aio(create))
+    await drive(manager, run_id, phase='provision')
+    with pytest.raises(ConnectionError):
+        await manager.advance(run_id)
+    assert cloud.machines[0].alive and not manager.state(run_id)['sandbox_id']
+    if old_journal:
+        state = manager.state(run_id)
+        state.pop('sandbox_name', None)
+        manager.save(run_id, state)
+    checkpoints = SimpleNamespace(flush=AsyncMock())
+    SessionLifecycle(manager.store, None, manager, checkpoints).request_delete(run_id, '', True)
+    successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    lifecycle = SessionLifecycle(successor.store, None, successor, checkpoints)
+    lifecycle.start()
+    deletion = lifecycle.deletions[run_id]
+    try:
+        await asyncio.sleep(0)
+        await drive(successor, run_id)
+        await asyncio.wait_for(asyncio.shield(deletion), 5)
+        assert successor.store.run(run_id)['deleted_at']
+        assert cloud.terminations == [cloud.machines[0].object_id] and not cloud.machines[0].alive
+        assert not cloud.launches
+    finally:
+        await lifecycle.close()
+
+
+@pytest.mark.parametrize('failure', ['provider', 'checkpoint'])
+async def test_delete_retries_unknown_historical_sandbox_cleanup_before_tombstone(durable, failure):
+    original, cloud, _ = durable
+    manager = cloud.attach(RunManager(original.store, original.settings))
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    run = manager.store.create_run('Historical workspace', '', 'modal', [], chat_enabled=True)
+    machine = await cloud.create(name='historical-workspace')
+    manager.store.update_run(run['id'], status='idle', sandbox_id=machine.object_id)
+    failed = asyncio.Event()
+    async def unavailable():
+        failed.set()
+        raise ConnectionError('Provider unavailable')
+    if failure == 'provider':
+        machine.poll = aio(unavailable)
+    flushed = []
+    async def checkpoint():
+        if failure == 'checkpoint' and not failed.is_set():
+            failed.set()
+            raise ConnectionError('Checkpoint unavailable')
+        flushed.append((bool(manager.store.run(run['id'])['deleted_at']), machine.alive))
+    checkpoints = SimpleNamespace(flush=AsyncMock(side_effect=checkpoint))
+    lifecycle = SessionLifecycle(manager.store, None, manager, checkpoints)
+    lifecycle.request_delete(run['id'], '', True)
+    task = lifecycle.schedule_delete(run['id'])
+    try:
+        await asyncio.wait_for(failed.wait(), 5)
+        assert manager.store.run(run['id'])['deletion_requested_at']
+        assert not manager.store.run(run['id'])['deleted_at'] and machine.alive
+        if failure == 'checkpoint':
+            assert flushed == []
+            assert manager.store.run(run['id'])['status'] == 'stopping'
+        machine.poll = aio(machine.poll_impl)
+        await asyncio.wait_for(asyncio.shield(task), 5)
+        assert manager.store.run(run['id'])['deleted_at'] and not machine.alive
+        assert run['id'] not in lifecycle.deletion_errors
+        assert flushed[0] == (False, True)
+        assert flushed[-1] == (True, False)
+    finally:
+        await lifecycle.close()
 
 
 @pytest.mark.parametrize('failure', ['exception', 'unavailable'])

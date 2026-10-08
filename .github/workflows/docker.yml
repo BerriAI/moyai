@@ -32,7 +32,7 @@ jobs:
           uv run --python 3.13 pytest -q --tb=line tests/test_user_preferences.py
           node --test tests/test_settings.cjs tests/test_users.cjs
       - name: Test session search and sidebar interactions
-        run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs tests/test_harness_picker.cjs tests/test_automation_editor.cjs
+        run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs tests/test_session_actions.cjs tests/test_activity.cjs tests/test_harness_picker.cjs tests/test_automation_editor.cjs
       - name: Test saved source citations and archive access
         run: |
           node --test tests/test_saved_files.cjs tests/test_file_tree.cjs tests/test_slack_file_links.cjs

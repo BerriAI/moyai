@@ -90,6 +90,7 @@ class SlackChat:
         self.watcher = None
         self.wake = asyncio.Event()
         self.last_post = {}
+        self.delivering: set[int] = set()
         self.activity = SlackActivity(owner)
 
 
@@ -272,7 +273,7 @@ class SlackChat:
                 # An adopted session may already have web-only updates.
                 self.collect_progress_in(conn, binding, False)
             run_id = binding['run_id']
-            if conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at!=''", (run_id,)).fetchone():
+            if conn.execute("SELECT 1 FROM runs WHERE id=? AND (deleted_at!='' OR deletion_requested_at!='')", (run_id,)).fetchone():
                 return None  # Retain the binding and receipts; never restart a deleted thread.
             if Decimal(ts) < Decimal(binding['started_ts']):
                 return None
@@ -447,9 +448,9 @@ class SlackChat:
         team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
+            for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
                 run_id = binding['run_id']
-                allowed = enabled and binding['team_id'] == team and not binding['deleted_at']
+                allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
                 if not allowed:
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
                 self.collect_answers_in(conn, binding, allowed)
@@ -465,8 +466,18 @@ class SlackChat:
                 if binding['status'] == 'interrupted':
                     self.queue(conn, run_id, f"interrupted:{run_id}:{binding['updated_at']}", 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
 
+    def reconcile_sending(self) -> None:
+        # The supported single process owns every live send. A lost receipt
+        # without its task is uncertain, never permission to send it again.
+        active = tuple(self.delivering)
+        exclude = ' AND id NOT IN (' + ','.join('?' for _ in active) + ')' if active else ''
+        self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'" + exclude, active)
+
     async def deliver_one(self):
+        self.reconcile_sending()
         for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending' ORDER BY o.id LIMIT 100"):
+            if row['id'] in self.delivering:
+                continue
             if self.skip_stale_progress(row):
                 continue
             if self.last_post.get(row['channel'], 0) > time.monotonic() - 1.1:
@@ -477,8 +488,9 @@ class SlackChat:
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
             if not self.store.execute("""UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'
-                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='')""", (row['id'],)):
+                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='' AND deletion_requested_at='')""", (row['id'],)):
                 continue
+            self.delivering.add(row['id'])
             try:
                 # Persist before external side effects. Ambiguous sends are
                 # marked uncertain and never replayed automatically.
@@ -530,8 +542,11 @@ class SlackChat:
                 if isinstance(exc, asyncio.CancelledError):
                     raise
             finally:
-                self.last_post[row['channel']] = time.monotonic()
-                await self.owner.checkpoints.flush()
+                try:
+                    self.last_post[row['channel']] = time.monotonic()
+                    await self.owner.checkpoints.flush()
+                finally:
+                    self.delivering.discard(row['id'])
             return
 
     def skip_stale_progress(self, row):
@@ -566,7 +581,7 @@ class SlackChat:
                 pass
 
     def recover(self):
-        self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'")
+        self.reconcile_sending()
         self.store.execute("UPDATE slack_outbox SET status='pending' WHERE status='uncertain' AND slack_ts!='' AND json_extract(metadata,'$.credential_request_id') IS NOT NULL")
         self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND "
                            "(kind='ack' OR (kind='progress' AND json_extract(metadata,'$.event_id') IS NULL) "

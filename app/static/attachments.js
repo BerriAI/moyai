@@ -99,7 +99,7 @@ function bindAttachments(input,form,key){
   return {
     hasFiles(){return draft.items.length>0;},
     ids(){if(recorder?.busy())throw Error('Stop or cancel the recording before sending.');if(draft.items.some(item=>item.status!=='ready'))throw Error('Wait for uploads to finish, or retry/remove the failed attachment.');return draft.items.map(item=>item.id);},
-    lock(value){draft.locked=value;notify();},
+    lock(value){draft.locked=value;if(value)recorder?.cancel();notify();},
     clear(ids){for(const item of draft.items.filter(file=>ids.includes(file.id))){if(item.localUrl)URL.revokeObjectURL(item.localUrl);}draft.items=draft.items.filter(file=>!ids.includes(file.id));notify();},
     destroy(){active=false;recorder?.destroy();draft.listeners.delete(render);document.removeEventListener('dragover',outside);document.removeEventListener('drop',outside);},
   };

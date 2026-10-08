@@ -3,6 +3,8 @@ import json
 import time
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.db import Store
 from app.slack_activity import SlackActivity
@@ -87,6 +89,20 @@ def test_all_terminal_states_clear_indicator_without_a_reply(activity, state):
     app.state.store.update_run(run_id, status=state)
     sync(app)
     assert activity[3][-1]['status'] == ''
+
+
+def test_pending_deletion_clears_working_indicator_without_a_reply(
+    activity: tuple[FastAPI, TestClient, list[dict[str, object]], list[dict[str, object]]],
+) -> None:
+    app, _, run_id = start(activity)
+    app.state.store.update_run(run_id, status='running')
+    sync(app)
+    assert activity[3][-1]['status'] == 'is working…'
+    app.state.session_lifecycle.request_delete(run_id, '', True)
+    assert app.state.slack.chat.activity.desired_status(run_id) == ''
+    sync(app)
+    assert activity[3][-1]['status'] == ''
+    assert not any('text' in item for item in activity[3])
 
 
 def test_paused_thread_clears_and_changed_workspace_never_receives_status(activity):

@@ -26,7 +26,8 @@ class TemporalRunManager(DurableRunner):
 
     async def cancel(self, run_id):
         state = self.state(run_id)
-        if (not self.is_active(run_id) and state.get('phase') not in {'warm', 'warm_cleanup'}
+        if (not (self.store.run(run_id) or {}).get('deletion_requested_at')
+                and not self.is_active(run_id) and state.get('phase') not in {'warm', 'warm_cleanup'}
                 and not (state.get('computer_only') and state.get('phase') != 'idle')):
             if self.coordinator:
                 await self.coordinator.cancel_children(run_id)
@@ -46,10 +47,11 @@ class TemporalRunManager(DurableRunner):
         legacy = self.store.rows("""SELECT id FROM runs WHERE
             (status NOT IN ('queued','idle','completed','failed','cancelled','interrupted')
              OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status='running'))
+            AND deletion_requested_at=''
             AND NOT EXISTS(SELECT 1 FROM durable_sessions WHERE run_id=runs.id)""")
         if legacy:
             raise RuntimeError('Finish or stop legacy active sessions before enabling Temporal')
-        for row in self.store.rows("SELECT id FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status='queued')"):
+        for row in self.store.rows("SELECT id FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted') OR (deletion_requested_at!='' AND deleted_at='') OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status='queued')"):
             self.submit(self.store.run(row['id']))
         for row in self.store.rows('SELECT run_id,state FROM durable_sessions'):
             state = json.loads(row['state'])

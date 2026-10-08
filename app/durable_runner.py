@@ -14,7 +14,7 @@ import modal
 from fastapi import HTTPException
 from .environments import EnvironmentPending
 
-from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files
+from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files, stop_requested
 from .security import digest
 from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
@@ -49,9 +49,20 @@ class DurableRunner(RunManager):
         with self.store.connect() as conn:
             self.submit_in(conn, run)
 
+    async def wait_for_stop(self, run_id):
+        # Temporal owns active turns, answers and warm/computer cleanup. Only
+        # an idle journal has no owner left to settle orphaned input rows.
+        while True:
+            async with self.locks.setdefault(run_id, asyncio.Lock()):
+                if self.state(run_id).get('phase', 'idle') == 'idle':
+                    await super().cleanup(self.store.run(run_id), run_id)
+                    return
+            await asyncio.sleep(0.2)
+
     def running_status(self, run_id, status, token_hash=None):
         # Never overwrite a stop that arrived during an awaited provider call.
-        if self.store.run(run_id)['status'] == 'stopping':
+        run = self.store.run(run_id)
+        if stop_requested(run):
             return False
         fields = {'status': status}
         if token_hash is not None:
@@ -78,7 +89,7 @@ class DurableRunner(RunManager):
         if not row or row['deleted_at'] or row['mode'] != 'modal':
             action, notice = 'missing', 'Cloud session not found.'
             shutting_down = True
-        elif (self.closing or row['status'] == 'stopping' or phase in {'cleanup', 'warm_cleanup'}
+        elif (self.closing or stop_requested(row) or phase in {'cleanup', 'warm_cleanup'}
                 or (phase == 'warm' and not state.get('computer_only')
                     and row['status'] in {'cancelled', 'interrupted'})):
             notice = 'This workspace is shutting down. Try again after it finishes.'
@@ -156,7 +167,8 @@ class DurableRunner(RunManager):
             await self.persist()
 
     async def advance_computer(self, run_id, state):
-        if self.store.run(run_id)['status'] == 'stopping' or state['phase'] == 'warm_cleanup':
+        run = self.store.run(run_id)
+        if stop_requested(run) or state['phase'] == 'warm_cleanup':
             await self.release_warm(run_id, state, 'computer stopped')
             if self.store.run(run_id)['status'] == 'stopping':
                 self.store.update_run(run_id, status='cancelled')
@@ -206,7 +218,7 @@ class DurableRunner(RunManager):
                         return True
                     state = self.state(run_id)
             if not state or state.get('phase') == 'idle':
-                if row['status'] in {'cancelled', 'interrupted', 'stopping'}:
+                if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
                     if row['status'] == 'stopping':
                         self.store.update_run(run_id, status='cancelled')
                     return False
@@ -222,7 +234,7 @@ class DurableRunner(RunManager):
                 if state.get('phase') == 'idle' or not state:
                     return False
             # Cancellation is persistent, including across worker restarts.
-            if self.store.run(run_id)['status'] == 'stopping' and state['phase'] not in {'cleanup', 'finish'}:
+            if stop_requested(self.store.run(run_id)) and state['phase'] not in {'cleanup', 'finish'}:
                 self.fail(run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
             try:
                 return await self.step(run_id, state)
@@ -263,7 +275,7 @@ class DurableRunner(RunManager):
                 return True
 
     def begin_turn(self, run_id, row, warm=None):
-        if row['status'] in {'stopping', 'cancelled', 'interrupted'}:
+        if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
             return False
         messages = self.store.rows("SELECT * FROM messages WHERE run_id=? AND status='running'", (run_id,))
         message = messages[0] if messages else self.store.claim_message(run_id)
@@ -304,7 +316,7 @@ class DurableRunner(RunManager):
             if touched and state.get('idle_until') is not None:
                 state['idle_until'] = max(state['idle_until'], touched + self.computer_idle_seconds(state))
                 self.save(run_id, state)
-        stopping = row['status'] == 'stopping' or (not state.get('computer_only') and row['status'] in {'cancelled', 'interrupted'})
+        stopping = stop_requested(row) or (not state.get('computer_only') and row['status'] in {'cancelled', 'interrupted'})
         queued = self.store.has_queued_messages(run_id)
         expired = (time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds
                    or (not queued and time.time() >= self.idle_deadline(state)))
@@ -312,7 +324,7 @@ class DurableRunner(RunManager):
                 or expired):
             await self.release_warm(run_id, state, state.get('idle_reason', 'idle timeout' if not stopping else 'stop requested'))
             row = self.store.run(run_id)
-            stopping = row['status'] in {'stopping', 'cancelled', 'interrupted'}
+            stopping = stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}
             if row['status'] == 'stopping':
                 self.store.update_run(run_id, status='cancelled')
             return False if stopping else self.store.has_queued_messages(run_id)
@@ -357,6 +369,9 @@ class DurableRunner(RunManager):
         return snapshot.object_id
 
     def fail(self, run_id, state, explanation, status='failed'):
+        if state['phase'] == 'provision' and not state.get('sandbox_id'):
+            # Recover provision journals written before sandbox_name existed.
+            state.setdefault('sandbox_name', f"moyai-{run_id}-{state['message_id']}-{state['segment']}")
         preserved = self.preserve_answer(run_id)
         state.update(phase='cleanup', outcome='save_failed' if preserved else status,
                      response=self.store.run(run_id)['summary'] if preserved else explanation)
@@ -375,18 +390,20 @@ class DurableRunner(RunManager):
 
     async def provision(self, run_id, state):
         project = await self.environments.prepare(run_id) if self.environments else {}
-        if self.store.run(run_id)['status'] == 'stopping':
+        if stop_requested(self.store.run(run_id)):
             return True
         if state['phase'] == 'waiting_environment':
             async with self.admission_lock:
                 if not await self.make_capacity(run_id):
                     return 'capacity'
-                if self.store.run(run_id)['status'] == 'stopping':
+                if stop_requested(self.store.run(run_id)):
                     return True
                 state['phase'] = 'provision'
                 self.save(run_id, state)
         backend = self.provider(self.store.run(run_id))
         name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
+        state['sandbox_name'] = name
+        self.save(run_id, state)  # Keep create identity even if its ACK is lost.
         token = '' if state.get('computer_only') else self.token(run_id, state['message_id'])
         try:
             sandbox = await backend.find(name, initialize=True, token=token)
@@ -485,7 +502,7 @@ class DurableRunner(RunManager):
                 async with self.admission_lock:
                     if not await self.make_capacity(run_id):
                         return 'capacity'
-                    if self.store.run(run_id)['status'] == 'stopping':
+                    if stop_requested(self.store.run(run_id)):
                         return True
                     # Resume the saved conversation under the same turn and scope.
                     # Leave the input pending until the restored agent acknowledges
@@ -498,11 +515,11 @@ class DurableRunner(RunManager):
         if phase == 'prepare':
             if self.prepare_context:
                 await self.prepare_context(run_id)
-            if self.store.run(run_id)['status'] == 'stopping':
+            if stop_requested(self.store.run(run_id)):
                 return True
             if run['mode'] == 'demo':
                 await self.demo(run)
-                if self.store.run(run_id)['status'] == 'stopping':
+                if stop_requested(self.store.run(run_id)):
                     self.fail(run_id, state, 'The response was stopped.', 'cancelled')
                     return True
                 row = self.store.run(run_id)
@@ -563,7 +580,7 @@ class DurableRunner(RunManager):
             # One Activity may poll multiple times, keeping workflow history
             # small. Heartbeats are delivered independently by the worker.
             for _ in range(10):
-                if self.store.run(run_id)['status'] == 'stopping':
+                if stop_requested(self.store.run(run_id)):
                     return True
                 output = await self.command(sandbox, 'read', self.directory(state), str(state['cursor']))
                 for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret):
@@ -783,7 +800,7 @@ class DurableRunner(RunManager):
         elif phase == 'finish':
             if state['outcome'] == 'steered':
                 state['response'] = ''  # Also suppress notices checkpointed by an older worker.
-            if run['status'] == 'stopping':
+            if stop_requested(run):
                 state['outcome'] = 'cancelled'
                 if state.get('keep_warm'):
                     state.update(phase='cleanup', keep_warm=False)
@@ -818,20 +835,17 @@ class DurableRunner(RunManager):
             state.pop('wait_credential', None)
 
     async def cleanup(self, state, run_id):
-        if state.get('computer_only') and not state.get('sandbox_id'):
+        name = state.get('sandbox_name')
+        if not name and state.get('computer_only'):
+            name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
+        if name and not state.get('sandbox_id'):
             # Recover a create whose acknowledgement was lost before Stop.
             try:
-                sandbox = await self.provider(self.store.run(run_id)).find(
-                    f"moyai-{run_id}-{state['message_id']}-{state['segment']}")
+                sandbox = await self.provider(self.store.run(run_id)).find(name)
                 state['sandbox_id'] = sandbox.object_id
                 self.save(run_id, state)
             except modal.exception.NotFoundError:
+                state.pop('sandbox_name', None)
                 return
-        if not state.get('sandbox_id'):
-            return
-        try:
-            sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
-            if await sandbox.poll.aio() is None:
-                await self.terminate(sandbox, run_id)
-        except modal.exception.NotFoundError:
-            pass  # A confirmed missing machine cannot still execute a tool.
+        await super().cleanup(state, run_id)
+        state.pop('sandbox_name', None)

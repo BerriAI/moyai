@@ -33,8 +33,15 @@ def completed_response(run: dict[str, object], result: object) -> bool:
             and isinstance(result.get('message'), str) and bool(result['message'].strip()))
 
 
+def stop_requested(run: dict[str, object]) -> bool:
+    """Deletion intent stays authoritative even after a terminal status write."""
+    return bool(run.get('deletion_requested_at')) or run['status'] == 'stopping'
+
+
 def response_status(run: dict[str, object]) -> str:
     """Present a finished answer as saving without settling durable execution."""
+    if run.get('deletion_requested_at') and not run.get('deleted_at'):
+        return 'deleting'
     status = str(run.get('status') or '')
     raw = run.get('pending_result')
     if status != 'running' or not isinstance(raw, str) or not raw:
@@ -140,6 +147,32 @@ class RunManager:
             # terminate() acknowledges the request before the machine exits.
             await sandbox.wait.aio(raise_on_termination=False)
 
+    async def cleanup(self, state, run_id):
+        if not state.get('sandbox_id'):
+            return
+        try:
+            sandbox = await self.provider(identity=state['sandbox_id']).get(state['sandbox_id'])
+            if await sandbox.poll.aio() is None:
+                await self.terminate(sandbox, run_id)
+        except modal.exception.NotFoundError:
+            pass  # Verified absence is success; transport failure is not.
+
+    async def stop_for_deletion(self, run_id):
+        await self.cancel(run_id)
+        family = self.store.rows('SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)', (run_id,))
+        for row in family:
+            await self.wait_for_stop(row['id'])
+            # The runtime has settled its answers and released its workspace.
+            # Retain orphaned inputs without replaying or inventing an answer.
+            self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status IN ('queued','running','injected')", (row['id'],))
+            if self.store.run(row['id'])['status'] not in TERMINAL:
+                self.store.update_run(row['id'], status='cancelled', token_hash='')
+
+    async def wait_for_stop(self, run_id):
+        if run_id in self.jobs:
+            await asyncio.gather(asyncio.shield(self.jobs[run_id]), return_exceptions=True)
+        await self.cleanup(self.store.run(run_id), run_id)
+
     async def recover(self):
         if self.store.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_sessions'"):
             if any(json.loads(row['state']).get('phase', 'idle') != 'idle'
@@ -183,7 +216,7 @@ class RunManager:
         return await self.modal_clients.get(self.settings)
 
     def submit(self, run):
-        if self.closing or run.get('deleted_at') or run["id"] in self.jobs:
+        if self.closing or run.get('deleted_at') or run.get('deletion_requested_at') or run["id"] in self.jobs:
             return
         task = asyncio.create_task(self.chat(run) if run.get("chat_enabled") else self.execute(run))
         self.jobs[run["id"]] = task
@@ -242,7 +275,8 @@ class RunManager:
         await asyncio.gather(*tasks, return_exceptions=True)
 
     def stopped(self, run_id):
-        return self.store.run(run_id)["status"] in TERMINAL | {"stopping"}
+        run = self.store.run(run_id)
+        return stop_requested(run) or run["status"] in TERMINAL
 
     async def cancel(self, run_id):
         run = self.store.run(run_id)
@@ -309,7 +343,7 @@ class RunManager:
         finally:
             row = self.store.run(run_id)
             pending = json.loads(row.get("pending_result") or "{}")
-            if row.get("chat_enabled") and pending and not pending.get("checkpoint_saved") and row["status"] in {"stopping", "cancelled", "interrupted", "failed"}:
+            if row.get("chat_enabled") and pending and not pending.get("checkpoint_saved") and (stop_requested(row) or row["status"] in {"cancelled", "interrupted", "failed"}):
                 self.preserve_answer(run_id)
             sandbox = self.sandboxes.pop(run_id, None)
             if sandbox:
