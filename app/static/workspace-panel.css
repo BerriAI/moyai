@@ -4,7 +4,7 @@
 .panel-file-folder>summary{padding:9px 8px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;color:#51475e;overflow-wrap:anywhere}.panel-file-folder>summary:hover{background:#f3f0f7}.panel-file-folder>summary:focus-visible{outline:2px solid #8366ac;outline-offset:-2px}.panel-file-folder>summary>span{margin-right:5px}.panel-file-children{margin-left:14px;padding-left:8px;border-left:1px solid #e8e2ee}.panel-file-children .panel-file-choice{min-width:0;width:100%}.panel-file-choice strong{overflow-wrap:anywhere}
 
 /* Session outputs stay visible beside the conversation until a workspace tab opens. */
-.chat-layout.has-pull-requests:not(.panel-open){grid-template-columns:minmax(0,1fr) 280px}
+.chat-layout.has-session-tools:not(.panel-open){grid-template-columns:minmax(0,1fr) 280px}
 .session-pull-requests{align-self:start;margin:24px 16px 24px 0;border:1px solid var(--line);border-radius:12px;background:var(--soft);max-height:calc(100% - 48px);overflow:auto;min-width:0}
 .session-pull-requests[hidden],.panel-open>.session-pull-requests{display:none}
 .pull-requests-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 16px 8px}
@@ -19,7 +19,7 @@
 .pull-request-icon{color:var(--purple);align-self:flex-start;padding-top:2px;flex:none}
 .pull-request-row>.ui-icon{transform:rotate(-90deg);color:var(--muted);flex:none}
 
-@media(max-width:1100px){.chat-layout.has-pull-requests:not(.panel-open){grid-template-columns:minmax(0,1fr)}.session-pull-requests{display:none}}
+@media(max-width:1100px){.chat-layout.has-session-tools:not(.panel-open){grid-template-columns:minmax(0,1fr)}.session-pull-requests{display:none}}
 @media(max-width:760px){.pull-request-row{min-height:44px}}
 .computer-github-link{font-size:12px;color:var(--purple);white-space:nowrap}
 
@@ -40,3 +40,8 @@
 .pr-diff-scroll{overflow:auto;border-top:1px solid var(--line);max-height:640px}.pr-diff{border-collapse:collapse;width:100%;font-size:12px;line-height:1.6;table-layout:auto}.pr-diff td{border:0;padding:0;vertical-align:top}.pr-diff .pr-line{padding:0 8px;text-align:right;width:1%;min-width:32px;color:#68636f;user-select:none;font-variant-numeric:tabular-nums}.pr-code{white-space:pre}.pr-code code{font:inherit;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;display:block;padding:0 12px 0 4px}.pr-addition{background:#edf6ef}.pr-deletion{background:#fff3f4}.pr-hunk{background:var(--soft);color:#543d79}.pr-note{color:#68636f}.pr-notice{padding:12px 16px;font-size:13px;color:#68636f;line-height:1.6;margin:0}
 .native-pr :is(button,a,summary,[tabindex]):focus-visible{outline:2px solid var(--purple);outline-offset:-2px}
 @media(max-width:760px){.pr-toolbar{padding:16px 16px 8px;gap:8px}.pr-toolbar button,.pr-sections button{min-height:44px}.pr-heading{padding:8px 16px 12px}.pr-heading h2{font-size:18px}.pr-sections{padding:8px 16px}.pr-content{padding:16px}.pr-load-status{padding-inline:16px}.pr-file summary{flex-wrap:wrap}.pr-file-status{display:none}}
+
+.session-pull-requests>section[hidden]{display:none}
+.session-pull-requests>section+section:not([hidden]){border-top:1px solid var(--line)}
+.session-pull-requests>section[hidden]+section{border-top:0}
+.subagent-row:focus-visible{outline:2px solid var(--purple);outline-offset:-2px}
