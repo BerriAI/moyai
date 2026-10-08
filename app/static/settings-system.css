@@ -25,20 +25,17 @@
 }
 .skip-link { position: fixed; inset-inline-start: 16px; inset-block-start: -100px; z-index: 100; padding: 12px 18px; background: white; color: #543d79; border: 2px solid #7155ba; border-radius: 8px; }
 .skip-link:focus { inset-block-start: 12px; }
-.settings-view .rail { width: 248px; flex-basis: 248px; padding: 8px 12px 12px; }
-.settings-view .rail-brand { padding-inline: 8px; margin-block-end: 8px; }
+/* Inherit the chat rail width, brand inset, and responsive shell spacing. */
 .settings-view :is(.rail-links,.sessions-label,#session-search-field,#session-list,#new-task,#search-sessions) { display: none !important; }
 #settings-navigation { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 20px; }
-#settings-navigation a { display: flex; align-items: center; gap: 10px; min-height: 38px; padding: 8px 12px; margin: 2px 0; border-radius: 7px; color: var(--settings-muted); font-size: var(--settings-body); text-decoration: none; line-height: 1.4; }
+#settings-navigation a { display: flex; align-items: center; gap: 10px; padding: 7px 8px; margin: 0; border-radius: 7px; color: var(--settings-muted); font-size: 14px; text-decoration: none; line-height: normal; }
 #settings-navigation a[aria-current] { background: var(--brand-selected); color: #543d79; font-weight: 550; }
-#settings-navigation svg { width: 17px; height: 17px; flex: 0 0 17px; }
-#settings-navigation .settings-back { margin-block-end: 24px; font-size: var(--settings-caption); }
-.settings-overview-icon { width: 17px; text-align: center; font-size: 19px; line-height: 1; }
-.settings-nav-title { padding: 0 12px 12px; font-size: 1.066667rem; font-weight: 600; }
+#settings-navigation svg { width: 18px; height: 17px; flex: 0 0 18px; }
+#settings-navigation .settings-back { margin-block: 2px 20px; }
+.settings-overview-icon { width: 18px; flex: 0 0 18px; text-align: center; font-size: 19px; line-height: 1; }
+.settings-nav-title { padding: 0 8px 12px; font-size: 1.066667rem; font-weight: 600; }
 .settings-nav-group { margin-block-start: 20px; }
-.settings-nav-group h2 { font-size: .733333rem; font-weight: 500; margin: 0 12px 6px; color: var(--settings-muted); letter-spacing: .04em; }
-.settings-view .rail-foot { margin-block-start: 12px; padding-inline: 8px; }
-.settings-view .topbar { min-height: 56px; height: 56px; border-bottom: 1px solid var(--settings-line); padding-inline: 32px; background: var(--settings-surface); }
+.settings-nav-group h2 { font-size: .733333rem; font-weight: 500; margin: 0 8px 6px; color: var(--settings-muted); letter-spacing: .04em; }
 .settings-view #page-title { font-size: var(--settings-caption); }
 .settings-view .settings-breadcrumb a { color: var(--settings-muted); }
 .settings-view #content { padding: 40px max(32px, calc((100% - 1056px)/2)) 64px; overflow-y: auto; scroll-padding-block: 24px; color: var(--settings-text); font-size: var(--settings-body); line-height: 1.55; }
@@ -56,8 +53,8 @@
 .settings-view #content .section-header { gap: 20px; align-items: center; }
 .settings-view #content .section-header h2 { margin-block-end: 0; }
 .settings-view #content .section-header:has(p) h2 { margin-block-end: 6px; }
-.settings-view :is(button,input,select,textarea) { font-size: var(--settings-body); line-height: 1.45; }
-.settings-view button { min-height: 36px; border-radius: var(--settings-control-radius); padding: 8px 12px; font-weight: 500; box-shadow: none; }
+.settings-view :where(#content,dialog) :is(button,input,select,textarea) { font-size: var(--settings-body); line-height: 1.45; }
+.settings-view :where(#content,dialog) button { min-height: 36px; border-radius: var(--settings-control-radius); padding: 8px 12px; font-weight: 500; box-shadow: none; }
 .settings-view button.primary { color: #fff; background: var(--settings-accent); border-color: var(--settings-accent); }
 .settings-view button.quiet { color: var(--settings-muted); background: transparent; border-color: transparent; }
 .settings-view button.danger { color: var(--settings-danger); }
@@ -271,12 +268,10 @@
   .settings-view .spend-cards strong { font-size: 1.666667rem; }
 }
 @media (max-width:850px) {
-  .settings-view .rail { width: 260px; }
   .settings-view #content { padding: 28px 24px 48px; }
   .settings-view .settings-group,.settings-view #title-model-settings { grid-template-columns: 140px minmax(0,1fr); gap: 16px; }
 }
 @media (max-width:650px) {
-  .settings-view .topbar { padding-inline: 16px; }
   .settings-view #content { padding: 24px 16px 48px; }
   .settings-view #content h1 { font-size: 1.666667rem; }
   .settings-view #content :is(.page-heading,.skills-page>.section-header,.secrets-page>.section-header,.memory-page>.section-header) { align-items: flex-start; flex-direction: column; gap: 16px; margin-bottom: 24px; }
