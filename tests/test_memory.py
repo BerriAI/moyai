@@ -39,6 +39,91 @@ def source(app, run, content='Include uncertainty in benchmark reports.'):
     app.state.store.execute('UPDATE messages SET content=? WHERE id=?', (content, run['active_message_id']))
 
 
+def observe(client, run, **changes):
+    return call(client, run, 'memory_save', **{'key':'benchmark-observation', 'title':'Benchmark harness gotcha',
+        'content':'In the benchmark harness, initialize the temporary database before running measurements.',
+        'kind':'project', 'request_id':'observe-memory-1', 'repo_url':run['repo_url'],
+        'observation':{'scope':'benchmark harness', 'evidence':'A cold run failed; initializing the database made the identical run succeed.'}, **changes})
+
+
+def test_observation_saves_during_work_with_private_provenance_and_bounded_recall(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    first = observe(client, run)
+    assert first.status_code == 200, first.text
+    assert observe(client, run).json() == first.json()
+    assert app.state.store.rows('SELECT status FROM messages WHERE id=?', (run['active_message_id'],))[0]['status'] == 'running'
+    note = client.get('/api/memory').json()['memories'][0]
+    assert note['source'] == {'type':'observation', 'run_id':run['id'], 'message_id':run['active_message_id'],
+        'scope':'benchmark harness', 'evidence':'A cold run failed; initializing the database made the identical run succeed.'}
+    assert note['expires_at'] > now()
+    for table in ('personal_memories', 'memory_operations', 'events'):
+        assert note['source']['evidence'] not in json.dumps(app.state.store.rows('SELECT * FROM '+table))
+    restarted = Memory(Store(app.state.settings.data_dir), Security(app.state.settings), app.state.credentials.same_requester, app.state.memory.checkpoints)
+    fresh = active(app)
+    assert restarted.search(fresh, 'google:alice', 'benchmark harness')['loaded'] == 1
+    assert note['source']['evidence'] in restarted.context(fresh)
+    assert not restarted.listing('google:bob')
+    app.state.store.execute("UPDATE personal_memories SET expires_at='2000-01-01T00:00:00+00:00'")
+    assert restarted.search(fresh, 'google:alice', 'benchmark harness')['loaded'] == 0
+    assert note['source']['evidence'] not in restarted.context(fresh)
+
+
+@pytest.mark.parametrize('changes', [
+    {'kind':'preference'}, {'kind':'feedback'}, {'source_message_id':1}, {'source_quote':'Include uncertainty in reports.'},
+    {'observation':{'scope':'', 'evidence':'A cold run failed; initialization corrected it.'}},
+    {'observation':{'scope':'a different environment', 'evidence':'A cold run failed; initialization corrected it.'}},
+    {'observation':{'scope':'benchmark harness', 'evidence':'A cold run used password=hunter2 before failing.'}},
+    {'repo_url':''}, {'repo_url':'https://github.com/BerriAI/other'},
+])
+def test_observation_rejects_invalid_evidence_or_scope(workspace, changes):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    run['repo_url'] = 'https://github.com/BerriAI/moyai'
+    app.state.store.execute('UPDATE runs SET repo_url=? WHERE id=?', (run['repo_url'], run['id']))
+    assert observe(client, run, **changes).status_code == 422
+    assert not client.get('/api/memory').json()['memories']
+
+
+@pytest.mark.parametrize('prior', ['manual', 'chat', 'changed_scope', 'changed_repository'])
+def test_observation_cannot_replace_user_notes_or_broaden_prior_scope(workspace, prior):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    if prior == 'manual':
+        assert create(client, key='benchmark-observation').status_code == 201
+    elif prior == 'chat':
+        source(app, run)
+        assert learn(client, run, key='benchmark-observation', kind='project').status_code == 200
+    else:
+        assert observe(client, run).status_code == 200
+    before = client.get('/api/memory').json()['memories']
+    changes = {'revision':1, 'request_id':'replace-observation'}
+    if prior == 'changed_scope':
+        changes.update(content='For another harness, initialize the database first.',
+            observation={'scope':'another harness', 'evidence':'This other harness also failed until its database was initialized.'})
+    if prior == 'changed_repository':
+        run['repo_url'] = 'https://github.com/BerriAI/moyai'
+        app.state.store.execute('UPDATE runs SET repo_url=? WHERE id=?', (run['repo_url'], run['id']))
+    assert observe(client, run, **changes).status_code == 409
+    assert client.get('/api/memory').json()['memories'] == before
+
+
+@pytest.mark.parametrize('restriction', ['manual_mode', 'paused', 'subagent'])
+def test_observation_uses_existing_write_authorization(workspace, restriction):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    if restriction == 'subagent':
+        app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (active(app)['id'], run['id']))
+    else:
+        assert client.put('/api/memory/preferences', json={'enabled':restriction != 'paused', 'auto_save':False}).status_code == 200
+    assert observe(client, run).status_code == 403
+    assert not client.get('/api/memory').json()['memories']
+
+
 def test_identity_isolation_including_administrator_and_requester_switch(workspace):
     app, client = workspace
     sign_in(app, client)

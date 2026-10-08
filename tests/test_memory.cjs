@@ -26,6 +26,23 @@ test('private notes render as text even when a saved note contains markup',()=>{
   assert.match(html,/Review & edit/);
 });
 
+test('observations show their source and escaped supporting evidence',()=>{
+  const {context,nodes}=fixture();
+  const note={id:'observed',kind:'project',title:'Harness gotcha',content:'Scoped context',repo_url:'',updated_at:'2026-10-08',
+    source:{type:'observation',run_id:'session',scope:'Harness <img src=x>',evidence:'Initialization failed with <script>bad()</script>'}};
+  assert.match(context.memoryCard(note),/Observed during work/);
+  assert.doesNotMatch(context.memoryCard(note),/Added by you/);
+  context.crypto={randomUUID:()=> 'request-id'};
+  nodes.set('#memory-dialog',{innerHTML:'',querySelector:()=> ({}),showModal:()=>{},close:()=>{}});
+  nodes.set('#memory-title',{focus:()=>{}});
+  context.openMemoryEditor(note);
+  const html=nodes.get('#memory-dialog').innerHTML;
+  assert.match(html,/Harness &lt;img/);
+  assert.match(html,/Initialization failed with &lt;script/);
+  assert.doesNotMatch(html,/<img|<script/);
+  assert.match(html,/#run=session/);
+});
+
 test('late personal-memory response never replaces a different page',async()=>{
   const f=fixture(async()=>{f.context.state.pageVersion++;f.context.$('#content').innerHTML='Different page';return {memories:[],preferences:{}};});
   await f.context.renderMemory();

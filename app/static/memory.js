@@ -5,8 +5,8 @@ function memoryCard(note) {
   return `<article class="memory-card">
     <div class="memory-card-top"><span class="memory-kind">${memoryKinds[note.kind] || 'Note'}</span><span class="subtext">${expired ? 'Expired' : 'Updated '+relative(note.updated_at)}</span></div>
     <h2>${esc(note.title)}</h2><p class="memory-content">${esc(note.content)}</p>
-    <div class="memory-meta">${note.repo_url ? esc(note.repo_url.replace('https://github.com/','')) : 'Across your sessions'}${note.expires_at ? ` · ${expired?'Expired':'Expires'} ${esc(new Date(note.expires_at).toLocaleDateString())}` : ''}</div>
-    <div class="memory-card-bottom"><span class="subtext">${note.source?.type==='chat'?'Learned from your message':'Added by you'}</span><div><button class="quiet" data-memory-edit="${esc(note.id)}">Review & edit</button><button class="quiet danger" data-memory-delete="${esc(note.id)}">Delete</button></div></div>
+    <div class="memory-meta">${note.repo_url ? esc(note.repo_url.replace('https://github.com/','')) : note.source?.type==='observation' ? esc(note.source.scope) : 'Across your sessions'}${note.expires_at ? ` · ${expired?'Expired':'Expires'} ${esc(new Date(note.expires_at).toLocaleDateString())}` : ''}</div>
+    <div class="memory-card-bottom"><span class="subtext">${note.source?.type==='chat'?'Learned from your message':note.source?.type==='observation'?'Observed during work':'Added by you'}</span><div><button class="quiet" data-memory-edit="${esc(note.id)}">Review & edit</button><button class="quiet danger" data-memory-delete="${esc(note.id)}">Delete</button></div></div>
   </article>`;
 }
 
@@ -31,7 +31,7 @@ async function renderMemory() {
   const prefs=data.preferences;
   $('#content').innerHTML=`<section class="memory-page">
     <div class="section-header"><div><h1>Memory</h1><p class="subtext">Preferences and context for future sessions.</p></div><button class="primary" id="memory-add">Add memory</button></div>
-    <div class="memory-controls"><div><strong>${prefs.enabled?'Moyai remembers useful context':'Memory is paused'}</strong><p class="subtext">${prefs.enabled?'Preferences, corrections, and context from your messages can carry into future sessions.':'Your notes are kept here. Moyai won’t retrieve or save them while paused.'}</p></div><button class="quiet" id="memory-toggle">${prefs.enabled?'Pause memory':'Resume memory'}</button></div>
+    <div class="memory-controls"><div><strong>${prefs.enabled?'Moyai remembers useful context':'Memory is paused'}</strong><p class="subtext">${prefs.enabled?'Preferences, corrections, and lessons learned during work can carry into future sessions.':'Your notes are kept here. Moyai won’t retrieve or save them while paused.'}</p></div><button class="quiet" id="memory-toggle">${prefs.enabled?'Pause memory':'Resume memory'}</button></div>
     <div class="memory-learning"><label for="memory-learning">How new memories are saved</label><select id="memory-learning" ${prefs.enabled?'':'disabled'}><option value="auto" ${prefs.auto_save?'selected':''}>Save useful context automatically</option><option value="manual" ${prefs.auto_save?'':'selected'}>Only save manually</option></select></div>
     ${prefs.enabled&&prefs.auto_save ? `<div class="memory-review"><p class="subtext" role="status">${esc(memoryReviewSummary(data.review,prefs))}</p><button class="quiet" id="memory-refresh">Refresh</button></div>` : ''}
     <p class="memory-privacy">These notes are available only for your requests. Answers in shared sessions may reflect them. Keep keys in <a href="#secrets">Secrets</a> and reusable team workflows in <a href="#skills">Skills</a>.</p>
@@ -67,7 +67,7 @@ function openMemoryEditor(note=null) {
     <div class="field"><label for="memory-kind">Type</label><select id="memory-kind">${Object.entries(memoryKinds).map(([key,label])=>`<option value="${key}" ${note?.kind===key?'selected':''}>${label}</option>`).join('')}</select></div>
     <div class="field"><label for="memory-content">What should Moyai remember?</label><textarea id="memory-content" required minlength="3" maxlength="1200" rows="5" placeholder="Keep PR descriptions short and include the test results.">${esc(note?.content||'')}</textarea></div>
     <div class="field"><label for="memory-repo">Repository (optional)</label><input type="url" id="memory-repo" value="${esc(note?.repo_url||'')}" placeholder="https://github.com/BerriAI/litellm"><small>Leave blank to use across your sessions.</small></div>
-    ${note?.source?.type==='chat'?`<details class="memory-source"><summary>Why Moyai saved this</summary><blockquote>${esc(note.source.quote)}</blockquote><a href="#run=${esc(note.source.run_id)}" id="memory-source-link">Open original session</a></details>`:''}
+    ${['chat','observation'].includes(note?.source?.type)?`<details class="memory-source"><summary>Why Moyai saved this</summary>${note.source.type==='observation'?`<p>Observed during work in ${esc(note.source.scope)}. Recheck if the environment changes.</p><blockquote>${esc(note.source.evidence)}</blockquote>`:`<blockquote>${esc(note.source.quote)}</blockquote>`}<a href="#run=${esc(note.source.run_id)}" id="memory-source-link">Open original session</a></details>`:''}
     <p id="memory-error" role="alert"></p><div class="credential-actions"><button type="submit">Save memory</button><button type="button" class="quiet" id="memory-cancel">Cancel</button></div></form>`;
   const close=()=>dialog.close();dialog.onclose=()=>{dialog.innerHTML='';};
   dialog.querySelector('[aria-label="Close memory editor"]').onclick=close;$('#memory-cancel').onclick=close;
