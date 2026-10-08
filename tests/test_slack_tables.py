@@ -87,3 +87,18 @@ def test_source_maps_preserve_text_with_unicode_line_separators(newline):
     assert result[0] == (slack_text(before), None)
     assert tables(result)[0]['rows'][1][0]['text'] == 'x'
     assert result[-1] == (slack_text(after), None)
+
+
+@pytest.mark.parametrize('alignment,expected', [
+    ('---', 'left'), (':---', 'left'), ('---:', 'right'), (':---:', 'center'),
+])
+@pytest.mark.parametrize('source,expected_cell', [
+    (r'escaped\|pipe', 'escaped|pipe'),
+    (r'two\\|slashes', r'two\|slashes'),
+    ('`code`', '`code`'), ('**bold**', '**bold**'),
+])
+def test_cells_and_alignment_checked_against_markdown_it(alignment, expected, source, expected_cell):
+    # Golden results checked against markdown-it-py's table rule; no library import.
+    block = tables(parts(f'A | B\n{alignment} | ---\n{source} | value'))[0]
+    assert block['rows'][1][0]['text'] == expected_cell
+    assert block['column_settings'][0]['align'] == expected
