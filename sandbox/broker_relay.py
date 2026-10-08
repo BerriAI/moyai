@@ -226,6 +226,14 @@ class BrokerRelay:
                             response_bytes += len(body)
                             value = json.loads(body)
                             pressure = value.get('detail')
+                            # Explicit broker preflight rejection: no provider
+                            # action occurred. Keep it as a tool result instead
+                            # of poisoning the run's transport recovery state.
+                            if (route == '/tools/call' and exc.code in {403, 422}
+                                    and exc.headers.get('X-Moyai-Tool-Error') == 'rejected'
+                                    and isinstance(pressure, str) and len(pressure) <= 1000):
+                                exc.close()
+                                return self.error(200, pressure, 'tool_rejected')
                             if (exc.headers.get('X-Moyai-Context') == 'compact' and isinstance(pressure, dict)
                                     and pressure.get('code') == 'context_compaction_required'
                                     and all(type(pressure.get(key)) is int and pressure[key] > 0

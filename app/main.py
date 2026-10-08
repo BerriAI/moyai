@@ -889,14 +889,14 @@ def create_app(settings: Settings | None = None):
                 # Do not include validation payloads or private provider errors.
                 return {'error': 'Invalid agent arguments.' if isinstance(exc, ValidationError) else str(exc)}
         if body.name not in TOOLS or TOOLS[body.name][0] not in run["plugins"]:
-            raise HTTPException(403, "This tool is not enabled for this task.")
+            raise HTTPException(403, "This tool is not enabled for this task.", headers={'X-Moyai-Tool-Error': 'rejected'})
         provider, write, schema, _ = TOOLS[body.name]
         try:
             arguments = schema.model_validate(body.arguments).model_dump()
         except ValidationError:
-            raise HTTPException(422, "Invalid tool arguments.")
+            raise HTTPException(422, "Invalid tool arguments.", headers={'X-Moyai-Tool-Error': 'rejected'})
         if not connectors.allowed(body.name):
-            raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
+            raise HTTPException(403, "This operation is disabled by the organization's connection policy.", headers={'X-Moyai-Tool-Error': 'rejected'})
         if provider == 'github':
             try:
                 await connectors.github.ensure_connection()
