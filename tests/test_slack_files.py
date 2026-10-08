@@ -268,3 +268,22 @@ def test_live_file_scope_check_preserves_connection_guards(slack_app, monkeypatc
     with pytest.raises(ValueError, match='Slack access changed'):
         asyncio.run(app.state.slack.files.read(FILE['id'], 'T12345678'))
     assert calls == ([FILE['id']] if during_read else [])
+
+
+@pytest.mark.parametrize('from_context', [False, True])
+def test_slack_eight_file_budget_keeps_mention_priority_and_deduplicates(slack_app, monkeypatch, from_context):
+    app, client, runs, _ = slack_app
+    files = [{**FILE, 'id': f'F{i:08d}'} for i in range(1, 10)]
+    earlier = '1790718000.123456'
+    history = [
+        {'ts': earlier, 'text': 'Earlier files', 'user': 'U12345678', 'files': files},
+        {'ts': ROOT, 'thread_ts': earlier, 'text': 'Inspect this', 'user': 'U12345678', 'files': [files[-1]]},
+    ]
+    calls, _ = provider(app, monkeypatch, history=history)
+    payload = event(thread_ts=earlier, files=[] if from_context else [files[-1], *files])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    run_id = runs[0]['id']
+    app.state.store.claim_message(run_id)
+    asyncio.run(app.state.slack.prepare(run_id))
+    assert calls == [files[-1]['id'], *[file['id'] for file in files[:7]]]
+    assert len(app.state.store.messages(run_id)[0]['attachments']) == 8

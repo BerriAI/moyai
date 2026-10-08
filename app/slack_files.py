@@ -84,7 +84,7 @@ class SlackFiles:
                 return
             ids = json.loads(pending['files_json']) if pending else []
             messages = source.get('messages', [])
-            # The directly addressed message wins the shared five-file budget.
+            # The directly addressed message wins the shared per-message file budget.
             messages = sorted(messages, key=lambda item: item['ts'] != source['mention_ts'])
             for item in messages:
                 if item['ts'] == source['mention_ts'] or source.get('kind') == 'thread':

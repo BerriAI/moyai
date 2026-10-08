@@ -18,7 +18,7 @@ from .audio import AudioTranscriber, audio_type
 from .attachment_transport import CONTENT_TYPE, OVERHEAD, unseal_file
 
 MAX_FILE = 10 * 1024 * 1024
-MAX_FILES = 5
+MAX_FILES = 8
 MAX_MESSAGE = 20 * 1024 * 1024
 MAX_DRAFT = 50 * 1024 * 1024
 ID = re.compile(r'^[0-9a-f]{32}$')
@@ -138,7 +138,7 @@ class Attachments:
     def bind_in(self, conn, ids, message_id, user_id):
         ids = ids or []
         if len(ids) > MAX_FILES or len(ids) != len(set(ids)):
-            raise ValueError('Attach up to five different files per message.')
+            raise ValueError(f'Attach up to {MAX_FILES} different files per message.')
         total = 0
         for attachment_id in ids:
             row = conn.execute('SELECT owner_id,message_id,size FROM attachments WHERE id=?', (attachment_id,)).fetchone()

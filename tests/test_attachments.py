@@ -124,7 +124,6 @@ def test_binding_rolls_back_whole_message_and_checks_total_size(workspace, monke
     assert start(app, client, monkeypatch, [file]).status_code == 409
     assert not app.state.store.rows('SELECT id FROM runs')
     assert app.state.store.rows('SELECT message_id FROM attachments')[0]['message_id'] is None
-    assert client.post('/api/runs', json={'prompt': 'Inspect files', 'attachment_ids': [file['id']] * 6}).status_code == 422
 
 
 @pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5'])
@@ -226,3 +225,30 @@ def test_deleted_session_attachment_is_not_readable(workspace):
     for suffix in ('', '/preview', '/audio'):
         assert client.get('/api/attachments/' + attachment_id + suffix).status_code == 404
     assert store.rows('SELECT data FROM attachments WHERE id=?', (attachment_id,))[0]['data'] == b'raw'
+
+
+@pytest.mark.parametrize('followup', [False, True])
+def test_eight_files_persist_and_ninth_or_duplicate_is_rejected(workspace, monkeypatch, followup):
+    app, client = workspace
+    store = app.state.store
+    files = [upload(client, f'file-{i}.txt').json() for i in range(9)]
+    ids = [file['id'] for file in files]
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    run_id = start(app, client, monkeypatch, []).json()['id'] if followup else None
+    endpoint = f'/api/runs/{run_id}/messages' if followup else '/api/runs'
+    body = {'content' if followup else 'prompt': 'Inspect files', 'client_id': 'eight-file-boundary'}
+    before = len(store.rows('SELECT id FROM messages'))
+    assert client.post(endpoint, json={**body, 'attachment_ids': ids}).status_code == 422
+    assert client.post(endpoint, json={**body, 'attachment_ids': [ids[0]] * 2}).status_code == 409
+    assert len(store.rows('SELECT id FROM messages')) == before
+    assert all(row['message_id'] is None for row in store.rows('SELECT message_id FROM attachments'))
+    # Exercise the storage guard independently of the request schema.
+    with pytest.raises(ValueError, match='different files'):
+        store.create_run('Too many files', '', 'demo', [], chat_enabled=True, attachment_ids=ids)
+    assert len(store.rows('SELECT id FROM messages')) == before
+    response = client.post(endpoint, json={**body, 'attachment_ids': ids[:8]})
+    assert response.status_code == (202 if followup else 201), response.text
+    run_id = run_id or response.json()['id']
+    reopened = Store(app.state.settings.data_dir)
+    assert {f['id'] for f in reopened.messages(run_id)[-1]['attachments']} == set(ids[:8])
+    assert store.rows('SELECT message_id FROM attachments WHERE id=?', (ids[8],))[0]['message_id'] is None
