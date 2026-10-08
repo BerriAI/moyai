@@ -5,17 +5,17 @@
 
 /* Session outputs stay visible beside the conversation until a workspace tab opens. */
 .chat-layout.has-session-tools:not(.panel-open){grid-template-columns:minmax(0,1fr) 280px}
-.session-pull-requests{align-self:start;margin:24px 16px 24px 0;border:1px solid var(--line);border-radius:12px;background:var(--soft);max-height:calc(100% - 48px);overflow:auto;min-width:0}
+.session-pull-requests{align-self:start;margin:16px 16px 16px 0;border:1px solid var(--line);border-radius:12px;background:var(--soft);max-height:calc(100% - 32px);overflow:auto;min-width:0}
 .session-pull-requests[hidden],.panel-open>.session-pull-requests{display:none}
-.pull-requests-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 16px 8px}
+.pull-requests-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px 4px}
 .pull-requests-heading h2{font-size:14px;font-weight:600;line-height:1.4;margin:0;color:var(--text)}
 .pull-requests-heading>span{font-size:12px;color:var(--muted)}
-.pull-request-list{padding:4px 8px 12px}
-.pull-request-row{display:flex;align-items:center;gap:10px;padding:12px 8px;border-radius:8px;color:var(--text);text-decoration:none;min-width:0}
+.pull-request-list{padding:2px 4px 6px}
+.pull-request-row{display:flex;align-items:center;gap:8px;padding:4px 8px;min-height:44px;border-radius:8px;color:var(--text);text-decoration:none;min-width:0}
 .pull-request-row:hover{background:var(--brand-selected)}
 .pull-request-row>span:nth-child(2){min-width:0;flex:1}
-.pull-request-row strong{display:block;font-size:13px;line-height:1.5;font-weight:500;overflow-wrap:anywhere}
-.pull-request-row small{display:block;font-size:11px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere;margin-top:4px}
+.pull-request-row strong{display:block;font-size:13px;line-height:18px;font-weight:500;overflow-wrap:anywhere}
+.pull-request-row small{display:block;font-size:11px;line-height:16px;color:var(--muted);overflow-wrap:anywhere;margin-top:2px}
 .pull-request-icon{color:var(--purple);align-self:flex-start;padding-top:2px;flex:none}
 .pull-request-row>.ui-icon{transform:rotate(-90deg);color:var(--muted);flex:none}
 
