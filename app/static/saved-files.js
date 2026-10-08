@@ -30,11 +30,17 @@
           node.classList.remove('saved-file-link','saved-image-link');node.onclick=null;
           if(node.dataset.fileImage)node.textContent=node.dataset.fileLabel;
         }
+        if(node.matches('[data-file-ref]')){
+          node.classList.add('saved-file-unavailable');
+          node.title='This file is not in the saved archive. Ask the agent to save it again.';
+          node.setAttribute('aria-disabled','true');
+        }
         return;
       }
       let link=node;
       if(node.tagName!=='A'){link=node.ownerDocument.createElement('a');link.textContent=node.textContent;node.replaceChildren(link);}
       link.href=file.url;link.classList.add('saved-file-link');link.dataset.fileRef=ref;link.dataset.savedFile=file.archive_path;
+      link.classList.remove('saved-file-unavailable');link.removeAttribute('aria-disabled');
       if(runId)link.dataset.fileRun=runId;else delete link.dataset.fileRun;
       link.removeAttribute('target');link.removeAttribute('rel');link.title='Preview '+file.path;
       if(link.dataset.fileImage){

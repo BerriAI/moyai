@@ -50,7 +50,7 @@ function linkFixture(ref,image=true){
       closest:()=>null,matches:selector=>selector==='[data-file-ref]',
       append(node){this.children.push(node);},replaceChildren(...nodes){this.children=nodes;},
       querySelector(selector){return this.children.find(n=>n.tagName===selector.toUpperCase())||null;},
-      getAttribute(name){return this[name]??null;},removeAttribute(name){delete this[name];}};
+      getAttribute(name){return this[name]??null;},setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];}};
   }};
   const link=doc.createElement('a');link.dataset.fileRef=ref;if(image)link.dataset.fileImage='true';link.textContent='Lens landing page';
   return {link,container:{querySelectorAll:()=>[link]}};
@@ -90,4 +90,18 @@ test('image hydration waits for exact catalog matches and preserves ordinary lin
   assert.equal(plain.link.href,image.url);assert.equal(plain.link.querySelector('img'),null);
   const broken=pending.link.querySelector('img');broken.onerror();decorate(pending.container,[image]);
   assert.equal(pending.link.querySelector('img'),broken);assert.equal(broken.hidden,true);assert.equal(pending.link.href,image.url);
+});
+
+test('missing file is explained and becomes clickable when saved later',()=>{
+  const view=linkFixture('/workspace/demo.zip',false);
+  decorate(view.container,[]);
+  assert.equal(view.link.href,undefined);
+  assert.equal(view.link.getAttribute('aria-disabled'),'true');
+  assert.equal(view.link.classList.contains('saved-file-unavailable'),true);
+  assert.match(view.link.title,/not in the saved archive/);
+  const demo=file('demo.zip');
+  decorate(view.container,[demo]);
+  assert.equal(view.link.href,demo.url);
+  assert.equal(view.link.getAttribute('aria-disabled'),null);
+  assert.equal(view.link.classList.contains('saved-file-unavailable'),false);
 });

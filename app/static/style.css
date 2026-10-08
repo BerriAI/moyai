@@ -201,3 +201,6 @@
 .audio-transcript { white-space: pre-wrap; line-height: 1.6; }
 .record-button { white-space: nowrap; font-size: 12px; }
 .recording-status { color: #b42336; font-size: 12px; }
+
+.markdown .saved-file-unavailable{color:var(--muted);cursor:help;text-decoration:none}
+.markdown .saved-file-unavailable::after{content:' (not saved)';font-size:.85em}

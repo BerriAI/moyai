@@ -46,3 +46,40 @@ def test_cloud_error_diagnostics_redact_credentials_and_request_urls():
     detail = safe_error_detail(RuntimeError('Snapshot failed; token=hidden Bearer other https://example.com/?key=secret sk-secret custom-private'), ['custom-private'])
     assert 'Snapshot failed' in detail
     assert all(secret not in detail for secret in ('hidden', 'other', 'example.com', 'sk-secret', 'custom-private'))
+
+
+def test_committed_demo_remains_downloadable_after_followup(tmp_path):
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    artifacts = tmp_path / 'artifacts'; artifacts.mkdir()
+    command(workspace, 'init')
+    with zipfile.ZipFile(workspace / 'demo.zip', 'w') as demo:
+        demo.writestr('README.md', 'Run the demo')
+    command(workspace, 'add', 'demo.zip')
+    command(workspace, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'demo')
+    (artifacts / 'result.md').write_text('A follow-up answer with no file links.')
+    collect_archive(workspace, artifacts, b'')
+    with zipfile.ZipFile(artifacts / 'result.zip') as archive:
+        assert archive.read('changes.patch') == b''
+        assert archive.read('new-files/demo.zip') == (workspace / 'demo.zip').read_bytes()
+
+
+def test_tracked_exports_preserve_exclusions_and_size_limits(tmp_path):
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    artifacts = tmp_path / 'artifacts'; artifacts.mkdir()
+    command(workspace, 'init')
+    (workspace / 'readme.txt').write_text('run-secret')
+    (workspace / '.env').write_text('hidden')
+    (workspace / 'node_modules').mkdir()
+    (workspace / 'node_modules' / 'dependency.js').write_text('dependency')
+    (workspace / 'large.zip').write_bytes(b'x' * (2 * 1024 * 1024 + 1))
+    outside = tmp_path / 'outside'; outside.write_text('private')
+    (workspace / 'linked.txt').symlink_to(outside)
+    command(workspace, 'add', '.')
+    command(workspace, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'files')
+    collect_archive(workspace, artifacts, b'run-secret')
+    with zipfile.ZipFile(artifacts / 'result.zip') as archive:
+        assert archive.read('new-files/readme.txt') == b'[redacted]'
+        assert not any(name in archive.namelist() for name in (
+            'new-files/.env', 'new-files/node_modules/dependency.js',
+            'new-files/linked.txt', 'new-files/large.zip'))
+        assert 'new-files/large.zip (size limit)' in json.loads(archive.read('recovery-manifest.json'))['omitted']
