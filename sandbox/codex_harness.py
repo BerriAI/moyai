@@ -188,6 +188,7 @@ class CodexAgent(HarnessAgent):
 
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
+        from openai_codex.errors import TransportClosedError
         # Each fresh SDK invocation has its own local ceiling. The gateway and
         # shared recovery loop retain the whole task's request cap and deadline.
         self.model_calls = 0
@@ -197,6 +198,7 @@ class CodexAgent(HarnessAgent):
         message_items = {}
         finished, answer = False, ''
         failure = {}
+        settlement_turn = None
         # Native transcripts are private, disposable state. Only Moyai's public
         # journal crosses requester/model changes and filesystem checkpoints.
         try:
@@ -216,6 +218,18 @@ class CodexAgent(HarnessAgent):
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
                             event = await client.next_turn_notification(turn.turn.id)
+                            if settlement_turn:
+                                # Background commands retain their original turn
+                                # ID. The completed queue drains without waiting;
+                                # the new turn's queue cannot supply these receipts.
+                                try:
+                                    while True:
+                                        previous = await client.next_turn_notification(settlement_turn)
+                                        if previous.method == 'item/completed':
+                                            body = previous.payload.model_dump(mode='json', by_alias=True)
+                                            self.record_item(body['item'], completed=True)
+                                except TransportClosedError:
+                                    pass
                             payload = (event.payload.params if hasattr(event.payload, 'params') else
                                        event.payload.model_dump(mode='json', by_alias=True))
                             if event.method == 'rawResponseItem/completed':
@@ -248,6 +262,19 @@ class CodexAgent(HarnessAgent):
                                         if payload['turn']['status'] in {'failed', 'interrupted'} else 'unknown')
                                     if payload['turn'].get('error'):
                                         failure.update(codex_details(payload['turn']['error']))
+                                if (finished and self.journal.pending and not settlement_turn
+                                        and not self.stopped.is_set() and not self.boundary_failed):
+                                    # One settlement turn shares this invocation's
+                                    # deadline and model-call cap. Never publish an
+                                    # answer that preceded its tool results.
+                                    settlement_turn = turn.turn.id
+                                    message_items.clear()
+                                    turn = await client.turn_start(thread.thread.id,
+                                        'Unfinished tool calls remain. Settle them before answering: '
+                                        'wait for finite work, or deliberately stop preview servers you no longer need. '
+                                        'Collect their actual results; do not restart or replay actions. '
+                                        'Then provide the final answer based on the confirmed results.')
+                                    continue
                                 break
         except Exception as exc:
             finished = False

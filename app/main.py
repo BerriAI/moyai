@@ -856,7 +856,7 @@ def create_app(settings: Settings | None = None):
             try:
                 result = skills.call(run,body.name,body.arguments)
             except ValidationError:
-                raise HTTPException(422,'Invalid skill arguments. Check the tool schema, text limits and relative file paths.') from None
+                return {'error': 'Invalid skill arguments. Check the tool schema, text limits and relative file paths.'}
             await checkpoints.flush()
             return result
         if body.name in CREDENTIAL_TOOLS:

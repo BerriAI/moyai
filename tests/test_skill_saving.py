@@ -46,7 +46,8 @@ def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     mine = call(client,member,**form()).json()
     assert app.state.store.rows('SELECT owner_id FROM skills WHERE id=?',(mine['id'],))[0]['owner_id']=='google:ishaan'
     for fake in ({'owner_id':'google:alice'},{'admin':True}):
-        assert call(client,member,**form(**fake)).status_code==422
+        invalid = call(client,member,**form(**fake))
+        assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
     sign_in(app,client)
     assert client.get('/api/skills/'+mine['id']).status_code==404
     app.state.store.update_run(member['id'],token_hash='')
@@ -198,7 +199,9 @@ def test_skill_paths_rejected(workspace,path):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
-    assert call(client,run,**form(files=[{'path':path,'content':'private content'}])).status_code==422
+    invalid=call(client,run,**form(files=[{'path':path,'content':'private content'}]))
+    assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
+    assert 'private content' not in invalid.text
     assert not app.state.store.rows('SELECT * FROM skills')
 
 

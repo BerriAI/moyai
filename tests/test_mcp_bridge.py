@@ -7,6 +7,12 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
+from app.security import digest
+from test_broker_transport import diagnostic_relay
+from test_skill_saving import call, form
+from test_spend import active, sign_in
+from test_workspace import workspace
+
 
 def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
     calls = []
@@ -84,3 +90,52 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
     assert 'synthetic-stdio-secret' not in result.stdout and 'synthetic-stdio-secret' not in result.stderr
     assert calls == [{"name": "linear_search", "arguments": {"query": "fixture"}}, {'name':'skills_save','arguments':{}},
                      {'name':'skills_search','arguments':{'query':'benchmark','turn_id':1}}]
+
+
+def test_skill_validation_remains_a_tool_error_through_broker_and_mcp(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    assert call(client, run, **form(files=[{'path': 'references/check.md', 'content': 'Read the evidence.'}])).json()['saved']
+    capability = 'private-capability'
+    app.state.store.update_run(run['id'], token_hash=digest(capability))
+
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+
+        def do_POST(self):
+            assert self.path == '/tools/call'
+            response = client.post('/broker/' + run['id'] + self.path,
+                content=self.rfile.read(int(self.headers['Content-Length'])),
+                headers={key: self.headers[key] for key in ('Authorization', 'Content-Type')})
+            self.send_response(response.status_code)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(response.content)))
+            self.end_headers()
+            self.wfile.write(response.content)
+
+    messages = [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call', 'params': {
+        'name': 'skills_read_file', 'arguments': {'name': 'personal:team-review', 'path': path}}}
+        for index, path in enumerate(['/private-input-marker/secret.md', 'references/check.md'], 1)]
+    script = Path(__file__).resolve().parents[1] / 'sandbox' / 'mcp_bridge.py'
+    with diagnostic_relay(Edge) as (relay, relay_client, diagnostics):
+        saved = None
+        for existing_failure in (False, True):
+            if existing_failure:
+                app.state.store.update_run(run['id'], token_hash='')
+                assert relay_client.post('/tools/call', json=messages[0]['params']).status_code == 401
+                saved = relay.last_failure
+                assert relay.last_error and relay.uncertain_tool and len(diagnostics) == 1
+                app.state.store.update_run(run['id'], token_hash=digest(capability))
+            result = subprocess.run([sys.executable, str(script)],
+                input='\n'.join(json.dumps(message) for message in messages) + '\n',
+                text=True, capture_output=True, timeout=10,
+                env={'PATH': os.environ['PATH'], 'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability})
+            assert result.returncode == 0, result.stderr
+            rejected, recovered = [json.loads(line)['result'] for line in result.stdout.splitlines()]
+            assert relay.last_failure == saved
+            assert bool(relay.last_error) == relay.uncertain_tool == existing_failure
+            assert len(diagnostics) == int(existing_failure)
+            assert rejected['isError'] and 'Invalid skill arguments' in rejected['content'][0]['text']
+            assert not recovered['isError'] and json.loads(recovered['content'][0]['text'])['loaded']
+            assert 'private-input-marker' not in result.stdout + result.stderr
