@@ -16,6 +16,7 @@ from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
 from .broker_diagnostics import upstream_headers
+from .model_routing import session_routing
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -259,6 +260,7 @@ class HarnessGateway:
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
+            payload.update(session_routing(model, run))
             if self.tracing.enabled and not compact:
                 content = NativeModelContent(payload, route)
             capture = NativeUsageCapture(bool(payload.get('stream')), route=route, content=content)

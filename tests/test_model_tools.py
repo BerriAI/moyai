@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.db import Store
 from app.model_tools import TOOL_NAMES
 from app.security import digest
-from test_models import ASTRA, GLM, OPUS
+from test_models import ASTRA, DEEPSEEK, GLM, OPUS
 from test_slack import slack_app, event, signed
 from test_spend import active
 from test_workspace import workspace
@@ -35,7 +35,8 @@ def gateway(app, monkeypatch):
 
 
 @pytest.mark.parametrize('user', ['google:alice', 'slack:T12345678:U12345678'])
-def test_tools_switch_next_inference_preserving_history_files_and_admission_receipts(workspace, monkeypatch, user):
+@pytest.mark.parametrize('selected, alias', [(GLM, 'GLM 5.3'), (DEEPSEEK, 'DeepSeek V4.1 Flash')])
+def test_tools_switch_next_inference_preserving_history_files_and_admission_receipts(workspace, monkeypatch, user, selected, alias):
     app, client = workspace
     run = active(app, user)
     captured = gateway(app, monkeypatch)
@@ -44,25 +45,25 @@ def test_tools_switch_next_inference_preserving_history_files_and_admission_rece
     assert TOOL_NAMES <= {tool['name'] for tool in listing}
     assert call(client, run, 'model_list').json()['active_model'] == ASTRA
     app.state.store.update_run(run['id'], snapshot_id='existing-workspace-snapshot')
-    history = [{'role': 'user', 'content': 'Remember copper lighthouse. Use GLM 5.3 and summarize this.'}]
+    history = [{'role': 'user', 'content': f'Remember copper lighthouse. Use {alias} and summarize this.'}]
     endpoint = f"/broker/{run['id']}/v1/chat/completions"
     assert client.post(endpoint, headers=headers, json={'model': GLM, 'messages': history}).status_code == 200
     assert captured[-1]['model'] == ASTRA  # Raw sandbox overrides still cannot switch.
-    response = call(client, run)
+    response = call(client, run, model=alias)
     assert response.status_code == 200, response.text
-    assert response.json()['active_model'] == response.json()['default_model'] == GLM
+    assert response.json()['active_model'] == response.json()['default_model'] == selected
     assert response.json()['effective'] == 'next_model_request'
     history += [{'role': 'assistant', 'content': 'The model switch succeeded.'}, {'role': 'user', 'content': 'Continue the same task.'}]
     assert client.post(endpoint, headers=headers, json={'model': ASTRA, 'messages': history}).status_code == 200
-    assert captured[-1]['model'] == GLM and captured[-1]['messages'] == history
+    assert captured[-1]['model'] == selected and captured[-1]['messages'][-len(history):] == history
     assert app.state.store.run(run['id'])['snapshot_id'] == 'existing-workspace-snapshot'
     assert len(app.state.store.messages(run['id'])) == 1  # No fabricated user turn or replay.
-    app.state.store.finish_message(run['id'], run['active_message_id'], 'Done using GLM')
+    app.state.store.finish_message(run['id'], run['active_message_id'], f'Done using {alias}')
     messages = app.state.store.messages(run['id'])
-    assert messages[0]['model'] == ASTRA and messages[1]['model'] == GLM
+    assert messages[0]['model'] == ASTRA and messages[1]['model'] == selected
     reopened = Store(app.state.settings.data_dir, default_model=ASTRA)
-    assert reopened.run(run['id'])['active_model'] == GLM
-    assert reopened.run(run['id'])['model'] == GLM
+    assert reopened.run(run['id'])['active_model'] == selected
+    assert reopened.run(run['id'])['model'] == selected
 
 
 def test_natural_slack_request_reaches_tools_with_task_intact(slack_app):

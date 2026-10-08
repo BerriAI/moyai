@@ -15,6 +15,7 @@ MODEL_CATALOG: dict[str, str] = {
     'openai/gpt-6.1-sol': 'GPT-6.1 Sol',
     'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
     'fireworks_ai/glm-5p3': 'GLM-5.3',
+    'fireworks_ai/deepseek-v4p1-flash': 'DeepSeek V4.1 Flash',
 }
 
 
@@ -307,6 +308,10 @@ class Settings(BaseSettings):
             'glm': 'fireworks_ai/glm-5p3', 'glm-5.3': 'fireworks_ai/glm-5p3',
             'glm-5p3': 'fireworks_ai/glm-5p3',
             'glm 5.3': 'fireworks_ai/glm-5p3', 'glm 5p3': 'fireworks_ai/glm-5p3',
+            'deepseek': 'fireworks_ai/deepseek-v4p1-flash',
+            'deepseek-flash': 'fireworks_ai/deepseek-v4p1-flash',
+            'deepseek-v4.1-flash': 'fireworks_ai/deepseek-v4p1-flash',
+            'deepseek-v4p1-flash': 'fireworks_ai/deepseek-v4p1-flash',
         }
         aliases.update({item['name'].lower(): item['id'] for item in self.model_choices()})
         selected = value if value is not None else fallback or self.agent_model or (self.allowed_models() or [''])[0]
