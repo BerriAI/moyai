@@ -157,7 +157,15 @@ def run(arguments: dict, broker: Callable) -> dict:
         if code:
             result['failure'] = kind
             result['instruction'] = 'Inspect the result before retrying; a command may have partially completed.'
-        if kind in {'expired', 'invalid', 'permission'} and len(bindings) == 1:
+        source_binding = any(binding.get('name') == '1password-shared' for binding in bindings)
+        if kind in {'expired', 'invalid', 'permission'} and source_binding:
+            # An op-run child may reject a key fetched from Shared while the
+            # service-account token remains valid. Do not revoke the source.
+            result['instruction'] += (' This command used a 1Password source. Determine whether the error came '
+                'from 1Password or the destination service. Report a source credential failure only after '
+                'confirming its own authentication failed; otherwise report the source_checks outcome '
+                'for the requested service. Keep vault values out of output.')
+        elif kind in {'expired', 'invalid', 'permission'} and len(bindings) == 1:
             # Multiple bindings cannot safely attribute which credential failed.
             binding = bindings[0]
             report = broker('/tools/call', {'name': 'credentials_report_failure', 'arguments': {

@@ -27,6 +27,26 @@ Provider-filtered inventory also includes authorized active Shared vault
 connections in `credential_sources`. An empty provider-key list does not mean
 the vault is empty: inspect that source before asking for another key.
 
+The broker enforces this order when `credentials_request` cannot reuse a saved
+connection: if authorized Shared access is available, it returns
+`lookup_required` with source metadata instead of opening a new form or pausing.
+The agent requests the source using its `secret_id`, searches Shared through
+`credentials_run`, and verifies the task's access. Working vault access is used
+directly; no provider key needs to be copied into Moyai. If lookup or verification
+fails, the agent retries the original request with `source_checks` containing
+the source ID, revision and observed outcome. These reports require that the
+same source revision was supplied to the credential executor in the current
+turn. This receipt proves source access was supplied; the lookup outcome is
+reported by the agent, not independently inspected by the broker. A rotated
+source or new turn requires a new check. Values never belong in these reports.
+
+Saved personal access takes precedence over organization access. Confirmed
+invalid or expired authentication tries another unambiguous authorized saved
+connection, then Shared lookup, before opening a replacement form. The failed
+operation is never replayed automatically. Multiple saved matches still require
+an appropriate selection; `secret_id` cannot select another user's private
+credential, a different capability, expired access or another session's access.
+
 For generic services, requests can include a verified service `setup_url` and
 plain-text `setup_instructions`. These appear in both the access card and secure
 form. The agent should explain the actual access method, such as an AWS access
@@ -78,13 +98,24 @@ policy expansion: approved credentials can now reach sandbox commands, with the
 permissions the user supplied. Organization connection policies still apply.
 
 Known expiry and recognizable invalid-authentication errors reopen the secure
-request. Permission failures request additional access without invalidating the
+request only after alternative saved access and available source lookup are
+exhausted. Permission failures request additional access without invalidating the
 shared credential for other tasks. Delayed errors from an earlier credential
 revision cannot invalidate its replacement. Commands with multiple credentials
 return their observed revisions so the agent can identify the failed connection;
 ambiguous failures do not invalidate every credential. Completed or uncertain
 writes are never automatically replayed. The agent verifies updated access and
 continues from the saved task.
+
+A command using Shared may fail because a retrieved destination key is invalid
+while the 1Password service-account token remains valid. The executor reports
+this uncertainty without invalidating the source automatically; the agent must
+attribute the failure before reporting that the source itself is invalid.
+
+Run `uv run python scripts/credential_discovery_demo.py` for a local walkthrough,
+or add `--serve` and open `http://127.0.0.1:8798`. It exercises the actual broker,
+saved-access fallback and credential executor with synthetic keys and a synthetic
+vault result. It does not contact 1Password or an inference provider.
 
 Fireworks, OpenAI, Anthropic, Together AI and Groq inference keys keep their
 existing server-side proxy. Its fixed HTTPS origins/routes, redirect rejection,

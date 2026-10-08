@@ -15,10 +15,10 @@ def command(source):
     return shlex.join([sys.executable, '-c', source])
 
 
-def fixture(monkeypatch, *, format='env', value=None, status='ready'):
+def fixture(monkeypatch, *, format='env', value=None, status='ready', name=''):
     monkeypatch.setattr(credential_tools, 'ensure_tools', lambda command: None)
     calls = []
-    binding = {'request_id': REQUEST, 'revision': 3, 'format': format, 'env_var': 'KUBECONFIG',
+    binding = {'request_id': REQUEST, 'revision': 3, 'name': name, 'format': format, 'env_var': 'KUBECONFIG',
                'value': value if value is not None else json.dumps({'TEST_ACCESS_KEY': SECRET})}
     def broker(path, body):
         calls.append((path, body))
@@ -84,6 +84,17 @@ def test_timeout_and_output_limit_stop_process_and_hide_partial_secret(monkeypat
         "import os; print('x'*25+os.environ['TEST_ACCESS_KEY']+'y'*50000)")}, broker)
     assert result['output_limited'] and SECRET[:8] not in result['output']
     assert credential_tools.redact('prefix ' + SECRET[:20], [SECRET]) == 'prefix [credential redacted]'
+
+
+def test_destination_authentication_error_does_not_invalidate_vault_source(monkeypatch):
+    broker, calls = fixture(monkeypatch, name='1password-shared',
+                           value=json.dumps({'OP_SERVICE_ACCOUNT_TOKEN': SECRET}))
+    result = credential_tools.run({'request_ids': [REQUEST], 'command': command(
+        "import sys; print('invalid_api_key from downstream service'); sys.exit(1)")}, broker)
+    assert result['failure'] == 'invalid'
+    assert 'moyai_wait_credential' not in result
+    assert len(calls) == 1 and calls[0][0] == '/credentials/materialize'
+    assert 'destination service' in result['instruction']
 
 
 @pytest.mark.skipif(not hasattr(os, 'memfd_create'), reason='Production credential files use Linux memfd')
