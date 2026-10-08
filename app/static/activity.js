@@ -151,7 +151,7 @@
         // Only new/changed updates get new DOM. Incoming tools must not erase
         // a selected passage, focused link, or copied update the user is reading.
         const template=slot.ownerDocument.createElement('template');
-        template.innerHTML=updateHTML(update,markdown);
+        MoyaiUI.render(template, updateHTML(update,markdown));
         const fresh=template.content.firstElementChild;
         fresh.dataset.updateContent=update.content;
         fresh.dataset.timelineKey=key;
@@ -197,7 +197,7 @@
     slot.dataset.workLive=String(!!turn?.live);
     const previous=new Map([...slot.querySelectorAll('[data-work-key]')].map(node=>[node.dataset.workKey,{open:node.open,manual:node.dataset.workManual}]));
     const focused=slot.contains(slot.ownerDocument?.activeElement)?slot.ownerDocument.activeElement.closest('[data-work-key]')?.dataset.workKey:null;
-    slot.innerHTML=html(turn);
+    MoyaiUI.render(slot, html(turn));
     slot.querySelectorAll('[data-work-key]').forEach(node=>{
       const before=previous.get(node.dataset.workKey);
       if(before&&!(justFinished&&node.dataset.workKey.startsWith('turn:')&&!before.manual))node.open=before.open;

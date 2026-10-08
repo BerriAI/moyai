@@ -67,10 +67,10 @@ function bindAutomationTrigger(form,d) {
   function add(t={id:crypto.randomUUID(),schedule:automationDefaultSchedule()}) {
     const card=document.createElement('section');card.className='automation-trigger-card';card.dataset.triggerId=t.id;card.dataset.repositoryName=t.event?.repository||'';card.dataset.repositoryId=t.event?.repository_id||'';
     const provider=t.event?.provider||'schedule';
-    card.innerHTML=`<header><strong data-trigger-title></strong><button type="button" class="quiet" data-remove-trigger>Remove</button></header><label>Source<select name="source">${Object.entries(automationSources).map(([key,label])=>`<option value="${key}" ${key===provider?'selected':''}>${label}</option>`).join('')}</select></label><div data-source-fields></div>`;
+    MoyaiUI.render(card, `<header><strong data-trigger-title></strong><button type="button" class="quiet" data-remove-trigger>Remove</button></header><label>Source<select name="source">${Object.entries(automationSources).map(([key,label])=>`<option value="${key}" ${key===provider?'selected':''}>${label}</option>`).join('')}</select></label><div data-source-fields></div>`);
     const fields=card.querySelector('[data-source-fields]'),source=card.querySelector('[name=source]');
     function draw(value) {
-      fields.innerHTML=source.value==='schedule'?automationScheduleEditor(value.schedule||automationDefaultSchedule()):automationEventEditor(source.value,value.event||{});
+      MoyaiUI.render(fields, source.value==='schedule'?automationScheduleEditor(value.schedule||automationDefaultSchedule()):automationEventEditor(source.value,value.event||{}));
       const frequency=card.querySelector('[name=frequency]');
       if(frequency)frequency.onchange=()=>{const current=readAutomationTrigger(card);draw(current);};
       const event=card.querySelector('[name=event]');
@@ -108,9 +108,9 @@ function automationDeliveries(a,opened) {
 }
 function automationTriggerDialog(title,description,body) {
   const dialog=$('#automation-dialog');
-  dialog.innerHTML=`<form class="automation-form"><header><div><h2>${esc(title)}</h2><p>${esc(description)}</p></div><button type="button" class="icon-button" data-close aria-label="Close trigger setup">×</button></header>${body}<p data-error role="alert"></p></form>`;
+  MoyaiUI.render(dialog, `<form class="automation-form"><header><div><h2>${esc(title)}</h2><p>${esc(description)}</p></div><button type="button" class="icon-button" data-close aria-label="Close trigger setup">×</button></header>${body}<p data-error role="alert"></p></form>`);
   dialog.querySelector('[data-close]').onclick=()=>dialog.close();
-  dialog.onclose=()=>{dialog.innerHTML='';};
+  dialog.onclose=()=>{MoyaiUI.render(dialog, '');};
   dialog.showModal();return dialog.querySelector('form');
 }
 const automationSetupNotes={
@@ -130,7 +130,7 @@ function setupAutomationWebhook(a) {
   let revision=a.revision;
   function draw() {
     const provider=form.elements.provider.value,entry=providers.find(p=>p.provider===provider),required=['linear','pagerduty'].includes(provider);
-    form.querySelector('[data-provider-setup]').innerHTML=`<label>Webhook URL<input readonly value="${esc(entry.url)}"></label><p class="automation-policy">${esc(automationSetupNotes[provider])}</p><label>Signing secret ${required?'':'(leave blank to generate)'}<input name="secret" type="password" autocomplete="new-password" ${required?'required':''} minlength="16" maxlength="512"></label>${provider==='webhook'?'<p class="automation-policy">HMAC alternative: X-Moyai-Event-Id, X-Moyai-Timestamp (Unix seconds), X-Moyai-Signature: sha256=&lt;hex digest&gt;. Sign timestamp + "." + eventId + "." + rawBody with HMAC-SHA256.</p>':''}<p class="automation-policy">Saving a secret pauses this automation. Enable it after setup. Replacing a secret disables the old one.</p><div data-secret-result></div>`;
+    MoyaiUI.render(form.querySelector('[data-provider-setup]'), `<label>Webhook URL<input readonly value="${esc(entry.url)}"></label><p class="automation-policy">${esc(automationSetupNotes[provider])}</p><label>Signing secret ${required?'':'(leave blank to generate)'}<input name="secret" type="password" autocomplete="new-password" ${required?'required':''} minlength="16" maxlength="512"></label>${provider==='webhook'?'<p class="automation-policy">HMAC alternative: X-Moyai-Event-Id, X-Moyai-Timestamp (Unix seconds), X-Moyai-Signature: sha256=&lt;hex digest&gt;. Sign timestamp + "." + eventId + "." + rawBody with HMAC-SHA256.</p>':''}<p class="automation-policy">Saving a secret pauses this automation. Enable it after setup. Replacing a secret disables the old one.</p><div data-secret-result></div>`);
     form.querySelector('[type=submit]').disabled=false;
   }
   form.elements.provider.onchange=draw;draw();
@@ -140,7 +140,7 @@ function setupAutomationWebhook(a) {
     try{
       const result=await api(`/api/automations/${a.id}/webhook`,{method:'POST',body:JSON.stringify({revision,provider:form.elements.provider.value,secret:form.elements.secret.value})});
       revision=result.revision;form.elements.secret.value='';
-      form.querySelector('[data-secret-result]').innerHTML=result.secret?`<label>Secret (shown once)<input readonly type="password" value="${esc(result.secret)}" data-generated-secret></label><button type="button" class="quiet" data-copy-secret>Copy secret</button><p class="automation-policy">Store this in your webhook sender. Moyai keeps an encrypted copy.</p>`:'<p>Secret saved.</p>';
+      MoyaiUI.render(form.querySelector('[data-secret-result]'), result.secret?`<label>Secret (shown once)<input readonly type="password" value="${esc(result.secret)}" data-generated-secret></label><button type="button" class="quiet" data-copy-secret>Copy secret</button><p class="automation-policy">Store this in your webhook sender. Moyai keeps an encrypted copy.</p>`:'<p>Secret saved.</p>');
       const copy=form.querySelector('[data-copy-secret]');if(copy)copy.onclick=async()=>{try{await navigator.clipboard.writeText(result.secret);toast('Secret copied.');}catch{form.querySelector('[data-generated-secret]').select();toast('Select and copy the secret.');}};
       if(state.pageVersion===version)await renderAutomations();
     }catch(e){form.querySelector('[data-error]').textContent=e.message;button.disabled=false;}

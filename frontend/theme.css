@@ -1,0 +1,79 @@
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@import "tw-animate-css";
+@source "./";
+
+@theme inline {
+  --color-background: var(--ui-background);
+  --color-foreground: var(--ui-foreground);
+  --color-card: var(--ui-background);
+  --color-card-foreground: var(--ui-foreground);
+  --color-popover: var(--ui-background);
+  --color-popover-foreground: var(--ui-foreground);
+  --color-primary: var(--ui-primary);
+  --color-primary-foreground: #fff;
+  --color-secondary: var(--ui-secondary);
+  --color-secondary-foreground: var(--ui-foreground);
+  --color-muted: var(--ui-secondary);
+  --color-muted-foreground: var(--ui-muted);
+  --color-accent: var(--ui-secondary);
+  --color-accent-foreground: var(--ui-foreground);
+  --color-destructive: #b42332;
+  --color-border: var(--ui-border);
+  --color-input: var(--ui-border);
+  --color-ring: var(--ui-primary);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 8px;
+}
+
+:root {
+  --ui-background: #fff;
+  --ui-foreground: #28282b;
+  --ui-primary: #7155ba;
+  --ui-secondary: #f3effa;
+  --ui-muted: #73717b;
+  --ui-border: #e4dfea;
+}
+
+/* Geometry remains in the workspace styles; these rules describe the shared
+   component boundary and portalled surfaces. No Tailwind preflight reset. */
+[data-dialog-body]:not([hidden]), [data-popover-body]:not([hidden]) { display: contents; }
+[data-overlay-root] { display: contents; }
+[data-slot="dialog-overlay"] { position: fixed; inset: 0; z-index: 1000; background: #221b2d66; }
+[data-slot="dialog-content"] {
+  position: fixed; inset: auto; top: 50%; left: 50%;
+  z-index: 1001; margin: 0; display: block; width: min(520px, calc(100vw - 32px));
+  max-width: calc(100vw - 32px); max-height: calc(100dvh - 32px); overflow: auto;
+  background: var(--ui-background); color: var(--ui-foreground); padding: 24px;
+  border: 1px solid var(--ui-border); border-radius: 8px; box-shadow: 0 16px 64px #28202f29;
+  animation: none;
+}
+[data-slot="popover-content"] { background: var(--ui-background); z-index: 1002; }
+[data-slot="tooltip-content"] { z-index: 1003; max-width: min(320px, calc(100vw - 24px)); }
+/* Closed tooltips must release their Escape-key layer before a dialog opens. */
+[data-slot="tooltip-content"][data-state="closed"] { animation: none; }
+[data-slot="native-select-wrapper"] { min-width: 0; width: 100%; }
+[data-slot="input"], [data-slot="native-select"] { height: 40px; }
+.settings-view [data-slot="button"] { height: auto; white-space: normal; }
+[data-slot="native-select-icon"] { width: 16px; height: 16px; }
+.model-picker [data-slot="native-select-wrapper"] { display: contents; }
+.model-picker [data-slot="native-select-icon"] { display: none; }
+.sessions-label [data-slot="native-select-wrapper"] { width: auto; }
+.sessions-label [data-slot="native-select-icon"] { right: 0; }
+.nav-button[data-slot="button"], [data-popover-id="session-actions"] [data-slot="button"] { justify-content: flex-start; }
+.nav-button[data-slot="button"] { height: auto; }
+.model-picker [data-slot="native-select"], .sessions-label [data-slot="native-select"] { box-shadow: none; }
+[data-slot="checkbox"], [data-slot="switch"] { flex: none; }
+[data-slot="checkbox"], .settings-view [data-slot="checkbox"] { width: 16px; height: 16px; min-height: 16px; padding: 0; border-radius: 4px; }
+[data-slot="checkbox-indicator"] { display: grid; place-items: center; }
+[data-slot="checkbox-indicator"] svg { width: 14px; height: 14px; }
+[data-slot="switch"], .settings-view [data-slot="switch"] { width: 36px; height: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 999px; background: #b2acba; display: inline-flex; align-items: center; }
+.settings-view [data-slot="checkbox"][data-state="checked"], .settings-view [data-slot="switch"][data-state="checked"], [data-slot="checkbox"][data-state="checked"], [data-slot="switch"][data-state="checked"] { background: var(--ui-primary); color: #fff; border-color: var(--ui-primary); }
+[data-slot="switch-thumb"] { display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
+[data-slot="table-container"] { overflow-x: auto; max-width: 100%; }
+@media (prefers-reduced-motion: reduce) {
+  [data-slot] { animation: none !important; transition: none !important; }
+}

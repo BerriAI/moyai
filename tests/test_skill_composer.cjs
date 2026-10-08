@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 
 const catalog = [
   {id:'org',name:'benchmark-review',reference:'org:benchmark-review',scope:'organization',description:'Review benchmark coverage'},

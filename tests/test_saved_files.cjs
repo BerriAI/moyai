@@ -1,4 +1,5 @@
 const assert=require('node:assert/strict');
+require('./helpers/ui-vm.cjs');
 const {test}=require('node:test');
 const {reference,resolve,decorate,preview,reveal,create}=require('../app/static/saved-files.js');
 const file=path=>({path,workspace_path:path,name:path.split('/').at(-1),archive_path:'new-files/'+path,url:'/download/'+encodeURIComponent(path)});

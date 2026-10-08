@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const {randomUUID}=require('node:crypto');
 function context(extra={}) {
   const c={Intl,Date,Map,Set,crypto:{randomUUID},state:{pageVersion:1,config:{cloud_ready:true,model:'model',models:[{id:'model',name:'Model'}]}},providerNames:{github:'GitHub'},esc:s=>String(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x])),...extra};

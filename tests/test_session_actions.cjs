@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 const source = readFileSync('app/static/session-actions.js', 'utf8');
 function harness() {
   const notices = [], calls = [];
@@ -26,42 +26,16 @@ function menuHarness(chat) {
   c.bindSessionHeaderActions(detail);
   return {...h,menu,detail,button,archive:()=>{node('[data-archive-session]').onclick();return pending;}};
 }
-test('sidebar menu opens beside its session row, aligned with the row top',()=>{
+test('sidebar and header menus anchor shadcn positioning to their actual trigger',()=>{
   const {context:c,menu,detail,button}=menuHarness(true);
-  const row={left:8,right:280,top:200,bottom:260};
-  button.closest=selector=>selector==='.parent-session'?{getBoundingClientRect:()=>row}:null;
-  button.getBoundingClientRect=()=>({right:276,bottom:233});
+  let anchor;
+  menu.showPopover=options=>anchor=options.source;
   c.showSessionActions(detail,button);
-  assert.equal(Number.parseFloat(menu.style.top),row.top);
-  assert.ok(Number.parseFloat(menu.style.left)>row.right,'Menu must not cover the session row');
-  assert.ok(Number.parseFloat(menu.style.left)+menu.offsetWidth<=c.innerWidth-8);
-});
-test('narrow sidebar menu falls back below the trigger and remains within the viewport',()=>{
-  const {context:c,menu,detail,button}=menuHarness(true);
-  c.innerWidth=320;
-  button.closest=()=>({getBoundingClientRect:()=>({right:288,top:200,bottom:260})});
-  button.getBoundingClientRect=()=>({right:280,bottom:233});
-  c.showSessionActions(detail,button);
-  assert.ok(Number.parseFloat(menu.style.top)>=233);
-  assert.ok(Number.parseFloat(menu.style.left)>=8);
-  assert.ok(Number.parseFloat(menu.style.left)+menu.offsetWidth<=c.innerWidth-8);
-});
-test('a sidebar menu near the bottom shifts up to keep every action visible',()=>{
-  const {context:c,menu,detail,button}=menuHarness(true);
-  const row={right:280,top:540,bottom:600};
-  button.closest=()=>({getBoundingClientRect:()=>row});
-  button.getBoundingClientRect=()=>({right:276,bottom:573});
-  c.showSessionActions(detail,button);
-  assert.ok(Number.parseFloat(menu.style.left)>row.right);
-  assert.ok(Number.parseFloat(menu.style.top)<row.top);
-  assert.equal(Number.parseFloat(menu.style.top)+menu.offsetHeight,c.innerHeight-8);
-});
-test('session-header menu stays below its trigger and inside the right edge',()=>{
-  const {context:c,menu,button}=menuHarness(true);
-  button.getBoundingClientRect=()=>({right:798,bottom:40});
+  assert.equal(anchor,button);
+  anchor=null;
   button.onclick();
-  assert.ok(Number.parseFloat(menu.style.top)>=40);
-  assert.equal(Number.parseFloat(menu.style.left)+menu.offsetWidth,c.innerWidth-8);
+  assert.equal(anchor,button);
+  // Viewport collisions and keyboard focus are covered by shadcn_ui.cjs.
 });
 for(const chat of [false,true])for(const origin of ['header','sidebar'])test(`${chat?'chat':'legacy'} header tracks archive and restore started from the ${origin}`,async()=>{
   const {context:c,state,menu,button,archive,calls}=menuHarness(chat);

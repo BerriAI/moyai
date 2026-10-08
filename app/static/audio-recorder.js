@@ -1,9 +1,9 @@
 // Microphone access starts only after a click. Draft audio uses the normal upload flow.
 function bindAudioRecorder(form, onFile, locked){
   if(!globalThis.MediaRecorder || !globalThis.navigator?.mediaDevices?.getUserMedia)return null;
-  const button=document.createElement('button');button.type='button';button.className='quiet record-button';
+  const button=MoyaiUI.createElement('button', document);button.type='button';button.className='quiet record-button';
   const microphoneIcon='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"/></svg>';
-  const cancel=document.createElement('button');cancel.type='button';cancel.className='quiet';cancel.textContent='Cancel recording';cancel.hidden=true;
+  const cancel=MoyaiUI.createElement('button', document);cancel.type='button';cancel.className='quiet';cancel.textContent='Cancel recording';cancel.hidden=true;
   const status=document.createElement('span');status.className='recording-status';status.setAttribute('role','status');
   form.querySelector('.composer-toolbar').prepend(button,cancel,status);
   let recorder,stream,timer,waiting=false,disposed=false,cancelled=false,seconds=0,generation=0;
@@ -13,7 +13,7 @@ function bindAudioRecorder(form, onFile, locked){
     button.disabled=locked()||waiting;
     const label=recorder?'Stop recording':waiting?'Opening microphone…':'Record audio';
     button.className='quiet record-button'+(busy()?'':' is-idle');
-    if(busy())button.textContent=label;else button.innerHTML=microphoneIcon;
+    if(busy())button.textContent=label;else MoyaiUI.render(button, microphoneIcon);
     button.title=label;button.setAttribute('aria-label',label);cancel.hidden=!busy();
     status.textContent=recorder?`Recording ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')} · 2 min max`:'';
   };

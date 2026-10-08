@@ -35,19 +35,19 @@ function settingsNavigation(view, role) {
 
 function updateSettingsNavigation() {
   const nav = $('#settings-navigation');
-  if (nav) nav.innerHTML = settingsNavigation(state.view, state.role);
+  if (nav) MoyaiUI.render(nav, settingsNavigation(state.view, state.role));
 }
 
 function settingsLoadError(title, error, retry) {
-  $('#content').innerHTML = `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`;
+  MoyaiUI.render($('#content'), `<section class="settings-load-error"><h1>${esc(title)}</h1><div role="alert"><h2>Unable to load this page</h2><p>${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="settings-retry">Try again</button></section>`);
   $('#settings-retry').onclick = retry;
 }
 
 function confirmSettingsAction(title, description, action) {
   return new Promise(resolve => {
-    const dialog = document.createElement('dialog');
+    const dialog = MoyaiUI.createDialog();
     dialog.setAttribute('aria-label', title);
-    dialog.innerHTML = `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`;
+    MoyaiUI.render(dialog, `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`);
     document.body.append(dialog);
     dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
     dialog.querySelector('[data-confirm]').onclick = () => dialog.close('confirmed');
@@ -63,7 +63,7 @@ function confirmSettingsAction(title, description, action) {
 
 // Background polling must not replace the control someone is using.
 function settingsInteractionActive() {
-  return !!document.querySelector('dialog[open]') ||
+  return !!document.querySelector('[data-slot="dialog-content"][data-state="open"]') ||
     !!(document.querySelector('#content')?.contains(document.activeElement) &&
       document.activeElement?.matches('button,a,input,select,textarea,summary,[tabindex="0"]'));
 }
@@ -113,13 +113,13 @@ function settingsIcon(view) {
 
 async function renderSettings() {
   const version = state.pageVersion;
-  $('#content').innerHTML = '<p class="subtext" role="status">Loading settings…</p>';
+  MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading settings…</p>');
   const session = await api('/api/session');
   if (version !== state.pageVersion) return;
   applyUserSession(session);
   if (!session.authenticated) { await boot(); return; }
   const admin = state.role === 'admin';
-  $('#content').innerHTML = `<section class="settings-page">
+  MoyaiUI.render($('#content'), `<section class="settings-page">
     <div class="page-heading"><div><h1>Settings</h1><p class="subtext">Make Moyai work the way your team does.</p></div></div>
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
@@ -151,7 +151,7 @@ async function renderSettings() {
         </div>
       </div>
     </section>
-  </section>`;
+  </section>`);
   const userId=state.userId;
   for(const key of ['send_immediately','omit_private_tool_payloads']){
     const id=key.replaceAll('_','-'),input=$('#'+id),status=$('#'+id+'-status');

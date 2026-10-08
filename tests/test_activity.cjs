@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const MoyaiQueue=require('../app/static/message-queue.js');
 const MoyaiActivity=require('../app/static/activity.js');
 const {groups,current,timeline,updates,html,duration,syncWork,tick}=MoyaiActivity;

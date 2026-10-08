@@ -39,7 +39,7 @@
     const activity=layout.querySelector('#session-details');
     const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',captures:'archive',files:'file',file:'file',chat:'chat',activity:'list',pulls:'pull',pr:'pull',agents:'participants'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
-    panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" title="Add tab" aria-expanded="false">${ico('plus',18)}</button><span class="panel-spacer"></span><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel" title="Expand">${ico('expand',17)}</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel" title="Hide panel">${ico('panel',18)}</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
+    MoyaiUI.render(panel, `<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" title="Add tab" aria-expanded="false">${ico('plus',18)}</button><span class="panel-spacer"></span><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel" title="Expand">${ico('expand',17)}</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel" title="Hide panel">${ico('panel',18)}</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`);
     const card=document.createElement('aside');card.className='session-pull-requests';card.setAttribute('aria-label','Session toolbox');card.hidden=true;layout.append(card);
     const pullsSection=document.createElement('section'),agentsSection=document.createElement('section');
     card.append(pullsSection,agentsSection);
@@ -53,7 +53,7 @@
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
     q('.panel-resize').onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();resize(width+(e.key==='ArrowLeft'?3:-3));}};
     function draw(){
-      q('.panel-tabs').innerHTML=[...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`).join('');
+      MoyaiUI.render(q('.panel-tabs'), [...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`).join(''));
       q('.panel-tabs').querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
       q('.panel-tabs').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
       document.querySelector('#toggle-details')?.setAttribute('aria-expanded',String(visible&&tabs.get(active)?.kind==='activity'));
@@ -67,7 +67,7 @@
     function menu(open){q('.panel-menu').hidden=!open;q('[data-add]').setAttribute('aria-expanded',String(open));if(open){q('.panel-menu input').value='';drawMenu();q('.panel-menu input').focus();}}
     function drawMenu(){
       const items=menuItems(q('.panel-menu input').value.toLowerCase());
-      q('[data-menu-items]').innerHTML=renderMenuItems(items);
+      MoyaiUI.render(q('[data-menu-items]'), renderMenuItems(items));
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
     q('.panel-menu input').oninput=drawMenu;q('[data-add]').onclick=()=>menu(q('.panel-menu').hidden);q('[data-hide]').onclick=hide;
@@ -116,8 +116,8 @@
       t.element.remove();tabs.delete(id);reconcile();
     }
     function good(t){return !disposed&&tabs.get(t.id)===t;}
-    function error(t,e){if(good(t))t.element.innerHTML=`<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`;t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t));}
-    function loading(t){t.element.innerHTML='<div class="panel-empty" role="status">Loading…</div>';}
+    function error(t,e){if(good(t))MoyaiUI.render(t.element, `<div class="panel-empty" role="alert">${esc(e.message)}<p><button type="button" data-retry>Retry</button></p></div>`);t.element.querySelector('[data-retry]')?.addEventListener('click',()=>mount(t));}
+    function loading(t){MoyaiUI.render(t.element, '<div class="panel-empty" role="status">Loading…</div>');}
     async function mount(t){
       const epoch=t.epoch=(t.epoch||0)+1;const current=()=>good(t)&&epoch===t.epoch;
       if(t.kind==='pulls'){renderPulls(t.element);return;}
@@ -134,12 +134,12 @@
       try{
         const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
-          t.element.innerHTML='<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><p class="panel-footnote">Latest saved version · Select a file to open it in a tab.</p>';
+          MoyaiUI.render(t.element, '<div class="panel-file-search"><input type="search" aria-label="Find a saved file" placeholder="Find a file…"><button type="button" data-refresh aria-label="Refresh saved files">↻</button></div><div class="panel-file-list"></div><p class="panel-footnote">Latest saved version · Select a file to open it in a tab.</p>');
           t.expandedFolders??=new Set();
           const input=t.element.querySelector('input');input.value=t.fileSearch||'';
           function list(){
             t.fileSearch=input.value;const term=input.value.toLowerCase(),files=catalog.files.filter(f=>f.path.toLowerCase().includes(term));
-            t.element.querySelector('.panel-file-list').innerHTML=renderFileTree(files,{escape:esc,size,expanded:t.expandedFolders,search:!!term});
+            MoyaiUI.render(t.element.querySelector('.panel-file-list'), renderFileTree(files,{escape:esc,size,expanded:t.expandedFolders,search:!!term}));
             t.element.querySelectorAll('[data-folder]').forEach(folder=>folder.ontoggle=()=>{
               // Search temporarily opens ancestors; don't overwrite browsing state.
               if(term||!folder.isConnected)return;
@@ -150,16 +150,16 @@
           t.element.querySelector('input').oninput=list;t.element.querySelector('[data-refresh]').onclick=()=>mount(t);list();return;
         }
         const file=catalog.files.find(f=>f.archive_path===t.path);if(!file)throw new Error('This file is no longer in the latest saved workspace. Open Files to choose another.');
-        t.title=file.name;draw();t.element.innerHTML=`<header class="panel-file-heading"><div><strong>${esc(file.name)}</strong><small>${esc(file.path)}</small></div><a href="${esc(file.url)}" download="${esc(file.name)}">↓ Download</a><button type="button" data-refresh aria-label="Refresh file">↻</button></header><div class="panel-file-content"></div>`;
+        t.title=file.name;draw();MoyaiUI.render(t.element, `<header class="panel-file-heading"><div><strong>${esc(file.name)}</strong><small>${esc(file.path)}</small></div><a href="${esc(file.url)}" download="${esc(file.name)}">↓ Download</a><button type="button" data-refresh aria-label="Refresh file">↻</button></header><div class="panel-file-content"></div>`);
         const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').onclick=()=>mount(t);
-        if(file.inline_url&&['image','video'].includes(file.kind)){content.classList.add('panel-media');content.innerHTML=file.kind==='video'?`<video controls preload="metadata" src="${esc(file.inline_url)}"></video>`:`<img src="${esc(file.inline_url)}" alt="${esc(file.name)}">`;}
+        if(file.inline_url&&['image','video'].includes(file.kind)){content.classList.add('panel-media');MoyaiUI.render(content, file.kind==='video'?`<video controls preload="metadata" src="${esc(file.inline_url)}"></video>`:`<img src="${esc(file.inline_url)}" alt="${esc(file.name)}">`);}
         else{
           const result=await api(file.preview_url);if(!current()||!content.isConnected)return;
           t.renderPreview=()=>{
             if(!current()||!content.isConnected)return;
             const location=MoyaiFiles.reference(t.sourceRef);
             t.element.querySelector('.panel-file-heading small').textContent=file.path+(location?.line?':'+location.line+(location.endLine!==location.line?'–'+location.endLine:''):'');
-            content.innerHTML=MoyaiFiles.preview(result,t.sourceRef,{escape:esc,markdown});decorate(content,catalog.files);
+            MoyaiUI.render(content, MoyaiFiles.preview(result,t.sourceRef,{escape:esc,markdown}));decorate(content,catalog.files);
             if(visible&&active===t.id)MoyaiFiles.reveal(content);
           };
           t.renderPreview();
@@ -169,7 +169,7 @@
     }
     function mountCaptures(t){
       let timer,version=0,viewActive=false,signature='',files=[];
-      t.element.innerHTML='<section class="computer-captures"><header class="computer-captures-heading"><h2>Saved captures</h2><button type="button" data-refresh>Refresh</button><p>Available after the workspace closes · Shared with session viewers</p></header><p data-status role="status"></p><div data-captures><p class="computer-no-captures">Loading captures…</p></div><p class="computer-limits">Desktop and browser captures · No audio · Up to 10 minutes or 25 MB per recording · 64 MB of captures per session</p></section>';
+      MoyaiUI.render(t.element, '<section class="computer-captures"><header class="computer-captures-heading"><h2>Saved captures</h2><button type="button" data-refresh>Refresh</button><p>Available after the workspace closes · Shared with session viewers</p></header><p data-status role="status"></p><div data-captures><p class="computer-no-captures">Loading captures…</p></div><p class="computer-limits">Desktop and browser captures · No audio · Up to 10 minutes or 25 MB per recording · 64 MB of captures per session</p></section>');
       const gallery=t.element.querySelector('[data-captures]'),status=t.element.querySelector('[data-status]');
       async function refresh(){
         clearTimeout(timer);const v=++version;
@@ -181,11 +181,11 @@
           const next=JSON.stringify(files);
           if(signature!==next){
             signature=next;
-            gallery.innerHTML=files.length?files.map(file=>`<article class="computer-capture">${file.kind==='image'?`<a href="${esc(file.inline_url)}" target="_blank" rel="noopener"><img src="${esc(file.inline_url)}" alt="${esc(file.name)}" loading="lazy"></a>`:`<video src="${esc(file.inline_url)}" controls preload="metadata"></video>`}<div><span title="${esc(file.name)}">${esc(file.name)}</span><a href="${esc(file.url)}" download="${esc(file.name)}" aria-label="Download ${esc(file.name)}">↓ Download</a></div></article>`).join(''):'<p class="computer-no-captures">No saved captures yet. Take a screenshot or record a flow in Computer.</p>';
+            MoyaiUI.render(gallery, files.length?files.map(file=>`<article class="computer-capture">${file.kind==='image'?`<a href="${esc(file.inline_url)}" target="_blank" rel="noopener"><img src="${esc(file.inline_url)}" alt="${esc(file.name)}" loading="lazy"></a>`:`<video src="${esc(file.inline_url)}" controls preload="metadata"></video>`}<div><span title="${esc(file.name)}">${esc(file.name)}</span><a href="${esc(file.url)}" download="${esc(file.name)}" aria-label="Download ${esc(file.name)}">↓ Download</a></div></article>`).join(''):'<p class="computer-no-captures">No saved captures yet. Take a screenshot or record a flow in Computer.</p>');
           }
           status.textContent='';
         }catch(e){if(v===version&&viewActive&&good(t)){
-          if(!signature)gallery.innerHTML='<p class="computer-no-captures">Captures could not be loaded.</p>';
+          if(!signature)MoyaiUI.render(gallery, '<p class="computer-no-captures">Captures could not be loaded.</p>');
           status.textContent=`Could not refresh captures. ${e.message} Use Refresh to try again.`;
         }}
         finally{if(v===version&&viewActive&&good(t))timer=setTimeout(refresh,3000);}
@@ -211,7 +211,7 @@
     function renderAgents(host){
       const focused=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-agent-id'):null;
       const ready=agents.filter(child=>['idle','completed'].includes(child.status)).length;
-      host.innerHTML=`<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`;
+      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc([child.path,statusFor(child)].filter(Boolean).join(' · '))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`);
       if(focused)host.querySelector(`[data-agent-id="${focused}"]`)?.focus({preventScroll:true});
     }
     function syncAgents(data){
@@ -233,7 +233,7 @@
     }
     function syncSession(data){syncAgents(data);syncPullRequests(data);}
     function renderPulls(host){
-      host.innerHTML=`<header class="pull-requests-heading"><h2>Pull requests</h2><span>${pullRequests.length}</span></header><div class="pull-request-list">${pullRequests.map(pr=>`<a class="pull-request-row" href="${esc(pr.url)}" data-pr-url="${esc(pr.url)}" title="${esc(pr.title)}" target="_blank" rel="noopener noreferrer"><span class="pull-request-icon">${ico('pull',18)}</span><span><strong>${esc(pr.title)}</strong><small>${esc(pr.repository)} #${pr.number}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Pull requests created in this session will appear here.</p>'}</div>`;
+      MoyaiUI.render(host, `<header class="pull-requests-heading"><h2>Pull requests</h2><span>${pullRequests.length}</span></header><div class="pull-request-list">${pullRequests.map(pr=>`<a class="pull-request-row" href="${esc(pr.url)}" data-pr-url="${esc(pr.url)}" title="${esc(pr.title)}" target="_blank" rel="noopener noreferrer"><span class="pull-request-icon">${ico('pull',18)}</span><span><strong>${esc(pr.title)}</strong><small>${esc(pr.repository)} #${pr.number}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Pull requests created in this session will appear here.</p>'}</div>`);
     }
     function openPullRequest(url){
       const pr=pullRequests.find(item=>item.url.toLowerCase()===String(url).toLowerCase());
@@ -274,24 +274,24 @@
       element.querySelectorAll('.copy-code').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(b.closest('.code-block').querySelector('code').textContent);b.textContent='Copied';}catch{b.textContent='Select to copy';}});
     }
     function mountChat(t){
-      t.element.innerHTML=`<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" maxlength="16000" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`;
+      MoyaiUI.render(t.element, `<div class="side-chat-note"><span>Separate conversation · Main task keeps running</span><a data-full hidden target="_blank" rel="noopener">Open session ↗</a></div><div class="side-chat-messages" role="log" aria-label="Side conversation"></div><form class="side-chat-form"><p data-status role="status"></p><label class="sr-only" for="side-input-${t.uid}">Message side chat</label><textarea id="side-input-${t.uid}" placeholder="Ask about this session…" rows="3" maxlength="16000" required></textarea><div><select aria-label="Side chat model">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===(t.model||run.model)?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" data-stop hidden>Stop</button><button type="submit" aria-label="Send side chat message">↑</button></div><small>Starts with a snapshot of this conversation. Files and computer are separate.</small></form>`);
       const form=t.element.querySelector('form'),input=form.querySelector('textarea'),log=t.element.querySelector('[role="log"]'),status=form.querySelector('[data-status]'),model=form.querySelector('select'),send=form.querySelector('[type="submit"]'),stop=form.querySelector('[data-stop]'),link=t.element.querySelector('[data-full]');
       let timer,inFlight=false,enabled=false,unavailable=false,signature='';
       model.onchange=()=>{t.model=model.value;save();};
       input.value=t.draft||'';input.oninput=()=>{t.draft=input.value;save();};
-      function showEmpty(){if(!t.chatId&&!unavailable)log.innerHTML='<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>';}
+      function showEmpty(){if(!t.chatId&&!unavailable)MoyaiUI.render(log, '<div class="side-chat-empty"><span aria-hidden="true">◌</span><h3>Ask about this session</h3><p>Ask a question, explore another idea, or discuss the work without interrupting Moyai.</p></div>');}
       function failed(e){
         if(!good(t)||unavailable)return;
         if(e.status!==404){status.textContent=e.message;return;}
         unavailable=true;clearTimeout(timer);signature='';status.textContent='';
-        log.innerHTML='<div class="panel-empty" role="status">This side chat is no longer available.</div>';
+        MoyaiUI.render(log, '<div class="panel-empty" role="status">This side chat is no longer available.</div>');
         input.disabled=model.disabled=send.disabled=stop.disabled=true;stop.hidden=link.hidden=true;
       }
       function drawChat(data){
         syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify(transcript);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
         if(signature!==next){
           signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-          log.innerHTML=transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join('');
+          MoyaiUI.render(log, transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):markdown(m.content)}</div></article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join(''));
           log.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=slots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
         }
         MoyaiActivity.sync(log,data,{markdown,copy:async(text)=>{try{await navigator.clipboard.writeText(text);}catch{toast('Select the text to copy.');}}});MoyaiActivity.tick(log);if(bottom)log.scrollTop=log.scrollHeight;

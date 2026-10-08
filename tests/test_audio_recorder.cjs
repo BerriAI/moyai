@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {readFileSync}=require('node:fs');
 const {test}=require('node:test');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function setup(){
   class Element{setAttribute(){}remove(){this.removed=true;}prepend(...items){this.children=items;}}

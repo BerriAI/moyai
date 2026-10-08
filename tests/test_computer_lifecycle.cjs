@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const fs=require('node:fs');
 function node(){
   const children=new Map(), listeners=new Map();

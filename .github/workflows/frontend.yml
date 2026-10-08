@@ -1,0 +1,39 @@
+name: Frontend
+
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'app/static/**'
+      - 'tests/**.cjs'
+      - 'tests/browser/**'
+      - 'tests/helpers/**'
+      - 'scripts/settings_ui_preview.cjs'
+      - 'package*.json'
+      - 'tsconfig.json'
+      - 'vite.config.ts'
+      - 'components.json'
+      - '.github/workflows/frontend.yml'
+  push:
+    branches: [main]
+    paths: ['frontend/**', 'app/static/**', 'package*.json']
+
+permissions:
+  contents: read
+
+jobs:
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: git diff --exit-code -- app/static/ui
+      - run: npm test
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:ui

@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 function setup(status='pending'){
  const buttons=[],continuations=[];
  const area={dataset:{},innerHTML:'',querySelectorAll:selector=>selector==='[data-pr-access]'?buttons:continuations};

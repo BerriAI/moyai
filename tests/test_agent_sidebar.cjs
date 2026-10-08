@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 const script = readFileSync('app/static/app.js','utf8');
 function helpers(){
   const context={state:{selected:'worker-b'},relative:()=> '2m ago'};

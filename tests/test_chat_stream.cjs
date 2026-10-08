@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 
 // Run the browser's stream controller with a transport that can permanently
 // close on a deployment's HTTP error, as native EventSource does.

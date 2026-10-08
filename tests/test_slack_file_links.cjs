@@ -1,6 +1,6 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const {readFileSync}=require('node:fs');
 const MoyaiFiles=require('../app/static/saved-files.js');
 const runId='a'.repeat(32),fileRef='/workspace/nightly-preflight/cutover-status.md';

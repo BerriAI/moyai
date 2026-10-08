@@ -1,4 +1,5 @@
 const assert=require('node:assert/strict');
+require('./helpers/ui-vm.cjs');
 const {test}=require('node:test');
 const {groups,updates,updateHTML,html,sync}=require('../app/static/activity.js');
 const stamp=n=>new Date(Date.UTC(2026,9,1,12,0,n)).toISOString();

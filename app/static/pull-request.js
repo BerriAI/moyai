@@ -25,23 +25,23 @@
   function mount({element,url,load,markdown,escape:esc}){
     let alive=true,active=false,epoch=0,data=null,section='changes',initialized=false;
     const expanded=new Set();
-    element.innerHTML=`<div class="native-pr">
+    MoyaiUI.render(element, `<div class="native-pr">
       <div class="pr-toolbar"><span data-state class="pr-state">Pull request</span><span class="pr-toolbar-spacer"></span><button type="button" data-refresh aria-label="Refresh pull request">Refresh</button><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open in GitHub ↗</a></div>
       <header class="pr-heading" data-heading></header>
       <p class="pr-load-status" data-status role="status" aria-live="polite"></p>
       <div class="pr-sections" role="group" aria-label="Pull request sections"><button type="button" data-section="changes" aria-pressed="true">Changes <span data-count></span></button><button type="button" data-section="description" aria-pressed="false">Description</button></div>
-      <div class="pr-content" data-content></div></div>`;
+      <div class="pr-content" data-content></div></div>`);
     const q=selector=>element.querySelector(selector),content=q('[data-content]'),status=q('[data-status]'),refresh=q('[data-refresh]');
     function renderContent(){
-      if(!data){content.innerHTML='';return;}
+      if(!data){MoyaiUI.render(content, '');return;}
       if(section==='description'){
-        content.innerHTML=`<div class="pr-description markdown">${data.body?markdown(data.body):'<p>No description provided.</p>'}</div>${data.body_truncated?'<p class="pr-notice">Description truncated. Open GitHub to read it in full.</p>':''}`;
+        MoyaiUI.render(content, `<div class="pr-description markdown">${data.body?markdown(data.body):'<p>No description provided.</p>'}</div>${data.body_truncated?'<p class="pr-notice">Description truncated. Open GitHub to read it in full.</p>':''}`);
         content.querySelectorAll('.copy-code').forEach(button=>button.onclick=async()=>{
           try{await navigator.clipboard.writeText(button.closest('.code-block').querySelector('code').textContent);button.textContent='Copied';}
           catch{button.textContent='Select to copy';}
         });
       }else{
-        content.innerHTML=changes(data,esc,expanded);
+        MoyaiUI.render(content, changes(data,esc,expanded));
         content.querySelectorAll('[data-file]').forEach(detail=>detail.ontoggle=()=>{
           if(!detail.isConnected)return;
           const name=data.files[Number(detail.dataset.file)]?.filename;
@@ -56,9 +56,9 @@
       const date=data.created_at?new Date(data.created_at):null;
       const opened=date&&!Number.isNaN(date.getTime())?'Opened '+date.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'';
       const repository=data.repository||url.split('/').slice(3,5).join('/');
-      q('[data-heading]').innerHTML=`<p class="pr-repository">${esc(repository)} · #${esc(data.number)}</p><h2>${esc(data.title)}</h2>
+      MoyaiUI.render(q('[data-heading]'), `<p class="pr-repository">${esc(repository)} · #${esc(data.number)}</p><h2>${esc(data.title)}</h2>
         <div class="pr-branches">${data.author?`<span class="pr-author">${esc(data.author)}</span>`:''}<code>${esc(data.base)}</code><span aria-label="from">←</span><code>${esc(data.head_ref||data.head?.slice(0,7)||'')}</code></div>
-        <p class="pr-stats">${opened?`<span>${esc(opened)}</span>`:''}<span>${esc(data.changed_files??data.files.length)} files</span><span class="pr-additions">+${esc(data.additions??0)}</span><span class="pr-deletions">−${esc(data.deletions??0)}</span></p>`;
+        <p class="pr-stats">${opened?`<span>${esc(opened)}</span>`:''}<span>${esc(data.changed_files??data.files.length)} files</span><span class="pr-additions">+${esc(data.additions??0)}</span><span class="pr-deletions">−${esc(data.deletions??0)}</span></p>`);
       q('[data-count]').textContent=String(data.changed_files??data.files.length);
       if(!initialized){if(data.files[0])expanded.add(data.files[0].filename);initialized=true;}
       renderContent();
@@ -74,7 +74,7 @@
       }catch(error){
         if(!alive||!active||request!==epoch)return;
         if([401,403,404,409].includes(error.status)){
-          data=null;initialized=false;expanded.clear();q('[data-heading]').innerHTML='';q('[data-count]').textContent='';
+          data=null;initialized=false;expanded.clear();MoyaiUI.render(q('[data-heading]'), '');q('[data-count]').textContent='';
           q('[data-state]').className='pr-state';q('[data-state]').textContent='Unavailable';renderContent();
         }
         status.textContent=(data?'Could not refresh. Showing the previous version. ':'')+error.message+' Use Refresh to try again.';

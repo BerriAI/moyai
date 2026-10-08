@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const queue=require('../app/static/message-queue.js');
 const message={id:2,role:'user',user_id:'alice',user_name:'Alice',status:'queued',content:'Original message',model:'astra',revision:0,queue_locked:0,attachments:[]};
 

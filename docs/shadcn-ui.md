@@ -1,0 +1,91 @@
+# Moyai UI components
+
+The workspace and every settings route render shared React components from
+`frontend/components/ui`. These are shadcn/ui's New York components, backed by
+Radix UI. The workspace palette and layout remain in place.
+
+## Build and preview
+
+```sh
+npm ci
+npm run build
+npm run typecheck
+npm test
+npm run test:ui
+npm run preview -- --port 8840
+```
+
+Open `http://127.0.0.1:8840`. This preview serves the real frontend with synthetic
+API fixtures and cannot call models or modify connected services. `?fixture=empty`,
+`?fixture=error` and `?fixture=member` select alternate states. Use `npm run dev` in
+another terminal to rebuild on source changes, then refresh the browser.
+
+The production bundle lives in `app/static/ui` and is checked in. Python, Docker
+and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
+checks that it matches its source. Commit bundle changes together with source.
+
+The session integration suite uses real local session APIs and demo execution:
+
+```sh
+uv run python scripts/session_ui_demo.py --port 8830
+SESSION_UI_URL=http://127.0.0.1:8830 node --test tests/browser/session_ui.cjs
+```
+
+Install the test browser once with `npx playwright install chromium`.
+
+## Rendering contract
+
+Feature controllers keep their existing API calls, revisions, access checks,
+stream handling and escaped templates. `MoyaiUI.render(element, html)` converts
+each template into a React tree composed of shadcn Button, Input, Textarea,
+NativeSelect, Checkbox, Switch, Label, Badge, Table, Card, Alert, Collapsible and
+Tooltip components. The initial workspace shell uses the same renderer.
+
+This is a component migration, not a rewrite of the application state into React
+hooks. The adapter is explicit at every rendering boundary. It does not patch DOM
+prototypes or watch the DOM to replace controls after handlers have been bound.
+
+- Use `MoyaiUI.render` for replacement, `insert` for incremental insertion, and
+  `replace` for replacing a loading region. All commit synchronously so controllers
+  can bind handlers immediately.
+- Regions are replaced in full, matching the former `innerHTML` behavior. Do not
+  call `root.render` to reconcile DOM owned by a controller. Nested roots are
+  disposed before their parent, and a removal observer releases detached regions.
+- Inputs remain uncontrolled. Controllers can read and set `value`, run native
+  validation, use `FormData`, and retain drafts while requests are in flight.
+  The Checkbox/Switch adapter preserves the existing `checked` and native
+  `input`/`change` event contract, including reset and failed-save rollback.
+- `MoyaiUI.createDialog()` returns a persistent content host with `showModal`,
+  `close`, `open`, `returnValue`, `cancel` and `close` events. Its visible surface is
+  shadcn Dialog; Radix provides the portal, focus trap, Escape, outside dismissal
+  and return focus. The host remains queryable while closed, and sensitive forms
+  keep their existing close/cancel cleanup.
+- Session actions use shadcn Popover anchored to the invoking control, with Radix
+  viewport collision handling. The existing menu commands and arrow-key handlers
+  remain in their controller.
+- Rich-text skill atoms, Markdown sanitization, charts, native drag/drop and the
+  remote computer canvas retain their specialized implementations. Their surrounding
+  controls use the shared components. Plain structural HTML remains semantic HTML.
+- Templates are trusted application markup; continue to escape API values and
+  sanitize Markdown before rendering. The component adapter is not a sanitizer.
+
+## Styling
+
+`components.json` configures the official shadcn CLI and TypeScript aliases.
+`frontend/theme.css` maps its semantic roles to Moyai's existing purple, lavender,
+white and neutral colors. Tailwind utilities are scoped through CSS layers and do
+not introduce Preflight, so existing page geometry stays intact. Component rules
+for portals, fields and controls are shared here; do not add page-specific copies.
+
+The legacy styles still own page and chat layout. Native dialog selectors now
+target `[data-slot="dialog-content"]`; per-dialog sizing uses `data-dialog-id`.
+The content host uses `display: contents`, so measure or focus the visible dialog
+via its dialog role or `data-dialog-id`, not the inner host.
+
+## Verification
+
+Controller tests use a renderer double in `tests/helpers/ui-vm.cjs`; their API,
+escaping, race and permission assertions remain independent of React. Browser
+tests exercise the built components, actual form values, dialog focus/cancellation,
+saved preferences, filters, role restrictions, errors and 1440/768/320px layouts.
+Menu placement is verified in Chromium rather than by mocking Radix geometry.

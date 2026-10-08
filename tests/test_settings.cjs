@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {test} = require('node:test');
 const {readFileSync} = require('node:fs');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 
 function setup({automations = false, role = 'admin'} = {}) {
   const elements = new Map();
@@ -239,7 +239,7 @@ test('background refresh defers while a dialog or page control is active', () =>
   const {context} = setup();
   let modal = null, contains = true, interactive = true;
   context.document = {
-    querySelector:key=>key==='dialog[open]'?modal:{contains:()=>contains},
+    querySelector:key=>key==='[data-slot="dialog-content"][data-state="open"]'?modal:{contains:()=>contains},
     activeElement:{matches:()=>interactive},
   };
   assert.equal(context.settingsInteractionActive(),true);

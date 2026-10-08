@@ -9,13 +9,16 @@ Keep Moyai’s calm, practical workspace identity: white content, a quiet lavend
 
 ## Read the source of the primitive
 
+- `frontend/components/ui`: the shared shadcn/ui components. `frontend/render.tsx` maps the existing escaped feature templates to these components; `frontend/overlays.tsx` supplies shadcn Dialog and Popover. Read [the rendering contract](../../../docs/shadcn-ui.md). Build with `npm run build` after editing component sources and commit the generated `app/static/ui` assets with the source.
+- `frontend/theme.css`: shadcn semantic color roles, shared component sizing, and portal geometry. Existing page and chat styles still own layout.
+
 - `app/static/settings-system.css`: the shared Settings layout, tokens, headers, controls, lists, notices, tables, dialogs, and responsive rules. Make shared changes here instead of layering a new override file over it.
 - `app/static/settings.js`: navigation registry (`settingsGroups`), overview, shared filter behavior, retry state, and `confirmSettingsAction()` for cancellable destructive actions.
 - `app/static/branding.css`: workspace color identity. `polish.css` and `style.css` supply the existing chat and sidebar layout. Settings styles are scoped by `.settings-view` so they do not change the composer.
 - `app/static/icons.js`: shared outline icons. Settings destination icons live in `settingsIcon()`. Reuse these before drawing new glyphs.
-- `app/static/index.html`: script/style order and native dialog roots. Feature scripts render HTML and bind handlers; this is vanilla JavaScript and CSS, with no frontend build step.
+- `app/static/index.html`: script/style order and dialog content hosts. Feature scripts call `MoyaiUI.render` with escaped templates and bind handlers after the synchronous React commit. Keep API/state logic in the controllers and component behavior in the shared frontend layer.
 
-Do not replace the stack, add a UI framework, or restyle chat for a Settings-only task. Inspect both the front page and the changed page when touching shared styles.
+Use the existing React/shadcn stack and do not restyle chat for a Settings-only task. Inspect both the front page and the changed page when touching shared styles.
 
 ## The primitives
 
@@ -28,11 +31,11 @@ Do not replace the stack, add a UI framework, or restyle chat for a Settings-onl
 | Spacing | Use 4, 8, 12, 16, 20, 24, 32, 40px steps. Related labels/controls are close; separate sections by at least twice that space. Preserve shared leading edges. |
 | Surfaces | Flat white surfaces; 12px cards, 8px controls. Borders organize tables and groups. Shadows are reserved for dialogs and overlays. Do not nest a card inside every card. |
 | Lists | Repeated library objects use compact rows with identity first, supporting copy next, actions last. Search/filter before a large library. Preserve full labels and identifiers or provide an explicit expansion. |
-| Controls | One filled purple primary action; secondary buttons neutral, quiet actions in consistent action areas. Use native labels, inputs, select, checkbox, button, details, and dialog. 36–40px desktop controls; touch controls at least 44px when space permits. |
+| Controls | One filled purple primary action; secondary buttons neutral, quiet actions in consistent action areas. Use the shared shadcn Button, Label, Input, NativeSelect, Checkbox, Switch and Collapsible through the component renderer. 36–40px desktop controls; touch controls at least 44px when space permits. |
 | State | Pair status text with a semantic treatment. Green = ready, amber = incomplete/needs attention, red = destructive/error. Purple is selection and primary action, not a generic status signal. |
 | Details | Use `<details><summary>` for longer explanations, automation instructions, billing methodology, and history. The summary names the hidden content. Never clamp essential text without a way to read all of it. |
 | Tables | Quiet header surface, clear row rules, tabular numbers, numeric totals at the trailing edge. Keep exact costs in request detail; round summary amounts to cents. At narrow widths, scroll the table’s own labelled, keyboard-focusable container. |
-| Dialogs | Native `showModal()` for inert background, focus trapping, and Escape. Give the dialog a name, explicit labels, an error region, and a visible close/cancel control. Cap height to the viewport and contain scrolling. |
+| Dialogs | Use `MoyaiUI.createDialog()` and the existing `showModal()`/`close()` controller contract. The visible surface is shadcn Dialog with focus trapping and Escape. Give the dialog a name, explicit labels, an error region, and a visible close/cancel control. Measure `[data-slot="dialog-content"]`, not its inner content host. Cap height to the viewport and contain scrolling. |
 | Empty/error | Explain the state and offer the next action. Filtered emptiness has a clear-filters action. Failed loading has a retry; keep API details escaped. |
 
 Color values come from the existing workspace palette and `--settings-*` role tokens. Avoid adding almost-identical hex values in feature files. Measure contrast when changing text, borders, or focus colors; keep ordinary text at 4.5:1 and meaningful control boundaries/focus at 3:1. Do not introduce dark mode as an incidental change.

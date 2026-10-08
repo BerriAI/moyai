@@ -1,7 +1,7 @@
 /* Extend the shared session menu; Rename and Move keep their existing owners. */
 function bindSessionLifecycleActions(menu, run) {
   const icon = name => globalThis.MoyaiIcon?.(name, 16) || '';
-  menu.insertAdjacentHTML('beforeend', `<button type="button" data-archive-session>${icon(run.archived ? 'restore' : 'archive')}${run.archived ? 'Restore session' : 'Archive session'}</button>
+  MoyaiUI.insert(menu, 'beforeend', `<button type="button" data-archive-session>${icon(run.archived ? 'restore' : 'archive')}${run.archived ? 'Restore session' : 'Archive session'}</button>
     ${run.can_delete ? `<button type="button" data-delete-session class="session-delete">${icon('trash')}Delete session…</button>` : ''}`);
   menu.querySelector('[data-archive-session]').onclick = () => { menu.hidePopover(); changeSessionArchive(run).catch(showError); };
   menu.querySelector('[data-delete-session]')?.addEventListener('click', () => { menu.hidePopover(); deleteSessionDialog(run); });
@@ -29,11 +29,11 @@ async function changeSessionArchive(run) {
 
 function deleteSessionDialog(run) {
   const dialog = $('#session-delete-dialog');
-  dialog.innerHTML = `<form class="folder-form"><h2 id="session-delete-title">Delete session?</h2>
+  MoyaiUI.render(dialog, `<form class="folder-form"><h2 id="session-delete-title">Delete session?</h2>
     <p class="folder-session-name">${esc(sessionTitle(run))}</p>
     <p>This removes the session and its agents for everyone. It cannot be reopened or continued.</p>
     <p class="subtext">Stored conversation data, files, billing records, and backups are retained. Side chats, GitHub work, and messages already sent to Slack stay unchanged.</p>
-    <p class="folder-error" role="alert"></p><div class="folder-dialog-actions"><button type="button" data-stop-session hidden>Stop session and agents</button><button type="button" data-cancel>Cancel</button><button type="submit" class="danger">Delete session</button></div></form>`;
+    <p class="folder-error" role="alert"></p><div class="folder-dialog-actions"><button type="button" data-stop-session hidden>Stop session and agents</button><button type="button" data-cancel>Cancel</button><button type="submit" class="danger">Delete session</button></div></form>`);
   dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
   dialog.querySelector('[data-stop-session]').onclick = async () => {
     const buttons = [...dialog.querySelectorAll('button')];
@@ -76,12 +76,12 @@ function deleteSessionDialog(run) {
 function bindSessionHeaderActions(run) {
   state.sessionHeaderRun = run;
   if (run.parent_run_id) return;
-  const button = document.createElement('button');
+  const button = MoyaiUI.createElement('button', document);
   button.className = 'quiet details-toggle header-icon';
   button.setAttribute('aria-label', 'Session actions');
   button.setAttribute('aria-expanded', 'false');
   button.setAttribute('aria-controls', 'session-actions');
-  button.innerHTML = globalThis.MoyaiIcon?.('more', 17) || '⋯';
+  MoyaiUI.render(button, globalThis.MoyaiIcon?.('more', 17) || '⋯');
   button.onclick = () => showSessionActions(state.chatRun?.id === run.id ? state.chatRun : run, button);
   $('#header-actions').append(button);
 }
