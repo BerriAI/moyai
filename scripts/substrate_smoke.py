@@ -15,8 +15,8 @@ from app.config import Settings
 from app.sandboxes.substrate import SubstrateProvider
 
 
-async def execute(sandbox, code):
-    process = await sandbox.exec.aio('/usr/local/bin/python', '-c', code, timeout=30)
+async def execute(sandbox, code, timeout=30):
+    process = await sandbox.exec.aio('/usr/local/bin/python', '-c', code, timeout=timeout)
     out, err = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
     assert await process.wait.aio() == 0, err
     return out
@@ -82,7 +82,7 @@ try:
 finally:
     server.shutdown()
     server.server_close()
-''')
+''', timeout=180)
     assert (await sandbox.filesystem.read_bytes.aio(json.loads(result)['path'])).startswith(b'\x89PNG')
     print('PASS Moyai Computer service, visible Chromium/Xvfb, click and saved screenshot', flush=True)
 

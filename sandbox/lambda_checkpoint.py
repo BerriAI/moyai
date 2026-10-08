@@ -1,5 +1,6 @@
 """File-only MicroVM checkpoints. This module runs in the guest, never the web host."""
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -75,7 +76,15 @@ def pack(destination, *, root=Path('/'), baseline_path=BASELINE, max_bytes):
     # An independent delta against the immutable image, never another runtime
     # checkpoint. Hash contents so restored dependencies cannot be overlooked
     # merely because their size/mtime matches the image.
-    changed = [name for name in names if previous.get(name) != signature(root / name)]
+    # AWS restores image blocks on demand. Serial reads of the full image can
+    # exhaust the checkpoint deadline even when very few files changed. Keep
+    # full content hashing, with bounded parallel reads and deterministic order.
+    changed = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for offset in range(0, len(names), 1024):
+            batch = names[offset:offset + 1024]
+            signatures = pool.map(signature, (root / name for name in batch))
+            changed.extend(name for name, value in zip(batch, signatures) if previous.get(name) != value)
     metadata = json.dumps({'version': 1, 'deleted': deleted}).encode()
     with tarfile.open(destination, 'w:gz', format=tarfile.PAX_FORMAT) as archive:
         info = tarfile.TarInfo('manifest.json')
