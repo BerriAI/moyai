@@ -34,9 +34,9 @@ async def transport(tracing, handler, outbox=0):
     tracing.outboxes[outbox].client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-def setup_both(tmp_path):
+def setup_both(tmp_path, endpoint='https://traces.example/v1/traces'):
     store = Store(tmp_path)
-    settings = Settings(_env_file=None, litellm_trace_endpoint='https://traces.example/v1/traces',
+    settings = Settings(_env_file=None, litellm_trace_endpoint=endpoint,
                         litellm_trace_api_key='trace-secret', raindrop_write_key='raindrop-secret',
                         raindrop_project_id='moyai')
     tracing = store.tracing = AgentTracing(store, settings)
@@ -55,8 +55,10 @@ async def test_raindrop_alone_enables_export_without_litellm(tmp_path):
     await tracing.close()
 
 
-async def test_each_span_reaches_litellm_and_raindrop_with_their_own_keys(tmp_path):
-    store, tracing, run, message = setup_both(tmp_path)
+@pytest.mark.parametrize('endpoint', ['https://traces.example/v1/traces',
+                                     'https://traces.example/lens-ingest/v1/traces'])
+async def test_each_span_reaches_litellm_and_raindrop_with_their_own_keys(tmp_path, endpoint):
+    store, tracing, run, message = setup_both(tmp_path, endpoint)
     store.finish_message(run['id'], message['id'], 'hello')
     received = {}
     def receiver(name):
@@ -68,7 +70,7 @@ async def test_each_span_reaches_litellm_and_raindrop_with_their_own_keys(tmp_pa
     await transport(tracing, receiver('raindrop'), 1)
     assert all([await outbox.export_once() for outbox in tracing.outboxes])
     litellm, raindrop = received['litellm'], received['raindrop']
-    assert str(litellm.url) == 'https://traces.example/v1/traces'
+    assert str(litellm.url) == endpoint
     assert str(raindrop.url) == 'https://api.raindrop.ai/v1/traces'
     assert litellm.headers['authorization'] == 'Bearer trace-secret'
     assert raindrop.headers['authorization'] == 'Bearer raindrop-secret'

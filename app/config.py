@@ -146,7 +146,7 @@ class Settings(BaseSettings):
         from urllib.parse import urlsplit
         parsed = urlsplit(value)
         if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or
-                      parsed.password or parsed.query or parsed.fragment or parsed.path != '/v1/traces'):
+                      parsed.password or parsed.query or parsed.fragment or not parsed.path.endswith('/v1/traces')):
             raise ValueError('Use an HTTPS trace endpoint ending in /v1/traces, without credentials or query parameters.')
         return value
 

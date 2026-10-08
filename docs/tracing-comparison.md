@@ -36,6 +36,15 @@ local defaults, and `render.yaml` carries deployment configuration. Inference
 stays on `https://gateway.litellm-sandbox.ai/v1`; Lens uses the separate dev trace
 gateway. All credentials stay on the Render control plane, outside sandboxes.
 
+For gateway-dev, set `LITELLM_TRACE_ENDPOINT` to
+`https://gateway-dev.litellm-sandbox.ai/lens-ingest/v1/traces`. In **Lens > Traces >
+Set up tracing**, generate a dedicated tracing key and save it as
+`LITELLM_TRACE_API_KEY` in Render's private environment. The old gateway
+`/v1/traces` route and model/virtual keys no longer accept trace exports.
+Other deployments should copy their full **Traces endpoint** from the same
+setup screen, preserving any path prefix. Restart Moyai after changing these
+settings; its pending Lens outbox will retry against the configured endpoint.
+
 | Destination | Required settings | Protocol and routing |
 | --- | --- | --- |
 | Lens | `LITELLM_TRACE_ENDPOINT`, `LITELLM_TRACE_API_KEY` | OTLP protobuf, Bearer, `/v1/traces` |

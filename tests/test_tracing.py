@@ -30,7 +30,7 @@ class Processor:
 
 def setup(tmp_path):
     store = Store(tmp_path)
-    settings = Settings(_env_file=None, litellm_trace_endpoint='https://gateway-dev.litellm-sandbox.ai/v1/traces',
+    settings = Settings(_env_file=None, litellm_trace_endpoint='https://gateway-dev.litellm-sandbox.ai/lens-ingest/v1/traces',
                         litellm_trace_api_key='trace-secret', litellm_api_key='model-secret')
     processor = Processor()
     tracing = store.tracing = AgentTracing(store, settings, processor)
@@ -141,7 +141,12 @@ def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
 
 
 @pytest.mark.parametrize('endpoint', ['http://example.com/v1/traces', 'https://key@example.com/v1/traces',
-                                     'https://example.com/v1/traces?key=secret', 'https://example.com/v1'])
+                                     'https://example.com/v1/traces?key=secret', 'https://example.com/v1',
+                                     'http://example.com/lens-ingest/v1/traces',
+                                     'https://key@example.com/lens-ingest/v1/traces',
+                                     'https://example.com/lens-ingest/v1/traces?key=secret',
+                                     'https://example.com/lens-ingest/v1/traces#fragment',
+                                     'https://example.com/lens-ingest/v1/traces/extra'])
 def test_trace_endpoint_rejects_insecure_or_ambiguous_destinations(endpoint):
     with pytest.raises(ValueError):
         Settings(_env_file=None, litellm_trace_endpoint=endpoint)
