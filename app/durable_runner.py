@@ -277,10 +277,14 @@ class DurableRunner(RunManager):
         self.save(run_id, state)
         return True
 
+    def rotation_seconds(self, state):
+        from .sandboxes import provider_for_id
+        return self.settings.sandbox_rotation_for(provider_for_id(state.get('sandbox_id', '')))
+
     def idle_deadline(self, state):
         # A follow-up never extends the machine's absolute renewal deadline.
         return min(state.get('idle_until') or float('inf'),
-                   state['machine_started'] + self.settings.sandbox_rotation_seconds)
+                   state['machine_started'] + self.rotation_seconds(state))
 
     def computer_idle_seconds(self, state):
         return self.settings.sandbox_idle_seconds or (300 if state.get('computer_only') else 0)
@@ -306,7 +310,7 @@ class DurableRunner(RunManager):
                 self.save(run_id, state)
         stopping = row['status'] == 'stopping' or (not state.get('computer_only') and row['status'] in {'cancelled', 'interrupted'})
         queued = self.store.has_queued_messages(run_id)
-        expired = (time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds
+        expired = (time.time() >= state['machine_started'] + self.rotation_seconds(state)
                    or (not queued and time.time() >= self.idle_deadline(state)))
         if (state['phase'] == 'warm_cleanup' or stopping or not self.computer_idle_seconds(state)
                 or expired):
@@ -396,7 +400,7 @@ class DurableRunner(RunManager):
                                                token=token)
             except modal.exception.AlreadyExistsError:
                 sandbox = await backend.find(name, initialize=True, token=token)
-        state.update(sandbox_id=sandbox.object_id, machine_started=time.time(), phase='install')
+        state.update(sandbox_id=sandbox.object_id, machine_started=getattr(sandbox, 'started_at', time.time()), phase='install')
         self.save(run_id, state)
         self.store.update_run(run_id, sandbox_id=sandbox.object_id)
         return sandbox
@@ -514,6 +518,8 @@ class DurableRunner(RunManager):
             spec = self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
                               'continuation': state['segment'] > 0})
             spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
+            if run.get('sandbox_provider') == 'lambda':
+                spec['rotation_at'] = state['machine_started'] + self.rotation_seconds(state)
             spec['chat_enabled'] = True
             if state.get('resume_transport'):
                 spec['transport_recovery'] = state['resume_transport']
@@ -627,7 +633,7 @@ class DurableRunner(RunManager):
             remaining = state['retry_at'] - time.time()
             if remaining > 0:
                 return {'retry_seconds': remaining}
-            if time.time() >= state['machine_started'] + self.settings.sandbox_rotation_seconds:
+            if time.time() >= state['machine_started'] + self.rotation_seconds(state):
                 await self.cleanup(state, run_id)
                 state['sandbox_id'] = ''
             state.update(phase='install' if state.get('sandbox_id') else 'provision',
@@ -677,7 +683,7 @@ class DurableRunner(RunManager):
                        self.message_queue.accepted(run_id, result.get('steer_message_id')))
             if steered:
                 keep = (self.settings.sandbox_idle_seconds and not run['parent_run_id']
-                        and time.time() < state['machine_started'] + self.settings.sandbox_rotation_seconds)
+                        and time.time() < state['machine_started'] + self.rotation_seconds(state))
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='steered', response='')
                 self.save(run_id, state)
             elif continuing and result.get('wait_credential') and self.credentials:
@@ -707,7 +713,7 @@ class DurableRunner(RunManager):
                 self.save(run_id, state)
             elif continuing:
                 state.pop('resume_transport', None)
-                if time.time() - state['machine_started'] >= self.settings.sandbox_rotation_seconds:
+                if time.time() - state['machine_started'] >= self.rotation_seconds(state):
                     await self.cleanup(state, run_id)
                     state.update(sandbox_id='', phase='provision')
                 else:
@@ -722,7 +728,7 @@ class DurableRunner(RunManager):
             else:
                 completed = result.get('completed') and state['exit_code'] == 0
                 keep = (completed and self.settings.sandbox_idle_seconds and run['chat_enabled'] and not run['parent_run_id']
-                        and time.time() < state['machine_started'] + self.settings.sandbox_rotation_seconds)
+                        and time.time() < state['machine_started'] + self.rotation_seconds(state))
                 state.update(phase='finish' if keep else 'cleanup', keep_warm=bool(keep), outcome='completed' if completed else 'failed',
                              response=result.get('message') or state.get('last_error') or 'Hermes stopped without a final answer.')
                 self.save(run_id, state)

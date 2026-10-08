@@ -88,7 +88,16 @@ class Settings(BaseSettings):
     braintrust_parent: str = "project_name:moyai"
     agent_model: str = ""
     agent_harness: str = 'claude-agent-sdk'
-    sandbox_provider: Literal['modal', 'substrate'] = 'modal'
+    sandbox_provider: Literal['modal', 'substrate', 'lambda'] = 'modal'
+    lambda_region: str = 'us-east-1'
+    lambda_image: str = ''
+    lambda_image_version: str = ''
+    lambda_checkpoint_bucket: str = ''
+    lambda_checkpoint_prefix: str = 'moyai-lambda'
+    lambda_execution_role_arn: str = ''
+    lambda_egress_connector: str = ''
+    # The server uses the standard AWS credential chain; no keys enter guests.
+    lambda_profile: str = ''
     substrate_api_url: str = ''
     substrate_router_url: str = ''
     substrate_api_token: str = ''
@@ -256,7 +265,16 @@ class Settings(BaseSettings):
             raise ValueError('Use 0 for no response deadline, or at least 120 seconds.')
         return value
 
-    def sandbox_lifetime_seconds(self) -> int:
+    def sandbox_rotation_for(self, provider=None) -> int:
+        if (provider or self.sandbox_provider) == 'lambda':
+            # One hour for the current tool round, three checkpoint attempts,
+            # termination confirmation, and control-plane delays.
+            return min(self.sandbox_rotation_seconds, 7 * 3600)
+        return self.sandbox_rotation_seconds
+
+    def sandbox_lifetime_seconds(self, provider=None) -> int:
+        if (provider or self.sandbox_provider) == 'lambda':
+            return 8 * 3600
         if self.run_timeout_seconds:
             return self.run_timeout_seconds + self.snapshot_timeout_seconds + 60
         # Modal allows at most 24h. Leave a full hour after the cooperative
@@ -358,7 +376,22 @@ class Settings(BaseSettings):
             raise ValueError('Enter at least one outbound hostname pattern.')
         return ','.join(hosts)
 
+    @field_validator('lambda_region', 'lambda_checkpoint_bucket', 'lambda_checkpoint_prefix')
+    @classmethod
+    def lambda_names(cls, value):
+        if value and not re.fullmatch(r'[a-z0-9][a-z0-9._/-]{0,180}', value):
+            raise ValueError('Use an AWS region, bucket, or storage prefix without spaces or colons.')
+        if '..' in value or value.endswith('/'):
+            raise ValueError('Do not use relative components or a trailing slash.')
+        return value
+
     def missing_sandbox(self, provider=None) -> list[str]:
+        if (provider or self.sandbox_provider) == 'lambda':
+            required = {'LAMBDA_REGION': self.lambda_region, 'LAMBDA_IMAGE': self.lambda_image,
+                        'LAMBDA_IMAGE_VERSION': self.lambda_image_version,
+                        'LAMBDA_CHECKPOINT_BUCKET': self.lambda_checkpoint_bucket,
+                        'LAMBDA_CHECKPOINT_PREFIX': self.lambda_checkpoint_prefix}
+            return [key for key, value in required.items() if not value]
         required = ({'MODAL_TOKEN_ID': self.modal_token_id, 'MODAL_TOKEN_SECRET': self.modal_token_secret}
                     if (provider or self.sandbox_provider) == 'modal' else {
                         'SUBSTRATE_API_URL': self.substrate_api_url, 'SUBSTRATE_ROUTER_URL': self.substrate_router_url,

@@ -14,7 +14,14 @@ import pytest
 
 from sandbox.claude_harness import ClaudeAgent
 from sandbox.context_store import ContextStore
-from test_workspace import workspace as broker_workspace
+
+
+@pytest.fixture
+def broker_workspace(tmp_path, monkeypatch):
+    # The standalone Linux guest conformance test only needs local inference
+    # and MCP. Load the web app only for the native broker integration cases.
+    from test_workspace import workspace
+    yield from workspace.__wrapped__(tmp_path, monkeypatch)
 
 
 def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):

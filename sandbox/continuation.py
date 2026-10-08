@@ -33,13 +33,21 @@ def resumed_context(spec):
 
 
 class RotationDeadline:
-    def __init__(self, seconds, clock=time.monotonic):
+    def __init__(self, seconds, clock=time.monotonic, *, rotation_at=None, wall_clock=time.time):
         self.clock = clock
         self.seconds = seconds
         self.deadline = None
         self.requested = False
+        self.rotation_at, self.wall_clock = rotation_at, wall_clock
 
     def step(self, agent):
+        # Absolute VM age includes provisioning and every previous turn. Never
+        # grant a first-round exception once the provider's deadline is due.
+        if self.rotation_at is not None and self.wall_clock() >= self.rotation_at:
+            if not self.requested:
+                agent.interrupt()
+                self.requested = True
+            return
         # Image/agent startup is not work. Always allow the first round before
         # considering a checkpoint, even when initialization was unusually slow.
         if self.seconds and self.deadline is None:

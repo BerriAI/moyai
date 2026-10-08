@@ -163,7 +163,7 @@ def _run_agent(spec, relay):
         from harness_registry import resolve, create_agent
         from continuation import AgentSteer
     definition = resolve(harness)
-    rotation = RotationDeadline(spec.get("rotation_seconds", 0))
+    rotation = RotationDeadline(spec.get("rotation_seconds", 0), rotation_at=spec.get("rotation_at"))
     waiting = AgentWait(relay)
     goal = GoalLoop(Path('/session/goal.json'), spec['run_id'],
                     restore=not (spec.get('fresh_child') or spec.get('workspace_warning')),

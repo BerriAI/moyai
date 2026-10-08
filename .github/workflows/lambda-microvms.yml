@@ -1,0 +1,36 @@
+name: Lambda MicroVM sandbox conformance
+on:
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'sandbox/**'
+      - 'tests/test_lambda*'
+      - 'tests/test_claude_sdk_transport.py'
+      - 'tests/fixtures/lambda/**'
+      - 'scripts/lambda*'
+      - 'scripts/substrate_smoke.py'
+      - 'Dockerfile.sandbox'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.github/workflows/lambda-microvms.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: lambda-microvms-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: SDK, checkpoint, failure, and lifecycle tests
+        run: uv run --frozen --python 3.13 pytest -q tests/test_lambda_microvms.py tests/test_sandbox_providers.py tests/test_runner.py tests/test_durable.py tests/test_idle_window.py tests/test_continuation.py tests/test_environments.py
+      - name: Build complete Linux agent image
+        run: docker build --target lambda-workspace -f Dockerfile.sandbox -t moyai-lambda:test .
+      - name: Real guest, TLS checkpoint transfer, restore, and process isolation
+        run: uv run --frozen python scripts/lambda_smoke.py --local-image moyai-lambda:test
+      - name: Package deployable AWS image
+        run: uv run --frozen python scripts/lambda_image.py
