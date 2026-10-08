@@ -48,3 +48,14 @@ test('failed private-library load is escaped and never displays an earlier libra
   assert.doesNotMatch(f.nodes.get('#content').innerHTML,/Earlier user memory|<img/);
   assert.match(f.nodes.get('#content').innerHTML,/&lt;img/);
 });
+
+test('review status distinguishes pending, empty results, failures and manual mode',()=>{
+  const {context}=fixture();
+  const prefs={enabled:true,auto_save:true};
+  const review={enabled:true,configured:true,pending:2};
+  assert.match(context.memoryReviewSummary(review,prefs),/2 finished turns are waiting/);
+  assert.match(context.memoryReviewSummary({...review,pending:0,latest:{status:'completed',saved_count:0}},prefs),/no new lasting context/);
+  assert.match(context.memoryReviewSummary({...review,latest:{status:'completed',saved_count:1}},prefs),/saved 1 memory\./);
+  assert.match(context.memoryReviewSummary({...review,latest:{status:'failed'}},prefs),/could not finish/);
+  assert.equal(context.memoryReviewSummary(review,{...prefs,auto_save:false}),'');
+});

@@ -184,6 +184,9 @@ def create_app(settings: Settings | None = None):
     memory = Memory(store, security, credentials.same_requester, checkpoints)
     from .model_slots import ModelSlots
     model_slots = ModelSlots(settings.max_concurrent_model_requests)
+    from .memory_review import MemoryReview
+    memory_review = MemoryReview(memory, settings, spend, model_slots)
+    memory.reviewer = store.memory_review = memory_review
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     credentials.slots = model_slots
@@ -224,9 +227,11 @@ def create_app(settings: Settings | None = None):
         tracing.start()
         infrastructure.start()
         session_titles.start()
+        memory_review.start()
         try:
             yield
         finally:
+            await memory_review.close()
             await spend.recovery.close()
             await harness_gateway.maintenance.close()
             await computer.close()
@@ -276,6 +281,7 @@ def create_app(settings: Settings | None = None):
     app.include_router(skills.routes())
     app.include_router(memory.routes())
     app.state.memory = memory
+    app.state.memory_review = memory_review
     session_folders = SessionFolders(store, security, checkpoints)
     app.state.session_folders = session_folders
     app.include_router(session_folders.routes())

@@ -133,6 +133,8 @@
 .settings-view .memory-controls { margin: 0; border-radius: var(--settings-radius) var(--settings-radius) 0 0; padding: 20px 24px; background: var(--settings-subtle); border-color: var(--settings-line); }
 .settings-view .memory-learning { padding: 18px 24px; margin: 0 0 16px; border: 1px solid var(--settings-line); border-top: 0; border-radius: 0 0 var(--settings-radius) var(--settings-radius); }
 .settings-view .memory-privacy { margin-bottom: 24px; color: var(--settings-muted); }
+.settings-view .memory-review { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-block: 16px; }
+.settings-view .memory-review p { flex: 1 1 240px; margin: 0; }
 .settings-view .memory-filter { margin-block: 24px 16px; flex-wrap: wrap; }
 .settings-view #memory-list { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
 .settings-view .memory-card h2 { margin-block: 16px 8px; }

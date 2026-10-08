@@ -49,6 +49,7 @@ class Store:
         self.generation = 0
         self.default_model = default_model
         self.tracing = None
+        self.memory_review = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         with self.connect() as conn:
@@ -621,6 +622,8 @@ class Store:
                     # Commit the answer and its pending span together. A crash
                     # after saving the answer must not lose its root trace.
                     self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
+                if status == 'completed' and self.memory_review:
+                    self.memory_review.enqueue_in(conn, message_id)
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
 
     def has_queued_messages(self, run_id):

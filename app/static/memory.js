@@ -11,6 +11,16 @@ function memoryCard(note) {
 }
 
 let memorySearchQuery = '';
+function memoryReviewSummary(review, prefs) {
+  if (!prefs.enabled || !prefs.auto_save) return '';
+  if (!review?.enabled) return 'Automatic saving during sessions is available. Background review is disabled.';
+  if (!review.configured) return 'Background review needs a configured model connection.';
+  const latest=review.latest;
+  const result=latest?.status==='failed' ? 'The last review could not finish. Future completed turns will still be reviewed.' :
+    latest?.status==='completed' ? `Last review ${relative(latest.updated_at)}: ${latest.saved_count ? `saved ${latest.saved_count} ${latest.saved_count===1?'memory':'memories'}.` : 'no new lasting context to save.'}` :
+    'Finished sessions are reviewed after a short idle period. Recent sessions are checked when background review starts.';
+  return `${review.pending ? `${review.pending} finished ${review.pending===1?'turn is':'turns are'} waiting for review. ` : ''}${result}`;
+}
 async function renderMemory() {
   const version=state.pageVersion;
   $('#content').innerHTML='<p class="subtext" role="status">Loading your memories…</p>';
@@ -23,6 +33,7 @@ async function renderMemory() {
     <div class="section-header"><div><h1>Memory</h1><p class="subtext">Preferences and context for future sessions.</p></div><button class="primary" id="memory-add">Add memory</button></div>
     <div class="memory-controls"><div><strong>${prefs.enabled?'Moyai remembers useful context':'Memory is paused'}</strong><p class="subtext">${prefs.enabled?'Preferences, corrections, and context from your messages can carry into future sessions.':'Your notes are kept here. Moyai won’t retrieve or save them while paused.'}</p></div><button class="quiet" id="memory-toggle">${prefs.enabled?'Pause memory':'Resume memory'}</button></div>
     <div class="memory-learning"><label for="memory-learning">How new memories are saved</label><select id="memory-learning" ${prefs.enabled?'':'disabled'}><option value="auto" ${prefs.auto_save?'selected':''}>Save useful context automatically</option><option value="manual" ${prefs.auto_save?'':'selected'}>Only save manually</option></select></div>
+    ${prefs.enabled&&prefs.auto_save ? `<div class="memory-review"><p class="subtext" role="status">${esc(memoryReviewSummary(data.review,prefs))}</p><button class="quiet" id="memory-refresh">Refresh</button></div>` : ''}
     <p class="memory-privacy">These notes are available only for your requests. Answers in shared sessions may reflect them. Keep keys in <a href="#secrets">Secrets</a> and reusable team workflows in <a href="#skills">Skills</a>.</p>
     <div class="memory-filter"><input type="search" id="memory-search" aria-label="Search your memories" placeholder="Search your memories"><span class="subtext">${data.memories.length} / ${data.limit} notes</span></div>
     <div id="memory-list"></div>
@@ -39,6 +50,7 @@ async function renderMemory() {
   };
   draw();$('#memory-search').oninput=draw;
   $('#memory-add').onclick=()=>openMemoryEditor();
+  if(prefs.enabled&&prefs.auto_save)$('#memory-refresh').onclick=renderMemory;
   const update=async changes=>{
     $('#memory-toggle').disabled=true;$('#memory-learning').disabled=true;
     try { await api('/api/memory/preferences',{method:'PUT',body:JSON.stringify({...prefs,...changes})});if(version===state.pageVersion)await renderMemory(); }

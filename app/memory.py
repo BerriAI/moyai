@@ -107,6 +107,7 @@ class Memory:
     def __init__(self, store, security, same_requester, checkpoints):
         self.store, self.security = store, security
         self.same_requester, self.checkpoints = same_requester, checkpoints
+        self.reviewer = None
         with store.connect() as conn:
             conn.executescript('''
                 CREATE TABLE IF NOT EXISTS memory_preferences (
@@ -126,6 +127,8 @@ class Memory:
                     run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
                     owner_id TEXT NOT NULL, memory_id TEXT NOT NULL,
                     PRIMARY KEY(run_id,turn_id,memory_id));
+                CREATE TABLE IF NOT EXISTS memory_capture_barriers (
+                    owner_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL);
             ''')
 
     def owner(self, actor):
@@ -183,47 +186,60 @@ class Memory:
         return row
 
     def save(self, owner, body, *, source=None, run=None, note_id=''):
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            result = self.save_in(conn, owner, body, source=source, run=run, note_id=note_id)
+            if source is None and run is None:
+                self.capture_barrier_in(conn, owner)
+        if run:
+            self.store.event(run['id'], 'memory', 'Saved a personal memory', {'memory_id': result['id']})
+        return result
+
+    def capture_barrier_in(self, conn, owner):
+        # Old chat inputs must not undo manual edits, forgetting, or a settings
+        # change, including after restart or a pause followed by re-enabling.
+        conn.execute('''INSERT INTO memory_capture_barriers VALUES(?,(SELECT coalesce(max(id),0) FROM messages))
+            ON CONFLICT(owner_id) DO UPDATE SET message_id=excluded.message_id''', (owner,))
+
+    def save_in(self, conn, owner, body, *, source=None, run=None, note_id=''):
+        """Shared storage checks; caller owns the transaction and authorization."""
         payload = {k: getattr(body, k) for k in ('key', 'title', 'content', 'kind', 'repo_url')}
         check_content(json.dumps(payload) + json.dumps(source or {}))
         payload['source'] = source or {'type': 'manual'}
         key_hash = fingerprint(body.key)
         digest = fingerprint({'note': payload, 'revision': body.revision, 'id': note_id})
         operation = fingerprint([run['id'], run['active_message_id'], body.request_id]) if run else body.request_id
-        with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            if run:
-                fresh, fresh_owner = self.active(run, body.turn_id)
-                if fresh_owner != owner or fresh['active_user_id'] != run['active_user_id']:
-                    raise HTTPException(409, 'The requester changed. Start a new memory request.')
-                prefs = self.preferences(owner, conn)
-                if not prefs['enabled'] or not prefs['auto_save']:
-                    raise HTTPException(403, 'Automatic saving is off. The user can add this note in Settings → Memory.')
-            prior = conn.execute('SELECT * FROM memory_operations WHERE owner_id=? AND request_id=?', (owner, operation)).fetchone()
-            if prior:
-                row = self.get(conn, owner, prior['memory_id'])
-                if prior['fingerprint'] != digest or prior['revision'] != row['revision']:
-                    raise HTTPException(409, 'This save was already used or the memory changed. Review it before retrying.')
-                return {'saved': True, 'id': row['id'], 'revision': row['revision']}
-            old = conn.execute('SELECT * FROM personal_memories WHERE owner_id=? AND key_hash=?', (owner, key_hash)).fetchone()
-            if note_id:
-                old = self.get(conn, owner, note_id)
-                if old['key_hash'] != key_hash:
-                    raise HTTPException(409, 'A memory’s key cannot change; edit its title or content instead.')
-            if old and old['deleted']:
-                raise HTTPException(409, 'This memory was forgotten. Do not recreate it automatically.')
-            if (old['revision'] if old else 0) != body.revision:
-                raise HTTPException(409, 'This memory changed. Search or reopen it and use its current revision.')
-            if not old and conn.execute('SELECT COUNT(*) FROM personal_memories WHERE owner_id=? AND deleted=0', (owner,)).fetchone()[0] >= MAX_NOTES:
-                raise HTTPException(409, 'Your memory library is full. Update or delete an existing note.')
-            note_id, revision = (old['id'], old['revision'] + 1) if old else (uuid4().hex, 1)
-            expires = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat() if body.kind in {'project', 'reference'} else ''
-            conn.execute('''INSERT INTO personal_memories VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET
-                encrypted=excluded.encrypted,revision=excluded.revision,updated_at=excluded.updated_at,expires_at=excluded.expires_at''',
-                (note_id, owner, key_hash, self.security.encrypt(json.dumps(payload, ensure_ascii=False)), revision,
-                 old['created_at'] if old else now(), now(), expires))
-            conn.execute('INSERT INTO memory_operations VALUES(?,?,?,?,?)', (owner, operation, digest, note_id, revision))
         if run:
-            self.store.event(run['id'], 'memory', 'Saved a personal memory', {'memory_id': note_id})
+            fresh, fresh_owner = self.active(run, body.turn_id)
+            if fresh_owner != owner or fresh['active_user_id'] != run['active_user_id']:
+                raise HTTPException(409, 'The requester changed. Start a new memory request.')
+            prefs = self.preferences(owner, conn)
+            if not prefs['enabled'] or not prefs['auto_save']:
+                raise HTTPException(403, 'Automatic saving is off. The user can add this note in Settings → Memory.')
+        prior = conn.execute('SELECT * FROM memory_operations WHERE owner_id=? AND request_id=?', (owner, operation)).fetchone()
+        if prior:
+            row = self.get(conn, owner, prior['memory_id'])
+            if prior['fingerprint'] != digest or prior['revision'] != row['revision']:
+                raise HTTPException(409, 'This save was already used or the memory changed. Review it before retrying.')
+            return {'saved': True, 'id': row['id'], 'revision': row['revision']}
+        old = conn.execute('SELECT * FROM personal_memories WHERE owner_id=? AND key_hash=?', (owner, key_hash)).fetchone()
+        if note_id:
+            old = self.get(conn, owner, note_id)
+            if old['key_hash'] != key_hash:
+                raise HTTPException(409, 'A memory’s key cannot change; edit its title or content instead.')
+        if old and old['deleted']:
+            raise HTTPException(409, 'This memory was forgotten. Do not recreate it automatically.')
+        if (old['revision'] if old else 0) != body.revision:
+            raise HTTPException(409, 'This memory changed. Search or reopen it and use its current revision.')
+        if not old and conn.execute('SELECT COUNT(*) FROM personal_memories WHERE owner_id=? AND deleted=0', (owner,)).fetchone()[0] >= MAX_NOTES:
+            raise HTTPException(409, 'Your memory library is full. Update or delete an existing note.')
+        note_id, revision = (old['id'], old['revision'] + 1) if old else (uuid4().hex, 1)
+        expires = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat() if body.kind in {'project', 'reference'} else ''
+        conn.execute('''INSERT INTO personal_memories VALUES(?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET
+            encrypted=excluded.encrypted,revision=excluded.revision,updated_at=excluded.updated_at,expires_at=excluded.expires_at''',
+            (note_id, owner, key_hash, self.security.encrypt(json.dumps(payload, ensure_ascii=False)), revision,
+             old['created_at'] if old else now(), now(), expires))
+        conn.execute('INSERT INTO memory_operations VALUES(?,?,?,?,?)', (owner, operation, digest, note_id, revision))
         return {'saved': True, 'id': note_id, 'revision': revision}
 
     def forget(self, owner, note_id, revision):
@@ -236,6 +252,7 @@ class Memory:
             # cannot resurrect a deleted note. No deleted note body is retained.
             conn.execute("UPDATE personal_memories SET encrypted='',deleted=1,revision=revision+1,updated_at=? WHERE id=?", (now(), note_id))
             conn.execute('DELETE FROM memory_selections WHERE memory_id=?', (note_id,))
+            self.capture_barrier_in(conn, owner)
         return {'forgotten': True}
 
     def search(self, run, owner, query):
@@ -352,7 +369,8 @@ class Memory:
         @router.get('/api/memory')
         async def listing(request: Request):
             owner = actor(request)
-            return {'preferences': self.preferences(owner), 'memories': self.listing(owner), 'limit': MAX_NOTES}
+            return {'preferences': self.preferences(owner), 'memories': self.listing(owner), 'limit': MAX_NOTES,
+                    'review': self.reviewer.status(owner) if self.reviewer else None}
 
         @router.put('/api/memory/preferences')
         async def preferences(body: Preferences, request: Request):
@@ -363,6 +381,7 @@ class Memory:
                     raise HTTPException(409, 'Memory settings changed. Refresh before saving.')
                 conn.execute('INSERT INTO memory_preferences VALUES(?,?,?,?) ON CONFLICT(owner_id) DO UPDATE SET enabled=excluded.enabled,auto_save=excluded.auto_save,revision=excluded.revision',
                              (owner, body.enabled, body.auto_save, body.revision + 1))
+                self.capture_barrier_in(conn, owner)
                 if not body.enabled:
                     conn.execute('DELETE FROM memory_selections WHERE owner_id=?', (owner,))
             await self.checkpoints.flush()
