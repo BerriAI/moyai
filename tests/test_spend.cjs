@@ -516,7 +516,11 @@ test('Users joins PR identities without replacing period spend and exports the f
   assert.equal(elements.get('#spend-activity').innerHTML,activityHTML);
   assert.equal(calls.length,requests);
   assert.ok(rows.some(row=>row[0]==='Team activity (all users)'));
-  await selectTab(elements,'leaderboard');await settle();assert.equal(calls.length,requests);
+  await c.renderSpend();await settle();
+  assert.equal(vm.runInContext('spendState.user',c),'slack:only');
+  assert.match(elements.get('#spend-users').innerHTML,/Draft 1/);
+  const afterRefresh=calls.length;
+  await selectTab(elements,'leaderboard');await settle();assert.equal(calls.length,afterRefresh);
 });
 
 test('Users keeps spend export honest through loading, PR outage, retry and stale refresh',async()=>{
