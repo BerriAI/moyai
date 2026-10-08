@@ -145,6 +145,41 @@ for (const width of [1440, 1024, 768, 320]) {
         const icon = await page.locator('.settings-toolbar [data-slot="native-select-icon"]').boundingBox();
         assert.ok(icon.x >= select.x && icon.x + icon.width <= select.x + select.width, 'The scope filter arrow stays inside its control');
         if (width >= 768) assert.equal(select.y, (await page.locator('#secret-search').boundingBox()).y, 'Desktop filters share a row');
+        const secrets = await rows.evaluateAll(rows => rows.map(row => {
+          const box = el => el.getBoundingClientRect().toJSON();
+          return {
+            row: box(row), info: box(row.firstElementChild), actions: box(row.lastElementChild),
+            title: box(row.querySelector('strong')), reference: box(row.querySelector('.secret-reference')),
+            badges: [...row.querySelectorAll('.secret-scope')].map(box),
+            buttons: [...row.querySelectorAll('button')].map(button => {
+              const text = document.createRange();
+              text.selectNodeContents(button);
+              return { box: box(button), textLines: [...text.getClientRects()].filter(rect => rect.width).length };
+            }),
+          };
+        }));
+        for (const [index, { row, info, actions, title, reference, badges, buttons }] of secrets.entries()) {
+          if (index) assert.ok(Math.abs(row.top - secrets[index - 1].row.bottom) <= 1, 'Secret rows meet at their divider without extra gaps');
+          assert.ok(Math.abs(badges[0].left - title.left) <= 1, 'Secret badges share the title leading edge');
+          assert.ok(Math.abs(reference.left - title.left) <= 1, 'Secret references share the title leading edge');
+          for (let index = 1; index < badges.length; index++) {
+            if (Math.abs(badges[index].top - badges[index - 1].top) <= 1) {
+              assert.ok(Math.abs(badges[index].left - badges[index - 1].right - 8) <= 1, 'Adjacent badges use one consistent gap');
+            } else {
+              assert.ok(Math.abs(badges[index].left - title.left) <= 1, 'Wrapped badges keep the leading edge');
+            }
+          }
+          for (const button of buttons) {
+            assert.equal(button.textLines, 1, 'Credential action labels stay on one line');
+            assert.ok(button.box.left >= row.left && button.box.right <= row.right + 1, 'Credential actions fit their row');
+          }
+          if (width > 650) {
+            assert.ok(Math.abs(actions.top + actions.height / 2 - info.top - info.height / 2) <= 1, 'Desktop credential actions are centered with their details');
+            assert.ok(row.height <= Math.max(info.height, actions.height) + 34, 'Secret rows have compact vertical padding');
+          } else {
+            assert.ok(actions.top - info.bottom >= 12 && actions.top - info.bottom <= 16, 'Mobile actions stay close to their details');
+          }
+        }
       }
       const geometry = await rows.evaluateAll(rows => rows.map(row => {
         const box = el => el.getBoundingClientRect().toJSON();
