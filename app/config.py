@@ -167,6 +167,7 @@ class Settings(BaseSettings):
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
     temporal_enabled: bool = False
+    maintenance_drain: bool = False
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     temporal_api_key: str = ""
@@ -189,6 +190,12 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
+
+    @model_validator(mode='after')
+    def maintenance_requires_durability(self):
+        if self.maintenance_drain and not self.temporal_enabled:
+            raise ValueError('Maintenance draining requires Temporal to preserve queued work.')
+        return self
 
     @model_validator(mode='after')
     def object_storage_credentials(self):

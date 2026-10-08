@@ -192,6 +192,15 @@ class DurableRunner(RunManager):
             if not row or row['deleted_at']:
                 return False
             state = self.state(run_id)
+            # Stop only at boundaries before a process is launched. Active
+            # execution, checkpoint saving and cleanup keep running. The saved
+            # state and inbox are resumed by the replacement worker.
+            if (self.settings.maintenance_drain and row['status'] != 'stopping'
+                    and state.get('phase', 'idle') in {
+                        'idle', 'warm', 'prepare', 'provision', 'waiting_environment',
+                        'install', 'startup_wait', 'transport_wait',
+                        'waiting_children', 'waiting_credential'}):
+                return {'retry_seconds': 15}
             if state.get('computer_only') and state.get('phase') not in {'idle', 'warm'}:
                 return await self.advance_computer(run_id, state)
             if state.get('phase') in {'warm', 'warm_cleanup'}:
