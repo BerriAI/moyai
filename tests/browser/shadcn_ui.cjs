@@ -147,3 +147,35 @@ test('reopening a dialog from a menu releases closed overlay layers before Escap
     assert.equal(await page.locator('[data-slot="popover-content"]').count(), 0);
   }
 });
+
+for (const width of [1440, 768, 320]) {
+  test(`automation drawer, metadata, checkboxes and template dialogs work at ${width}px`, async t => {
+    const page = await pageFor(t, 'automations', 'populated', width);
+    await page.locator('.automation-create summary').click();
+    await page.getByRole('button', { name: 'Create', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    const bounds = await dialog.boundingBox();
+    assert.ok(bounds.x >= 0 && Math.abs(bounds.x + bounds.width - width) <= 1, JSON.stringify(bounds));
+    assert.equal(bounds.y, 0);
+    assert.equal(bounds.height, 1000);
+    await page.getByLabel('Automation name', { exact: true }).fill('Check the release');
+    await page.getByLabel('Instructions', { exact: true }).fill('Review the release and summarize test results.');
+    await page.getByRole('checkbox', { name: 'Queue overlapping event runs', exact: true }).click();
+    assert.equal(await dialog.locator('form').evaluate(form => form.elements.queue_events.checked), true);
+    await page.getByRole('button', { name: /Add metadata/ }).click();
+    await page.getByLabel('Key', { exact: true }).fill('team');
+    await page.getByLabel('Value', { exact: true }).fill('platform');
+    const values = await dialog.locator('form').evaluate(form => Object.fromEntries(new FormData(form)));
+    assert.equal(values.queue_events, 'on');
+    assert.equal(values.metadata_key, 'team');
+    assert.equal(values.metadata_value, 'platform');
+    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    await dialog.waitFor({ state: 'detached' });
+    await page.locator('.automation-create summary').click();
+    await page.getByRole('button', { name: 'Template', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Automation templates' }).waitFor();
+    await page.keyboard.press('Escape');
+    assert.equal(await page.getByRole('dialog').count(), 0);
+    assert.equal(await page.locator('[data-slot="dialog-overlay"]').count(), 0);
+  });
+}

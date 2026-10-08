@@ -521,7 +521,7 @@
 .automation-template-list :is(strong,span,small) { display: block; }
 .automation-template-list span { margin: 6px 0 12px; color: var(--settings-muted); font-weight: 400; }
 .settings-view [data-slot="dialog-content"].automation-start-dialog { width: min(640px,calc(100% - 32px)); padding: 0; }
-.settings-view [data-dialog-id="automation-dialog"].automation-drawer { position: fixed; inset: 0 0 0 auto; translate: none; margin: 0; width: min(800px,100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; border-inline-start: 1px solid var(--settings-line); overflow: auto; }
+.settings-view :is(#automation-dialog,[data-dialog-id="automation-dialog"]).automation-drawer { position: fixed; inset: 0 0 0 auto; translate: none; margin: 0; width: min(800px,100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; border-inline-start: 1px solid var(--settings-line); overflow: auto; }
 .settings-view .automation-drawer .automation-editor { padding: 0; }
 .automation-editor > header { position: sticky; inset-block-start: 0; z-index: 2; display: flex; align-items: center; gap: 16px; padding: 20px 24px; margin: 0; background: var(--settings-surface); border-bottom: 1px solid var(--settings-line); }
 .settings-view .automation-editor > header h2 { font-size: var(--settings-heading); }
