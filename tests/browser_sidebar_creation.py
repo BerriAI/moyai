@@ -1,19 +1,49 @@
 """Sidebar creation affordances against the real UI with synthetic API fixtures.
 
-Run: python tests/browser_sidebar_creation.py (requires Playwright and Chromium).
+Run: python tests/browser_sidebar_creation.py (requires Playwright, Pillow and Chromium).
 Set CHROMIUM_EXECUTABLE to use a system browser, or install Playwright Chromium.
 The fixture is local-only and stopped when the checks finish; no backend writes.
 """
 import os
+from io import BytesIO
 from pathlib import Path
 import subprocess
 import time
 import urllib.request
 
+from PIL import Image, ImageChops
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "http://127.0.0.1:8842"
+
+
+def check_search_caret(page):
+    page.locator("#search-sessions").click()
+    field = page.locator("#session-search")
+    heights = {}
+    for state, value, key in (
+        ("empty", "", "Home"),
+        ("end", "abc", "End"),
+        ("home", "abc", "Home"),
+        ("middle", "abc", "ArrowLeft"),
+        ("long", "a" * 100, "End"),
+        ("cleared", "", "Home"),
+    ):
+        field.fill(value)
+        field.press(key)
+        frames = []
+        for _ in range(7):
+            frames.append(Image.open(BytesIO(field.screenshot(caret="initial"))).convert("RGB"))
+            page.wait_for_timeout(180)
+        bounds = [ImageChops.difference(frames[0], frame).getbbox() for frame in frames[1:]]
+        visible = [box for box in bounds if box]
+        assert visible, f"No blinking caret observed: {state}"
+        assert all(box[2] - box[0] <= 2 for box in visible), visible
+        heights[state] = max(box[3] - box[1] for box in visible)
+    assert len(set(heights.values())) == 1, f"Clipped search caret: {heights}"
+    print(f"PASS: caret heights {heights}")
+    field.press("Escape")
 
 
 def checks():
@@ -44,6 +74,7 @@ def checks():
                 page.set_viewport_size({"width": width, "height": 900})
                 if width <= 850:
                     page.get_by_role("button", name="Open sidebar", exact=True).click()
+                check_search_caret(page)
                 for scope in ("mine", "all"):
                     page.get_by_label("Filter sessions", exact=True).select_option(scope)
                     expect(folder).to_be_visible()
@@ -70,7 +101,7 @@ def checks():
                 expect(folder).to_be_focused()
                 new_session.click()
                 expect(prompt).to_be_focused()
-                expect(prompt).to_have_value("Keep my unsent session draft")
+                expect(prompt).to_have_text("Keep my unsent session draft")
                 expect(dialog).not_to_be_visible()
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
                 print(f"PASS: distinct visible actions, My/All scope, keyboard/cancel, draft and layout at {width}px")
