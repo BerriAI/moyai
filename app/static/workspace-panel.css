@@ -4,7 +4,7 @@
 .panel-file-folder>summary{padding:9px 8px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:600;color:#51475e;overflow-wrap:anywhere}.panel-file-folder>summary:hover{background:#f3f0f7}.panel-file-folder>summary:focus-visible{outline:2px solid #8366ac;outline-offset:-2px}.panel-file-folder>summary>span{margin-right:5px}.panel-file-children{margin-left:14px;padding-left:8px;border-left:1px solid #e8e2ee}.panel-file-children .panel-file-choice{min-width:0;width:100%}.panel-file-choice strong{overflow-wrap:anywhere}
 
 /* Session outputs stay visible beside the conversation until a workspace tab opens. */
-.chat-layout.has-pull-requests:not(.panel-open){grid-template-columns:minmax(0,1fr) 280px}
+.chat-layout.has-session-tools:not(.panel-open){grid-template-columns:minmax(0,1fr) 280px}
 .session-pull-requests{align-self:start;margin:24px 16px 24px 0;border:1px solid var(--line);border-radius:12px;background:var(--soft);max-height:calc(100% - 48px);overflow:auto;min-width:0}
 .session-pull-requests[hidden],.panel-open>.session-pull-requests{display:none}
 .pull-requests-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 16px 8px}
@@ -20,6 +20,11 @@
 .pull-request-row>.ui-icon{transform:rotate(-90deg);color:var(--muted);flex:none}
 .panel-pr>.computer-view{flex:1;min-height:0}
 .panel-pr .computer-address{padding:10px 20px;background:var(--soft);border-block:1px solid var(--line);font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media(max-width:1100px){.chat-layout.has-pull-requests:not(.panel-open){grid-template-columns:minmax(0,1fr)}.session-pull-requests{display:none}}
+@media(max-width:1100px){.chat-layout.has-session-tools:not(.panel-open){grid-template-columns:minmax(0,1fr)}.session-pull-requests{display:none}}
 @media(max-width:760px){.pull-request-row{min-height:44px}.panel-pr .computer-heading{flex-wrap:wrap}.panel-pr .computer-heading a{font-size:13px}}
 .computer-github-link{font-size:12px;color:var(--purple);white-space:nowrap}.panel-pr .computer-heading>div:last-child{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+
+.session-pull-requests>section[hidden]{display:none}
+.session-pull-requests>section+section:not([hidden]){border-top:1px solid var(--line)}
+.session-pull-requests>section[hidden]+section{border-top:0}
+.subagent-row:focus-visible{outline:2px solid var(--purple);outline-offset:-2px}

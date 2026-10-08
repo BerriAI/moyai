@@ -264,3 +264,69 @@ test('returning to captures invalidates an earlier read before its delayed respo
   assert.equal(f.node('[data-captures]').innerHTML,current);assert.match(current,/current\.png/);
   assert.equal(f.timers.size,1);f.dispose();
 });
+
+function agentToolbox(){
+  const source=fs.readFileSync(panelPath,'utf8');
+  const host=()=>({hidden:false,writes:0,html:'',contains:()=>false,querySelector:()=>null,
+    set innerHTML(value){this.html=value;this.writes++;},get innerHTML(){return this.html;}});
+  const card=host(),pullsSection=host(),agentsSection=host(),agentTab=host(),classes=new Set(),toggle={hidden:true};
+  const ctx={disposed:false,run:{id:'parent'},agents:[],agentSignature:'',pullRequests:[],card,pullsSection,agentsSection,
+    tabs:new Map([['agents',{kind:'agents',element:agentTab}]]),
+    document:{activeElement:null,querySelector:()=>toggle},ico:()=>'',
+    esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
+    layout:{classList:{toggle:(key,value)=>value?classes.add(key):classes.delete(key)}}};
+  vm.createContext(ctx);
+  const app=fs.readFileSync('app/static/app.js','utf8');
+  vm.runInContext(app.slice(app.indexOf('function sessionStatus('),app.indexOf('function sessionRepository(')),ctx);
+  ctx.statusFor=ctx.sessionStatus;
+  vm.runInContext(source.slice(source.indexOf('    function syncToolboxVisibility('),source.indexOf('    function renderPulls(')),ctx);
+  return {ctx,card,pullsSection,agentsSection,agentTab,classes,toggle};
+}
+const childId='a'.repeat(32);
+function team(children){return {id:'parent',agents:{groups:[{status:'completed',children}]}};}
+test('agents alone show in the toolbox and tab with current status, safe links and escaped labels',()=>{
+  const f=agentToolbox();
+  f.ctx.syncAgents(team([{id:childId,agent_label:'<Explore> "design"',status:'running',session_url:'https://evil.test'},
+    {id:'javascript:bad',status:'running'}]));
+  assert.equal(f.card.hidden,false);assert.equal(f.pullsSection.hidden,true);assert.equal(f.toggle.hidden,false);
+  assert.ok(f.classes.has('has-session-tools'));
+  assert.match(f.agentsSection.html,/#run=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+  assert.match(f.agentsSection.html,/&lt;Explore> &quot;design&quot;/);
+  assert.match(f.agentsSection.html,/Working now/);assert.match(f.agentsSection.html,/0 of 1 ready/);
+  assert.doesNotMatch(f.agentsSection.html,/evil.test|javascript:|<Explore>/);
+  assert.equal(f.agentTab.html,f.agentsSection.html);
+});
+test('agent changes do not depend on PR changes and preserve unchanged rows',()=>{
+  const f=agentToolbox();f.ctx.pullRequests=[{url}];
+  for(const [status,label,ready] of [['queued','Queued',0],['running','Working now',0],['completed','Completed',1],['failed','Failed',0],['running','Working now',0],['idle','Ready',1],['waiting_credential','Needs access',0],['cancelled','Stopped',0],['new-status','Status unknown',0]]){
+    const data=team([{id:childId,agent_label:'Scout',status}]);
+    f.ctx.syncAgents(data);assert.match(f.agentsSection.html,new RegExp(label));
+    assert.match(f.agentsSection.html,new RegExp(`${ready} of 1 ready`));
+    const writes=f.agentsSection.writes;f.ctx.syncAgents(data);assert.equal(f.agentsSection.writes,writes);
+    assert.equal(f.pullsSection.hidden,false);
+  }
+  f.ctx.syncAgents(team([]));assert.equal(f.agentsSection.hidden,true);assert.equal(f.card.hidden,false);
+  f.ctx.pullRequests=[];f.ctx.syncToolboxVisibility();assert.equal(f.card.hidden,true);
+  assert.match(f.agentTab.html,/Subagents assigned to this session/);
+});
+test('agent updates reject old sessions and disposal, deduplicate membership, and restore the agents tab',()=>{
+  const f=agentToolbox(),child={id:childId,status:'completed'};
+  const data=team([child]);data.agents.groups.push({children:[child]});f.ctx.syncAgents(data);
+  assert.match(f.agentsSection.html,/1 of 1 ready/);
+  const writes=f.agentsSection.writes;
+  f.ctx.syncAgents({...team([]),id:'another-session'});f.ctx.syncAgents({id:'parent'});
+  f.ctx.disposed=true;f.ctx.syncAgents(team([]));assert.equal(f.agentsSection.writes,writes);
+  const saved=restore(JSON.stringify({visible:true,active:'agents',tabs:[{id:'agents',kind:'agents',title:'Subagents'}]}));
+  assert.equal(saved.tabs[0].kind,'agents');assert.equal(saved.active,'agents');
+});
+test('terminal children still reconcile after the sidebar sees completion first',()=>{
+  const script=fs.readFileSync('app/static/app.js','utf8'),polls=[],callbacks=[];
+  const ctx={state:{authenticated:true,selected:'parent',chatRun:{agents:{groups:[{}]}},runs:[{id:'parent',children:[{status:'completed'}]}]},
+    document:{hidden:false},setInterval:fn=>callbacks.push(fn),refreshChat:id=>{polls.push(id);return Promise.resolve();}};
+  vm.createContext(ctx);
+  const start=script.indexOf('setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected');
+  vm.runInContext(script.slice(start,script.indexOf('\n',start)),ctx);
+  callbacks[0]();assert.deepEqual(polls,['parent']);
+  ctx.state.chatRun=null;ctx.state.runs[0].children=[];callbacks[0]();assert.equal(polls.length,1);
+  ctx.document.hidden=true;ctx.state.runs[0].children=[{status:'running'}];callbacks[0]();assert.equal(polls.length,1);
+});

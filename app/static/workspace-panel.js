@@ -8,7 +8,7 @@
   function restore(value){
     try{
       const data=JSON.parse(value);
-      const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','captures','files','file','activity','chat','pulls','pr'].includes(t.kind)&& (t.kind!=='pr'||prUrl(t.url))&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
+      const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','captures','files','file','activity','chat','pulls','pr','agents'].includes(t.kind)&& (t.kind!=='pr'||prUrl(t.url))&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
       return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||60)),tabs};
     }catch{return {visible:false,active:'',width:60,tabs:[]};}
   }
@@ -32,16 +32,18 @@
     }
     return render(fileTree(files))||'<p class="panel-empty">No matching saved files.</p>';
   }
-  function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated}){
+  function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated,statusFor=()=>'Status unknown'}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
     const activity=layout.querySelector('#session-details');
-    const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',captures:'archive',files:'file',file:'file',chat:'chat',activity:'list',pulls:'pull',pr:'pull'};
+    const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',captures:'archive',files:'file',file:'file',chat:'chat',activity:'list',pulls:'pull',pr:'pull',agents:'participants'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
     panel.innerHTML=`<div class="panel-resize" role="separator" aria-label="Resize workspace panel" aria-orientation="vertical" tabindex="0"></div><header class="panel-header"><div class="panel-tabs" role="tablist" aria-label="Workspace tabs"></div><div class="panel-tools"><button type="button" class="panel-icon" data-add aria-label="Add tab" title="Add tab" aria-expanded="false">${ico('plus',18)}</button><span class="panel-spacer"></span><button type="button" class="panel-icon" data-expand aria-label="Expand workspace panel" title="Expand">${ico('expand',17)}</button><button type="button" class="panel-icon" data-hide aria-label="Hide workspace panel" title="Hide panel">${ico('panel',18)}</button></div></header><div class="panel-menu" hidden><label><span aria-hidden="true">⌕</span><input type="search" placeholder="Search tabs…" aria-label="Search workspace tabs"></label><div data-menu-items></div></div><div class="panel-views"></div><div data-parking hidden></div>`;
-    const card=document.createElement('aside');card.className='session-pull-requests';card.setAttribute('aria-label','Session pull requests');card.hidden=true;layout.append(card);
-    let pullRequests=[],prSignature='';
+    const card=document.createElement('aside');card.className='session-pull-requests';card.setAttribute('aria-label','Session toolbox');card.hidden=true;layout.append(card);
+    const pullsSection=document.createElement('section'),agentsSection=document.createElement('section');
+    card.append(pullsSection,agentsSection);
+    let pullRequests=[],prSignature='',agents=[],agentSignature='';
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
     const closingStatus=document.createElement('div');closingStatus.className='panel-empty';closingStatus.setAttribute('role','status');closingStatus.textContent='Closing tabs…';closingStatus.hidden=true;views.append(closingStatus);
     if(activity){parking.append(activity);activity.hidden=false;}
@@ -81,7 +83,7 @@
       if(kind==='chat'&&data.chatId){const existing=[...tabs.values()].find(t=>t.chatId===data.chatId);if(existing)return existing;}
       const id=data.id||(kind==='pr'?'pr:'+data.url.toLowerCase():kind==='file'?'file:'+data.path:kind==='chat'?'chat:'+(data.chatId||crypto.randomUUID()):kind);
       if(tabs.has(id))return tabs.get(id);if(tabs.size>=16){toast('Close a tab before opening another.');return null;}
-      const t={...data,id,kind,uid:crypto.randomUUID(),title:data.title||({computer:'Computer',captures:'Saved captures',files:'Files',chat:'Side chat',activity:'Activity',pulls:'Pull requests'}[kind]||'File')};
+      const t={...data,id,kind,uid:crypto.randomUUID(),title:data.title||({computer:'Computer',captures:'Saved captures',files:'Files',chat:'Side chat',activity:'Activity',pulls:'Pull requests',agents:'Subagents'}[kind]||'File')};
       t.element=document.createElement('section');t.element.className='panel-view panel-'+kind;t.element.id='view-'+t.uid;t.element.setAttribute('role','tabpanel');t.element.setAttribute('aria-labelledby','tab-'+t.uid);t.element.hidden=true;views.append(t.element);tabs.set(id,t);return t;
     }
     function open(kind,data={}){const t=make(kind,data);if(t)select(t.id);return true;}
@@ -121,6 +123,7 @@
     async function mount(t){
       const epoch=t.epoch=(t.epoch||0)+1;const current=()=>good(t)&&epoch===t.epoch;
       if(t.kind==='pulls'){renderPulls(t.element);return;}
+      if(t.kind==='agents'){renderAgents(t.element);return;}
       if(t.kind==='pr'){
         t.activate=()=>{const autoload=!!t.autoload;t.autoload=false;computer.open(run.id,t.element,{tab:t.url,title:t.title,autoload});};
         t.deactivate=()=>computer.close();return;
@@ -192,6 +195,30 @@
       document.addEventListener('visibilitychange',visibility);
       t.dispose=()=>{t.deactivate();document.removeEventListener('visibilitychange',visibility);};
     }
+    function syncToolboxVisibility(){
+      pullsSection.hidden=!pullRequests.length;agentsSection.hidden=!agents.length;
+      card.hidden=!pullRequests.length&&!agents.length;
+      layout.classList.toggle('has-session-tools',!card.hidden);
+    }
+    function renderAgents(host){
+      const focused=host.contains(document.activeElement)?document.activeElement?.getAttribute('data-agent-id'):null;
+      const ready=agents.filter(child=>['idle','completed'].includes(child.status)).length;
+      host.innerHTML=`<header class="pull-requests-heading"><h2>Subagents</h2><span>${ready} of ${agents.length} ready</span></header><div class="pull-request-list">${agents.map(child=>`<a class="pull-request-row subagent-row" href="#run=${child.id}" data-agent-id="${child.id}"><span class="pull-request-icon">${ico('participants',18)}</span><span><strong>${esc(child.agent_label||'Agent')}</strong><small>${esc(statusFor(child))}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Subagents assigned to this session will appear here.</p>'}</div>`;
+      if(focused)host.querySelector(`[data-agent-id="${focused}"]`)?.focus({preventScroll:true});
+    }
+    function syncAgents(data){
+      if(disposed||data.id!==run.id||!data.agents)return;
+      const byId=new Map();
+      for(const group of data.agents.groups||[])for(const child of group.children||[]){
+        if(child&&/^[a-f0-9]{32}$/.test(child.id))byId.set(child.id,{id:child.id,agent_label:child.agent_label,status:child.status});
+      }
+      const next=[...byId.values()],signature=JSON.stringify(next);
+      if(signature===agentSignature)return;agentSignature=signature;agents=next;
+      renderAgents(agentsSection);syncToolboxVisibility();
+      const toggle=document.querySelector('#subagents-button');if(toggle){toggle.hidden=!agents.length;toggle.title=`Subagents (${agents.length})`;}
+      for(const t of tabs.values())if(t.kind==='agents')renderAgents(t.element);
+    }
+    function syncSession(data){syncAgents(data);syncPullRequests(data);}
     function renderPulls(host){
       host.innerHTML=`<header class="pull-requests-heading"><h2>Pull requests</h2><span>${pullRequests.length}</span></header><div class="pull-request-list">${pullRequests.map(pr=>`<a class="pull-request-row" href="${esc(pr.url)}" data-pr-url="${esc(pr.url)}" title="${esc(pr.title)}" target="_blank" rel="noopener noreferrer"><span class="pull-request-icon">${ico('pull',18)}</span><span><strong>${esc(pr.title)}</strong><small>${esc(pr.repository)} #${pr.number}</small></span>${ico('chevron',14)}</a>`).join('')||'<p class="panel-empty">Pull requests created in this session will appear here.</p>'}</div>`;
     }
@@ -205,7 +232,7 @@
       if(disposed||data.id!==run.id||!Array.isArray(data.pull_requests))return;
       pullRequests=data.pull_requests.filter(pr=>prUrl(pr.url));
       const signature=JSON.stringify(pullRequests);if(signature===prSignature)return;prSignature=signature;
-      card.hidden=!pullRequests.length;layout.classList.toggle('has-pull-requests',!!pullRequests.length);renderPulls(card);
+      renderPulls(pullsSection);syncToolboxVisibility();
       const toggle=document.querySelector('#pull-requests-button');if(toggle){toggle.hidden=!pullRequests.length;toggle.title=`Pull requests (${pullRequests.length})`;}
       for(const t of [...tabs.values()]){
         if(t.kind==='pulls')renderPulls(t.element);
@@ -224,7 +251,7 @@
       const url=prUrl(link.getAttribute('href'));if(url&&openPullRequest(url))event.preventDefault();
     }
     layout.addEventListener('click',followPullRequest);
-    syncPullRequests(run);
+    syncSession(run);
     function openFile(file){return open('file',{path:file.archive_path,title:file.name});}
     function decorate(element,files){
       MoyaiFiles.decorate(element,files,{onOpen:openFile});
@@ -283,7 +310,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Open this session’s PRs in the browser'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Open this session’s PRs in the browser'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.
@@ -302,7 +329,7 @@
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
     restoring=false;save();
     api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
-    return {open,openFile,openPullRequest,syncPullRequests,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-pull-requests');}};
+    return {open,openFile,openPullRequest,syncPullRequests,syncSession,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-session-tools');}};
   }
   return {create,restore,fileTree,renderFileTree,prUrl};
 });

@@ -11,6 +11,9 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from uuid import uuid4
+
+from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -79,6 +82,24 @@ def demo(directory, port=8976, static_root=None, computer_container=None):
         display_title='Review the workspace improvements')
     child, child_message = session('Check keyboard navigation', 'Local child-session fixture.',
                                     parent_run_id=root['id'], agent_label='Keyboard navigation')
+    group_id = uuid4().hex
+    store.execute("INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at) VALUES(?,?,?,'toolbox-demo','{}','completed',?)",
+                  (group_id, root['id'], root_message, root['created_at']))
+    failed, _ = session('Check narrow layouts', 'Local failed child fixture.',
+                        parent_run_id=root['id'], agent_label='Responsive layouts')
+    running, _ = session('Review session updates', 'Local running child fixture.',
+                         parent_run_id=root['id'], agent_label='Live updates')
+    for agent in (child, failed, running):
+        store.execute('UPDATE runs SET agent_group_id=? WHERE id=?', (group_id, agent['id']))
+    store.update_run(failed['id'], status='failed')
+
+    @app.post('/demo/agent-state/{status}')
+    async def agent_state(status: str):
+        if status not in {'running', 'completed', 'failed', 'idle'}:
+            raise HTTPException(400, 'Unknown fixture status')
+        store.update_run(running['id'], status=status)
+        return {'id': running['id'], 'status': status}
+
     unrelated, unrelated_message = session('Investigate another change', 'Local unrelated-session fixture.',
                                             display_title='Unrelated session')
     for index, (number, title, state, draft) in enumerate(PULLS + [(999, 'Unrelated pull request', 'open', False)]):
