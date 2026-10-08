@@ -123,13 +123,16 @@
 .settings-view .skill-card code { font-size: .733333rem; color: var(--settings-muted); background: var(--settings-subtle); padding: 3px 6px; border-radius: 4px; overflow-wrap: anywhere; }
 .settings-view :is(.skill-card-actions,.credential-actions,.environment-card-actions) { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .settings-view .secret-list { gap: 0; }
-.settings-view #content .secret-card { padding-block: 16px; gap: 16px; }
-.settings-view .secret-card p { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--settings-caption); margin: 8px 0; overflow-wrap: anywhere; }
+.settings-view #content .secret-card { padding-block: 12px; gap: 16px; }
+.settings-view .secret-info { display: grid; gap: 4px; }
+.settings-view :is(.secret-title,.secret-meta) { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.settings-view .secret-title { align-items: baseline; }
+.settings-view .secret-card p { font-size: var(--settings-caption); margin: 0; overflow-wrap: anywhere; }
 .settings-view .secret-card .secret-scope { margin: 0; }
 .settings-view .secret-card .credential-actions { margin: 0; flex-shrink: 0; }
 .settings-view .secret-card .credential-actions button { max-width: none; white-space: nowrap; }
-.settings-view .secret-card small { display: inline; }
-.settings-view .secret-card .secret-reference { font: .733333rem/1.6 var(--mono); color: var(--settings-muted); }
+.settings-view .secret-card small { display: inline; min-width: 0; overflow-wrap: anywhere; }
+.settings-view .secret-card .secret-reference { font: .8rem/1.6 var(--mono); color: var(--settings-muted); min-width: 0; overflow-wrap: anywhere; }
 .settings-view #content .automation-template { background: var(--settings-subtle); border-color: var(--settings-line); border-radius: var(--settings-radius); padding: 18px 20px; margin-bottom: 24px; }
 .settings-view .automation-card header { align-items: flex-start; }
 .settings-view .automation-card h2 { margin: 0 0 6px; }
@@ -305,7 +308,10 @@
   .settings-view .memory-learning select { max-width: 100%; }
   .settings-view .memory-filter input { width: 100%; }
   .settings-view .environment-explainer { grid-template-columns: 1fr; }
+  .settings-view #content .secret-card { gap: 8px; }
+  .settings-view .secret-card>.secret-info { flex-basis: 100%; }
   .settings-view .secret-card .credential-actions { flex-basis: 100%; }
+  .settings-view .secret-card .credential-actions button { min-height: 44px; }
   .settings-view .automation-card :is(header,footer) { flex-wrap: wrap; }
   .settings-view .automation-history-row { grid-template-columns: minmax(0,1fr); gap: 6px; }
   .settings-view .users-toolbar { flex-wrap: wrap; padding: 16px; }

@@ -161,7 +161,11 @@ for (const width of [1440, 1024, 768, 320]) {
         for (const [index, { row, info, actions, title, reference, badges, buttons }] of secrets.entries()) {
           if (index) assert.ok(Math.abs(row.top - secrets[index - 1].row.bottom) <= 1, 'Secret rows meet at their divider without extra gaps');
           assert.ok(Math.abs(badges[0].left - title.left) <= 1, 'Secret badges share the title leading edge');
-          assert.ok(Math.abs(reference.left - title.left) <= 1, 'Secret references share the title leading edge');
+          if (reference.top >= title.bottom) {
+            assert.ok(Math.abs(reference.left - title.left) <= 1, 'Wrapped references share the title leading edge');
+          } else {
+            assert.ok(Math.abs(reference.left - title.right - 8) <= 1, 'Inline references stay close to their title');
+          }
           for (let index = 1; index < badges.length; index++) {
             if (Math.abs(badges[index].top - badges[index - 1].top) <= 1) {
               assert.ok(Math.abs(badges[index].left - badges[index - 1].right - 8) <= 1, 'Adjacent badges use one consistent gap');
@@ -175,9 +179,11 @@ for (const width of [1440, 1024, 768, 320]) {
           }
           if (width > 650) {
             assert.ok(Math.abs(actions.top + actions.height / 2 - info.top - info.height / 2) <= 1, 'Desktop credential actions are centered with their details');
-            assert.ok(row.height <= Math.max(info.height, actions.height) + 34, 'Secret rows have compact vertical padding');
+            assert.ok(row.height <= Math.max(info.height, actions.height) + 26, 'Secret rows have compact vertical padding');
+            if (width === 1440 && !index) assert.ok(row.height <= 80, 'A standard desktop secret fits in a compact two-line row');
           } else {
-            assert.ok(actions.top - info.bottom >= 12 && actions.top - info.bottom <= 16, 'Mobile actions stay close to their details');
+            assert.ok(Math.abs(actions.top - info.bottom - 8) <= 1, 'Mobile actions stay close to their details');
+            assert.ok(buttons.every(button => button.box.height >= 44), 'Mobile credential actions retain touch-sized targets');
           }
         }
       }
@@ -321,6 +327,50 @@ for (const width of [1440, 768, 320]) {
     await page.waitForFunction(() => document.activeElement?.hasAttribute('data-session-actions'));
   });
 }
+
+test('compact secrets preserve long identifiers, file metadata and managed access', async t => {
+  for (const width of [1440, 768, 320]) {
+    const page = await pageFor(t, 'secrets', 'populated', width);
+    const label = 'PRODUCTION_SERVICE_ACCOUNT_'.repeat(4);
+    const name = 'production-service-account-'.repeat(4);
+    const envVar = 'PRODUCTION_CREDENTIAL_FILE_'.repeat(4);
+    await page.route('**/api/credentials', async route => {
+      const response = await route.fetch();
+      const data = await response.json();
+      data.secrets = [{ ...data.secrets[0], label, name, format: 'file', env_var: envVar, status: 'invalid', can_manage: false, expires_at: '2027-01-01T00:00:00Z' }];
+      await route.fulfill({ response, json: data });
+    });
+    await page.reload();
+    const row = page.locator('.secret-card');
+    await row.waitFor();
+    assert.equal(await row.locator('strong').textContent(), label);
+    assert.equal(await row.locator('.secret-reference').textContent(), name);
+    assert.ok((await row.locator('.secret-meta small').textContent()).includes(envVar));
+    assert.ok((await row.textContent()).includes('Credential file'));
+    assert.ok((await row.textContent()).includes('Expires'));
+    assert.ok((await row.textContent()).includes('Needs updating'));
+    assert.equal(await row.locator('button').count(), 0, 'Managed credentials have no write actions');
+    await row.getByText('Managed by an admin', { exact: true }).waitFor();
+    const overflow = await row.evaluate(row => {
+      const bounds = row.getBoundingClientRect();
+      const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+      const failures = [];
+      while (walker.nextNode()) {
+        if (!walker.currentNode.textContent.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(walker.currentNode);
+        if ([...range.getClientRects()].some(rect => rect.width && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1))) failures.push(walker.currentNode.textContent);
+      }
+      return failures;
+    });
+    assert.deepEqual(overflow, [], `Long secret metadata stays within the ${width}px layout`);
+    await page.locator('#secret-search').fill('no matching credential');
+    assert.equal(await row.isVisible(), false);
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+    assert.equal(await row.isVisible(), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  }
+});
 
 test('filters, empty results, failed loading and member permissions remain usable', async t => {
   const page = await pageFor(t, 'skills');
