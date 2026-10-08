@@ -8,7 +8,6 @@ import pytest
 from PIL import Image
 
 from app import artifact_files
-from storage_fixture import MemoryObjects
 from test_workspace import workspace
 
 
@@ -45,20 +44,6 @@ def test_existing_archive_supports_exact_file_preview_and_download(workspace):
     client.cookies.clear()
     for endpoint in [url, file['url'], file['preview_url']]:
         assert client.get(endpoint).status_code == 401
-
-
-def test_catalog_cap_preserves_recovery_artifacts_before_source(workspace):
-    primary = {'result.md': b'Answer', 'browser.png': b'screenshot', 'changes.patch': b'root patch',
-               'repositories/repo/changes.patch': b'nested patch', 'recovery-manifest.json': b'{}'}
-    sources = [(f'new-files/repo/source-{i:04}.js', 'source') for i in range(artifact_files.MAX_LIST)]
-    client, url, _ = saved(workspace, sources + list(primary.items()))
-    listing = client.get(url).json()
-    files = {file['archive_path']: file for file in listing['files']}
-    assert listing['limited'] and len(files) == artifact_files.MAX_LIST
-    assert primary.keys() <= files.keys()
-    for name, content in primary.items():
-        assert files[name]['workspace_path'] is None
-        assert client.get(files[name]['url']).content == content
 
 
 def test_paths_symlinks_duplicates_and_oversized_entries_are_not_served(workspace):
@@ -117,43 +102,6 @@ def test_a_new_checkpoint_cannot_silently_change_an_open_download(workspace):
     assert client.get(old['preview_url']).status_code == 409
     new = client.get(url).json()['files'][0]
     assert client.get(new['url']).content == b'newest'
-
-
-def test_object_archives_override_legacy_bytes_and_keep_revisions_and_faults(workspace):
-    client, url, legacy = saved(workspace, [('new-files/report.md', 'legacy')])
-    app, _ = workspace
-    store = app.state.store
-    store.objects = MemoryObjects()
-    for version in ['remote', 'replacement']:
-        raw = BytesIO()
-        with zipfile.ZipFile(raw, 'w') as archive:
-            archive.writestr('new-files/report.md', version)
-        store.artifacts.save(legacy.name, raw.getvalue())
-        listing = client.get(url).json()
-        file = listing['files'][0]
-        assert client.get(file['url']).content == version.encode()
-        archive_url = url.removesuffix('/files') + '/artifact'
-        download = client.get(archive_url)
-        assert download.content == raw.getvalue()
-        resumed = client.get(archive_url, headers={'Range': 'bytes=0-9', 'If-Range': download.headers['etag']})
-        assert resumed.status_code == 206 and resumed.content == raw.getvalue()[:10]
-        if version == 'remote':
-            first = file
-            first_etag = download.headers['etag']
-        else:
-            assert client.get(first['url']).status_code == 409
-            replaced = client.get(archive_url, headers={'Range': 'bytes=0-9', 'If-Range': first_etag})
-            assert replaced.status_code == 200 and replaced.content == raw.getvalue()
-    # A failed remote read cannot silently serve the retained old disk copy.
-    assert legacy.exists()
-    store.objects.fail = True
-    count = store.objects.reads
-    assert client.get(url.removesuffix('/files')).json()['has_artifact'] is True
-    assert store.objects.reads == count
-    assert client.get(file['url']).status_code == 503
-    assert client.get(url).status_code == 503
-    client.cookies.clear()
-    assert client.get(file['url']).status_code == 401
 
 
 @pytest.mark.parametrize('format,extension', [('PNG', 'png'), ('JPEG', 'jpg'), ('WEBP', 'webp'), ('GIF', 'gif')])

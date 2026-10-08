@@ -44,7 +44,7 @@ def test_accepted_pr_with_failed_http_reply_is_read_back(workspace, monkeypatch,
     assert [c[0] for c in api.calls if c[1].endswith('/pulls')] == ['GET', 'POST', 'GET']
     assert client.post(url, headers=headers, json=body).json() == result
     assert len(transport_calls) == 1
-    assert github.owned_publication(101, 100, github.connection_version())['result']
+    assert github.owned_publication(app.state.store.run(run_id), 101, 100, github.connection_version())['result']
 
 
 @pytest.mark.parametrize('outcome', ['empty', 'read_error', 'multiple', 'wrong_sha', 'wrong_repo', 'wrong_branch', 'wrong_base', 'revoked'])

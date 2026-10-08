@@ -18,7 +18,7 @@ from .audio import AudioTranscriber, audio_type
 from .attachment_transport import CONTENT_TYPE, OVERHEAD, unseal_file
 
 MAX_FILE = 10 * 1024 * 1024
-MAX_FILES = 8
+MAX_FILES = 5
 MAX_MESSAGE = 20 * 1024 * 1024
 MAX_DRAFT = 50 * 1024 * 1024
 ID = re.compile(r'^[0-9a-f]{32}$')
@@ -112,78 +112,33 @@ class Attachments:
                 CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
                 CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(owner_id);
             ''')
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(attachments)')}
-            for name, definition in [('data_ref', "TEXT NOT NULL DEFAULT ''"),
-                                     ('preview_ref', "TEXT NOT NULL DEFAULT ''"),
-                                     ('preview_size', 'INTEGER NOT NULL DEFAULT 0')]:
-                if name not in columns:
-                    conn.execute(f'ALTER TABLE attachments ADD COLUMN {name} {definition}')
-            if 'preview_size' not in columns:
-                conn.execute('UPDATE attachments SET preview_size=length(preview)')
-
-    def payload(self, row, field='data'):
-        """Read an already-authorized row; a remote reference never falls back to a BLOB."""
-        if field not in {'data', 'preview'}:
-            raise ValueError('Unknown attachment payload.')
-        reference = row[field + '_ref']
-        if not reference:
-            return row[field]
-        size = row['size' if field == 'data' else 'preview_size']
-        raw = self.store.objects.read(reference, size)
-        if len(raw) != size:
-            raise HTTPException(503, 'Attachment storage is temporarily unavailable.')
-        return raw
-
-    def existing(self, conn, attachment_id, owner_id, name, checksum):
-        prior = conn.execute(f'SELECT {META} FROM attachments WHERE id=?', (attachment_id,)).fetchone()
-        if prior:
-            if prior['owner_id'] != owner_id or prior['sha256'] != checksum or prior['name'] != name:
-                raise ValueError('This upload ID was already used. Add the file again.')
-            return public_file(prior)
-        return None
-
-    def check_quota(self, conn, owner_id, size, preview_size, storage_limit, cutoff):
-        # Preflight and publication count the same live population. Expired
-        # drafts are deleted only once publication holds the writer lock.
-        total = conn.execute("SELECT COALESCE(SUM(size + CASE WHEN preview_ref!='' THEN preview_size ELSE length(preview) END),0) FROM attachments WHERE message_id IS NOT NULL OR created_at>=?", (cutoff,)).fetchone()[0]
-        draft = conn.execute('SELECT COALESCE(SUM(size),0) FROM attachments WHERE owner_id=? AND message_id IS NULL AND created_at>=?', (owner_id, cutoff)).fetchone()[0]
-        if total + size + preview_size > storage_limit:
-            raise ValueError('Attachment storage is full. Ask an administrator to increase the storage limit.')
-        if draft + size > MAX_DRAFT:
-            raise ValueError('Too many unsent files. Remove some draft attachments first.')
 
     def save(self, attachment_id, owner_id, name, raw, inspected, storage_limit):
         media_type, preview, preview_text = inspected
         checksum = hashlib.sha256(raw).hexdigest()
         stamp = datetime.now(timezone.utc)
-        cutoff = (stamp - timedelta(days=1)).isoformat()
-        with self.store.connect() as conn:
-            prior = self.existing(conn, attachment_id, owner_id, name, checksum)
-            if prior:
-                return prior
-            self.check_quota(conn, owner_id, len(raw), len(preview), storage_limit, cutoff)
-        data_ref = preview_ref = ''
-        if self.store.objects.enabled:
-            # Network I/O precedes the writer lock. A failed/cancelled publication
-            # can leave an unreferenced immutable object, never a partial row.
-            data_ref = self.store.objects.put(raw)
-            preview_ref = self.store.objects.put(preview) if preview else ''
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            conn.execute('DELETE FROM attachments WHERE message_id IS NULL AND created_at<?', (cutoff,))
-            prior = self.existing(conn, attachment_id, owner_id, name, checksum)
+            conn.execute('DELETE FROM attachments WHERE message_id IS NULL AND created_at<?', ((stamp - timedelta(days=1)).isoformat(),))
+            prior = conn.execute(f'SELECT {META} FROM attachments WHERE id=?', (attachment_id,)).fetchone()
             if prior:
-                return prior
-            self.check_quota(conn, owner_id, len(raw), len(preview), storage_limit, cutoff)
-            conn.execute('INSERT INTO attachments(id,owner_id,message_id,name,size,sha256,media_type,preview_text,created_at,data,preview,data_ref,preview_ref,preview_size) VALUES(?,?,NULL,?,?,?,?,?,?,?,?,?,?,?)',
-                         (attachment_id, owner_id, name, len(raw), checksum, media_type, preview_text, stamp.isoformat(),
-                          b'' if data_ref else raw, b'' if preview_ref else preview, data_ref, preview_ref, len(preview)))
+                if prior['owner_id'] != owner_id or prior['sha256'] != checksum or prior['name'] != name:
+                    raise ValueError('This upload ID was already used. Add the file again.')
+                return public_file(prior)
+            total = conn.execute('SELECT COALESCE(SUM(size + length(preview)),0) FROM attachments').fetchone()[0]
+            draft = conn.execute('SELECT COALESCE(SUM(size),0) FROM attachments WHERE owner_id=? AND message_id IS NULL', (owner_id,)).fetchone()[0]
+            if total + len(raw) + len(preview) > storage_limit:
+                raise ValueError('Attachment storage is full. Ask an administrator to increase the storage limit.')
+            if draft + len(raw) > MAX_DRAFT:
+                raise ValueError('Too many unsent files. Remove some draft attachments first.')
+            conn.execute('INSERT INTO attachments VALUES(?,?,NULL,?,?,?,?,?,?,?,?)',
+                         (attachment_id, owner_id, name, len(raw), checksum, media_type, preview_text, stamp.isoformat(), raw, preview))
             return public_file(conn.execute(f'SELECT {META} FROM attachments WHERE id=?', (attachment_id,)).fetchone())
 
     def bind_in(self, conn, ids, message_id, user_id):
         ids = ids or []
         if len(ids) > MAX_FILES or len(ids) != len(set(ids)):
-            raise ValueError(f'Attach up to {MAX_FILES} different files per message.')
+            raise ValueError('Attach up to five different files per message.')
         total = 0
         for attachment_id in ids:
             row = conn.execute('SELECT owner_id,message_id,size FROM attachments WHERE id=?', (attachment_id,)).fetchone()
@@ -209,24 +164,20 @@ class Attachments:
         return [{**public_file(row), 'message_id': row['message_id'], 'sha256': row['sha256'],
                  'path': f"/workspace/.moyai-attachments/{row['id']}/{row['name']}"} for row in rows]
 
-    def broker_row(self, run, attachment_id, *, conn=None):
-        query = "SELECT a.* FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued' OR (m.steering_parent_id=? AND m.queue_locked=1))"
-        params = (attachment_id, run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0)
-        rows = conn.execute(query, params).fetchall() if conn is not None else self.store.rows(query, params)
+    def broker_file(self, run, attachment_id):
+        rows = self.store.rows("SELECT a.data FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued' OR (m.steering_parent_id=? AND m.queue_locked=1))",
+                               (attachment_id, run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0))
         if not rows:
             raise HTTPException(404, 'Attachment not found in this session.')
-        return rows[0]
-
-    def broker_file(self, run, attachment_id):
-        return Response(self.payload(self.broker_row(run, attachment_id)), media_type='application/octet-stream')
+        return Response(rows[0]['data'], media_type='application/octet-stream')
 
     def with_images(self, run, messages, *, protocol='/v1/chat/completions'):
         # Keep image bytes out of sandbox transcripts, Temporal history and logs.
         # Only this run's sent attachments, up to its currently executing turn,
         # are eligible. Future queued messages cannot leak into the active turn.
-        rows = self.store.rows("SELECT a.id,a.preview,a.preview_ref,a.preview_size FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND (m.id<=? OR m.steering_parent_id=?) AND m.status NOT IN ('queued','deleted') AND (a.preview_size>0 OR length(a.preview)>0) ORDER BY m.id DESC,a.created_at DESC LIMIT 10",
+        rows = self.store.rows("SELECT a.id,a.preview FROM attachments a JOIN messages m ON m.id=a.message_id WHERE m.run_id=? AND (m.id<=? OR m.steering_parent_id=?) AND m.status NOT IN ('queued','deleted') AND length(a.preview)>0 ORDER BY m.id DESC,a.created_at DESC LIMIT 10",
                                (run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0))
-        images = {row['id']: row for row in rows}
+        images = {row['id']: row['preview'] for row in rows}
         result = []
         for message in reversed(messages):
             if not isinstance(message, dict):
@@ -242,7 +193,7 @@ class Attachments:
             before = len(parts)
             for attachment_id in ids:
                 if attachment_id in images:
-                    encoded = base64.b64encode(self.payload(images.pop(attachment_id), 'preview')).decode()
+                    encoded = base64.b64encode(images.pop(attachment_id)).decode()
                     if protocol == '/v1/messages':
                         parts.append({'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': encoded}})
                     elif protocol == '/v1/responses':
@@ -294,14 +245,13 @@ class Attachments:
                         return public_file(row)
                     media_type = audio_type(safe_name, raw)
                     inspected = (media_type, b'', await transcriber.transcribe(raw, safe_name, media_type)) if media_type else await asyncio.to_thread(inspect_file, raw)
-                    return await asyncio.to_thread(self.save, attachment_id, owner, safe_name, raw, inspected,
-                                                   settings.attachment_storage_limit_mb * 1024 * 1024)
+                    return self.save(attachment_id, owner, safe_name, raw, inspected, settings.attachment_storage_limit_mb * 1024 * 1024)
                 except ValueError as exc:
                     raise HTTPException(422, str(exc)) from None
 
         def accessible(request, attachment_id):
             owner = actor(request)
-            rows = self.store.rows('SELECT * FROM attachments WHERE id=?', (attachment_id,))
+            rows = self.store.rows(f'SELECT {META} FROM attachments WHERE id=?', (attachment_id,))
             if not rows or (rows[0]['message_id'] is None and rows[0]['owner_id'] != owner):
                 raise HTTPException(404, 'Attachment not found.')
             if rows[0]['message_id'] is not None and not self.store.rows("""SELECT 1 FROM messages m
@@ -311,17 +261,18 @@ class Attachments:
 
         @router.get('/api/attachments/{attachment_id}/preview')
         async def preview(attachment_id: str, request: Request):
-            row = accessible(request, attachment_id)
-            if not row['preview_ref'] and not row['preview']:
+            accessible(request, attachment_id)
+            row = self.store.rows('SELECT preview FROM attachments WHERE id=?', (attachment_id,))[0]
+            if not row['preview']:
                 raise HTTPException(404, 'No image preview available.')
-            return Response(await asyncio.to_thread(self.payload, row, 'preview'), media_type='image/jpeg')
+            return Response(row['preview'], media_type='image/jpeg')
 
         @router.get('/api/attachments/{attachment_id}/audio')
         async def audio(attachment_id: str, request: Request):
             row = accessible(request, attachment_id)
             if not row['media_type'].startswith('audio/'):
                 raise HTTPException(404, 'No audio available.')
-            raw = await asyncio.to_thread(self.payload, row)
+            raw = self.store.rows('SELECT data FROM attachments WHERE id=?', (attachment_id,))[0]['data']
             headers = {'Accept-Ranges': 'bytes'}
             requested = request.headers.get('range')
             if requested:
@@ -339,7 +290,7 @@ class Attachments:
         @router.get('/api/attachments/{attachment_id}')
         async def download(attachment_id: str, request: Request):
             row = accessible(request, attachment_id)
-            raw = await asyncio.to_thread(self.payload, row)
+            raw = self.store.rows('SELECT data FROM attachments WHERE id=?', (attachment_id,))[0]['data']
             return Response(raw, media_type='application/octet-stream',
                             headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'])})
 

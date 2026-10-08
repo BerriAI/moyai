@@ -1,9 +1,7 @@
 import base64
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-import threading
 from unittest.mock import AsyncMock
 
 import pytest
@@ -14,7 +12,6 @@ from app import captures
 from app.computer import BROWSER_PARTIAL_NOTICE, DesktopConnection
 from sandbox import computer
 from test_workspace import workspace
-from storage_fixture import MemoryObjects
 
 PNG = b'\x89PNG\r\n\x1a\n' + b'capture bytes'
 WEBM = b'\x1aE\xdf\xa3\x42\x82\x84webm' + bytes(range(100))
@@ -54,23 +51,17 @@ def test_preview_control_requires_login_csrf_and_requester(workspace, monkeypatc
     assert client.get(url).status_code == 401
 
 
-@pytest.mark.parametrize('remote', [False, True])
-def test_saved_media_survives_sleep_supports_ranges_and_blocks_paths(workspace, remote):
+def test_saved_media_survives_sleep_supports_ranges_and_blocks_paths(workspace):
     app, client, rid, url = cloud(workspace)
-    store = app.state.store
-    if remote:
-        store.objects = MemoryObjects()
     directory = captures.directory(app.state.settings, rid)
     directory.mkdir(parents=True)
-    for name, raw in [('image-a.png', PNG), ('flow-b.webm', WEBM), ('evil.png', b'<html><script>alert(1)</script>')]:
-        store.artifacts.save(rid + '-captures/' + name, raw)
+    (directory/'image-a.png').write_bytes(PNG)
+    (directory/'flow-b.webm').write_bytes(WEBM)
+    (directory/'evil.png').write_bytes(b'<html><script>alert(1)</script>')
     (directory/'link.png').symlink_to(directory/'image-a.png')
     listing = client.get(f'/api/runs/{rid}/files').json()['files']
     assert {f['name'] for f in listing} == {'image-a.png','flow-b.webm','evil.png'}
     assert client.get(f'/api/runs/{rid}').json()['has_captures']
-    if remote:
-        assert store.objects.reads == 0
-        assert not (directory / 'flow-b.webm').exists()
     media = url + '/captures/flow-b.webm'
     response = client.get(media)
     assert response.content == WEBM
@@ -86,12 +77,6 @@ def test_saved_media_survives_sleep_supports_ranges_and_blocks_paths(workspace, 
     assert client.get(url+'/captures/evil.png').status_code == 415
     assert client.get(url+'/captures/link.png').status_code == 404
     assert client.get(url+'/captures/..%2Fworkspace.db').status_code == 404
-    other = store.create_run('Other capture scope', '', 'demo', [])['id']
-    assert client.get(f'/api/runs/{other}/computer/captures/flow-b.webm').status_code == 404
-    if remote:
-        store.objects.fail = True
-        assert client.get(media).status_code == 503
-        assert len(client.get(f'/api/runs/{rid}/files').json()['files']) == 3
     client.cookies.clear()
     assert client.get(media).status_code == 401
 
@@ -340,11 +325,8 @@ def test_deleting_session_removes_browser_authentication_for_parent_and_children
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('remote', [False, True])
-async def test_sync_is_idempotent_and_rejects_bad_or_oversized_media(workspace, monkeypatch, remote):
+async def test_sync_is_idempotent_and_rejects_bad_or_oversized_media(workspace):
     app, _, rid, _ = cloud(workspace)
-    if remote:
-        app.state.store.objects = MemoryObjects()
     hub = app.state.computer
     hub.execute = AsyncMock(return_value={'data': base64.b64encode(PNG).decode()})
     hub.manager.persist = AsyncMock()
@@ -353,118 +335,13 @@ async def test_sync_is_idempotent_and_rejects_bad_or_oversized_media(workspace, 
     await hub.sync(object(), rid, rows)
     assert hub.execute.await_count == 1
     assert hub.manager.persist.await_count == 1
-    assert captures.read(captures.directory(app.state.settings, rid) / 'proof.png', store=app.state.store)[0] == PNG
-    if remote:
-        assert not captures.directory(app.state.settings, rid).exists()
+    assert (captures.directory(app.state.settings,rid)/'proof.png').read_bytes() == PNG
     await hub.sync(object(),rid,[{'name':'../escape.png','size':1}, {'name':'huge.webm','size':captures.MAX_FILE+1}])
     assert hub.execute.await_count == 1
     hub.execute.return_value = {'data':base64.b64encode(b'not an image').decode()}
     with pytest.raises(Exception,match='supported image'):
         await hub.sync(object(),rid,[{'name':'invalid.png','size':len(b'not an image')}])
     assert not (captures.directory(app.state.settings,rid)/'invalid.png').exists()
-    if remote:
-        app.state.store.objects.fail = True
-        hub.execute.return_value = {'data': base64.b64encode(PNG).decode()}
-        with pytest.raises(HTTPException, match='unavailable'):
-            await hub.sync(object(), rid, [{'name': 'retry.png', 'size': len(PNG)}])
-        assert app.state.store.artifacts.info(rid + '-captures/retry.png') is None
-        assert not captures.directory(app.state.settings, rid).exists()
-        app.state.store.objects.fail = False
-    monkeypatch.setattr(captures, 'MAX_TOTAL', len(PNG))
-    hub.execute.return_value = {'data': base64.b64encode(PNG).decode()}
-    with pytest.raises(HTTPException, match='saved capture budget'):
-        await hub.sync(object(), rid, [{'name': 'over-budget.png', 'size': len(PNG)}])
-
-
-@pytest.mark.parametrize('remote', [False, True])
-@pytest.mark.parametrize('same_name', [False, True])
-async def test_cancelled_capture_save_cannot_overwrite_or_exceed_shared_budget(workspace, monkeypatch, remote, same_name):
-    from app import blob_storage
-    app, _, rid, _ = cloud(workspace)
-    store, hub = app.state.store, app.state.computer
-    if remote:
-        store.objects = MemoryObjects()
-    first_raw, second_raw = PNG + b'first', PNG + b'other'
-    first_name, second_name = 'first.png', 'first.png' if same_name else 'second.png'
-    prefix = rid + '-captures/'
-    monkeypatch.setattr(captures, 'MAX_TOTAL', len(first_raw))
-    hub.manager.persist = AsyncMock()
-    hub.execute = AsyncMock(side_effect=[{'data': base64.b64encode(raw).decode()} for raw in (first_raw, second_raw)])
-    started, release, second_started, finished = (threading.Event() for _ in range(4))
-    outcomes = {}
-    real_save = store.artifacts.save
-    real_listing = store.artifacts.listing
-    second_thread = None
-
-    def observed_save(name, raw, **kwargs):
-        nonlocal second_thread
-        if raw == second_raw:
-            second_thread = threading.get_ident()
-        try:
-            outcomes[raw] = real_save(name, raw, **kwargs)
-            return outcomes[raw]
-        except HTTPException as exc:
-            outcomes[raw] = exc
-            raise
-        finally:
-            if raw == first_raw:
-                finished.set()
-
-    def observed_listing(prefix, conn=None):
-        result = real_listing(prefix, conn)
-        if conn is not None and threading.get_ident() == second_thread:
-            second_started.set()
-        return result
-
-    monkeypatch.setattr(store.artifacts, 'save', observed_save)
-    monkeypatch.setattr(store.artifacts, 'listing', observed_listing)
-    if remote:
-        real_put = store.objects.put
-
-        def blocked_put(raw):
-            if raw == first_raw:
-                started.set()
-                assert release.wait(5), 'Cancelled upload was never released'
-            return real_put(raw)
-
-        monkeypatch.setattr(store.objects, 'put', blocked_put)
-    else:
-        real_fsync = blob_storage.os.fsync
-
-        def blocked_fsync(descriptor):
-            if not started.is_set():
-                started.set()
-                assert release.wait(5), 'Cancelled local save was never released'
-            return real_fsync(descriptor)
-
-        monkeypatch.setattr(blob_storage.os, 'fsync', blocked_fsync)
-    first = asyncio.create_task(hub.sync(object(), rid, [{'name': first_name, 'size': len(first_raw)}]))
-    try:
-        assert await asyncio.to_thread(started.wait, 5)
-        assert store.artifacts.listing(prefix) == [], 'Unpublished staging bytes are not capture inventory'
-        first.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await first
-        second = asyncio.create_task(hub.sync(object(), rid, [{'name': second_name, 'size': len(second_raw)}]))
-        assert await asyncio.to_thread(second_started.wait, 5)
-        if remote:
-            # A blocked remote upload must not hold SQLite's writer lock.
-            await asyncio.wait_for(second, 5)
-    finally:
-        release.set()
-        assert await asyncio.to_thread(finished.wait, 5)
-    if not remote:
-        if same_name:
-            await second
-        else:
-            with pytest.raises(HTTPException, match='saved capture budget'):
-                await second
-    rejected = outcomes[first_raw if remote else second_raw]
-    assert rejected is False if same_name else isinstance(rejected, HTTPException) and rejected.status_code == 413
-    rows = store.artifacts.listing(prefix)
-    assert len(rows) == 1 and sum(row['size'] for row in rows) == len(first_raw)
-    winner = second_raw if remote else first_raw
-    assert store.artifacts.read(rows[0]['name'], captures.MAX_FILE) == winner
 
 
 @pytest.mark.asyncio

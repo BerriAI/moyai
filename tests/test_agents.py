@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import zipfile
 
 import pytest
-from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.agents import AgentCoordinator, Artifact, Fanout, Retry
@@ -18,7 +17,6 @@ from sandbox.continuation import AgentWait
 from test_durable import durable, drive
 from test_workspace import workspace
 from test_spend import active, sign_in
-from storage_fixture import MemoryObjects
 
 
 def attach(manager):
@@ -323,34 +321,25 @@ async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, 
     assert coordinator.group(root, result['group_id'])['result_snapshot'] == ''
 
 
-@pytest.mark.parametrize('storage', ['local', 'remote', 'mixed'])
-async def test_post_handoff_chat_preserves_answers_and_files_across_restart(durable, storage):
+async def test_post_handoff_chat_preserves_answers_and_files_across_restart(durable):
     from test_durable import aio
     from app.runner import RunManager
-    from io import BytesIO
     manager, cloud, root = durable
-    objects = MemoryObjects()
-    if storage == 'remote':
-        manager.store.objects = objects
     coordinator, result, _ = await launch(durable, count=1)
     await pause_parent(manager, root, result['group_id'])
     child = coordinator.children(result['group_id'])[0]['id']
     await drive(manager, child)
-    first = BytesIO()
-    with zipfile.ZipFile(first, 'w') as z:
+    archive = manager.settings.data_dir / 'artifacts' / (child + '.zip')
+    archive.parent.mkdir()
+    with zipfile.ZipFile(archive, 'w') as z:
         z.writestr('results.json', '{"passed":20}')
-    manager.store.artifacts.save(child + '.zip', first.getvalue())
-    objects.fail = True  # Freezing handoff metadata must never fetch an object.
     await drive(manager, root)
-    assert objects.reads == 0
-    objects.fail = False
-    if storage == 'mixed':
-        manager.store.objects = objects
     coordinator.enqueue_child(child, 'Change the follow-up report', 'new-report', None, 'google:bob')
     await drive(manager, child)
     manager.store.update_run(child, summary='New follow-up answer')
     # Exercise the real archive writer: replacing current files cannot mutate
-    # a saved handoff, including after switching legacy storage to objects.
+    # the saved handoff's shared inode.
+    from io import BytesIO
     content = BytesIO()
     with zipfile.ZipFile(content, 'w') as z:
         z.writestr('results.json', '{"passed":21}')
@@ -358,27 +347,13 @@ async def test_post_handoff_chat_preserves_answers_and_files_across_restart(dura
     async def read(_): return content.getvalue()
     sandbox = SimpleNamespace(filesystem=SimpleNamespace(stat=aio(stat), read_bytes=aio(read)))
     await RunManager.save_artifact(manager, sandbox, child)
-    if storage == 'mixed':
-        frozen = json.loads(coordinator.group(root, result['group_id'])['result_snapshot'])[0]['artifact_name']
-        with manager.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            manager.store.artifacts.snapshot_in(conn, child + '.zip', frozen)
-    restarted = Store(manager.settings.data_dir, object_storage=objects if storage != 'local' else None)
-    coordinator = attach(cloud.attach(TemporalRunManager(restarted, manager.settings)))
+    coordinator = attach(cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings)))
     assert coordinator.results(root, result['group_id'])['children'][0]['summary'] == 'Saved answer'
     assert coordinator.results(root, result['group_id'], latest=True)['children'][0]['summary'] == 'New follow-up answer'
     assert coordinator.read_artifact(root, Artifact(child_id=child, path='results.json'))['content'] == '{"passed":20}'
     assert coordinator.read_artifact(root, Artifact(child_id=child, path='results.json', latest=True))['content'] == '{"passed":21}'
     assert coordinator.view(root, include_costs=False)['groups'][0]['children'][0]['status'] == 'idle'
     assert len([m for m in manager.store.messages(root) if m['role'] == 'assistant']) == 1
-    if storage != 'local':
-        objects.fail = True
-        with pytest.raises(HTTPException, match='unavailable'):
-            coordinator.read_artifact(root, Artifact(child_id=child, latest=True))
-        with pytest.raises(ValueError, match='does not belong'):
-            coordinator.read_artifact('unrelated-parent', Artifact(child_id=child))
-        if storage == 'remote':
-            assert not (manager.settings.data_dir / 'artifacts').exists()
 
 
 async def test_child_chat_during_parent_stop_is_rejected_without_losing_assignment(durable):

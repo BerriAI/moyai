@@ -385,7 +385,7 @@ class SlackChat:
                 prs = select_prs(conn, run_id, value)
                 for pr in prs:
                     pr.title = self.scrub(pr.title)
-                media = select_captures(self.settings, run_id, value, store=self.store, conn=conn) if message['status'] == 'completed' else []
+                media = select_captures(self.settings, run_id, value) if message['status'] == 'completed' else []
                 value = link_captures(self.settings, run_id, value, media)
                 if binding['channel'].startswith('D') and not conn.execute(
                     "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' LIMIT 1", (run_id,)).fetchone():

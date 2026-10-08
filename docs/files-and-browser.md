@@ -44,7 +44,7 @@ before sending. Raster images open a larger preview; UTF-8 documents such as
 Clipboard file availability depends on what the browser and source app place
 on the clipboard; the file picker and drag/drop are available as fallbacks.
 
-Limits: eight files, 10 MiB each, 20 MiB total per message. Image previews accept
+Limits: five files, 10 MiB each, 20 MiB total per message. Image previews accept
 PNG, JPEG, WebP and GIF up to 25 megapixels (the first GIF frame). Original bytes
 are preserved. Signed-in users own private drafts; sent files share the existing
 organization session visibility. Uploads and message submissions are idempotent,
@@ -72,7 +72,7 @@ Slack scopes. Agent demo captures referenced in completed answers use the separa
 [native Slack delivery](slack.md#chat-with-moyai-in-slack).
 
 Incoming Slack files use this same attachment pipeline. Signed mentions, direct
-messages and replies in a bound thread retain up to eight file IDs, including
+messages and replies in a bound thread retain up to five file IDs, including
 image-only messages. AgentChat normalizes the attachment references. Once that
 turn starts, Moyai uses AgentChat's incoming-file helper to retrieve metadata and
 download from Slack's private file host using the bot's `files:read` access.
@@ -96,7 +96,7 @@ legacy `slack_audio_inputs` name to preserve pending recordings across upgrades.
 
 ## Audio input
 
-Moyai accepts Slack voice clips and uploaded MP3, WAV, M4A/MP4, WebM, OGG and FLAC files. In the web composer, use **Record audio** or attach/drop a recording, wait for **Transcript ready**, then open the attachment to review the transcript and play the original. **Edit in message** copies an uploaded transcript into the composer; microphone recordings insert their transcript automatically. Correct the text before sending. Explicit message text takes precedence over the original transcript. Audio-only messages are valid. Browser recording requires HTTPS (or localhost), microphone permission and a supported MediaRecorder implementation; recording stops after two minutes. Uploads retain the existing 10 MB per file, eight files and 20 MB per message limits.
+Moyai accepts Slack voice clips and uploaded MP3, WAV, M4A/MP4, WebM, OGG and FLAC files. In the web composer, use **Record audio** or attach/drop a recording, wait for **Transcript ready**, then open the attachment to review the transcript and play the original. **Edit in message** copies an uploaded transcript into the composer; microphone recordings insert their transcript automatically. Correct the text before sending. Explicit message text takes precedence over the original transcript. Audio-only messages are valid. Browser recording requires HTTPS (or localhost), microphone permission and a supported MediaRecorder implementation; recording stops after two minutes. Uploads retain the existing 10 MB per file, five files and 20 MB per message limits.
 
 Optional `AUDIO_TRANSCRIPTION_PROMPT` supplies a short spelling glossary without sending prior conversation history. Transcription uses `POST /audio/transcriptions` on `LITELLM_API_BASE`, authenticated with the existing server-side `LITELLM_API_KEY`. Set `AUDIO_TRANSCRIPTION_MODEL` to a transcription model/alias enabled for that gateway key (default `gpt-transcribe`; `whisper-1` remains compatible when configured). Transcription is a model request and can incur provider charges, including when previewing an unsent draft. It also runs for audio uploaded in demo mode; demo **agent responses** remain simulated. No new provider key is exposed to the browser or agent sandbox.
 
@@ -129,12 +129,3 @@ Input is queued in order, and the view requests a new frame every 100 ms after a
 If saved browser access cannot be read, Moyai preserves the checkpoint and reports the problem. Agent work that does not require the browser can continue; opening the affected Computer remains blocked until saved access can be restored.
 
 Up to 32 tabs resume, including the active tab. A failed per-tab session storage read does not prevent saving healthy tabs and browser access; unavailable tab data uses its last saved value when the same tab has not navigated. Moyai reports partial saves. A failure to read the browser's cookies and site storage preserves the previous checkpoint. Browser access gets a bounded save attempt before recording cleanup during shutdown.
-
-
-## Review pull requests beside the conversation
-
-Open a session pull request from the conversation, the PR list, or a saved PR tab to see its status, branches, description, and changed-file diffs directly in Moyai. This read-only view uses the organization’s selected GitHub repositories and works while the cloud workspace is asleep. Refresh updates the details; Open in GitHub provides the full review, discussion, and checks interface.
-
-The panel includes the session’s confirmed PRs and those of its direct child agents. Disabled GitHub access or removed repository selection makes the details unavailable. Large changes show explicit truncation notices; GitHub remains available for complete diffs. Computer and Saved captures retain their separate controls.
-
-For a local demo, run `uv run python scripts/pull_request_panel_demo.py --port 8987` and open `http://localhost:8987/demo/login`. The session and GitHub data are fixtures. Add `--live-github` to read real PR details using your existing local `gh` login; no model, cloud workspace, or GitHub write is used.

@@ -302,7 +302,7 @@ class GitHubRepositories:
         if self.connection_version() != expected:
             raise ConnectorError('The GitHub connection changed during verification. Retry the connection check.')
         self.migrate_references(credentials)
-        # Metadata refresh does not revoke in-flight writes or workspace-published PRs.
+        # Metadata refresh does not revoke in-flight writes or session-owned PRs.
         self.store.execute("UPDATE connections SET label=? WHERE provider='github'", (label,))
         self.connectors.record_check('github', 'healthy')
         return credentials

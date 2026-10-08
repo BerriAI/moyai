@@ -1,7 +1,6 @@
 """Published Codex runtime, real native/MCP tools, and synthetic Responses inference."""
 import json
 import re
-import shlex
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -280,21 +279,6 @@ def test_native_code_mode_yield_polls_live_tool_without_checkpointing(tmp_path, 
     assert not proof['pending_tools'] and not proof['sdk_failure']
 
 
-@pytest.mark.parametrize('outcome', ['settle-finite', 'settle-preview', 'settle-limit'])
-def test_native_settlement_collects_late_command_receipts(tmp_path, monkeypatch, outcome):
-    proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome)
-    limited = outcome == 'settle-limit'
-    assert proof['native_plugins'] == [False]
-    assert proof['completed'] is not limited, proof
-    assert proof['pending_tools'] == int(limited)
-    assert proof['completed_receipts'] == int(not limited)
-    assert proof['upstream_requests'] == (2 if limited else 4)
-    assert proof['tool_executions'] == 1
-    assert 'premature-answer' not in proof['saved_prose']
-    assert proof['final_response'] == ('Codex stopped (model call limit reached, HTTP 409, '
-        '1 unresolved tool(s)). Saved tool receipts are preserved.' if limited else 'yield-test-complete')
-
-
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
@@ -309,33 +293,12 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     calls, requests, steps, events, faults, diagnostics = [], [], [], [], [], []
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
-    settlement = outcome.startswith('settle-')
-    if settlement:
-        (workspace / 'command.py').write_text(
-            'import http.server, pathlib, signal, sys, time\n'
-            'signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n'
-            'try:\n' + (
-                ' server = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)\n'
-                ' pathlib.Path("preview-port").write_text(str(server.server_port))\n'
-                ' print("preview-ready", flush=True)\n server.serve_forever()\n'
-                if outcome == 'settle-preview' else
-                ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n') +
-            'finally:\n print("slow-tool-complete", flush=True)\n')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
-    native_errors, native_plugins = [], []
+    native_errors = []
     from openai_codex.async_client import AsyncCodexClient
     from sandbox.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
-        async def initialize(self):
-            from openai_codex.generated.v2_all import ExperimentalFeatureListResponse
-            result = await super().initialize()
-            features = await self.request('experimentalFeature/list', {},
-                                         response_model=ExperimentalFeatureListResponse)
-            native_plugins.extend(feature.enabled for feature in features.data if feature.name == 'plugins')
-            progress('Native plugin marketplace enabled: ' + json.dumps(native_plugins))
-            return result
-
         async def next_turn_notification(self, turn_id):
             event = await super().next_turn_notification(turn_id)
             if event.method == 'error':
@@ -385,36 +348,11 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             sequence = len(requests)
             progress(f'Model request {sequence} admitted; pending tools: {len(agent.journal.pending)}')
             if sequence == 1:
-                code = ('text(await tools.exec_command(' + json.dumps({
-                    'cmd': shlex.quote(sys.executable) + ' command.py', 'tty': True,
-                    'login': False, 'yield_time_ms': 1000}) + '));' if settlement else
-                    'text(await tools.mcp__moyai__slow_echo({}));')
-                if yield_ms is not None and not settlement:
+                code = 'text(await tools.mcp__moyai__slow_echo({}));'
+                if yield_ms is not None:
                     code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
                 output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
                           'name': 'exec', 'namespace': 'functions', 'input': code}
-            elif settlement and sequence == 2:
-                assert agent.journal.pending and steps == [0]
-                if outcome == 'settle-preview':
-                    from urllib.request import urlopen
-                    port = (workspace / 'preview-port').read_text()
-                    with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
-                        assert response.status == 200
-                    progress('Preview server answered HTTP 200; model prematurely finishes')
-                output = {'type': 'message', 'id': 'premature', 'role': 'assistant',
-                    'phase': 'final_answer', 'status': 'completed',
-                    'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
-            elif settlement and sequence == 3:
-                assert agent.journal.pending and agent.model_calls == 3
-                sessions = re.findall(r'session_id\\?"\s*:\s*(\d+)', json.dumps(body))
-                assert sessions, 'Native command must return a running session'
-                (workspace / 'release').touch()
-                progress('Settlement turn stops the preview or waits for finite work')
-                output = {'type': 'custom_tool_call', 'id': 'settle', 'call_id': 'settle',
-                    'name': 'exec', 'namespace': 'functions',
-                    'input': 'text(await tools.write_stdin(' + json.dumps({
-                        'session_id': int(sessions[-1]), 'yield_time_ms': 1000,
-                        'chars': '\u0003' if outcome == 'settle-preview' else ''}) + '));'}
             elif sequence == 2:
                 assert len(calls) == 1 and agent.journal.pending
                 assert steps == [0], 'Lifecycle must not run while the nested tool is pending'
@@ -426,8 +364,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                           'arguments': json.dumps({'cell_id': cells[-1], 'yield_time_ms': 1000})}
                 release.set()
             else:
-                if not settlement:
-                    assert not agent.journal.pending and agent.journal.completed_tools == 1
+                assert not agent.journal.pending and agent.journal.completed_tools == 1
                 assert 'slow-tool-complete' in json.dumps(body)
                 output = {'type': 'message', 'id': 'answer', 'role': 'assistant', 'phase': 'final_answer',
                           'status': 'completed', 'content': [{'type': 'output_text', 'text': 'yield-test-complete'}]}
@@ -447,8 +384,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         if outcome == 'interrupt' and agent.journal.completed_tools:
             agent.interrupt()
 
-    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60,
-        'max_iterations': 2 if outcome == 'settle-limit' else 6},
+    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60, 'max_iterations': 6},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
@@ -458,23 +394,20 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     try:
         result = agent.run_conversation('Run the local slow tool once.', conversation_history=[],
                                         system_message='Local yield regression fixture.')
-        assert calls == ([] if settlement else [{'name': 'slow_echo', 'arguments': {}}])
+        assert calls == [{'name': 'slow_echo', 'arguments': {}}]
         receipts = [m for m in result['messages'] if m['role'] == 'tool']
         assert all('slow-tool-complete' in receipt['content'] for receipt in receipts)
         proof = {key: result[key] for key in ('completed', 'interrupted', 'failed', 'final_response')}
         proof.update(boundary_failed=agent.boundary_failed, model_calls=agent.model_calls,
-            upstream_requests=len(requests), lifecycle_steps=steps,
-            tool_executions=sum(kind == 'start' for kind, _ in events),
+            upstream_requests=len(requests), lifecycle_steps=steps, tool_executions=len(calls),
             completed_receipts=len(receipts), pending_tools=len(store.pending),
             tool_events=[kind for kind, _ in events], faults=faults, transport_errors=diagnostics,
-            sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
-            saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
+            sdk_failure=result.get('sdk_failure'), native_errors=native_errors)
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
         return proof
     finally:
         release.set()
-        (workspace / 'release').touch()
         agent.close()
         relay.close()
         store.close()

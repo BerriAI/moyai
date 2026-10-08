@@ -1,6 +1,8 @@
 """Completed browser captures, stored independently of sandbox lifetime."""
 from pathlib import Path
+import os
 import re
+import stat
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -28,33 +30,40 @@ def directory(settings, run_id):
     return settings.data_dir / 'artifacts' / (run_id + '-captures')
 
 
-def listing(settings, run_id, *, store):
-    prefix = directory(settings, run_id).name + '/'
+def listing(settings, run_id):
+    root = directory(settings, run_id)
+    if not root.exists():
+        return []
     result = []
-    for row in store.artifacts.listing(prefix):
-        name = row['name'].removeprefix(prefix)
-        if not valid_name(name):
+    for path in sorted(root.iterdir(), key=lambda p: p.name):
+        if not valid_name(path.name) or path.is_symlink() or not path.is_file():
             continue
-        url = f'/api/runs/{run_id}/computer/captures/{name}'
-        result.append({'path': 'moyai-captures/' + name, 'workspace_path': 'moyai-captures/' + name,
-                       'archive_path': 'capture:' + name, 'name': name, 'size': row['size'],
-                       'kind': 'video' if name.endswith('.webm') else 'image', 'url': url + '?download=true',
+        url = f'/api/runs/{run_id}/computer/captures/{path.name}'
+        result.append({'path': 'moyai-captures/' + path.name, 'workspace_path': 'moyai-captures/' + path.name,
+                       'archive_path': 'capture:' + path.name, 'name': path.name, 'size': path.stat().st_size,
+                       'kind': 'video' if path.suffix == '.webm' else 'image', 'url': url + '?download=true',
                        'inline_url': url})
     return result
 
 
-def read(path: Path, *, store) -> tuple[bytes, str]:
+def read(path: Path) -> tuple[bytes, str]:
     """Read bounded media without following a replaced file's symlink."""
-    name = path.relative_to(store.path.parent / 'artifacts').as_posix()
-    try:
-        raw = store.artifacts.read(name, MAX_FILE)
-    except FileNotFoundError:
-        raise HTTPException(404, 'Capture not found.') from None
+    if path.is_symlink() or not path.is_file():
+        raise HTTPException(404, 'Capture not found.')
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise HTTPException(404, 'Capture not found.')
+        if info.st_size > MAX_FILE:
+            raise HTTPException(413, 'Capture exceeds the size limit.')
+        raw = stream.read(MAX_FILE + 1)
+    if len(raw) > MAX_FILE:
+        raise HTTPException(413, 'Capture exceeds the size limit.')
     return raw, media_type(path.name, raw)
 
 
-def response(path: Path, request, download=False, *, store):
-    raw, mime = read(path, store=store)
+def response(path: Path, request, download=False):
+    raw, mime = read(path)
     headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes',
                'Content-Disposition': ('attachment' if download else 'inline') + "; filename*=UTF-8''" + quote(path.name)}
     status = 200

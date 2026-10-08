@@ -6,17 +6,11 @@
     let path=String(value||'').trim();
     try{path=decodeURIComponent(path);}catch{return null;}
     path=path.replace(/^sandbox:(?=\/workspace\/)/,'').replace(/^\/workspace\//,'').replace(/^\.\//,'');
-    const suffix=path.match(/(?::([1-9]\d*)(?::([1-9]\d*))?|#L([1-9]\d*)(?:-L([1-9]\d*))?)$/);
-    const line=suffix?Number(suffix[1]||suffix[3]):null,endLine=suffix?Number(suffix[4]||line):null;
-    if(suffix){
-      if(!Number.isSafeInteger(line)||!Number.isSafeInteger(endLine)||endLine<line||(suffix[2]&&!Number.isSafeInteger(Number(suffix[2]))))return null;
-      path=path.slice(0,suffix.index);
-    }
     if(!path||path.startsWith('/')||/[\\:#?\x00-\x1f\x7f]/.test(path)||path.split('/').some(p=>!p||p==='.'||p==='..'))return null;
-    return {path,line,endLine};
+    return path;
   }
   function resolve(value,files){
-    const path=reference(value)?.path;if(!path)return null;
+    const path=reference(value);if(!path)return null;
     const exact=files.filter(file=>file.workspace_path===path);
     if(exact.length===1)return exact[0];
     // A bare filename may be shorthand for a nested file, but never guess
@@ -36,16 +30,11 @@
           node.classList.remove('saved-file-link','saved-image-link');node.onclick=null;
           if(node.dataset.fileImage)node.textContent=node.dataset.fileLabel;
         }
-        if(node.matches('[data-file-ref]')){
-          node.title='This file is not available in this session’s saved files.';
-          node.setAttribute('aria-disabled','true');
-        }
         return;
       }
       let link=node;
       if(node.tagName!=='A'){link=node.ownerDocument.createElement('a');link.textContent=node.textContent;node.replaceChildren(link);}
       link.href=file.url;link.classList.add('saved-file-link');link.dataset.fileRef=ref;link.dataset.savedFile=file.archive_path;
-      link.removeAttribute('aria-disabled');
       if(runId)link.dataset.fileRun=runId;else delete link.dataset.fileRun;
       link.removeAttribute('target');link.removeAttribute('rel');link.title='Preview '+file.path;
       if(link.dataset.fileImage){
@@ -63,23 +52,9 @@
       }
       if(onOpen)link.onclick=event=>{
         if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey||event.button)return;
-        event.preventDefault();onOpen(file,ref);
+        event.preventDefault();onOpen(file);
       };
     });
-  }
-  function preview(result,ref,{escape:esc,markdown}){
-    if(result.text===null)return '<p class="saved-file-empty">Preview isn’t available for this file type. Use Download to open it.</p>';
-    const location=reference(ref),notice=result.truncated?'<p class="saved-file-notice">Showing the first 128 KB. Use Download for the complete file.</p>':'';
-    if(!location?.line)return notice+(result.format==='markdown'?`<div class="markdown">${markdown(result.text)}</div>`:`<pre class="saved-file-text">${esc(result.text)}</pre>`);
-    const lines=result.text.split('\n'),{line,endLine}=location,available=lines.length-(result.truncated?1:0);
-    const label=line===endLine?'Line '+line:'Lines '+line+'–'+endLine;
-    if(endLine>available)return notice+`<p class="saved-file-notice">${label} is not included in this saved preview.</p><pre class="saved-file-text">${esc(result.text)}</pre>`;
-    const before=lines.slice(0,line-1).join('\n'),selected=lines.slice(line-1,endLine).join('\n'),after=lines.slice(endLine).join('\n');
-    return notice+`<p class="saved-file-location">${label}</p><pre class="saved-file-text">${esc(before)}${line>1?'\n':''}<mark class="saved-source-selection" data-source-line="${line}" tabindex="-1" aria-label="${label}">${esc(selected)||'\u200b'}</mark>${endLine<lines.length?'\n':''}${esc(after)}</pre>`;
-  }
-  function reveal(container){
-    const target=container.querySelector('[data-source-line]');
-    if(target){target.focus({preventScroll:true});target.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});}
   }
   function create({api,markdown,escape:esc,size,onOpen}){
     let run=null,catalog=null,key='',loading=null,requestId=0,previewId=0,viewId=0,selected=null,dialog=null;
@@ -124,12 +99,11 @@
       query('#saved-file-list').innerHTML=files.length?files.map(file=>`<button type="button" class="saved-file-choice ${file.archive_path===selected?.archive_path?'selected':''}" data-file-choice="${esc(file.archive_path)}" ${file.archive_path===selected?.archive_path?'aria-current="true"':''}><span class="saved-file-icon" aria-hidden="true">▤</span><span><strong>${esc(file.name)}</strong><small>${esc(file.path)} · ${size(file.size)}</small></span></button>`).join(''):'<p class="saved-file-empty">No matching files.</p>';
       query('#saved-file-list').querySelectorAll('[data-file-choice]').forEach(button=>button.onclick=()=>select(catalog.files.find(file=>file.archive_path===button.dataset.fileChoice)));
     }
-    async function select(file,ref=null){
+    async function select(file){
       if(!file)return;selected=file;const id=++previewId;
       drawList();
       query('#saved-file-title').textContent=file.name;
-      const location=reference(ref);
-      query('#saved-file-path').textContent=file.path+(location?.line?':'+location.line+(location.endLine!==location.line?'–'+location.endLine:''):'');
+      query('#saved-file-path').textContent=file.path;
       const download=query('#saved-file-download');download.href=file.url;download.hidden=false;download.setAttribute('download',file.name);
       query('#saved-file-preview').innerHTML='<p class="saved-file-empty" role="status">Opening file…</p>';
       if(file.inline_url&&['image','video'].includes(file.kind)){
@@ -139,13 +113,14 @@
       try{
         const result=await api(file.preview_url);if(id!==previewId||!dialog.open)return;
         const target=query('#saved-file-preview');
-        target.innerHTML=preview(result,ref,{escape:esc,markdown});
-        target.scrollTop=0;decorate(target);reveal(target);
+        target.innerHTML=result.text===null?'<p class="saved-file-empty">Preview isn’t available for this file type. Use Download to open it.</p>':
+          `${result.truncated?'<p class="saved-file-notice">Showing the first 128 KB. Use Download for the complete file.</p>':''}${result.format==='markdown'?`<div class="markdown">${markdown(result.text)}</div>`:`<pre class="saved-file-text">${esc(result.text)}</pre>`}`;
+        target.scrollTop=0;decorate(target);
         target.querySelectorAll('.copy-code').forEach(button=>button.onclick=async()=>{try{await navigator.clipboard.writeText(button.closest('.code-block').querySelector('code').textContent);button.textContent='Copied';}catch{button.textContent='Select text to copy';}});
       }catch(error){if(id===previewId&&dialog.open)query('#saved-file-preview').innerHTML=`<p class="saved-file-empty" role="alert">${esc(error.message)}</p>`;}
     }
-    async function open(file=null,ref=null){
-      if(onOpen?.(file,ref))return;
+    async function open(file=null){
+      if(onOpen?.(file))return;
       if(!(run?.has_artifact||run?.has_captures))return;
       if(!dialog){dialog=doc.createElement('dialog');dialog.id='saved-files-dialog';dialog.setAttribute('aria-labelledby','saved-files-heading');doc.body.append(dialog);dialog.addEventListener('close',()=>{previewId++;viewId++;dialog.querySelectorAll('video').forEach(video=>video.pause());});}
       const rid=run.id,viewing=++viewId;
@@ -156,15 +131,15 @@
       dialog.querySelector('.saved-files-loading').outerHTML=`<div class="saved-files-body"><aside class="saved-files-nav"><input id="saved-file-search" type="search" placeholder="Find a file…" aria-label="Find a saved file"><div id="saved-file-list"></div></aside><section class="saved-file-view"><div class="saved-file-heading"><div><h3 id="saved-file-title">Select a file</h3><p id="saved-file-path"></p></div><a id="saved-file-download" class="small" hidden>↓ Download</a></div><div id="saved-file-preview"><p class="saved-file-empty">Choose a file to preview.</p></div></section></div><footer class="saved-files-footer"><span>${esc(catalog?.error||catalog?.note||'')}${catalog?.limited?' Some entries cannot be previewed.':''}</span>${run.has_artifact?`<a href="/api/runs/${rid}/artifact">Download ZIP</a>`:''}</footer>`;
       selected=null;drawList();query('#saved-file-search').oninput=drawList;
       const choice=file?catalog.files.find(item=>item.archive_path===file.archive_path):catalog.files.find(item=>item.workspace_path)||catalog.files[0];
-      if(choice)select(choice,ref);
+      if(choice)select(choice);
     }
     doc.addEventListener('click',event=>{
       const link=event.target.closest('[data-saved-file]');
       if(!link||link.dataset.fileRun!==run?.id||event.ctrlKey||event.metaKey||event.shiftKey||event.altKey||event.button)return;
       const file=catalog?.files.find(item=>item.archive_path===link.dataset.savedFile);if(!file)return;
-      event.preventDefault();if(dialog?.open){if(query('#saved-file-list'))select(file,link.dataset.fileRef);}else open(file,link.dataset.fileRef);
+      event.preventDefault();if(dialog?.open){if(query('#saved-file-list'))select(file);}else open(file);
     });
     return {sync,decorate,reset,open};
   }
-  return {reference,resolve,decorate:decorateReferences,preview,reveal,create};
+  return {reference,resolve,decorate:decorateReferences,create};
 });

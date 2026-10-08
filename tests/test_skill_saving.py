@@ -6,8 +6,7 @@ import pytest
 
 from app.db import Store, now
 from app.skills import Skills
-from test_attachments import upload, storage_mode
-from storage_fixture import MemoryObjects
+from test_attachments import upload
 from test_skills import edit
 from test_spend import active, sign_in
 from test_workspace import workspace
@@ -47,8 +46,7 @@ def test_save_current_requester_explicit_personal_and_admin_org_only(workspace):
     mine = call(client,member,**form()).json()
     assert app.state.store.rows('SELECT owner_id FROM skills WHERE id=?',(mine['id'],))[0]['owner_id']=='google:ishaan'
     for fake in ({'owner_id':'google:alice'},{'admin':True}):
-        invalid = call(client,member,**form(**fake))
-        assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
+        assert call(client,member,**form(**fake)).status_code==422
     sign_in(app,client)
     assert client.get('/api/skills/'+mine['id']).status_code==404
     app.state.store.update_run(member['id'],token_hash='')
@@ -113,7 +111,7 @@ def test_atomic_save_replay_concurrent_updates_and_no_duplicate_audit(workspace)
     assert client.get('/api/skills/'+saved['id']+'/files/references/checks.md').text=='New reference.'
 
 
-def test_large_attachments_persist_exactly_and_references_are_private_pinned_and_bounded(workspace,monkeypatch,storage_mode):
+def test_large_attachments_persist_exactly_and_references_are_private_pinned_and_bounded(workspace,monkeypatch):
     app,client = workspace
     sign_in(app,client)
     run = active(app)
@@ -178,7 +176,7 @@ def test_large_attachments_persist_exactly_and_references_are_private_pinned_and
     assert 'runbook-secret-marker' not in skills.context(app.state.store.run(later['id']))
 
 
-def test_attachment_cutoff_and_failed_import_leave_no_partial_skill(workspace,storage_mode):
+def test_attachment_cutoff_and_failed_import_leave_no_partial_skill(workspace):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
@@ -200,13 +198,11 @@ def test_skill_paths_rejected(workspace,path):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
-    invalid=call(client,run,**form(files=[{'path':path,'content':'private content'}]))
-    assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
-    assert 'private content' not in invalid.text
+    assert call(client,run,**form(files=[{'path':path,'content':'private content'}])).status_code==422
     assert not app.state.store.rows('SELECT * FROM skills')
 
 
-def test_file_limits_invalid_text_removal_and_rollback(workspace,storage_mode):
+def test_file_limits_invalid_text_removal_and_rollback(workspace):
     app,client=workspace
     sign_in(app,client)
     run=active(app)
@@ -253,50 +249,3 @@ def test_nonchat_and_unknown_identities_cannot_write_skills(workspace):
     run=active(app)
     app.state.store.execute('UPDATE runs SET chat_enabled=0 WHERE id=?',(run['id'],))
     assert call(client,run,**form()).status_code==403
-
-
-def test_remote_skill_import_has_no_writer_lock_and_completed_retry_survives_outage(workspace, monkeypatch):
-    app, client = workspace
-    sign_in(app, client)
-    run = active(app)
-    app.state.store.objects = backend = MemoryObjects()
-    attachment_id = attach(app, client, run, 'reference.md', b'Privately imported reference.')
-    original_read = backend.read
-    def unlocked_read(reference, limit):
-        app.state.store.execute('UPDATE organization SET name=name')
-        return original_read(reference, limit)
-    monkeypatch.setattr(backend, 'read', unlocked_read)
-    args = form(files=[{'path': 'reference.md', 'attachment_id': attachment_id}])
-    saved = call(client, run, **args)
-    assert saved.status_code == 200, saved.text
-    backend.fail = True
-    assert call(client, run, **args).json() == saved.json()
-    failed = call(client, run, **{**args, 'request_id': 'retry-during-outage', 'expected_revision': 1})
-    assert failed.status_code == 503
-    assert app.state.store.rows('SELECT revision FROM skills')[0]['revision'] == 1
-    assert len(app.state.store.rows('SELECT * FROM skill_saves')) == 1
-
-
-@pytest.mark.parametrize('change', ['scope', 'content', 'turn'])
-def test_skill_import_revalidates_authorized_identity_after_remote_read(workspace, monkeypatch, change):
-    app, client = workspace
-    sign_in(app, client)
-    run = active(app)
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    attachment_id = attach(app, client, run, 'reference.md', b'Private reference before a concurrent change.')
-    original_read = backend.read
-    def raced_read(reference, limit):
-        raw = original_read(reference, limit)
-        if change == 'scope':
-            store.execute("UPDATE messages SET status='deleted' WHERE id=?", (run['active_message_id'],))
-        elif change == 'content':
-            store.execute("UPDATE attachments SET sha256='changed' WHERE id=?", (attachment_id,))
-        else:
-            store.execute("UPDATE runs SET active_user_id='google:someone-else' WHERE id=?", (run['id'],))
-        return raw
-    monkeypatch.setattr(backend, 'read', raced_read)
-    response = call(client, run, **form(files=[{'path': 'reference.md', 'attachment_id': attachment_id}]))
-    assert response.status_code == (404 if change == 'scope' else 409)
-    assert not store.rows('SELECT * FROM skills')
-    assert not store.rows('SELECT * FROM skill_saves')

@@ -31,12 +31,9 @@ function renderMarkdown(content) {
     const href = link.getAttribute('href') || '';
     const fileIndex = href.match(/^#saved-file-(\d+)$/)?.[1];
     const file=fileIndex!==undefined?fileReferences[fileIndex]:null;
-    if(file){
-      link.dataset.fileRef=file.href;if(file.image)link.dataset.fileImage='true';
-      link.removeAttribute('href');link.setAttribute('aria-disabled','true');
-      link.title='Available only when this file is in the session’s saved files.';
-    }else if(/^(https?:\/\/|mailto:)/i.test(href)){link.target='_blank';link.rel='noopener noreferrer';}
-    else link.replaceWith(...link.childNodes);
+    if(file){link.dataset.fileRef=file.href;if(file.image)link.dataset.fileImage='true';}
+    if (!/^(https?:\/\/|mailto:)/i.test(href)) link.removeAttribute('href');
+    else { link.target='_blank'; link.rel='noopener noreferrer'; }
   });
   template.content.querySelectorAll('pre').forEach(pre => {
     const wrapper = document.createElement('div'); wrapper.className='code-block';

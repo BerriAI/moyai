@@ -1,11 +1,9 @@
-import asyncio
 import hashlib
 from io import BytesIO
 import json
 from uuid import uuid4
 
 import httpx
-from fastapi import HTTPException
 from PIL import Image
 import pytest
 
@@ -17,29 +15,6 @@ from sandbox.agent import conversation_prompt
 from sandbox.attachments import prepare_attachments
 from test_spend import sign_in
 from test_workspace import workspace
-from storage_fixture import MemoryObjects
-
-
-def off_event_loop(operation):
-    def call(*args):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            raise AssertionError('Blocking object I/O reached the event loop')
-        return operation(*args)
-    return call
-
-
-@pytest.fixture(params=['local', 'objects'])
-def storage_mode(workspace, request, monkeypatch):
-    if request.param == 'objects':
-        backend = MemoryObjects()
-        for name in ('put', 'read'):
-            monkeypatch.setattr(backend, name, off_event_loop(getattr(backend, name)))
-        workspace[0].state.store.objects = backend
-    return request.param
 
 
 def png():
@@ -59,7 +34,7 @@ def start(app, client, monkeypatch, files, prompt='Read these attachments'):
     return client.post('/api/runs', json={'prompt': prompt, 'attachment_ids': [f['id'] for f in files], 'client_id': 'upload-new-session'})
 
 
-def test_upload_send_retry_and_reopen_keep_files_on_the_exact_message(workspace, monkeypatch, storage_mode):
+def test_upload_send_retry_and_reopen_keep_files_on_the_exact_message(workspace, monkeypatch):
     app, client = workspace
     file = upload(client).json()
     assert file['preview_text'].startswith('# Context') and not file['preview_url']
@@ -88,7 +63,7 @@ def test_upload_send_retry_and_reopen_keep_files_on_the_exact_message(workspace,
     assert client.get(second['url']).status_code == 200
 
 
-def test_drafts_are_owner_only_and_sent_files_follow_shared_chat_access(workspace, monkeypatch, storage_mode):
+def test_drafts_are_owner_only_and_sent_files_follow_shared_chat_access(workspace, monkeypatch):
     app, client = workspace
     sign_in(app, client)
     file = upload(client, 'private.png', png()).json()
@@ -109,7 +84,7 @@ def test_drafts_are_owner_only_and_sent_files_follow_shared_chat_access(workspac
     assert upload(client).status_code == 401
 
 
-def test_upload_auth_limits_safe_names_and_idempotency(workspace, monkeypatch, storage_mode):
+def test_upload_auth_limits_safe_names_and_idempotency(workspace, monkeypatch):
     app, client = workspace
     attachment_id = uuid4().hex
     first = upload(client, '../folder\\SKILL.md\r\n', attachment_id=attachment_id)
@@ -127,7 +102,7 @@ def test_upload_auth_limits_safe_names_and_idempotency(workspace, monkeypatch, s
     assert not app.state.store.rows('SELECT id FROM attachments')
 
 
-def test_preview_does_not_serve_html_svg_or_trust_claimed_mime(workspace, storage_mode):
+def test_preview_does_not_serve_html_svg_or_trust_claimed_mime(workspace):
     _, client = workspace
     dangerous = b'<svg onload="alert(1)">untrusted</svg>'
     file = upload(client, 'image.svg', dangerous).json()
@@ -149,10 +124,11 @@ def test_binding_rolls_back_whole_message_and_checks_total_size(workspace, monke
     assert start(app, client, monkeypatch, [file]).status_code == 409
     assert not app.state.store.rows('SELECT id FROM runs')
     assert app.state.store.rows('SELECT message_id FROM attachments')[0]['message_id'] is None
+    assert client.post('/api/runs', json={'prompt': 'Inspect files', 'attachment_ids': [file['id']] * 6}).status_code == 422
 
 
 @pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'anthropic/claude-opus-5-5'])
-def test_current_image_is_multimodal_but_future_and_other_session_files_are_inaccessible(workspace, monkeypatch, model, storage_mode):
+def test_current_image_is_multimodal_but_future_and_other_session_files_are_inaccessible(workspace, monkeypatch, model):
     app, client = workspace
     first = upload(client, 'current.png', png()).json()
     run_id = start(app, client, monkeypatch, [first]).json()['id']
@@ -193,32 +169,6 @@ def test_current_image_is_multimodal_but_future_and_other_session_files_are_inac
     repeated = app.state.store.attachments.with_images(store.run(run_id), [*body['messages'], *body['messages']])
     assert isinstance(repeated[0]['content'], str)
     assert len(repeated[1]['content']) == 2  # A resumed prompt cannot multiply image payloads.
-
-
-@pytest.mark.parametrize('route,field', [('messages', 'messages'), ('responses', 'input')])
-def test_native_gateway_resolves_object_previews_off_event_loop(workspace, monkeypatch, route, field):
-    app, client = workspace
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    monkeypatch.setattr(backend, 'read', off_event_loop(backend.read))
-    file = upload(client, 'image.png', png()).json()
-    run_id = start(app, client, monkeypatch, [file]).json()['id']
-    store.claim_message(run_id)
-    store.update_run(run_id, status='running', token_hash=digest('capability'))
-    store.execute("UPDATE runs SET mode='modal' WHERE id=?", (run_id,))
-    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
-    captured = []
-    def upstream(request):
-        captured.append(json.loads(request.content)[field][-1]['content'])
-        return httpx.Response(200, json={'usage': {'input_tokens': 2, 'output_tokens': 1}})
-    actual = httpx.AsyncClient
-    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
-    response = client.post(f'/broker/{run_id}/v1/{route}', headers={'Authorization': 'Bearer capability'},
-                           json={field: [{'role': 'user', 'content': f"Inspect [moyai-attachment:{file['id']}]"}]})
-    assert response.status_code == 200, response.text
-    image = captured[0][1]
-    assert image['type'] == ('image' if route == 'messages' else 'input_image')
-    assert backend.reads == 1
 
 
 def test_sandbox_restores_originals_verifies_download_and_preserves_safe_paths(tmp_path):
@@ -269,151 +219,10 @@ def test_deleted_session_attachment_is_not_readable(workspace):
     run_id = settled_session(app)
     message_id = store.messages(run_id)[0]['id']
     attachment_id = uuid4().hex
-    store.execute('INSERT INTO attachments(id,owner_id,message_id,name,size,sha256,media_type,preview_text,created_at,data,preview) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+    store.execute('INSERT INTO attachments VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                   (attachment_id, 'google:bob', message_id, 'private.png', 3, 'hash', 'image/png', '', now(), b'raw', b'preview'))
     assert client.get('/api/attachments/' + attachment_id).status_code == 200
     assert client.delete('/api/runs/' + run_id).status_code == 200
     for suffix in ('', '/preview', '/audio'):
         assert client.get('/api/attachments/' + attachment_id + suffix).status_code == 404
     assert store.rows('SELECT data FROM attachments WHERE id=?', (attachment_id,))[0]['data'] == b'raw'
-
-
-
-@pytest.mark.parametrize('followup', [False, True])
-def test_eight_files_persist_and_ninth_or_duplicate_is_rejected(workspace, monkeypatch, followup, storage_mode):
-    app, client = workspace
-    store = app.state.store
-    files = [upload(client, f'file-{i}.txt').json() for i in range(9)]
-    ids = [file['id'] for file in files]
-    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
-    run_id = start(app, client, monkeypatch, []).json()['id'] if followup else None
-    endpoint = f'/api/runs/{run_id}/messages' if followup else '/api/runs'
-    body = {'content' if followup else 'prompt': 'Inspect files', 'client_id': 'eight-file-boundary'}
-    before = len(store.rows('SELECT id FROM messages'))
-    assert client.post(endpoint, json={**body, 'attachment_ids': ids}).status_code == 422
-    assert client.post(endpoint, json={**body, 'attachment_ids': [ids[0]] * 2}).status_code == 409
-    assert len(store.rows('SELECT id FROM messages')) == before
-    assert all(row['message_id'] is None for row in store.rows('SELECT message_id FROM attachments'))
-    # Exercise the storage guard independently of the request schema.
-    with pytest.raises(ValueError, match='different files'):
-        store.create_run('Too many files', '', 'demo', [], chat_enabled=True, attachment_ids=ids)
-    assert len(store.rows('SELECT id FROM messages')) == before
-    response = client.post(endpoint, json={**body, 'attachment_ids': ids[:8]})
-    assert response.status_code == (202 if followup else 201), response.text
-    run_id = run_id or response.json()['id']
-    reopened = Store(app.state.settings.data_dir)
-    assert {f['id'] for f in reopened.messages(run_id)[-1]['attachments']} == set(ids[:8])
-    assert store.rows('SELECT message_id FROM attachments WHERE id=?', (ids[8],))[0]['message_id'] is None
-
-@pytest.mark.parametrize('failure_at', [0, 1])
-def test_remote_upload_failure_never_publishes_a_partial_attachment_or_holds_writer_lock(workspace, monkeypatch, failure_at):
-    app, client = workspace
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    original_put, calls = backend.put, []
-    def failing_put(raw):
-        # A separate writer must remain available while object I/O is pending.
-        store.execute('UPDATE organization SET name=name')
-        calls.append(raw)
-        if len(calls) - 1 == failure_at:
-            raise HTTPException(503, 'Object storage unavailable.')
-        return original_put(raw)
-    monkeypatch.setattr(backend, 'put', failing_put)
-    response = upload(client, 'image.png', png())
-    assert response.status_code == 503
-    assert len(backend.values) == failure_at
-    assert not store.rows('SELECT id FROM attachments')
-
-
-def test_remote_and_legacy_payloads_share_quotas_without_fallback_or_exposed_references(workspace, monkeypatch):
-    app, client = workspace
-    legacy = upload(client, 'legacy.png', png()).json()
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    remote = upload(client, 'remote.png', png()).json()
-    row = store.rows('SELECT * FROM attachments WHERE id=?', (remote['id'],))[0]
-    assert row['data'] == row['preview'] == b''
-    assert row['data_ref'] and row['preview_ref'] and row['preview_size'] > 0
-    assert 'data_ref' not in remote and 'preview_ref' not in remote
-    total = 2 * (len(png()) + row['preview_size'])
-    with pytest.raises(ValueError, match='storage is full'):
-        store.attachments.save(uuid4().hex, row['owner_id'], 'extra.txt', b'x', inspect_file(b'x'), total)
-    for file in (legacy, remote):
-        assert client.get(file['url']).content == png()
-        assert client.get(file['preview_url']).content.startswith(b'\xff\xd8')
-    run_id = start(app, client, monkeypatch, [remote]).json()['id']
-    # A stale migration source must not mask loss of the authoritative object.
-    store.execute('UPDATE attachments SET data=?,preview=? WHERE id=?', (b'stale', b'stale', remote['id']))
-    backend.fail = True
-    assert client.get(remote['url']).status_code == 503
-    assert client.get(remote['preview_url']).status_code == 503
-    assert client.get(legacy['url']).content == png()
-    assert client.get('/api/runs/' + run_id).status_code == 200
-    assert upload(client, 'remote.png', png(), remote['id']).json() == remote
-
-
-@pytest.mark.parametrize('race', ['identity', 'quota'])
-def test_upload_rechecks_identity_and_quota_after_remote_io(workspace, monkeypatch, race):
-    app, _ = workspace
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    original_put = backend.put
-    attachment_id = uuid4().hex
-    def raced_put(raw):
-        result = original_put(raw)
-        # A competing upload can publish while the network call is in flight.
-        store.execute('INSERT INTO attachments(id,owner_id,name,size,sha256,media_type,preview_text,created_at,data,preview) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                      (attachment_id if race == 'identity' else uuid4().hex, 'different-owner', 'different.txt', 1, 'different', 'text/plain', '', '2099-01-01', b'x', b''))
-        return result
-    monkeypatch.setattr(backend, 'put', raced_put)
-    with pytest.raises(ValueError, match='already used' if race == 'identity' else 'storage is full'):
-        store.attachments.save(attachment_id, 'candidate-owner', 'new.txt', b'a' * 10, inspect_file(b'a' * 10), 10)
-    assert store.rows('SELECT owner_id FROM attachments')[0]['owner_id'] == 'different-owner'
-
-
-@pytest.mark.parametrize('quota', ['global', 'draft'])
-def test_full_quota_rejects_before_uploading_remote_objects(workspace, monkeypatch, quota):
-    app, _ = workspace
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    if quota == 'draft':
-        monkeypatch.setattr('app.attachments.MAX_DRAFT', 10)
-    limit = 10 if quota == 'global' else 100
-    store.attachments.save(uuid4().hex, 'owner', 'first.txt', b'a' * 10, inspect_file(b'a' * 10), limit)
-    backend.fail = True  # Any attempted object I/O would turn this into a 503.
-    with pytest.raises(ValueError, match='storage is full' if quota == 'global' else 'Too many unsent files'):
-        store.attachments.save(uuid4().hex, 'owner', 'second.txt', b'b', inspect_file(b'b'), limit)
-    assert len(backend.values) == 1
-    assert len(store.rows('SELECT id FROM attachments')) == 1
-
-
-def test_quota_preflight_excludes_expired_drafts_without_deleting_them_before_upload(workspace, monkeypatch):
-    app, _ = workspace
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    monkeypatch.setattr('app.attachments.MAX_DRAFT', 10)
-    first = store.attachments.save(uuid4().hex, 'owner', 'expired.txt', b'a' * 10, inspect_file(b'a' * 10), 10)
-    store.execute("UPDATE attachments SET created_at='2000-01-01T00:00:00+00:00'")
-    original_put = backend.put
-    def observe_expired(raw):
-        assert store.rows('SELECT id FROM attachments')[0]['id'] == first['id']
-        return original_put(raw)
-    monkeypatch.setattr(backend, 'put', observe_expired)
-    second = store.attachments.save(uuid4().hex, 'owner', 'new.txt', b'b' * 10, inspect_file(b'b' * 10), 10)
-    assert [row['id'] for row in store.rows('SELECT id FROM attachments')] == [second['id']]
-
-
-def test_legacy_schema_upgrade_is_idempotent_and_preserves_preview_bytes(tmp_path):
-    store = Store(tmp_path)
-    with store.connect() as conn:
-        for name in ('data_ref', 'preview_ref', 'preview_size'):
-            conn.execute(f'ALTER TABLE attachments DROP COLUMN {name}')
-        conn.execute('INSERT INTO attachments VALUES(?,?,NULL,?,?,?,?,?,?,?,?)',
-                     (uuid4().hex, 'legacy-owner', 'legacy.png', 3, 'hash', 'image/png', '', '2026-01-01', b'raw', b'preview'))
-    for _ in range(2):
-        restored = Store(tmp_path)
-        row = restored.rows('SELECT * FROM attachments')[0]
-        assert row['preview_size'] == 7 and not row['data_ref'] and not row['preview_ref']
-        assert restored.attachments.payload(row) == b'raw'
-        assert restored.attachments.payload(row, 'preview') == b'preview'
-

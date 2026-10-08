@@ -324,12 +324,9 @@ def test_search_ranks_exact_references_replaces_matches_and_never_scans_bodies(w
     result=search(client,run,'BENCHMARK-REVIEW').json()
     assert {m['reference'] for m in result['matches'][:2]}=={'personal:benchmark-review','org:benchmark-review'}
     selected=app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')
-    for query in ['', '   ', 'x'*201]:
-        invalid=search(client,run,query)
-        assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
+    for query in ['', '   ', 'the and for', 'x'*201]:
+        assert search(client,run,query).status_code==422
         assert app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')==selected
-    assert search(client,run,'the and for').status_code==422
-    assert app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')==selected
     assert search(client,run,MARKER).json()['matches']==[]
     assert skill_context(app,run)['matches']==[]
     assert not app.state.store.rows('SELECT * FROM skill_searches')

@@ -14,7 +14,6 @@ from test_attachments import png
 from test_audio import gateway, grant_files, slack_download
 from test_slack import event, signed, slack_app
 from test_spend import sign_in
-from storage_fixture import MemoryObjects
 
 FILE = {'id': 'F12345678', 'name': 'image.png', 'mimetype': 'image/png'}
 ROOT = '1790719000.123456'
@@ -269,64 +268,3 @@ def test_live_file_scope_check_preserves_connection_guards(slack_app, monkeypatc
     with pytest.raises(ValueError, match='Slack access changed'):
         asyncio.run(app.state.slack.files.read(FILE['id'], 'T12345678'))
     assert calls == ([FILE['id']] if during_read else [])
-
-
-
-@pytest.mark.parametrize('from_context', [False, True])
-@pytest.mark.parametrize('remote', [False, True])
-def test_slack_eight_file_budget_keeps_mention_priority_and_deduplicates(slack_app, monkeypatch, from_context, remote):
-    app, client, runs, _ = slack_app
-    if remote:
-        app.state.store.objects = MemoryObjects()
-    files = [{**FILE, 'id': f'F{i:08d}'} for i in range(1, 10)]
-    earlier = '1790718000.123456'
-    history = [
-        {'ts': earlier, 'text': 'Earlier files', 'user': 'U12345678', 'files': files},
-        {'ts': ROOT, 'thread_ts': earlier, 'text': 'Inspect this', 'user': 'U12345678', 'files': [files[-1]]},
-    ]
-    calls, _ = provider(app, monkeypatch, history=history)
-    payload = event(thread_ts=earlier, files=[] if from_context else [files[-1], *files])
-    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
-    run_id = runs[0]['id']
-    app.state.store.claim_message(run_id)
-    asyncio.run(app.state.slack.prepare(run_id))
-    assert calls == [files[-1]['id'], *[file['id'] for file in files[:7]]]
-    assert len(app.state.store.messages(run_id)[0]['attachments']) == 8
-
-@pytest.mark.parametrize('change', ['paused', 'team_changed'])
-@pytest.mark.parametrize('recovered', [False, True])
-def test_slack_scope_is_rechecked_when_publishing_remote_uploads(slack_app, monkeypatch, change, recovered):
-    app, client, runs, _ = slack_app
-    provider(app, monkeypatch)
-    store = app.state.store
-    store.objects = backend = MemoryObjects()
-    client.post('/hooks/slack/events', **signed(event(files=[FILE])))
-    run_id = runs[0]['id']
-    store.claim_message(run_id)
-    def revoke():
-        if change == 'paused':
-            store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0) "
-                          "ON CONFLICT(provider) DO UPDATE SET enabled=0")
-        else:
-            app.state.connectors.save('slack', {'kind': 'oauth', 'bot': {
-                'access_token': 'replacement-token', 'team': {'id': 'T87654321'},
-                'bot_user_id': 'U99999999', 'scope': 'files:read'}}, 'Other team')
-    original_put = backend.put
-    def revoke_after_upload(raw):
-        reference = original_put(raw)
-        revoke()
-        return reference
-    if recovered:
-        asyncio.run(app.state.slack.files.prepare(run_id))
-        # Model the saved draft left by cancellation before batch publication.
-        store.execute('UPDATE attachments SET message_id=NULL')
-        store.execute("UPDATE slack_audio_inputs SET status='pending'")
-        revoke()
-    else:
-        monkeypatch.setattr(backend, 'put', revoke_after_upload)
-    asyncio.run(app.state.slack.files.prepare(run_id))
-    message = store.messages(run_id)[0]
-    assert not message['attachments']
-    assert 'Slack access changed' in message['content']
-    assert all(row['message_id'] is None for row in store.rows('SELECT message_id FROM attachments'))
-

@@ -228,7 +228,7 @@ class HarnessGateway:
                 items = payload[field]
                 if isinstance(items, str):
                     items = [{'role': 'user', 'content': items}]
-                payload[field] = await asyncio.to_thread(self.store.attachments.with_images, run, items, protocol=route)
+                payload[field] = self.store.attachments.with_images(run, items, protocol=route)
             while True:
                 try:
                     checked_budget = await self.context_budget.check(payload, scope='' if compact else run_id + route)

@@ -29,12 +29,6 @@ REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
 
 
-class GitHubError(ConnectorError):
-    def __init__(self, message, status_code):
-        super().__init__(message)
-        self.status_code = status_code
-
-
 def supports_permissions(actual, required=PERMISSIONS):
     """Accept broader installations; token issuance still narrows every operation."""
     levels = {'read': 1, 'write': 2}
@@ -168,11 +162,11 @@ TOOLS = {
     'github_update_ruleset_reviewers': ('github', True, RulesetReviewers, 'Change required reviewing teams/file patterns in one repository branch ruleset when requested by the user. Read github_ruleset first and pass its revision. Preserves approval count, code owner review, status checks and all other rules/settings. Requires GitHub Administration write access. Cannot edit inherited organization rulesets. On an uncertain result, read the ruleset before retrying; never retry blindly.'),
     'github_repositories': ('github', False, Args, 'List the repositories enabled for the shared organization GitHub connection. Pass an entry’s id as repository_id in checkout and PR tools. Names are display labels.'),
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
-    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
+    'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
     'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
-    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open Moyai PR created by any chat in this workspace under the current GitHub connection. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
-    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open Moyai PR created by any chat in this workspace under the current GitHub connection, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
+    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR created by this session. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
+    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR created by this session, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
 }
 
@@ -235,7 +229,7 @@ class GitHub(GitHubRepositories):
                 if missing and response.status_code == 404:
                     return None
                 if not 200 <= response.status_code < 300:
-                    raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.', response.status_code)
+                    raise ConnectorError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.')
                 return response.json()
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
@@ -307,15 +301,7 @@ class GitHub(GitHubRepositories):
         if name == 'github_repositories':
             await self.refresh_connection()
             return {'repositories': self.repository_options()}
-        read_version = None
-        if name == 'github_pull_request':
-            self.ensure_read_allowed(run.get('github_connection_version'))
-            await self.ensure_connection()
-            read_version = run.get('github_connection_version', self.connection_version())
-            self.ensure_read_allowed(read_version)
         target = await self.selected_target(run, arguments.get('repository', ''), arguments.get('repository_id'))
-        if read_version:
-            self.ensure_read_allowed(read_version, target)
         if name in {'github_rulesets', 'github_ruleset'}:
             token = await self.installation_token(repository=target, rules=True)
             if name == 'github_rulesets':
@@ -328,8 +314,6 @@ class GitHub(GitHubRepositories):
                                       params={'includes_parents': 'true'})
             return self.ruleset_result(target, data)
         token = await self.installation_token(repository=target)
-        if read_version:
-            self.ensure_read_allowed(read_version, target)
         if name in {'github_repository', 'github_checkout'}:
             repo = {**await self.repository(token, target), 'git_path': f'/github/repositories/{target}.git'}
             if name == 'github_checkout' and arguments.get('number'):
@@ -351,38 +335,19 @@ class GitHub(GitHubRepositories):
         number = PullRequest.model_validate(arguments).number
         prefix = f'/repositories/{target}/pulls/{number}'
         pr = await self.request('GET', prefix, token=token)
-        self.ensure_read_allowed(read_version, target)
-        if pr['number'] != number or pr['base']['repo']['id'] != target:
-            raise ConnectorError('GitHub returned a different pull request or repository.')
-        self.remember_repository(pr['base']['repo'], self.saved_credentials())
         files = await self.request('GET', prefix + '/files', token=token, params={'per_page': 100})
-        self.ensure_read_allowed(read_version, target)
         remaining = 160000
         compact = []
-        for f in files[:100]:
+        for f in files:
             patch = (f.get('patch') or '')[:min(remaining, 16000)]
             remaining -= len(patch)
             compact.append({**{k: f.get(k) for k in ('filename', 'status', 'additions', 'deletions')},
                             'patch': patch, 'patch_truncated': len(f.get('patch') or '') > len(patch)})
-        return {**{k: pr.get(k) for k in ('number', 'title', 'state', 'draft', 'merged', 'html_url',
-                                       'additions', 'deletions', 'changed_files', 'created_at')},
-                'repository_id': target, 'repository': self.repository_name(target),
-                'author': (pr.get('user') or {}).get('login'), 'head_ref': pr['head'].get('ref'),
+        return {**{k: pr.get(k) for k in ('number', 'title', 'state', 'draft', 'merged', 'html_url')},
                 'body': (pr.get('body') or '')[:20000],
-                'body_truncated': len(pr.get('body') or '') > 20000,
                 'head': pr['head']['sha'], 'base': pr['base']['ref'],
                 'files': compact,
-                'files_truncated': pr['changed_files'] > len(compact)}
-
-    def ensure_read_allowed(self, version=None, target=None):
-        if (not self.connectors.allowed('github_pull_request')
-                or (version is not None and version != self.connection_version())):
-            raise GitHubError('GitHub access changed. Refresh the pull request to try again.', 403)
-        try:
-            if target is not None:
-                self.target(target)
-        except ConnectorError as exc:
-            raise GitHubError(str(exc), 403) from None
+                'files_truncated': pr['changed_files'] > len(files)}
 
     @staticmethod
     def ruleset_revision(data):
@@ -614,16 +579,14 @@ class GitHub(GitHubRepositories):
                                             json={'message': args.title, 'tree': created_tree['sha'], 'parents': [args.base_sha]})
         return created_commit['sha']
 
-    def owned_publication(self, target, number, version):
-        # Provenance belongs to the workspace connection, not the requesting chat.
-        for row in self.store.rows('SELECT * FROM github_publications WHERE connection_version=? AND result!=?', (version, '')):
-            try:
-                result = json.loads(row['result'])
-            except ValueError:
-                continue
-            if isinstance(result, dict) and result.get('repository_id') == target and result.get('number') == number:
+    def owned_publication(self, run, target, number, version):
+        for row in self.store.rows('SELECT * FROM github_publications WHERE run_id=? AND result!=?', (run['id'], '')):
+            result = json.loads(row['result'])
+            if result.get('repository_id') == target and result.get('number') == number:
+                if row['connection_version'] != version:
+                    raise ConnectorError('The GitHub installation changed since this PR was published.')
                 return row
-        raise ConnectorError('Only confirmed Moyai PRs published in this workspace under the current GitHub connection can be updated or commented on.')
+        raise ConnectorError('Only PRs published by this session can be updated or commented on.')
 
     async def owned_pr(self, token, target, number, publication):
         pr = await self.request('GET', f'/repositories/{target}/pulls/{number}', token=token)
@@ -653,7 +616,7 @@ class GitHub(GitHubRepositories):
         target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
-        publication = self.owned_publication(target, args.number, version)
+        publication = self.owned_publication(run, target, args.number, version)
         row = self.followup(run, tool, args, version, target)
         if row['result']:
             return self.receipt(row['result'], target)
@@ -685,7 +648,7 @@ class GitHub(GitHubRepositories):
         target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
-        publication = self.owned_publication(target, args.number, version)
+        publication = self.owned_publication(run, target, args.number, version)
         row = self.followup(run, tool, args, version, target)
         if row['result']:
             return self.receipt(row['result'], target)

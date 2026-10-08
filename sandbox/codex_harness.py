@@ -38,7 +38,6 @@ class CodexAgent(HarnessAgent):
         self.journal = None
         self.calls = {}
         self.completed = set()
-        self.observed_outputs = set()
         self.compaction_window = None
         self.boundary_failed = False
         self.boundary_reason = ''
@@ -78,9 +77,8 @@ class CodexAgent(HarnessAgent):
                 # Input IDs are only a barrier; wire text never becomes a receipt.
                 # A code-mode output may yield while nested tools are still live.
                 # Let the model poll them; lifecycle work below must still wait.
-                if not self.receipts.wait_for(
-                        lambda: expected <= self.completed | self.observed_outputs or self.stopped.is_set(),
-                        timeout=RECEIPT_TIMEOUT_SECONDS):
+                if not self.receipts.wait_for(lambda: expected <= self.completed or self.stopped.is_set(),
+                                              timeout=RECEIPT_TIMEOUT_SECONDS):
                     self.boundary_failed = True
                     self.boundary_reason = 'native output notification timed out'
                     return False
@@ -114,8 +112,7 @@ class CodexAgent(HarnessAgent):
             'mcp_servers': {'moyai': ctx.config['mcp_servers']['workspace']},
             'projects': {str(Path(ctx.cwd).resolve()): {'trust_level': 'untrusted'}},
             'project_doc_max_bytes': 0, 'web_search': 'disabled',
-            # Moyai owns plugins; native marketplace sync outlives SDK shutdown.
-            'features': {'hooks': False, 'apps': False, 'plugins': False, 'memories': False,
+            'features': {'hooks': False, 'apps': False, 'memories': False,
                          'multi_agent': False, 'unified_exec': False, 'shell_snapshot': False},
             'skills': {'include_instructions': False, 'bundled': {'enabled': False}},
             'agents': {'enabled': False},
@@ -191,18 +188,15 @@ class CodexAgent(HarnessAgent):
 
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
-        from openai_codex.errors import TransportClosedError
         # Each fresh SDK invocation has its own local ceiling. The gateway and
         # shared recovery loop retain the whole task's request cap and deadline.
         self.model_calls = 0
         self.calls.clear()
         self.completed.clear()
-        self.observed_outputs.clear()
         self.journal.call_namespace = uuid4().hex
         message_items = {}
         finished, answer = False, ''
         failure = {}
-        settlement_turn = None
         # Native transcripts are private, disposable state. Only Moyai's public
         # journal crosses requester/model changes and filesystem checkpoints.
         try:
@@ -222,28 +216,16 @@ class CodexAgent(HarnessAgent):
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
                             event = await client.next_turn_notification(turn.turn.id)
-                            if settlement_turn:
-                                # Background commands retain their original turn
-                                # ID. The completed queue drains without waiting;
-                                # the new turn's queue cannot supply these receipts.
-                                try:
-                                    while True:
-                                        previous = await client.next_turn_notification(settlement_turn)
-                                        if previous.method == 'item/completed':
-                                            body = previous.payload.model_dump(mode='json', by_alias=True)
-                                            self.record_item(body['item'], completed=True)
-                                except TransportClosedError:
-                                    pass
                             payload = (event.payload.params if hasattr(event.payload, 'params') else
                                        event.payload.model_dump(mode='json', by_alias=True))
                             if event.method == 'rawResponseItem/completed':
                                 item = payload.get('item', {})
                                 if item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
-                                    # Output observation admits polling; only native
-                                    # completion settles a receipt, even when both
-                                    # events carry the same ID.
+                                    # Astra's code-mode outer call ID differs from
+                                    # nested tool item IDs. A yielded outer output
+                                    # does not settle its nested tool receipts.
                                     with self.receipts:
-                                        self.observed_outputs.add(item['call_id'])
+                                        self.completed.add(item['call_id'])
                                         self.receipts.notify_all()
                             elif event.method in {'item/started', 'item/completed'}:
                                 item = payload['item']
@@ -266,19 +248,6 @@ class CodexAgent(HarnessAgent):
                                         if payload['turn']['status'] in {'failed', 'interrupted'} else 'unknown')
                                     if payload['turn'].get('error'):
                                         failure.update(codex_details(payload['turn']['error']))
-                                if (finished and self.journal.pending and not settlement_turn
-                                        and not self.stopped.is_set() and not self.boundary_failed):
-                                    # One settlement turn shares this invocation's
-                                    # deadline and model-call cap. Never publish an
-                                    # answer that preceded its tool results.
-                                    settlement_turn = turn.turn.id
-                                    message_items.clear()
-                                    turn = await client.turn_start(thread.thread.id,
-                                        'Unfinished tool calls remain. Settle them before answering: '
-                                        'wait for finite work, or deliberately stop preview servers you no longer need. '
-                                        'Collect their actual results; do not restart or replay actions. '
-                                        'Then provide the final answer based on the confirmed results.')
-                                    continue
                                 break
         except Exception as exc:
             finished = False

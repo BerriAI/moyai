@@ -5,7 +5,8 @@ and downloads to the archive the user selected, rather than a later overwrite.
 """
 from collections import Counter
 from contextlib import contextmanager
-from io import BytesIO
+import hashlib
+import os
 from pathlib import PurePosixPath
 import re
 import stat
@@ -42,24 +43,22 @@ def safe_member(info):
 def saved_archive(settings, store, run_id, revision=None):
     if not re.fullmatch(r'[0-9a-f]{32}', run_id) or not store.run(run_id):
         raise HTTPException(404, 'Session not found.')
-    name = run_id + '.zip'
+    path = settings.data_dir / 'artifacts' / (run_id + '.zip')
     try:
-        info = store.artifacts.info(name)
-        if info is None:
-            raise FileNotFoundError(name)
-        if info['size'] > MAX_ARCHIVE:
-            raise HTTPException(413, 'This archive is too large to browse.')
-        current = info['revision']
-        if revision is not None and revision != current:
-            raise HTTPException(409, 'The saved files changed. Close and reopen Files to view the latest version.')
-        raw = store.artifacts.read(name, MAX_ARCHIVE, revision=current)
-        with zipfile.ZipFile(BytesIO(raw)) as archive:
-            entries = archive.infolist()
-            if len(entries) > MAX_ENTRIES or sum(i.file_size for i in entries) > MAX_TOTAL:
-                raise HTTPException(413, 'This archive exceeds the file browser limits. Download the ZIP instead.')
-            counts = Counter(i.filename for i in entries)
-            files = {i.filename: i for i in entries if safe_member(i) and counts[i.filename] == 1}
-            yield archive, files, current, len(entries) - len(files)
+        with path.open('rb') as stream:
+            stamp = os.fstat(stream.fileno())
+            if stamp.st_size > MAX_ARCHIVE:
+                raise HTTPException(413, 'This archive is too large to browse.')
+            current = hashlib.sha256(f'{stamp.st_mtime_ns}:{stamp.st_size}'.encode()).hexdigest()[:24]
+            if revision is not None and revision != current:
+                raise HTTPException(409, 'The saved files changed. Close and reopen Files to view the latest version.')
+            with zipfile.ZipFile(stream) as archive:
+                entries = archive.infolist()
+                if len(entries) > MAX_ENTRIES or sum(i.file_size for i in entries) > MAX_TOTAL:
+                    raise HTTPException(413, 'This archive exceeds the file browser limits. Download the ZIP instead.')
+                counts = Counter(i.filename for i in entries)
+                files = {i.filename: i for i in entries if safe_member(i) and counts[i.filename] == 1}
+                yield archive, files, current, len(entries) - len(files)
     except FileNotFoundError:
         raise HTTPException(404, 'No saved files are available yet.') from None
     except (zipfile.BadZipFile, OSError, RuntimeError, NotImplementedError, EOFError, zlib.error):
@@ -82,12 +81,11 @@ def routes(settings, store, security):
     @router.get('/api/runs/{run_id}/files')
     def list_files(run_id: str, request: Request):
         security.require(request)
-        media = captures.listing(settings, run_id, store=store) if store.run(run_id) else []
-        if media and store.artifacts.info(run_id + '.zip') is None:
+        media = captures.listing(settings, run_id) if store.run(run_id) else []
+        if media and not (settings.data_dir / 'artifacts' / (run_id + '.zip')).exists():
             return {'revision': 'captures', 'files': media, 'limited': False, 'note': 'Saved browser captures.'}
         with saved_archive(settings, store, run_id) as (_, files, revision, skipped):
-            # Source inventories must not crowd recovery artifacts out of the capped catalog.
-            ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
+            ordered = sorted(files.values(), key=lambda i: (not i.filename.startswith('new-files/'), i.filename.casefold()))
             return {'revision': revision, 'files': media + [file_info(run_id, i, revision) for i in ordered[:MAX_LIST]],
                     'limited': len(ordered) > MAX_LIST or bool(skipped),
                     'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}

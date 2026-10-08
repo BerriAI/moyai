@@ -1,5 +1,4 @@
 import json
-import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -7,7 +6,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from .attachments import Attachments
-from .blob_storage import ArtifactStore, ObjectStorage
 from .slack_mentions import SlackMentions
 
 
@@ -34,16 +32,8 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def require_database_owner(path: Path) -> None:
-    if hasattr(os, 'geteuid'):
-        owner = (path if path.exists() else path.parent).stat().st_uid
-        if os.geteuid() != owner:
-            # Even read-only root connections can race the owner's WAL/SHM creation.
-            raise PermissionError(f"Database access requires UID {owner}; run maintenance as the database owner.")
-
-
 class Store:
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None):
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000):
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
@@ -243,14 +233,11 @@ class Store:
                 if name not in columns:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
         self.path.chmod(0o600)
-        self.objects = object_storage if object_storage is not None else ObjectStorage()
-        self.artifacts = ArtifactStore(self, directory)
         self.attachments = Attachments(self)
         self.slack_mentions = SlackMentions(self)
 
     @contextmanager
     def connect(self):
-        require_database_owner(self.path)
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.create_function('unicode_lower', 1, str.lower, deterministic=True)

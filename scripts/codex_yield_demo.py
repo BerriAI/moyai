@@ -16,7 +16,7 @@ from sandbox.codex_harness import CodexAgent
 from test_codex_sdk_transport import native_yield_case
 
 
-def demonstrate(baseline_ref, output, *, settlement=False, pause=0):
+def demonstrate(baseline_ref, output):
     output.mkdir(parents=True, exist_ok=True)
     source = subprocess.check_output(['git', 'show', baseline_ref + ':sandbox/codex_harness.py'], cwd=ROOT)
     baseline = ModuleType('sandbox._yield_baseline')
@@ -33,40 +33,27 @@ def demonstrate(baseline_ref, output, *, settlement=False, pause=0):
             recording.flush()
         say('Moyai: real Codex 0.161.0 + MCP + BrokerRelay + SQLite')
         say('Synthetic local model replies; no external provider or production changes')
-        time.sleep(pause)
         proofs = {}
         for label, cls in [('BEFORE', baseline.CodexAgent), ('AFTER', CodexAgent)]:
-            say(label + (': start a preview server, then finish with its command still running'
-                         if settlement else ': run one tool, yield after 1 second, then poll it'))
+            say(label + ': run one tool, yield after 1 second, then poll it')
             with tempfile.TemporaryDirectory(prefix='moyai-yield-') as temporary, MonkeyPatch.context() as patch:
-                proofs[label] = native_yield_case(Path(temporary), patch, 1000,
-                    'settle-preview' if settlement else 'complete', agent_class=cls, progress=say)
-            time.sleep(pause)
-        assert proofs['BEFORE']['failed']
-        if settlement:
-            assert proofs['BEFORE']['pending_tools'] == 1
-            assert 'premature-answer' not in proofs['AFTER']['saved_prose']
-        else:
-            assert proofs['BEFORE']['boundary_failed']
-            assert any(e.get('http_status') == 409 for e in proofs['BEFORE']['native_errors'])
+                proofs[label] = native_yield_case(Path(temporary), patch, 1000, agent_class=cls, progress=say)
+        assert proofs['BEFORE']['failed'] and proofs['BEFORE']['boundary_failed']
+        assert any(e.get('http_status') == 409 for e in proofs['BEFORE']['native_errors'])
         assert proofs['AFTER']['completed'] and not proofs['AFTER']['boundary_failed']
         assert proofs['AFTER']['tool_executions'] == proofs['AFTER']['completed_receipts'] == 1
         assert proofs['AFTER']['pending_tools'] == 0
-        say('PASS: original adapter rejects final; fixed adapter settles the command and completes'
-            if settlement else 'PASS: original adapter receives HTTP 409; fixed adapter completes')
+        say('PASS: original adapter receives HTTP 409; fixed adapter completes')
         say('PASS: one tool execution, one saved receipt, zero unresolved tools')
         report = {'baseline_ref': baseline_ref, 'head': subprocess.check_output(
             ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
             'inference': 'synthetic local model replies', 'proofs': proofs, 'timeline': rows}
         (output / 'codex-yield-proof.json').write_text(json.dumps(report, indent=2) + '\n')
-        time.sleep(pause)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline-ref', required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--settlement', action='store_true')
-    parser.add_argument('--pause', type=float, default=0, help='Pause between stages when recording a demo')
     args = parser.parse_args()
-    demonstrate(args.baseline_ref, args.output, settlement=args.settlement, pause=args.pause)
+    demonstrate(args.baseline_ref, args.output)

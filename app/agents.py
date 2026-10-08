@@ -6,7 +6,6 @@ and releases its machine while waiting; no in-memory gather owns the work.
 import asyncio
 import json
 from decimal import Decimal
-from io import BytesIO
 from pathlib import PurePosixPath
 from uuid import uuid4
 import zipfile
@@ -152,24 +151,26 @@ class AgentCoordinator:
                 'total': len(children),
                 'children': [{**child, 'summary': child['summary'][:6000],
                               'session_url': self.settings.public_url.rstrip('/') + '/#run=' + child['id'],
-                              'has_artifact': self.store.artifacts.info(child['id'] + '.zip') is not None}
+                              'has_artifact': (self.settings.data_dir / 'artifacts' / (child['id'] + '.zip')).exists()}
                              for child in children]}
 
     def snapshot_group_in(self, conn, group):
         """Freeze answers and archives before direct chats can change them.
 
-        Object references and legacy hard links preserve immutable versions.
-        Names include the last turn so retries retain old versions. No network
-        operations or awaits occur inside the handoff/enqueue transaction.
+        Hard links share storage with the current archive until a later atomic
+        replacement. Names include the last turn so retries retain old versions.
+        No awaits occur inside the handoff/enqueue transaction.
         """
         children = conn.execute('SELECT * FROM runs WHERE agent_group_id=? ORDER BY created_at,id', (group['id'],)).fetchall()
         snapshot = []
         for child in children:
-            name = child['id'] + '.zip'
+            path = self.settings.data_dir / 'artifacts' / (child['id'] + '.zip')
             artifact_name = ''
-            if self.store.artifacts.info(name, conn=conn) is not None:
+            if path.exists():
                 artifact_name = f"group-{group['id']}-{child['id']}-{child['active_message_id'] or 0}.zip"
-                self.store.artifacts.snapshot_in(conn, name, artifact_name)
+                target = path.with_name(artifact_name)
+                if not target.exists():
+                    target.hardlink_to(path)
             snapshot.append({key: child[key] for key in ('id', 'agent_label', 'status', 'summary', 'error', 'checkpoint_error')} | {
                 'summary': child['summary'][:6000], 'artifact_name': artifact_name,
                 'has_artifact': bool(artifact_name), 'message_id': child['active_message_id'],
@@ -240,7 +241,7 @@ class AgentCoordinator:
         if name == 'agents_results':
             return self.results(run_id, value.group_id, latest=value.latest)
         if name == 'agents_read_artifact':
-            return await asyncio.to_thread(self.read_artifact, run_id, value)
+            return self.read_artifact(run_id, value)
         if name == 'agents_retry':
             return await self.retry(run, value)
         if name == 'agents_cancel':
@@ -355,18 +356,16 @@ class AgentCoordinator:
         child = self.store.run(args.child_id)
         if not child or child['parent_run_id'] != parent_id:
             raise ValueError('Worker does not belong to this session.')
-        artifact_name = args.child_id + '.zip'
+        path = self.settings.data_dir / 'artifacts' / (args.child_id + '.zip')
         group = self.group(parent_id, child['agent_group_id'])
         if not args.latest and group['result_snapshot'] and group['status'] in {'completed', 'cancelled'}:
             saved = next(c for c in json.loads(group['result_snapshot']) if c['id'] == args.child_id)
             if not saved['artifact_name']:
                 return {'available': False, 'status': saved['status']}
-            artifact_name = saved['artifact_name']
-        try:
-            raw = self.store.artifacts.read(artifact_name, 20 * 1024 * 1024)
-        except FileNotFoundError:
+            path = path.with_name(saved['artifact_name'])
+        if not path.exists():
             return {'available': False, 'status': child['status']}
-        with zipfile.ZipFile(BytesIO(raw)) as archive:
+        with zipfile.ZipFile(path) as archive:
             if not args.path:
                 return {'available': True, 'files': [{'path': i.filename, 'bytes': i.file_size} for i in archive.infolist()[:1000]]}
             name = PurePosixPath(args.path)

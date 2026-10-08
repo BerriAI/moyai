@@ -3,7 +3,7 @@ from typing import Literal
 import base64
 import re
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
 
@@ -28,13 +28,6 @@ class Settings(BaseSettings):
         return init_settings, dotenv_settings, env_settings, file_secret_settings
     data_dir: Path = Path(".data")
     attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
-    object_storage_bucket: str = ''
-    object_storage_endpoint: str = ''
-    object_storage_region: str = 'us-east-1'
-    object_storage_prefix: str = 'moyai'
-    object_storage_access_key_id: str = Field(default='', repr=False)
-    object_storage_secret_access_key: str = Field(default='', repr=False)
-    object_storage_session_token: str = Field(default='', repr=False)
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
@@ -139,42 +132,6 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
-
-    @model_validator(mode='after')
-    def object_storage_credentials(self):
-        if bool(self.object_storage_access_key_id) != bool(self.object_storage_secret_access_key):
-            raise ValueError('Set both object-storage access key and secret key, or leave both empty for the AWS credential chain.')
-        if self.object_storage_session_token and not self.object_storage_access_key_id:
-            raise ValueError('An object-storage session token requires its access key and secret key.')
-        return self
-
-    @field_validator('object_storage_bucket')
-    @classmethod
-    def validate_object_bucket(cls, value):
-        if value and not re.fullmatch(r'[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', value):
-            raise ValueError('Use an S3-compatible bucket name.')
-        return value
-
-    @field_validator('object_storage_prefix')
-    @classmethod
-    def validate_object_prefix(cls, value):
-        if not re.fullmatch(r'[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*', value) or len(value) > 200:
-            raise ValueError('Use a nonempty object prefix containing letters, numbers, hyphens, underscores and slashes.')
-        return value
-
-    @field_validator('object_storage_endpoint')
-    @classmethod
-    def validate_object_endpoint(cls, value):
-        from urllib.parse import urlsplit
-        if not value:
-            return value
-        parsed = urlsplit(value)
-        local = parsed.hostname in {'127.0.0.1', 'localhost', '::1'}
-        if (not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or
-                parsed.path not in {'', '/'} or (parsed.scheme != 'https' and not (local and parsed.scheme == 'http'))):
-            raise ValueError('Use an HTTPS object-storage endpoint without credentials or a path. HTTP is allowed only on loopback for testing.')
-        _ = parsed.port
-        return value.rstrip('/')
 
     @field_validator('modal_billing_object_ids')
     @classmethod

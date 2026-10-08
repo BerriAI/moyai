@@ -270,8 +270,9 @@ class Computer:
         async with self.capture_locks.setdefault(run_id, asyncio.Lock()):
             if records is None:
                 records = await self.execute(sandbox, 'captures')
-            prefix = captures.directory(self.settings, run_id).name + '/'
-            existing = {row['name'] for row in self.store.artifacts.listing(prefix)}
+            root = captures.directory(self.settings, run_id)
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            used = sum(p.stat().st_size for p in root.iterdir() if p.is_file())
             saved = False
             if not isinstance(records, list) or len(records) > 100:
                 raise HTTPException(502, 'Invalid sandbox capture catalog.')
@@ -279,9 +280,11 @@ class Computer:
                 name, size = record.get('name'), record.get('size')
                 if not captures.valid_name(name) or not isinstance(size, int) or not 0 < size <= captures.MAX_FILE:
                     continue
-                target = prefix + name
-                if target in existing:
+                target = root / name
+                if target.exists():
                     continue  # Captures are immutable and uniquely named.
+                if used + size > captures.MAX_TOTAL:
+                    raise HTTPException(413, 'This session has reached its 64 MB saved capture budget.')
                 data = await self.execute(sandbox, 'capture', name, timeout=90)
                 encoded = data.get('data', '')
                 if len(encoded) > (captures.MAX_FILE + 2) // 3 * 4:
@@ -290,10 +293,12 @@ class Computer:
                 if len(raw) != size or len(raw) > captures.MAX_FILE:
                     raise HTTPException(502, 'Capture changed while saving. Refresh to retry.')
                 captures.media_type(name, raw)
-                published = await asyncio.to_thread(self.store.artifacts.save, target, raw,
-                    immutable=True, budget=(prefix, captures.MAX_TOTAL))
-                existing.add(target)
-                saved = saved or published
+                staged = target.with_suffix('.next')
+                staged.write_bytes(raw)
+                staged.chmod(0o600)
+                staged.replace(target)
+                used += size
+                saved = True
             if saved:
                 self.store.event(run_id, 'artifact', 'Browser captures saved. Open Computer or Files to view them.')
                 await self.manager.persist()
@@ -362,7 +367,7 @@ class Computer:
                         'wake_error': lifecycle.get('wake_error', ''), 'wake_notice': lifecycle.get('wake_notice', ''),
                         'can_wake': can_wake,
                         'wake_supported': hasattr(self.manager, 'wake_computer'),
-                        'captures': captures.listing(self.settings, run_id, store=self.store)}
+                        'captures': captures.listing(self.settings, run_id)}
 
         @router.post('/api/runs/{run_id}/computer')
         async def command(run_id: str, body: Command, request: Request):
@@ -386,11 +391,11 @@ class Computer:
                         if lifecycle.get('phase') != 'warm':
                             return {'ok': True, 'available': False, 'has_sandbox': False, 'waking': True,
                                     'wake_supported': True, 'actor': actor, 'tab': body.tab,
-                                    'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                    'captures': captures.listing(self.settings, run_id)}
                     async with self.connection(run) as connection:
                         if not connection:
                             if closing:
-                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
                             raise HTTPException(409, 'This workspace is asleep. Wake it up to see it live.')
                         if body.tab:
                             probe = {'action': 'state', 'tab': body.tab, 'actor': actor}
@@ -408,10 +413,10 @@ class Computer:
                                 if closing and 'tab' not in scope and 'error' not in scope and all(
                                     isinstance(scope.get(field), bool) for field in ('available', 'recording')
                                 ):
-                                    return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                    return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
                                 raise HTTPException(503, TAB_UPDATE_NOTICE)
                             if closing and scope.get('available') is False and scope.get('recording') is False:
-                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                return {'ok': True, 'tab': body.tab, 'captures': captures.listing(self.settings, run_id)}
                         if self.shutting_down(run_id, run.get('sandbox_id')):
                             raise HTTPException(409, 'This workspace is shutting down. Saved captures remain available in Files.')
                         result = await connection.request({**body.model_dump(), 'actor': actor})
@@ -429,7 +434,7 @@ class Computer:
                             await self.sync(connection.sandbox, run_id)
                         return {**result, 'ok': True, 'actor': actor, 'tab': body.tab, 'has_sandbox': True,
                                 'shutting_down': self.shutting_down(run_id, run.get('sandbox_id')),
-                                'captures': captures.listing(self.settings, run_id, store=self.store)}
+                                'captures': captures.listing(self.settings, run_id)}
                 finally:
                     for key in list(self.cache):
                         if key[0] == run_id:
@@ -441,6 +446,6 @@ class Computer:
             self.security.require(request)
             if not self.store.run(run_id) or not captures.valid_name(name):
                 raise HTTPException(404, 'Capture not found.')
-            return captures.response(captures.directory(self.settings, run_id) / name, request, download, store=self.store)
+            return captures.response(captures.directory(self.settings, run_id) / name, request, download)
 
         return router

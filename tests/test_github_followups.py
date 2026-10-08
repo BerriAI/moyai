@@ -1,4 +1,4 @@
-"""Exercise workspace publication access, concurrency and response recovery."""
+"""Exercise session ownership, concurrency and response recovery through the broker."""
 import asyncio
 import copy
 import json
@@ -7,8 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.connector_errors import ConnectorError
-from app.github import Change, Comment, GitHub, Publish, Update, MAX_FILE, MAX_TOTAL
-from app.security import digest
+from app.github import Change, Comment, Publish, Update, MAX_FILE, MAX_TOTAL
 from sandbox.broker_transport import CONTENT_TYPE, seal, unseal, MAX_BODY
 from test_github import BASE, COMMIT, TREE, PAYLOAD, GitHubAPI, connected
 from test_workspace import workspace
@@ -77,71 +76,36 @@ def comment_args():
     return Comment(repository=PAYLOAD['repository'], number=100, body='@review-bot review', request_key='review-second-head')
 
 
-def another_session(app):
-    run = app.state.store.create_run('Continue an existing PR', '', 'modal', ['github'])
-    token = 'another-run-capability'
-    app.state.store.update_run(run['id'], status='running', token_hash=digest(token))
-    return app.state.store.run(run['id']), {'Authorization': 'Bearer ' + token}
-
-
 @pytest.mark.parametrize('operation', ['update', 'comment'])
 @pytest.mark.parametrize('lost', [False, True])
-@pytest.mark.parametrize('new_chat', [False, True])
-def test_followup_recovery_does_not_repeat_write_across_turns(published, monkeypatch, operation, lost, new_chat):
+def test_followup_recovery_does_not_repeat_write_across_turns(published, operation, lost):
     app, client, run, headers, github, api = published
-    publications = app.state.store.rows('SELECT * FROM github_publications')
-    if new_chat:
-        run, headers = another_session(app)
-    url = f"/broker/{run['id']}/tools/call"
-    checkout = client.post(url, headers=headers, json={'name': 'github_checkout',
-        'arguments': {'repository_id': 101, 'number': 100}}).json()
-    assert checkout['base_sha'] == COMMIT and checkout['checkout_ref'] == 'refs/pull/100/head'
     args = update_args() if operation == 'update' else comment_args()
-    body = {'name': 'github_' + operation + '_pull_request', 'arguments': args.model_dump()}
     if lost:
         api.lose = operation
-    first = client.post(url, headers=headers, json=body).json()
-    assert ('Lost' in first.get('error', '')) if lost else 'url' in first
-    # A new broker instance and turn recover the same durable operation.
-    restored = GitHub(github.store, github.security, github.settings, github.connectors)
-    monkeypatch.setattr(restored, 'request', api.request)
-    monkeypatch.setattr(restored, 'installation_token', github.installation_token)
-    monkeypatch.setattr(app.state.connectors, 'github', restored)
+        with pytest.raises(ConnectorError, match='Lost'):
+            asyncio.run(getattr(github, operation)(run, args))
     app.state.store.execute('UPDATE runs SET active_message_id=42 WHERE id=?', (run['id'],))
-    result = client.post(url, headers=headers, json=body).json()
-    assert result['number'] == 100
-    assert client.post(url, headers=headers, json=body).json() == result
-    assert app.state.store.rows('SELECT * FROM github_publications') == publications
-    assert not app.state.store.approvals(run['id'])
+    run = app.state.store.run(run['id'])
+    result = asyncio.run(getattr(github, operation)(run, args))
+    assert asyncio.run(getattr(github, operation)(run, args)) == result
     writes = [c for c in api.calls if c[0] == ('PATCH' if operation == 'update' else 'POST')
               and (operation == 'update' or c[1].endswith('/comments'))]
     assert len(writes) == 1
     assert result.get('commit', NEXT) == NEXT
     assert len(api.comments) == (operation == 'comment')
-    changed = args.model_copy(update={'title': 'Changed revision'} if operation == 'update' else {'body': 'Different request'})
-    conflict = client.post(url, headers=headers, json={**body, 'arguments': changed.model_dump()}).json()
-    assert 'different changes' in conflict['error']
+    with pytest.raises(ConnectorError, match='different changes'):
+        changed = args.model_copy(update={'title': 'Changed revision'} if operation == 'update' else {'body': 'Different request'})
+        asyncio.run(getattr(github, operation)(run, changed))
 
 
 @pytest.mark.parametrize('operation', ['update', 'comment'])
-@pytest.mark.parametrize('new_chat', [False, True])
-@pytest.mark.parametrize('restriction', ['missing', 'unconfirmed', 'malformed', 'non_object', 'foreign_connection',
-    'foreign_repo', 'other_pr', 'other_repo', 'closed', 'merged', 'foreign_branch', 'fork', 'read_only', 'revoked', 'installation'])
-def test_followup_boundaries_prevent_writes(published, operation, restriction, new_chat):
+@pytest.mark.parametrize('restriction', ['other_session', 'other_pr', 'other_repo', 'closed', 'merged', 'foreign_branch', 'fork', 'read_only', 'revoked', 'installation'])
+def test_followup_boundaries_prevent_writes(published, operation, restriction):
     app, client, run, headers, github, api = published
-    if new_chat:
-        run, headers = another_session(app)
     args = update_args() if operation == 'update' else comment_args()
-    if restriction == 'missing':
-        app.state.store.execute('DELETE FROM github_publications')
-    elif restriction in {'unconfirmed', 'malformed', 'non_object'}:
-        value = {'unconfirmed': '', 'malformed': '{', 'non_object': '[]'}[restriction]
-        app.state.store.execute('UPDATE github_publications SET result=?', (value,))
-    elif restriction == 'foreign_connection':
-        app.state.store.execute("UPDATE github_publications SET connection_version='another-connection'")
-    elif restriction == 'foreign_repo':
-        receipt = json.loads(app.state.store.rows('SELECT result FROM github_publications')[0]['result'])
-        app.state.store.execute('UPDATE github_publications SET result=?', (json.dumps({**receipt, 'repository_id': 202}),))
+    if restriction == 'other_session':
+        app.state.store.execute("UPDATE github_publications SET run_id='another-session'")
     elif restriction == 'other_pr':
         args = args.model_copy(update={'number': 101})
     elif restriction == 'other_repo':
@@ -163,18 +127,6 @@ def test_followup_boundaries_prevent_writes(published, operation, restriction, n
     with pytest.raises(ConnectorError):
         asyncio.run(getattr(github, operation)(run, args))
     assert all(c[0] == 'GET' for c in api.calls)
-
-
-def test_same_request_key_in_another_chat_does_not_replay_or_overwrite(published):
-    app, client, run, headers, github, api = published
-    second, second_headers = another_session(app)
-    body = {'name': 'github_update_pull_request', 'arguments': update_args().model_dump()}
-    first = client.post(f"/broker/{run['id']}/tools/call", headers=headers, json=body).json()
-    assert first['commit'] == NEXT
-    stale = client.post(f"/broker/{second['id']}/tools/call", headers=second_headers, json=body).json()
-    assert 'head changed' in stale['error']
-    assert api.branch == NEXT and len(app.state.store.rows('SELECT * FROM github_followups')) == 2
-    assert len([c for c in api.calls if c[0] == 'PATCH']) == 1
 
 
 def test_stale_head_and_race_after_commit_do_not_overwrite(published):

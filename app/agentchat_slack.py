@@ -146,8 +146,7 @@ class SlackWebhookChannel:
         try:
             for value in selected:
                 capture = pr_delivery.Capture.model_validate(value)
-                raw, _ = await asyncio.to_thread(captures.read,
-                    captures.directory(self.owner.settings, run_id) / capture.name, store=self.owner.store)
+                raw, _ = captures.read(captures.directory(self.owner.settings, run_id) / capture.name)
                 if hashlib.sha256(raw).hexdigest() != capture.sha256:
                     raise ValueError('Saved capture changed before delivery')
                 batch.append(UploadFile(filename=capture.name, content=raw))

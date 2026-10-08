@@ -1,5 +1,5 @@
 const attachmentDrafts = new Map();
-const attachmentLimits = {count:8, file:10*1024*1024, total:20*1024*1024};
+const attachmentLimits = {count:5, file:10*1024*1024, total:20*1024*1024};
 const imageFile = file => /^image\/(png|jpeg|webp|gif)$/.test(file.type || file.media_type || '');
 const audioFile = file => /^(audio\/|video\/(webm|mp4))/.test(file.media_type || file.type || '') || /\.(mp3|mpga|mpeg|wav|m4a|mp4|webm|ogg|oga|flac)$/i.test(file.name);
 function fileSize(size){return size<1024?`${size} B`:size<1024*1024?`${Math.ceil(size/1024)} KB`:`${(size/1024/1024).toFixed(1)} MB`;}
@@ -10,7 +10,7 @@ function transferFiles(transfer){
 function attachmentError(files,file){
   if(!file.size)return `${file.name} is empty.`;
   if(file.size>attachmentLimits.file)return `${file.name} is larger than 10 MB.`;
-  if(files.length>=attachmentLimits.count)return `Attach up to ${attachmentLimits.count} files per message.`;
+  if(files.length>=attachmentLimits.count)return 'Attach up to 5 files per message.';
   if(files.reduce((size,item)=>size+item.size,0)+file.size>attachmentLimits.total)return 'Attachments must total 20 MB or less.';
   return '';
 }
