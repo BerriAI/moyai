@@ -372,9 +372,9 @@ async function openRun(id,hash='#run='+id){
   if($('#cancel'))$('#cancel').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await openRun(id);}catch(e){toast(e.message);}};
   if($('#retry'))$('#retry').onclick=async()=>{await navigate('tasks');$('#prompt').value=run.prompt;$('#repo').value=run.repo_url;$('#mode').value=run.mode;$('#mode').dispatchEvent(new Event('change'));document.querySelectorAll('[name="plugin"]').forEach(input=>input.checked=run.plugins.includes(input.value));};
   renderApprovals(run.approvals || []);
-  savedFiles.sync(run);
   if(link?.fileRef)await openLinkedFile(link,version);
   if(version!==state.pageVersion)return;
+  savedFiles.sync(run);
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncPullRequests(run);
   if(!terminal.has(run.status) || run.active){
     const cursor=run.events.at(-1)?.id||0; const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
