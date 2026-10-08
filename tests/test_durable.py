@@ -188,6 +188,7 @@ async def test_transport_recovery_checkpoints_and_resumes_same_turn_after_worker
     assert len(cloud.machines) == (2 if lost_machine else 1)
     assert spec['continuation'] is True and spec['prompt'] == 'Do the task'
     assert spec['transport_recovery'] == transport_failure_report()['final']['transport_retry']
+    assert spec['transport_attempt'] == 1
     assert checkpoint == 'im-1' and cloud.snapshots == 2
     assert [m['content'] for m in manager.store.messages(run_id) if m['role'] == 'assistant'] == ['Saved answer']
 
@@ -249,6 +250,33 @@ async def test_transport_recovery_bound_survives_segments_and_preserves_queued_i
         await drive(manager, run_id, phase='transport_wait' if attempt < 3 else 'idle')
     assert len(cloud.launches) == 4  # Original invocation plus three bounded continuations.
     assert manager.store.run(run_id)['status'] == 'failed'
+    assert 'three continuation attempts' in manager.store.run(run_id)['error']
+
+
+@pytest.mark.parametrize('consumed', [2, 3])
+async def test_live_and_cold_recovery_share_the_original_turn_budget(durable, consumed):
+    manager, cloud, run_id = durable
+    cloud.saving_before_answer = False
+    command = cloud.command
+    async def outage(machine, action, directory, value, **kwargs):
+        if action == 'read':
+            report = transport_failure_report()
+            report['final']['transport_attempt'] = consumed
+            return json.dumps(report)
+        return await command(machine, action, directory, value, **kwargs)
+    manager.command = outage
+    await drive(manager, run_id, phase='transport_wait' if consumed == 2 else 'idle')
+    assert manager.state(run_id)['transport_attempt'] == 3
+    if consumed == 2:
+        state = manager.state(run_id)
+        state['retry_at'] = 0
+        manager.save(run_id, state)
+        manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+        manager.command = outage
+        await drive(manager, run_id)
+        assert cloud.machines[-1].spec['transport_attempt'] == 3
+        assert manager.state(run_id)['transport_attempt'] == 3  # A stale result cannot refund a retry.
+    assert len(cloud.launches) == (2 if consumed == 2 else 1)
     assert 'three continuation attempts' in manager.store.run(run_id)['error']
 
 

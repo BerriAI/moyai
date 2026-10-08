@@ -422,6 +422,7 @@ def _run_agent(spec, relay):
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
+             transport_attempt=getattr(agent, 'transport_attempt', spec.get('transport_attempt', 0)),
              **({'transport_retry': transport_retry} if transport_retry else {}),
              **({'transport_failure': relay.last_failure} if getattr(relay, 'last_failure', None) else {}),
              **({'sdk_failure': result['sdk_failure']} if result.get('sdk_failure') else {}),

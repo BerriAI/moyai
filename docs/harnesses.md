@@ -71,7 +71,11 @@ Responses and Chat Completions for durable summary generation. For Astra it must
 also preserve native Responses items such as `additional_tools`, tool namespaces,
 custom tool calls/outputs and streamed completion events.
 
-When context rejection ends a Codex turn with yielded tools still pending, the
+Transient model connection failures with pending tools continue in the same live
+native thread, preserving existing command sessions under the original turn
+retry limit. See [cloud recovery](observability.md#cloud-request-failures-and-recovery).
+
+When context rejection or a terminal failure ends a Codex turn with yielded tools still pending, the
 adapter keeps that native client alive for a bounded receipt grace period (up to
 10 seconds, within the original task deadline). It drains late tool completions
 from both the failed turn and any preceding settlement turn before closing the

@@ -16,7 +16,7 @@ from .environments import EnvironmentPending
 
 from .runner import RunManager, SAVE_WARNING, TERMINAL, safe_error_detail, refresh_sandbox_files
 from .security import digest
-from sandbox.transport_recovery import valid_retry
+from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
 
 class LostExecution(Exception):
@@ -435,7 +435,7 @@ class DurableRunner(RunManager):
         # The process exited and its exact public receipts/files were saved.
         # This counter belongs to the original user turn, not an SDK segment.
         attempt = state.get('transport_attempt', 0) + 1
-        if attempt > 3:
+        if attempt > MAX_TRANSPORT_ATTEMPTS:
             self.fail(run_id, state, 'The cloud connection did not recover after three continuation attempts. '
                       'Your request, completed tool receipts and error diagnostics are saved. '
                       'No completed tool calls were automatically replayed.')
@@ -515,6 +515,7 @@ class DurableRunner(RunManager):
                               'continuation': state['segment'] > 0})
             spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
             spec['chat_enabled'] = True
+            spec['transport_attempt'] = state.get('transport_attempt', 0)
             if state.get('resume_transport'):
                 spec['transport_recovery'] = state['resume_transport']
             if state.get('resume_group') and self.coordinator:
@@ -582,6 +583,10 @@ class DurableRunner(RunManager):
                         self.acknowledge_credential(run_id, state)
                     self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
                     state['result'] = {**report['final'], 'message_id': state['message_id']}
+                    attempts = report['final'].get('transport_attempt')
+                    if type(attempts) is int and attempts >= 0:
+                        state['transport_attempt'] = max(state.get('transport_attempt', 0),
+                                                         min(attempts, MAX_TRANSPORT_ATTEMPTS))
                     if not state['result'].get('startup_retry') and not state['result'].get('transport_retry'):
                         self.receive_result(run_id, state['result'])
                 self.save(run_id, state)
