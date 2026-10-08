@@ -698,3 +698,48 @@ async def test_cost_recovery_shutdown_joins_an_outstanding_database_write() -> N
     with pytest.raises(asyncio.CancelledError):
         await task
     assert finished.is_set()
+
+
+@pytest.mark.parametrize('wire, completed', [
+    (b'{}', True), (b'{"error":null}', True),
+    (b'{"error":{"message":"failed"}}', False), (b'{"error":{}}', False),
+    (b'{"error":[]}', False), (b'{"error":false}', False),
+    (b'{"error":0}', False), (b'{"error":""}', False),
+    (b'null', False), (b'[]', False), (b'not-json', False), (b'\xff', False),
+])
+def test_nonstream_capture_distinguishes_null_from_nonnull_error(wire, completed):
+    capture = UsageCapture(False)
+    capture.feed(wire)
+    capture.finish()
+    assert capture.done is completed
+    assert capture.buffer == b''
+
+
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('fields', [{}, {'error': None}])
+def test_chat_null_error_preserves_success_and_accounting(workspace, monkeypatch, stream, fields):
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    run = active(app)
+    value = {'id': 'chat-success', 'choices': [{'index': 0, 'finish_reason': 'stop',
+             'message': {'role': 'assistant', 'content': 'ACCOUNTING_OK'}}],
+             'usage': {'prompt_tokens': 2, 'completion_tokens': 1, 'total_tokens': 3},
+             **fields}
+    def upstream(request):
+        assert json.loads(request.content)['stream'] is False
+        return httpx.Response(200, json=value, headers={'x-litellm-response-cost': '0.0123456789'})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(upstream), **kw))
+    response = client.post(f"/broker/{run['id']}/v1/chat/completions",
+        headers={'Authorization': 'Bearer capability'}, json={'messages': [], 'stream': stream})
+    assert response.status_code == 200
+    if stream:
+        assert 'ACCOUNTING_OK' in response.text and 'data: [DONE]' in response.text
+    else:
+        assert response.json() == value
+    reopened = Store(app.state.settings.data_dir)
+    rows = reopened.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))
+    assert len(rows) == 1
+    assert rows[0]['status'] == 'completed' and rows[0]['finished_at']
+    assert rows[0]['total_tokens'] == 3 and rows[0]['cost'] == '0.0123456789'

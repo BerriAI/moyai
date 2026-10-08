@@ -13,7 +13,7 @@ services:
     disk:
       name: moyai-state
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 10
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"

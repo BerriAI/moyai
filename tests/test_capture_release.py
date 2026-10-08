@@ -87,7 +87,7 @@ async def test_stalled_capture_release_is_bounded_and_reports_loss(runner, monke
     finally:
         lock.release()
     assert machine.terminated and runner.store.run(run_id)['token_hash'] == ''
-    assert not captures.listing(runner.settings, run_id)
+    assert not captures.listing(runner.settings, run_id, store=runner.store)
     assert any('could not be saved' in row['message'] for row in runner.store.events(run_id))
 
 

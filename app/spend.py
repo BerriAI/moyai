@@ -129,7 +129,8 @@ class UsageCapture:
             try:
                 value = json.loads(self.buffer, parse_float=Decimal)
                 self.consume(value)
-                self.done = isinstance(value, dict) and 'error' not in value
+                # Successful Responses payloads include an explicit null error.
+                self.done = isinstance(value, dict) and value.get('error') is None
             except (ValueError, UnicodeDecodeError):
                 pass
         self.buffer = b''

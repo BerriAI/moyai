@@ -9,8 +9,8 @@
     try{
       const data=JSON.parse(value);
       const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','captures','files','file','activity','chat','pulls','pr','agents'].includes(t.kind)&& (t.kind!=='pr'||prUrl(t.url))&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
-      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||60)),tabs};
-    }catch{return {visible:false,active:'',width:60,tabs:[]};}
+      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||40)),tabs};
+    }catch{return {visible:false,active:'',width:40,tabs:[]};}
   }
   function fileTree(files){
     const root={directories:new Map(),files:[],path:''};
@@ -47,7 +47,7 @@
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
     const closingStatus=document.createElement('div');closingStatus.className='panel-empty';closingStatus.setAttribute('role','status');closingStatus.textContent='Closing tabs…';closingStatus.hidden=true;views.append(closingStatus);
     if(activity){parking.append(activity);activity.hidden=false;}
-    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
+    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,sourceRef:t.sourceRef,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
     function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');layout.closest('.workspace')?.style.setProperty('--workspace-panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
     resize(width);q('.panel-resize').setAttribute('aria-valuemin','30');q('.panel-resize').setAttribute('aria-valuemax','70');
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
@@ -87,12 +87,12 @@
       t.element=document.createElement('section');t.element.className='panel-view panel-'+kind;t.element.id='view-'+t.uid;t.element.setAttribute('role','tabpanel');t.element.setAttribute('aria-labelledby','tab-'+t.uid);t.element.hidden=true;views.append(t.element);tabs.set(id,t);return t;
     }
     function open(kind,data={}){const t=make(kind,data);if(t)select(t.id);return true;}
-    function select(id,autoload=false){
+    function select(id){
       const t=tabs.get(id);if(disposed||!t||t.closing)return;
-      const previous=tabs.get(active);if(previous?.id===id&&visible&&!autoload)return;
+      const previous=tabs.get(active);if(previous?.id===id&&visible)return;
       if(t.kind==='computer'&&!tabs.has('captures')&&tabs.size<16)make('captures');
       previous?.deactivate?.();if(previous)previous.element.hidden=true;
-      active=id;closingStatus.hidden=true;if(autoload)t.autoload=true;t.element.hidden=false;setVisible(true);
+      active=id;closingStatus.hidden=true;t.element.hidden=false;setVisible(true);
       if(!t.loaded){t.loaded=true;mount(t);}
       t.activate?.();draw();save();q('[aria-selected="true"]')?.scrollIntoView({block:'nearest',inline:'nearest'});
     }
@@ -111,8 +111,6 @@
     async function remove(id){
       const t=tabs.get(id);if(!t||t.closing)return;
       t.closing=true;draw();
-      try{if(t.kind==='pr'&&run.mode==='modal')await computer.closeTab(run.id,t.url);}
-      catch(e){if(good(t)){t.closing=false;reconcile();toast(e.message);}return;}
       if(!good(t))return;
       if(id===active)t.deactivate?.();t.dispose?.();if(t.kind==='activity')parking.append(activity);
       t.element.remove();tabs.delete(id);reconcile();
@@ -125,14 +123,14 @@
       if(t.kind==='pulls'){renderPulls(t.element);return;}
       if(t.kind==='agents'){renderAgents(t.element);return;}
       if(t.kind==='pr'){
-        t.activate=()=>{const autoload=!!t.autoload;t.autoload=false;computer.open(run.id,t.element,{tab:t.url,title:t.title,autoload});};
-        t.deactivate=()=>computer.close();return;
+        Object.assign(t,MoyaiPullRequest.mount({element:t.element,url:t.url,markdown,escape:esc,
+          load:()=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`)}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
       if(t.kind==='activity'){t.element.append(activity);return;}
       if(t.kind==='chat'){mountChat(t);return;}
-      loading(t);
+      t.renderPreview=null;loading(t);
       try{
         const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
@@ -155,7 +153,17 @@
         t.title=file.name;draw();t.element.innerHTML=`<header class="panel-file-heading"><div><strong>${esc(file.name)}</strong><small>${esc(file.path)}</small></div><a href="${esc(file.url)}" download="${esc(file.name)}">↓ Download</a><button type="button" data-refresh aria-label="Refresh file">↻</button></header><div class="panel-file-content"></div>`;
         const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').onclick=()=>mount(t);
         if(file.inline_url&&['image','video'].includes(file.kind)){content.classList.add('panel-media');content.innerHTML=file.kind==='video'?`<video controls preload="metadata" src="${esc(file.inline_url)}"></video>`:`<img src="${esc(file.inline_url)}" alt="${esc(file.name)}">`;}
-        else{const result=await api(file.preview_url);if(!current()||!content.isConnected)return;content.innerHTML=result.text===null?'<p class="panel-empty">No preview for this file type. Download it to open it.</p>':`${result.truncated?'<p class="saved-file-notice">Showing the first 128 KB. Download for the complete file.</p>':''}${result.format==='markdown'?`<div class="markdown">${markdown(result.text)}</div>`:`<pre class="saved-file-text">${esc(result.text)}</pre>`}`;decorate(content,catalog.files);}
+        else{
+          const result=await api(file.preview_url);if(!current()||!content.isConnected)return;
+          t.renderPreview=()=>{
+            if(!current()||!content.isConnected)return;
+            const location=MoyaiFiles.reference(t.sourceRef);
+            t.element.querySelector('.panel-file-heading small').textContent=file.path+(location?.line?':'+location.line+(location.endLine!==location.line?'–'+location.endLine:''):'');
+            content.innerHTML=MoyaiFiles.preview(result,t.sourceRef,{escape:esc,markdown});decorate(content,catalog.files);
+            if(visible&&active===t.id)MoyaiFiles.reveal(content);
+          };
+          t.renderPreview();
+        }
         t.deactivate=()=>t.element.querySelectorAll('video').forEach(v=>v.pause());
       }catch(e){if(current())error(t,e);}
     }
@@ -226,7 +234,7 @@
       const pr=pullRequests.find(item=>item.url.toLowerCase()===String(url).toLowerCase());
       if(!pr)return false;
       const t=make('pr',{url:pr.url,title:pr.title});
-      if(t)select(t.id,true);return !!t;
+      if(t)select(t.id);return !!t;
     }
     function syncPullRequests(data){
       if(disposed||data.id!==run.id||!Array.isArray(data.pull_requests))return;
@@ -252,7 +260,10 @@
     }
     layout.addEventListener('click',followPullRequest);
     syncSession(run);
-    function openFile(file){return open('file',{path:file.archive_path,title:file.name});}
+    function openFile(file,ref=null){
+      const t=make('file',{path:file.archive_path,title:file.name});if(!t||t.closing)return true;
+      t.sourceRef=typeof ref==='string'?ref:null;select(t.id);t.renderPreview?.();save();return true;
+    }
     function decorate(element,files){
       MoyaiFiles.decorate(element,files,{onOpen:openFile});
       element.querySelectorAll('.copy-code').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(b.closest('.code-block').querySelector('code').textContent);b.textContent='Copied';}catch{b.textContent='Select to copy';}});
@@ -310,7 +321,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Open this session’s PRs in the browser'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Review this session’s PR details and changes'},{kind:'agents',title:'Subagents',detail:'Follow the agents assigned to this session'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.

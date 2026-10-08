@@ -40,7 +40,7 @@ def sdk_event(method, body):
     return SimpleNamespace(method=method, payload=SimpleNamespace(model_dump=lambda **kwargs: body))
 
 
-def install_codex_client(monkeypatch, agent, stream):
+def install_codex_client(monkeypatch, agent, stream, late_items=()):
     observed = SimpleNamespace(homes=[], prompts=[], thread_options=[])
 
     class Client:
@@ -50,6 +50,8 @@ def install_codex_client(monkeypatch, agent, stream):
             (home / 'native-private-transcript').write_text('requester-native-secret')
             observed.homes.append(home)
             self.notifications = stream()
+            self.turn_count = 0
+            self.late_items = iter(late_items)
 
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
@@ -62,10 +64,16 @@ def install_codex_client(monkeypatch, agent, stream):
         async def turn_start(self, thread_id, prompt):
             assert thread_id == 'fresh-thread'
             observed.prompts.append(prompt)
-            return SimpleNamespace(turn=SimpleNamespace(id='fresh-turn'))
+            self.turn_count += 1
+            return SimpleNamespace(turn=SimpleNamespace(id=f'fresh-turn-{self.turn_count}'))
 
         async def next_turn_notification(self, turn_id):
-            assert turn_id == 'fresh-turn'
+            if turn_id != f'fresh-turn-{self.turn_count}':
+                from openai_codex.errors import TransportClosedError
+                try:
+                    return next(self.late_items)
+                except StopIteration:
+                    raise TransportClosedError('Turn is no longer streaming') from None
             return await anext(self.notifications)
 
     monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
@@ -157,6 +165,8 @@ def test_unsettled_turn_discards_final_candidates_but_keeps_commentary(codex_age
             agent.boundary_failed = True
         yield sdk_event('turn/completed', {'turn': {
             'status': 'failed' if outcome == 'failed-status' else 'completed'}})
+        if outcome == 'pending-tool':
+            yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
 
     install_codex_client(monkeypatch, agent, stream)
     result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
@@ -173,6 +183,54 @@ def test_unsettled_turn_discards_final_candidates_but_keeps_commentary(codex_age
             'boundary-failed': 'Codex stopped (incomplete turn). Saved tool receipts are preserved.',
         }[outcome])
     assert bool(store.pending) == (outcome == 'pending-tool')
+
+
+@pytest.mark.parametrize('outcome', ['complete', 'stop', 'boundary', 'failed', 'limit', 'timeout'])
+def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_agent, monkeypatch, outcome):
+    agent, events, store = codex_agent
+    started, finished = native_item('commandExecution')
+    namespaces = []
+    if outcome == 'timeout': agent.context.spec['timeout'] = 0.05
+
+    async def stream():
+        assert agent.before_model()
+        namespaces.append(agent.journal.call_namespace)
+        yield sdk_event('item/started', {'item': started})
+        yield sdk_event('item/completed', {'item': {
+            'id': 'old', 'type': 'agentMessage', 'phase': 'final_answer', 'text': 'Premature answer.'}})
+        if outcome == 'stop': agent.interrupt()
+        if outcome == 'boundary': agent.boundary_failed = True
+        if outcome == 'limit': agent.context.spec['max_iterations'] = 1
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed' if outcome == 'failed' else 'completed'}})
+        if outcome == 'timeout': await asyncio.Event().wait()
+        if outcome == 'limit':
+            assert not agent.before_model()
+            yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
+            return
+        assert agent.before_model()
+        namespaces.append(agent.journal.call_namespace)
+        yield sdk_event('item/completed', {'item': {
+            'id': 'new', 'type': 'agentMessage', 'phase': 'final_answer', 'text': 'Confirmed answer.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream,
+        late_items=[sdk_event('item/completed', {'item': finished})] if outcome == 'complete' else [])
+    result = agent.run_conversation('Work', conversation_history=[], system_message='Moyai')
+    assert len(observed.prompts) == (2 if outcome in {'complete', 'limit', 'timeout'} else 1)
+    assert result['completed'] == (outcome == 'complete')
+    assert result['interrupted'] == (outcome == 'stop')
+    assert saved_prose(store) == (['Confirmed answer.'] if outcome == 'complete' else [])
+    assert 'Premature answer.' not in json.dumps(result)
+    assert bool(store.pending) == (outcome != 'complete')
+    assert len(set(namespaces)) == 1
+    assert agent.model_calls == (2 if outcome == 'complete' else 1)
+    if outcome == 'complete':
+        assert sum(message.get('role') == 'tool' for message in result['messages']) == 1
+        assert result['final_response'] == 'Confirmed answer.'
+    if outcome == 'limit':
+        assert result['sdk_failure']['boundary_reason'] == 'model call limit reached'
+    if outcome == 'timeout':
+        assert result['sdk_failure']['exception_type'] == 'TimeoutError'
 
 
 def test_native_restart_accepts_reused_message_ids(codex_agent, monkeypatch):
@@ -385,7 +443,9 @@ def test_each_invocation_uses_disposable_native_state_and_preserves_public_recei
 
 
 @pytest.mark.parametrize('outer_marker_first', [False, True])
-def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(codex_agent, monkeypatch, outer_marker_first):
+@pytest.mark.parametrize('output_id', ['outer-code-call', 'native-call'])
+def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(
+        codex_agent, monkeypatch, outer_marker_first, output_id):
     agent, _, _ = codex_agent
     notifications, processed = queue.Queue(), queue.Queue()
     stepped = threading.Event()
@@ -413,11 +473,11 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(c
             return notification
     monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
     monkeypatch.setattr(agent, 'validate', lambda: None)
-    request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': 'outer-code-call',
+    request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': output_id,
                                     'output': 'wire-private-marker'}]}).encode()
     nested = event('item/completed', {'item': finished})
     outer = event('rawResponseItem/completed', {'item': {
-        'type': 'custom_tool_call_output', 'call_id': 'outer-code-call', 'output': 'raw-private-marker'}})
+        'type': 'custom_tool_call_output', 'call_id': output_id, 'output': 'raw-private-marker'}})
     with ThreadPoolExecutor(max_workers=2) as executor:
         run = executor.submit(agent.run_conversation, 'Do the task.', conversation_history=[], system_message='Moyai')
         try:
@@ -429,11 +489,12 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(c
             first, second = (outer, nested) if outer_marker_first else (nested, outer)
             notifications.put(first)
             assert processed.get(timeout=2) == first.method
-            assert not stepped.wait(0.05)
             if outer_marker_first:
+                assert not stepped.wait(0.05)
                 assert boundary.result(timeout=2) is True
                 assert agent.journal.pending and agent.model_calls == 1
-            else:
+            elif output_id != 'native-call':
+                assert not stepped.wait(0.05)
                 assert not boundary.done()
             notifications.put(second)
             assert processed.get(timeout=2) == second.method
@@ -451,6 +512,42 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(c
     assert 'private-marker' not in json.dumps(result)
 
 
+@pytest.mark.parametrize('native_completion', [False, True])
+def test_raw_output_before_native_start_preserves_receipt_lifecycle(codex_agent, monkeypatch, native_completion):
+    agent, events, store = codex_agent
+    started, finished = native_item('mcpToolCall', failed=True)
+
+    async def stream():
+        # A fresh invocation must not inherit output IDs from its predecessor.
+        assert not getattr(agent, 'observed_outputs', set())
+        yield sdk_event('rawResponseItem/completed', {'item': {
+            'type': 'function_call_output', 'call_id': started['id'], 'output': 'raw-private-marker'}})
+        yield sdk_event('item/started', {'item': started})
+        assert agent.journal.pending == {started['id']} and store.pending
+        if native_completion:
+            for _ in range(2):
+                yield sdk_event('item/completed', {'item': finished})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+        if not native_completion:
+            yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    install_codex_client(monkeypatch, agent, stream)
+    results = [asyncio.run(agent._run('Continue.', 'Moyai')) for _ in range(2 if native_completion else 1)]
+    assert all(result['completed'] is native_completion for result in results)
+    assert bool(store.pending) is (not native_completion)
+    receipts = [message for message in results[-1]['messages'] if message.get('role') == 'tool']
+    assert len(receipts) == (2 if native_completion else 0)
+    saved = [json.loads(row[0]) for row in store.db.execute('SELECT message FROM journal')]
+    saved_receipts = [message for message in saved if message.get('role') == 'tool']
+    assert len({receipt['tool_call_id'] for receipt in saved_receipts}) == len(receipts)
+    tool_events = [event[2]['phase'] for event in events if event[0] == 'tool']
+    assert tool_events == (['started', 'error'] * 2 if native_completion else ['started'])
+    assert 'raw-private-marker' not in json.dumps([results, events, store.history()])
+    if not native_completion:
+        assert results[-1]['sdk_failure']['source'] == 'incomplete_turn'
+        assert results[-1]['sdk_failure']['pending_tools'] == 1
+
+
 def test_polling_counts_toward_limit_without_checkpointing_live_tools(codex_agent, monkeypatch):
     from sandbox.transport_recovery import recovery_marker
     agent, _, store = codex_agent
@@ -458,7 +555,7 @@ def test_polling_counts_toward_limit_without_checkpointing_live_tools(codex_agen
     maintenance = []
     monkeypatch.setattr(codex_harness, 'maintain_context', lambda *_: maintenance.append(True))
     agent.record_item(native_item('commandExecution')[0], completed=False)
-    agent.completed.add('outer')
+    agent.observed_outputs.add('outer')
     agent.context = agent.context.__class__(agent.context.spec, agent.context.relay, agent.context.config,
         agent.context.activity, lambda: pytest.fail('Cannot checkpoint a running tool'), agent.context.cwd)
     request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': 'outer'}]})

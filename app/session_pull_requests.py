@@ -7,9 +7,11 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from cryptography.fernet import InvalidToken
+from fastapi import HTTPException
 from pydantic import Field, StrictBool, ValidationError, field_validator, model_validator
 
 from .connector_errors import ConnectorError
+from .github import GitHubError
 from .github_repositories import positive_id
 from .pr_delivery import PullRequest
 
@@ -119,13 +121,10 @@ class SessionPullRequests:
         key = (version, target, receipt.number)
         return target, key, self._cached(key)
 
-    def summaries(self, run_ids):
-        result = {identity: {'open': 0, 'merged': 0, 'closed': 0, 'unknown': 0,
-                             'stale': False, 'label': '', 'pull_requests': []} for identity in run_ids}
-        if not result:
-            return result
+    def receipts(self, run_ids):
+        """Both status summaries and detail reads use the same live family scope."""
         rows = []
-        identities = list(result)
+        identities = list(dict.fromkeys(run_ids))
         for offset in range(0, len(identities), 400):
             batch = identities[offset:offset + 400]
             marks = ','.join('?' for _ in batch)
@@ -134,14 +133,60 @@ class SessionPullRequests:
                 WHERE r.deleted_at='' AND (r.parent_run_id='' OR parent.deleted_at='')
                 AND (r.id IN ({marks}) OR r.parent_run_id IN ({marks})) ORDER BY p.created_at,p.id''',
                 [*batch, *batch]))
-        context = self.context()
-        parsed, receipt_ids = [], {}
+        parsed = []
         for row in rows:
             try:
                 receipt = Receipt.model_validate_json(row['result'])
             except ValidationError:
                 continue
             parsed.append((row, receipt))
+        return sorted(parsed, key=lambda entry: entry[1].repository_id is None)
+
+    def selected(self, run_id, url, context):
+        for _, receipt in self.receipts([run_id]):
+            target, _, _ = self.status(receipt, context)
+            urls = {receipt.url.casefold()}
+            if target:
+                name = self.github.repository_name(target, context[1])
+                urls.add(f'https://github.com/{name}/pull/{receipt.number}'.casefold())
+            if url.casefold() in urls:
+                if not target:
+                    raise HTTPException(403, 'This pull request is no longer accessible through the GitHub connection.')
+                return receipt, target
+        raise HTTPException(404, 'This pull request is not available in this session.')
+
+    async def read(self, run_id, url):
+        context = self.context()
+        receipt, target = self.selected(run_id, url, context)
+        try:
+            result = await self.github.call({'id': run_id, 'github_connection_version': context[0]}, 'github_pull_request',
+                                            {'repository_id': target, 'number': receipt.number})
+            Receipt(number=result['number'], repository=result['repository'], url=result['html_url'])
+            return result
+        except GitHubError as exc:
+            status = 404 if exc.status_code == 404 else 403 if exc.status_code in {401, 403} else 502
+            raise HTTPException(status, 'The pull request is unavailable on GitHub.' if status != 502
+                                else 'GitHub could not load the pull request. Try again.') from None
+        except (ConnectorError, InvalidToken, ValidationError, KeyError, TypeError, ValueError, AttributeError, TimeoutError):
+            raise HTTPException(502, 'GitHub could not load the pull request. Try again.') from None
+        finally:
+            # A revoked read must clear the native view even when GitHub failed.
+            current = self.context()
+            if not current or current[0] != context[0]:
+                raise HTTPException(403, 'GitHub access changed. Refresh the pull request to try again.')
+            fresh, current_target = self.selected(run_id, url, current)
+            if (current_target, fresh.number) != (target, receipt.number):
+                raise HTTPException(404, 'This pull request is no longer available in this session.')
+
+    def summaries(self, run_ids):
+        result = {identity: {'open': 0, 'merged': 0, 'closed': 0, 'unknown': 0,
+                             'stale': False, 'label': '', 'pull_requests': []} for identity in run_ids}
+        if not result:
+            return result
+        parsed = self.receipts(result)
+        context = self.context()
+        receipt_ids = {}
+        for row, receipt in parsed:
             if receipt.repository_id:
                 for run_id in {row['id'], row['parent_run_id']} & result.keys():
                     receipt_ids.setdefault((run_id, receipt.url.casefold()), set()).add(receipt.repository_id)
@@ -150,7 +195,7 @@ class SessionPullRequests:
         wanted = []
         # Prefer permanent receipts before considering their legacy duplicates.
         # This affects presentation only; target() still owns every access check.
-        for row, receipt in sorted(parsed, key=lambda entry: entry[1].repository_id is None):
+        for row, receipt in parsed:
             target, key, cached = self.status(receipt, context)
             if key:
                 wanted.append(key)

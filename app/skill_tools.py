@@ -136,9 +136,16 @@ def checked_text(raw, *, instructions=False):
     return value
 
 
-def attachment_text(skills, run, attachment_id, *, instructions=False):
-    raw = skills.store.attachments.broker_file(run, attachment_id).body
-    return checked_text(raw, instructions=instructions)
+def saved_result(skills, conn, operation, actor, admin, fingerprint):
+    prior = conn.execute('SELECT * FROM skill_saves WHERE run_id=? AND message_id=? AND request_id=?', operation).fetchone()
+    if not prior:
+        return None
+    if prior['actor_id'] != actor or prior['fingerprint'] != fingerprint:
+        raise HTTPException(409, 'This request_id was already used for a different save. Use a new request_id.')
+    current = conn.execute('SELECT * FROM skills WHERE id=?', (prior['skill_id'],)).fetchone()
+    if not current or not skills.manageable(current, actor, admin):
+        raise HTTPException(404, 'Skill not found.')
+    return json.loads(prior['result'])
 
 
 def save_skill(skills, run, args):
@@ -154,16 +161,35 @@ def save_skill(skills, run, args):
         raise HTTPException(403, 'Only an administrator can publish organization skills.')
     fingerprint = hashlib.sha256(json.dumps(args.model_dump(), sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     operation = (run['id'], run['active_message_id'], args.request_id)
+    imports = {}
+    attachment_ids = {file.attachment_id for file in args.files if file.attachment_id}
+    if args.instructions_attachment_id:
+        attachment_ids.add(args.instructions_attachment_id)
+    if attachment_ids:
+        with skills.store.connect() as conn:
+            prior = saved_result(skills, conn, operation, actor, admin, fingerprint)
+            if prior is not None:
+                return prior
+        # Object downloads must not hold SQLite's writer lock. Keep the selected
+        # immutable identity so scope and content can be checked again at publish.
+        for attachment_id in attachment_ids:
+            row = skills.store.attachments.broker_row(run, attachment_id)
+            imports[attachment_id] = (row, skills.store.attachments.payload(row))
     with skills.store.connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
-        prior = conn.execute('SELECT * FROM skill_saves WHERE run_id=? AND message_id=? AND request_id=?', operation).fetchone()
-        if prior:
-            if prior['actor_id'] != actor or prior['fingerprint'] != fingerprint:
-                raise HTTPException(409, 'This request_id was already used for a different save. Use a new request_id.')
-            current = conn.execute('SELECT * FROM skills WHERE id=?', (prior['skill_id'],)).fetchone()
-            if not current or not skills.manageable(current, actor, admin):
-                raise HTTPException(404, 'Skill not found.')
-            return json.loads(prior['result'])
+        prior = saved_result(skills, conn, operation, actor, admin, fingerprint)
+        if prior is not None:
+            return prior
+        if imports:
+            current = conn.execute('SELECT active_message_id,active_user_id,chat_enabled,deleted_at FROM runs WHERE id=?', (run['id'],)).fetchone()
+            if (not current or current['deleted_at'] or any(current[key] != run[key]
+                    for key in ('active_message_id', 'active_user_id', 'chat_enabled'))
+                    or writing_actor(skills, run) != (actor, admin)):
+                raise HTTPException(409, 'The active chat turn changed. Retry from the current turn.')
+            for attachment_id, (original, _) in imports.items():
+                current = skills.store.attachments.broker_row(run, attachment_id, conn=conn)
+                if any(current[key] != original[key] for key in ('id', 'owner_id', 'message_id', 'sha256', 'size', 'data_ref')):
+                    raise HTTPException(409, 'An attachment changed. Retry the skill import.')
         namespace = 'organization' if args.scope == 'organization' else actor
         old = conn.execute('SELECT * FROM skills WHERE namespace=? AND name=?', (namespace, args.name)).fetchone()
         if (old and old['revision'] != args.expected_revision) or (not old and args.expected_revision):
@@ -172,7 +198,7 @@ def save_skill(skills, run, args):
             raise HTTPException(409, 'Restore the archived skill from the Skills library before updating it.')
         instructions = args.instructions
         if args.instructions_attachment_id:
-            instructions = attachment_text(skills, run, args.instructions_attachment_id, instructions=True)
+            instructions = checked_text(imports[args.instructions_attachment_id][1], instructions=True)
         if instructions is None and old:
             instructions = skills.security.decrypt(old['encrypted'])
         if instructions is None:
@@ -182,7 +208,7 @@ def save_skill(skills, run, args):
         for path in args.remove_files:
             files.pop(path, None)
         for file in args.files:
-            files[file.path] = (attachment_text(skills, run, file.attachment_id) if file.attachment_id
+            files[file.path] = (checked_text(imports[file.attachment_id][1]) if file.attachment_id
                                 else checked_text(file.content.encode()))
         if len(files) > MAX_FILES or sum(len(text.encode()) for text in files.values()) > MAX_BUNDLE:
             raise HTTPException(413, 'A skill can contain at most 20 supporting files and 4 MiB of supporting text.')
