@@ -14,6 +14,8 @@ Use the account that owns the chosen domain. Enable Zero Trust, review its terms
 
 Use company Google SSO with a dedicated OAuth web client in a company-owned Google Cloud project whose audience is **Internal**. Add the team's `https://<team>.cloudflareaccess.com` origin and exact `/cdn-cgi/access/callback` redirect, store the client secret only in Cloudflare's identity-provider configuration, and enable PKCE. Cloudflare's Google integration supports sign-in without directory access; its Google Workspace integration additionally requires administrator authorization for group membership. Select only this Google provider on the employee application, keep the company-email policy, and retain Moyai's existing Google sign-in and role settings. Confirm MFA enforcement in Google Workspace separately before describing the rollout as enforcing MFA. If One-time PIN is used as an interim login method, an email code alone is not an independent MFA factor.
 
+Company-wide MFA verification is outside this rollout's scope and is not a cutover prerequisite. Leave any existing Google MFA policy unchanged; this rollout does not assert or enforce MFA for every employee.
+
 Create these self-hosted Access applications **before** publishing the DNS/tunnel route:
 
 | Application | Host and path | Policy | Origin check |
