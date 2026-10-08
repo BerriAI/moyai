@@ -13,6 +13,13 @@ users. Choose **Only save manually** to stop agent writes while keeping recall,
 or **Pause memory** to stop both. You can review, edit, and delete each note.
 Shared passwords cannot use personal memory; local demo access has its own library.
 
+With automatic saving enabled, the agent reviews the current requester's messages
+before its final answer and saves lasting preferences, corrections, decisions or
+references. You do not need to say “remember this.” It searches first to avoid
+duplicates and checks that the save succeeded. One-off task instructions and
+temporary status do not become memories. The note and supporting quote go only
+to the private `memory_save` tool, not files, unrelated tools or chat.
+
 - `memory_search` retrieves up to five relevant notes, with an 8,000-character
   total payload budget. Nothing from the library loads until the agent searches.
 - `memory_save` creates or updates a short note. Agent writes require an exact
@@ -57,6 +64,16 @@ not embed or search whole transcripts, run background summarization, or backfill
 old chats. Shared reusable procedures belong in **Skills**. The agent may spend
 additional tool rounds finding and saving memories; there is no separate model
 or vector database running on every message.
+
+To evaluate automatic capture with a real model, set `GATEWAY_BASE_URL` and
+`GATEWAY_API_KEY` and run `uv run python -m scripts.memory_capture_smoke`.
+This opt-in, billed check uses synthetic messages, a temporary database and the
+real memory broker. It checks implicit preferences, correction without duplicate
+notes, recall in a fresh session, one-off requests, quoted third-party text and
+manual mode. It tests model choices with the production memory prompt and tools;
+it does not run a complete SDK or cloud sandbox, and is not a guarantee that
+every future preference will be captured. Use `--model` to test another model
+and `--report path.json` to save the evidence.
 
 The design draws on official [Codex memories](https://developers.openai.com/codex/customization/memories),
 [Claude Code memory](https://code.claude.com/docs/en/memory), and other coding-agent
