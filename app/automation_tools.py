@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from .automations import Definition, Save, Toggle
+from .automations import Definition, Save, Toggle, SCHEDULE_VERSION
 from .connector_errors import ConnectorError
 
 
@@ -124,7 +124,8 @@ class AutomationTools:
                         if synchronize:
                             await service.sync(client, automation_id=row['id'])
                         current = service.row(row['id'])
-                        if current['revision'] == row['revision'] and current['synced_revision'] == row['revision']:
+                        if (current['revision'] == row['revision'] and current['synced_revision'] == row['revision']
+                                and current['synced_schedule_version'] == SCHEDULE_VERSION):
                             definition = Definition.model_validate_json(row['definition'])
                             future = []
                             for trigger in definition.triggers:
@@ -152,7 +153,7 @@ class AutomationTools:
             state = {'status': 'paused' if current['paused'] else 'pending_sync', 'next_run_at': None, 'next_runs': []}
         result = {key: current[key] for key in ('id', 'revision', 'paused', 'synced_revision', 'sync_error')}
         return {**result, 'definition': Definition.model_validate_json(current['definition']).model_dump(mode='json'),
-                **state, 'note': 'Next run times are planned scheduler times; overlap, access checks or service outages can delay or skip execution.'}
+                **state, 'note': 'Next run times are planned scheduler times; rate limits, capacity, access checks or service outages can delay or skip execution.'}
 
     async def call(self, run, name, arguments):
         args = SPECS[name][0].model_validate(arguments)

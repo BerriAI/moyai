@@ -6,11 +6,13 @@ authenticate a web session. This is JIT matching, not SCIM lifecycle management.
 import asyncio
 import re
 import time
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Request
 
 from .db import now
+from .connector_errors import ConnectorError
 
 PROFILE_SCOPES = {'users:read', 'users:read.email'}
 # Refresh with headroom for worker delays and retries, without extending the
@@ -20,12 +22,91 @@ PROFILE_REFRESH_SECONDS = PROFILE_MAX_AGE_SECONDS // 2
 
 
 class SlackIdentities:
-    def __init__(self, store, connectors, settings, security, checkpoints):
+    def __init__(self, store, connectors, settings, security, checkpoints, same_requester: Callable[[str, str], bool]):
         self.store, self.connectors, self.settings = store, connectors, settings
         self.security, self.checkpoints = security, checkpoints
         self.wake = asyncio.Event()
         self.worker = None
         self.lock = asyncio.Lock()
+        self.same_requester = same_requester
+
+    def check_requester(self, run: Mapping[str, object], installation: Mapping[str, object]) -> None:
+        current = self.store.run(run['id'])
+        keys = ('active_user_id', 'active_message_id', 'owner_id', 'chat_enabled', 'token_hash', 'status')
+        bot = self.connectors.slack_installation()
+        if not current or any(current.get(key) != run.get(key) for key in keys):
+            raise ConnectorError('The requester or turn changed. Resolve your Slack identity again.')
+        if any(bot.get(key) != installation.get(key) for key in ('team_id', 'user_id')) or not bot.get('installed'):
+            raise ConnectorError('The Slack workspace or bot changed. Resolve your Slack identity again.')
+        if not self.connectors.allowed('slack_me'):
+            raise ConnectorError('The Slack connection is disabled.')
+
+    async def requester(self, run: Mapping[str, object] | None) -> dict[str, str]:
+        """Resolve the broker's requester, never a caller-supplied email or accounting override."""
+        actor = (run or {}).get('active_user_id')
+        if not actor and run and not run.get('chat_enabled'):
+            actor = run.get('owner_id')
+        rows = self.store.rows('SELECT * FROM users WHERE id=?', (actor,)) if isinstance(actor, str) and actor else []
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'} or not run:
+            raise ConnectorError('Slack identity requires an identified requester. Sign in with Google or message the bot in Slack.')
+        user = rows[0]
+        installation = self.connectors.slack_installation()
+        self.check_requester(run, installation)
+        team = installation.get('team_id')
+        if not isinstance(team, str) or not re.fullmatch(r'T[A-Z0-9]{7,30}', team):
+            raise ConnectorError('Reconnect Slack to identify the bot workspace.')
+        if user['kind'] == 'slack':
+            recipient = user['id'].removeprefix(f'slack:{team}:')
+            if not re.fullmatch(r'[UW][A-Z0-9]{7,30}', recipient):
+                raise ConnectorError('Your Slack identity belongs to a different workspace.')
+            return {'user_id': recipient, 'team_id': team, 'email': user['email'], 'name': user['name']}
+        email = user['email']
+        if not email or email.rpartition('@')[2] not in self.settings.google_domains():
+            raise ConnectorError('Your verified work email is no longer allowed in this workspace.')
+        if not self.status()['ready']:
+            raise ConnectorError('Enable Slack identity linking and reconnect the bot with users:read and users:read.email.')
+
+        def candidates():
+            return self.store.rows("""SELECT * FROM users WHERE kind='slack' AND id LIKE ?
+                AND (linked_user_id=? OR email=?)""", (f'slack:{team}:%', actor, email))
+
+        matches = candidates()
+        if not matches:
+            # Slack's lookup is scoped to the installed bot and the trusted SSO email.
+            token = await self.connectors.slack_bot_token()
+            self.check_requester(run, installation)
+            result = await self.connectors.request('GET', 'https://slack.com/api/users.lookupByEmail',
+                headers={'Authorization': f'Bearer {token}'}, params={'email': email}, allowed_errors=('users_not_found',))
+            self.check_requester(run, installation)
+            profile = result.get('user') or {}
+            recipient = profile.get('id') if isinstance(profile, dict) else None
+            if (not result.get('ok') or not isinstance(recipient, str)
+                    or not re.fullmatch(r'[UW][A-Z0-9]{7,30}', recipient) or profile.get('team_id') != team):
+                raise ConnectorError('No Slack account was verified for your work email in this workspace.')
+            with self.store.connect() as conn:
+                identity = self.store.slack_identity_in(conn, team, recipient)
+            matches = self.store.rows('SELECT * FROM users WHERE id=?', (identity,))
+        if len(matches) != 1:
+            raise ConnectorError('Your Slack identity is ambiguous. Review the linked accounts before sending a DM.')
+        match = matches[0]
+        if (match['profile_conflict'] or match['link_status'] == 'email_changed'
+                or (match['email'] and match['email'] != email)):
+            raise ConnectorError('Your Slack account link needs review before it can be used for a DM.')
+        if not self.same_requester(actor, match['id']):
+            await self.resolve(match, team)
+            await self.checkpoints.flush()
+        self.check_requester(run, installation)
+        # Re-read after provider awaits; historical/manual spend links alone never select a recipient.
+        google = self.store.rows("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,))
+        matches = candidates()
+        if len(google) != 1 or google[0]['id'] != actor or len(matches) != 1:
+            raise ConnectorError('Your Slack identity is ambiguous. Review the linked accounts before sending a DM.')
+        match = matches[0]
+        if (match['linked_user_id'] != actor or match['link_status'] not in {'linked', 'manual'}
+                or not self.same_requester(actor, match['id'])):
+            raise ConnectorError('Your Slack account link could not be verified. Check the profile email or refresh the account link.')
+        return {'user_id': match['id'].removeprefix(f'slack:{team}:'), 'team_id': team,
+                'email': email, 'name': user['name']}
 
     def status(self):
         bot = self.connectors.slack_installation()

@@ -93,6 +93,17 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
         # The SDK may automatically retry 502; it must not resubmit inference.
         assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 409
         assert len(calls) == 1 and len(diagnostics) == 1
+        # A live native continuation must explicitly consume this exact failure.
+        assert not relay.resume_model(dict(saved))
+        assert relay.resume_model(saved)
+        assert not relay.last_error and relay.last_failure is None and not relay.model_failed
+        assert not relay.resume_model(saved)
+        assert client.post('/v1/messages', json={}).status_code == 502
+        assert len(calls) == 2
+        current = relay.last_failure
+        assert not relay.resume_model(saved) and relay.last_failure is current
+        relay.uncertain_tool = True
+        assert not relay.resume_model(current) and relay.model_failed
 
 
 @pytest.mark.parametrize('status,upstream,transient', [(502, 401, False), (502, 403, False),
@@ -113,6 +124,7 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
         assert relay.last_failure['upstream_status'] == upstream
         assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
         assert relay.last_failure['transient'] is transient
+        assert relay.resume_model(relay.last_failure) is transient
 
 
 @pytest.mark.parametrize('route,uncertain_tool', [('/v1/messages', False), ('/tools/call', True),
@@ -133,6 +145,105 @@ def test_dropped_connection_is_recorded_once_without_replaying_tools(route, unce
         assert saved['http_status'] is None and saved['response_bytes'] == 0
         assert saved['transient'] and not saved['response_started']
         assert saved['uncertain_tool'] is uncertain_tool and relay.uncertain_tool is uncertain_tool
+        assert relay.resume_model(saved) is (not uncertain_tool)
+
+
+@pytest.mark.parametrize('fault', ['http', 'disconnect', 'partial', 'permanent', 'exhausted'])
+def test_agent_read_reconnect_uses_broker_catalog_without_poisoning_model(workspace, monkeypatch, fault):
+    app, broker = workspace
+    run_id, headers = cloud_capability(app, [])
+    app.state.settings.temporal_enabled = True
+    app.state.store.execute('UPDATE runs SET chat_enabled=1 WHERE id=?', (run_id,))
+    catalog = broker.get(f'/broker/{run_id}/tools', headers=headers).json()
+    safe = {tool['name'] for tool in catalog if tool.get('annotations', {}).get('idempotentHint') is True}
+    calls = []
+    if fault == 'exhausted':
+        from sandbox.startup import _read_with_reconnect
+        monkeypatch.setattr('sandbox.broker_relay._read_with_reconnect',
+            lambda request, reader, **options: _read_with_reconnect(request, reader, **{**options, 'budget': 0}))
+
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200); self.end_headers()
+            self.wfile.write(json.dumps(catalog).encode())
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            calls.append((self.path, body))
+            if self.path == '/v1/responses':
+                self.send_response(502); self.end_headers(); return
+            if len(calls) == 1:
+                if fault == 'disconnect':
+                    self.close_connection = True; return
+                if fault == 'partial':
+                    self.send_response(200); self.send_header('Content-Length', '100')
+                    self.end_headers(); self.wfile.write(b'{"incomplete":')
+                    self.close_connection = True; return
+                self.send_response(403 if fault == 'permanent' else 502)
+                self.end_headers(); return
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b'{"completed":2}')
+
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.get('/tools').status_code == 200
+        body = {'name': 'agents_results', 'arguments': {'group_id': 'a' * 32}}
+        response = client.post('/tools/call', json=body)
+        recovers = fault not in {'permanent', 'exhausted'}
+        expected = 200 if recovers else 503 if fault == 'exhausted' else 502
+        assert response.status_code == expected, (response.status_code, relay.last_failure)
+        assert safe == {'agents_results', 'agents_read_artifact'}
+        assert len(calls) == (2 if recovers else 1)
+        assert all(call == ('/tools/call', body) for call in calls)
+        if recovers:
+            assert response.json() == {'completed': 2}
+        assert not relay.uncertain_tool and not relay.last_error and relay.last_failure is None
+        assert all(not diagnostic['uncertain_tool'] for diagnostic in diagnostics)
+        # Reproduce the second half of the incident, then use the real model
+        # gate: a preceding safe read must not veto live/checkpoint recovery.
+        assert client.post('/v1/responses', json={}).status_code == 502
+        failed_model = relay.last_failure
+        assert client.post('/tools/call', json=body).status_code == 200
+        assert relay.last_failure is failed_model and relay.model_failed
+        assert relay.resume_model(failed_model)
+
+
+@pytest.mark.parametrize('metadata', ['missing', 'read_only', 'string', 'duplicate', 'revoked', 'malformed', 'prior_write'])
+def test_tool_retry_permission_cannot_come_from_arguments_or_stale_catalog(metadata, monkeypatch):
+    hints = {'readOnlyHint': True, 'idempotentHint': True}
+    catalog = [{'name': 'operation', 'annotations': dict(hints)}]
+    if metadata == 'missing': catalog = []
+    if metadata == 'read_only': catalog[0]['annotations'].pop('idempotentHint')
+    if metadata == 'string': catalog[0]['annotations']['idempotentHint'] = 'true'
+    if metadata == 'duplicate': catalog *= 2
+    if metadata == 'malformed': catalog[0]['annotations'] = 'invalid'
+    calls = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200); self.end_headers()
+            self.wfile.write(json.dumps(catalog).encode())
+        def do_POST(self):
+            calls.append(self.rfile.read(int(self.headers['Content-Length'])))
+            self.send_response(502); self.end_headers()
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        assert client.get('/tools').status_code == 200
+        if metadata == 'revoked':
+            catalog.clear()
+            assert client.get('/tools').status_code == 200
+        assert client.post('/tools/call', json={'name': 'unknown' if metadata == 'prior_write' else 'operation', 'arguments': {},
+            'annotations': hints, 'read_only': True}).status_code == 502
+        assert len(calls) == 1 and relay.uncertain_tool
+        assert diagnostics[-1]['uncertain_tool']
+        assert client.get('/tools').status_code == 200
+        assert relay.uncertain_tool  # Discovery cannot clear an uncertain write.
+        if metadata == 'prior_write':
+            from sandbox.startup import _read_with_reconnect
+            monkeypatch.setattr('sandbox.broker_relay._read_with_reconnect',
+                lambda request, reader, **options: _read_with_reconnect(request, reader, **{**options, 'budget': 0}))
+            uncertain = relay.last_failure
+            assert client.post('/tools/call', json={'name': 'operation', 'arguments': {}}).status_code == 503
+            assert len(calls) == 2 and relay.uncertain_tool and relay.last_failure is uncertain
 
 
 def test_partial_stream_is_recorded_without_sending_another_http_status():

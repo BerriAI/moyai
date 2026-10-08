@@ -20,6 +20,8 @@ jobs:
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py
       - name: Test personal memory ownership, capture and privacy
         run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py
+      - name: Test Slack requester identity and DM delivery
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
         run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py
       - name: Test private storage, migration and legacy file compatibility

@@ -96,6 +96,8 @@ def test_actual_https_relay_carries_both_auth_layers_on_every_transport(access_o
                 assert client.post(path, json={}).status_code == 200
             relay.repository_startup = True
             assert client.post('/tools/call', json={'name': 'github_checkout'}).status_code == 200
+            relay.retry_safe_tools = frozenset({'memory_search'})
+            assert client.post('/tools/call', json={'name': 'memory_search'}).status_code == 200
         assert relay.control()['ok']
         assert relay.context_window()['input_budget'] == 1000
         assert relay.native({})['ok']
@@ -106,7 +108,7 @@ def test_actual_https_relay_carries_both_auth_layers_on_every_transport(access_o
                 'size': len(content), 'sha256': hashlib.sha256(content).hexdigest()}]}
         prepare_attachments(spec, 'test-run', root=tmp_path / 'uploads')
         assert (tmp_path / 'uploads' / ('a' * 32) / 'note.txt').read_bytes() == content
-        assert len(calls) == 14
+        assert len(calls) == 15
     finally:
         relay.close()
 

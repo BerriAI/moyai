@@ -500,3 +500,70 @@
  .analytics-pr-filters label:first-child { flex-basis:100%; }
  .settings-view button.analytics-pr-person-link { min-height:44px; }
 }
+
+/* Automation library, creation menu, and side-panel editor. */
+.settings-view .automation-create { position: relative; flex-shrink: 0; }
+.settings-view #content .automation-create > summary { display: flex; align-items: center; gap: 12px; list-style: none; background: var(--settings-accent); color: white; border-radius: 8px; padding: 9px 14px; font-size: var(--settings-body); margin: 0; }
+.settings-view .automation-create > summary::-webkit-details-marker { display: none; }
+.automation-create-options { position: absolute; z-index: 5; inset-inline-end: 0; inset-block-start: calc(100% + 6px); width: 224px; padding: 6px; background: var(--settings-surface); border: 1px solid var(--settings-line); border-radius: 12px; box-shadow: 0 8px 24px #28202f1a; }
+.settings-view .automation-create-options button { display: block; width: 100%; text-align: start; background: transparent; border-color: transparent; }
+.settings-view .automation-create-options button:hover { background: var(--settings-selected); }
+.automation-discover { display: flex; align-items: center; justify-content: space-between; gap: 24px; border: 1px solid var(--settings-line); border-inline-start: 3px solid var(--settings-accent); border-radius: 12px; padding: 20px 24px; }
+.automation-discover p { margin: 4px 0 0; color: var(--settings-muted); font-size: var(--settings-caption); }
+.automation-discover button { flex-shrink: 0; }
+.automation-scopes { display: flex; gap: 4px; margin-inline-end: auto; }
+.settings-view .automation-scopes button { border-color: transparent; background: transparent; color: var(--settings-muted); }
+.settings-view .automation-scopes button[aria-pressed=true] { color: var(--settings-accent); background: var(--settings-selected); }
+.automation-scopes span { font-variant-numeric: tabular-nums; margin-inline-start: 4px; }
+.automation-toolbar input[type=search] { width: 240px; }
+.automation-template-list { display: grid; gap: 12px; }
+.settings-view .automation-template-list button { padding: 20px; text-align: start; border: 1px solid var(--settings-line); background: var(--settings-surface); }
+.automation-template-list :is(strong,span,small) { display: block; }
+.automation-template-list span { margin: 6px 0 12px; color: var(--settings-muted); font-weight: 400; }
+.settings-view dialog.automation-start-dialog { width: min(640px,calc(100% - 32px)); padding: 0; }
+.settings-view #automation-dialog.automation-drawer { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(800px,100%); max-width: 100%; height: 100dvh; max-height: 100dvh; border-radius: 0; border: 0; border-inline-start: 1px solid var(--settings-line); overflow: auto; }
+.settings-view #automation-dialog.automation-drawer::backdrop { background: #221b2d26; }
+.settings-view .automation-drawer .automation-editor { padding: 0; }
+.automation-editor > header { position: sticky; inset-block-start: 0; z-index: 2; display: flex; align-items: center; gap: 16px; padding: 20px 24px; margin: 0; background: var(--settings-surface); border-bottom: 1px solid var(--settings-line); }
+.settings-view .automation-editor > header h2 { font-size: var(--settings-heading); }
+.automation-editor > header > div { display: flex; align-items: center; gap: 8px; }
+.automation-editor-body { padding: 24px; }
+.automation-editor-section { margin: 24px 0; padding: 24px; border: 1px solid var(--settings-line); border-radius: 12px; }
+.automation-editor-section h3 { margin: 0 0 8px; font-size: var(--settings-heading); font-weight: 600; }
+.automation-editor-section > .subtext { margin: 0 0 20px; }
+.automation-editor-section :is(h4,legend) { font-size: var(--settings-body); font-weight: 500; }
+.automation-editor-section .automation-trigger-group { margin: 16px 0 0; }
+.automation-editor-section .automation-trigger-group > legend { display: none; }
+.automation-editor-section .automation-trigger-card { background: var(--settings-subtle); }
+.automation-editor-section .automation-trigger-card > header { margin: 0; align-items: center; }
+.automation-readonly,.automation-section-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0 0 20px; }
+.automation-readonly strong { font-weight: 400; color: var(--settings-muted); overflow-wrap: anywhere; }
+.automation-section-heading { margin-block-end: 8px; }
+.automation-section-heading h4 { margin: 0; }
+.automation-section-heading a { font-size: var(--settings-caption); }
+.automation-connections { border: 1px solid var(--settings-line); border-radius: 8px; overflow: hidden; }
+.automation-connection-search { display: flex; align-items: center; gap: 12px; padding: 12px; }
+.automation-connection-search input { flex: 1; width: 0; }
+.automation-connection-search span { font-size: var(--settings-caption); color: var(--settings-muted); white-space: nowrap; }
+.automation-connections > [data-connection] { border-top: 1px solid var(--settings-line); padding: 12px 16px; }
+.settings-view .automation-connections .automation-check { display: flex; margin: 0; width: 100%; }
+.automation-connections .automation-check small { margin-inline-start: auto; text-align: end; }
+.automation-connections details { margin: 4px 0 0 24px; font-size: var(--settings-caption); color: var(--settings-muted); }
+.automation-connections details li { margin-block: 8px; overflow-wrap: anywhere; }
+.automation-connections [data-connection-empty] { padding: 0 16px; }
+.automation-metadata-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr) auto; gap: 12px; align-items: end; }
+.automation-metadata-row button { margin-bottom: 18px; }
+.settings-view .automation-form .automation-check { display: flex; align-items: center; gap: 8px; }
+.settings-view .automation-form .automation-check input { width: 16px; height: 16px; flex: 0 0 16px; }
+@media(max-width:768px) {
+  .automation-discover { align-items: start; flex-direction: column; gap: 16px; padding: 20px; }
+  .automation-toolbar input[type=search] { width: 100%; }
+  .automation-editor-body { padding: 16px; }
+  .automation-editor > header { padding: 16px; flex-wrap: wrap; }
+  .automation-editor > header > div { margin-inline-start: auto; }
+  .automation-editor-section { padding: 16px; }
+  .automation-metadata-row { grid-template-columns: minmax(0,1fr); gap: 0; }
+  .automation-connection-search { flex-wrap: wrap; }
+  .automation-connection-search input { flex-basis: 100%; }
+  .settings-view dialog :is(input,textarea,select) { font-size: 16px; }
+}

@@ -7,6 +7,25 @@
 
 ## Automations
 
+The **Create automation** menu offers four starting points:
+
+- **Create** opens a side-panel editor for triggers, agent instructions, model and harness, connections and their tools, repository/environment, metadata, and invocation limits.
+- **Template** offers Linear tickets to PRs, a weekly engineering digest, failed-build investigation, and daily issue triage. Templates remain editable; choose a repository where needed.
+- **Generate with Moyai** opens a real agent session with your description, timezone, model, and selected connected apps. The agent uses the existing automation tools to save a paused workflow for review.
+- **Suggest for me** asks Moyai for up to three ideas. You can include the titles of up to ten recent personal sessions or describe recurring work yourself. Raw conversation content is not added to the generation request. Suggestions do not create or enable automations until you choose one.
+
+AI generation requires the configured cloud runtime. In a local simulation it is visibly unavailable; manual creation and templates still work. Creation requests reuse their session idempotency key after a transport failure. Generation uses normal session permissions and billing.
+
+Use **Mine / All**, the status filter, and search to find saved workflows. Search includes names, instructions, owners, repositories, and metadata. These filters preserve the existing shared-workspace visibility and owner-only editing permissions.
+
+**Queue overlapping event runs** defaults off, preserving independent parallel sessions. Turn it on to wait while a previous automation run is still active at dispatch. Scheduled runs remain independent. Hourly limits and capacity checks may still hold events. Metadata is descriptive only, with up to 20 key-value pairs; it does not change access or execution.
+
+The editor exposes Moyai's actual runtime capabilities. Runs start new sessions as the owner. Security and network access remain governed by the workspace and environment; this does not add Devin-style per-automation security profiles, domain allowlists, arbitrary run-as identities, or per-session dollar budgets.
+
+For a local UI demo with a real temporary database and no credentials, run
+`uv run python scripts/automation_builder_demo.py` and open
+`http://127.0.0.1:8850/#automations`. Save, edit, search, and manual launch use real APIs; agent responses are simulated and the scheduler is disabled. The temporary database is removed when the demo exits.
+
 You can also manage schedules from a direct web or Slack chat. Ask, for example,
 “Every Monday at 9 AM Los Angeles time, audit the skills repository and open a PR
 only when updates are needed.” The agent uses `automation_list`,
@@ -79,7 +98,7 @@ does not produce another event. Legacy tasks without chat messages are out of sc
 
 The native source needs no webhook or Slack credentials. Automatic runs still
 require Temporal and retain the existing owner identity, connections, hourly cap,
-overlap rules and bounded inbox. Under load, capture waits without blocking users.
+workspace capacity and bounded inbox. Under load, capture waits without blocking users.
 A durable indexed message cursor and receipt commit together; restarts cannot
 relaunch the same delivery. Source context includes a session link, at most ten
 prior messages (1000 characters each), the triggering text (4000 characters), and
@@ -165,11 +184,19 @@ and cannot be rearmed by routine sync. Dates are stored in UTC and displayed in
 local time. Custom schedules use numeric cron, not raw RRULE.
 
 A schedule workflow launches the existing durable session runner and waits for
-it to finish, including input waits. Scheduled occurrences skip overlap
-and have a 15-minute catch-up window. Event deliveries persist before acknowledgement
-and queue while a previous run (including children) is active, the automation's
-hourly limit is full, or session capacity is unavailable. Queued events expire
-after 24 hours. A stopped/replaced worker resumes dispatch from SQLite.
+it to finish, including input waits, without blocking other occurrences. By default, every distinct
+matching event or scheduled occurrence creates an independent session: 20 feedback
+events can start 20 sessions, and one later event creates one more. Duplicate
+deliveries still return the original receipt. Scheduled occurrences allow overlap
+and retain their 15-minute catch-up window. Existing schedules automatically resync
+the overlap policy without changing their definition revision or invalidating queued events.
+
+Event deliveries persist before acknowledgement. The dispatcher admits bounded
+batches in rounds across automations, without waiting for earlier sessions or their
+children unless event queueing is explicitly enabled for that automation. Events queue when the automation's hourly limit is full, workspace session
+capacity is unavailable, or project setup is not ready. Active sandbox concurrency
+is controlled separately by the workspace runner. Queued events expire after 24 hours.
+A stopped/replaced worker resumes dispatch from SQLite.
 
 Launch receipts, the session, its initial message, and its Temporal wake commit
 atomically. A retry returns the same session. Pending edits retry after outages;

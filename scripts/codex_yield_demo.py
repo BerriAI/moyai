@@ -16,7 +16,7 @@ from sandbox.codex_harness import CodexAgent
 from test_codex_sdk_transport import native_yield_case
 
 
-def demonstrate(baseline_ref, output, *, settlement=False, pause=0):
+def demonstrate(baseline_ref, output, *, settlement=False, context=False, pause=0):
     output.mkdir(parents=True, exist_ok=True)
     source = subprocess.check_output(['git', 'show', baseline_ref + ':sandbox/codex_harness.py'], cwd=ROOT)
     baseline = ModuleType('sandbox._yield_baseline')
@@ -36,14 +36,21 @@ def demonstrate(baseline_ref, output, *, settlement=False, pause=0):
         time.sleep(pause)
         proofs = {}
         for label, cls in [('BEFORE', baseline.CodexAgent), ('AFTER', CodexAgent)]:
-            say(label + (': start a preview server, then finish with its command still running'
+            say(label + (': reject context while a command still needs 12 seconds to finish' if context else
+                         ': start a preview server, then finish with its command still running'
                          if settlement else ': run one tool, yield after 1 second, then poll it'))
             with tempfile.TemporaryDirectory(prefix='moyai-yield-') as temporary, MonkeyPatch.context() as patch:
                 proofs[label] = native_yield_case(Path(temporary), patch, 1000,
-                    'settle-preview' if settlement else 'complete', agent_class=cls, progress=say)
+                    'settle-context' if context else 'settle-preview' if settlement else 'complete',
+                    agent_class=cls, progress=say, context_delay=12)
+                say(label + ' response: ' + proofs[label]['final_response'])
             time.sleep(pause)
         assert proofs['BEFORE']['failed']
-        if settlement:
+        if context:
+            assert proofs['BEFORE']['pending_tools'] == 1
+            assert 'tool outcomes are pending' in proofs['BEFORE']['final_response']
+            assert proofs['AFTER']['native_clients'] == 1
+        elif settlement:
             assert proofs['BEFORE']['pending_tools'] == 1
             assert 'premature-answer' not in proofs['AFTER']['saved_prose']
         else:
@@ -52,7 +59,8 @@ def demonstrate(baseline_ref, output, *, settlement=False, pause=0):
         assert proofs['AFTER']['completed'] and not proofs['AFTER']['boundary_failed']
         assert proofs['AFTER']['tool_executions'] == proofs['AFTER']['completed_receipts'] == 1
         assert proofs['AFTER']['pending_tools'] == 0
-        say('PASS: original adapter rejects final; fixed adapter settles the command and completes'
+        say('PASS: #233 still fails; native compaction keeps the command alive and finishes' if context else
+            'PASS: original adapter rejects final; fixed adapter settles the command and completes'
             if settlement else 'PASS: original adapter receives HTTP 409; fixed adapter completes')
         say('PASS: one tool execution, one saved receipt, zero unresolved tools')
         report = {'baseline_ref': baseline_ref, 'head': subprocess.check_output(
@@ -67,6 +75,7 @@ if __name__ == '__main__':
     parser.add_argument('--baseline-ref', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--settlement', action='store_true')
+    parser.add_argument('--context', action='store_true', help='Prove context recovery preserves a command beyond the old grace period')
     parser.add_argument('--pause', type=float, default=0, help='Pause between stages when recording a demo')
     args = parser.parse_args()
-    demonstrate(args.baseline_ref, args.output, settlement=args.settlement, pause=args.pause)
+    demonstrate(args.baseline_ref, args.output, settlement=args.settlement, context=args.context, pause=args.pause)

@@ -1,0 +1,16 @@
+name: Automation delivery
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  automations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify concurrent admission, delivery recovery, and real Temporal schedules
+        run: uv run --python 3.13 pytest -q --tb=short tests/test_automation*.py

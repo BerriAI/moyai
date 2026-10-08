@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from agentchat.models import Message, Sender
 
+from .model_preferences import preferred_model, save_model
 from .db import now
 from .file_links import file_link
 from .progress import active_turn
@@ -248,7 +249,7 @@ class SlackChat:
                         raise ValueError('The session queue is full.')
                     run_id, stamp = uuid4().hex, now()
                     plugins = [x['id'] for x in self.owner.connectors.list() if x['connected'] and x['enabled']]
-                    model = self.settings.resolve_model()
+                    model = preferred_model(conn, self.settings, actor_id)
                     if selected_model:
                         try:
                             model = self.settings.resolve_model(selected_model)
@@ -293,6 +294,8 @@ class SlackChat:
                     validate_harness(current['harness'], selected_model)
                 except ValueError as exc:
                     command, model_error = 'model', str(exc)
+            if selected_model and not model_error and not harness_error:
+                save_model(conn, actor_id, selected_model)
             if command:
                 if command == 'model' and not model_error:
                     conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (selected_model, now(), run_id))

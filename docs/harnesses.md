@@ -71,12 +71,25 @@ Responses and Chat Completions for durable summary generation. For Astra it must
 also preserve native Responses items such as `additional_tools`, tool namespaces,
 custom tool calls/outputs and streamed completion events.
 
-When context rejection ends a Codex turn with yielded tools still pending, the
-adapter keeps that native client alive for a bounded receipt grace period (up to
-10 seconds, within the original task deadline). It drains late tool completions
-from both the failed turn and any preceding settlement turn before closing the
-client and compacting. This issues no model or tool calls. User Stop still wins;
-missing receipts remain unresolved and continue to block automatic restart.
+Transient model connection failures with pending tools continue in the same live
+native thread, preserving existing command sessions under the original turn
+retry limit. See [cloud recovery](observability.md#cloud-request-failures-and-recovery).
+
+When context rejection ends a Codex turn, the adapter compacts the same native
+thread while commands remain alive. Only explicit native compaction can pass
+the relay's context-pressure latch; authentication, model-call limits and the
+original deadline still apply. Overflow during compaction uses the pinned
+runtime's SSE error contract so Codex can trim history and retry. Completion
+events from earlier turns remain attached to their original calls, and private
+native summaries never enter the public journal. After verified compaction the
+same thread continues; failed compaction still permits a fresh runtime only
+when all tool outcomes are confirmed. User Stop retains priority.
+
+After a terminal failure, the adapter allows up to 10 seconds for queued and
+late command receipts before closing the native client, within the original
+task deadline. This grace period issues no model or tool calls. Stop permits
+saving already-queued receipts but cancels the wait; unknown outcomes continue
+to block automatic restart.
 
 ## Claude Agent SDK
 
@@ -205,15 +218,49 @@ reserved inside that limit. Missing/invalid limits pause inference with a
 configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
-Claude Agent SDK owns proactive compaction within a task. At session startup the
-authenticated `/context/window` endpoint supplies the selected model's input
-budget, reserving output, injected context and tool-result headroom. The harness
-sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` and an 80% compaction threshold (scaled for
-windows below the SDK's 100k setting minimum). The SDK may impose a smaller
-window for an unfamiliar model. Both inherited compaction-disable flags are
-cleared. Native `compact_boundary` events appear in activity, while the native
-summary remains private to the SDK. The durable journal still preserves original
-public receipts for restart recovery. No generation limit is added or lowered.
+Moyai's gateway owns background model-input compaction for Codex, Claude Agent
+SDK, Hermes, OpenCode, Deep Agents and Tool Loop. At 75% of the verified input
+budget it snapshots an older, closed prefix and starts tool-free summarization.
+Fitting model requests continue using the existing history while that summary
+runs. A later request uses the completed summary plus every item appended after
+the captured prefix. A summary covers a contiguous span, keeping work on its
+original side of retained instructions and media. Later compactions can extend
+that summary or summarize a later span after a retained record. Native
+processes and tools keep running; the gateway does not replace the SDK's own
+transcript or restart its session.
+
+Prefix hashes and the originating capability, turn, requester and selected model
+fence adoption. Divergent child/title histories cannot adopt an unrelated result.
+System/developer instructions, first/latest user requests, unresolved tool groups
+and opaque media groups remain verbatim. Private reasoning is omitted from the
+summary input. Native tool responses can contain still-running process handles;
+the summary preserves those handles and their continuation steps. Private
+snapshots and summaries stay in a bounded in-memory cache, outside the public
+journal, background journal jobs, activity text and content traces. Stop, scope
+changes and idle expiry retire this cache and cancel its background work.
+Requests checking or waiting for compaction keep their scope alive through idle
+cleanup and cache pressure. Idle expiry starts after the last such request exits;
+Stop, scope changes and shutdown still invalidate it and wake waiting requests.
+If every cache slot is in use, new requests use their checked original input and
+new summaries may be declined without evicting another active request's history.
+
+If a request cannot fit, it waits for relevant compaction before taking a model
+slot, then validates the resulting input again. Summary failure preserves the
+original history and the last valid projection. If reduction cannot make the
+request fit, the existing typed context-recovery path remains available.
+Summaries share ordinary model concurrency, request limits and usage accounting;
+foreground work can preempt maintenance. Output allowances are unchanged.
+
+The authenticated `/context/window` capability enables supported native controls:
+Claude automatic compaction, Hermes proactive compression, OpenCode auto/prune,
+and Deep Agents summarization middleware yield to this gateway owner. Older
+gateways retain their existing controls. Codex has no supported disable switch;
+its usage-based native counter sees the projected input, while emergency native
+recovery remains available. Deep Agents' public middleware profile is process-wide;
+if a running process loses the capability, it requires a restart to restore native
+compaction. SDK transcripts still grow in memory and remain
+subject to the existing 5 MiB transport ceiling. This is not an unlimited raw
+transcript or restart-persistent private-history store.
 
 Ordinary text requests use a local UTF-8 estimate, or the previous response's
 input usage plus a conservative byte estimate of appended messages. Reuse is
@@ -248,7 +295,7 @@ Hermes receives the standard `context_length_exceeded` error and retains its
 native bounded overflow-compression path; its native transcript is not rewritten
 by Moyai. Temporal continues to checkpoint lifecycle references, not prompts.
 
-To verify native SDK compaction against a live gateway with only synthetic local
+To verify the legacy native SDK fallback against a live gateway with only synthetic local
 files and the Read tool, set `GATEWAY_BASE_URL` and `GATEWAY_API_KEY`, then run:
 
 ```sh

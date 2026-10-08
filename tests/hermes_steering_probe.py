@@ -194,9 +194,38 @@ def conversation(scenario, *, unpatched=False):
         agent.close()
 
 
+def background_compaction(url, model, enabled):
+    from sandbox.hermes_harness import HermesAgent
+    events = []
+    activity = SimpleNamespace(start=lambda call, *args: events.append(('start', call)),
+        complete=lambda call, *args: events.append(('complete', call)), commentary=lambda text: None)
+    # App-tool discovery is unrelated to this proof; terminal execution and the
+    # complete native model loop still use the released Hermes runtime.
+    with patch('tools.mcp_tool_discovery.discover_mcp_tools', return_value=[]):
+        agent = HermesAgent(spec={'model': model, 'max_iterations': 50, 'timeout': 90},
+            relay=SimpleNamespace(url=url, context_window=lambda: {'live_compaction': enabled}),
+            config={}, activity=activity, step=lambda: None, cwd=str(Path.cwd()))
+    assert agent.compression_enabled is not enabled
+    agent.agent._cached_system_prompt = 'Execute the requested fixture tools and retain their receipts.'
+    try:
+        result = agent.run_conversation('Perform each fixture step once, preserving all new results.',
+            conversation_history=[], system_message='Execute the fixture terminal commands.')
+        report('BACKGROUND_PROOF ' + json.dumps({'completed': result['completed'], 'events': events,
+            'final_response': result['final_response'],
+            'private_summary_visible': 'private-background-summary-marker' in json.dumps(result['messages'])}))
+    finally:
+        agent.close()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('scenario', choices=['corrections', 'redirect-cap', 'provider-failure', 'stop', 'guards'])
+    parser.add_argument('scenario', choices=['corrections', 'redirect-cap', 'provider-failure', 'stop', 'guards', 'background'])
     parser.add_argument('--unpatched', action='store_true')
+    parser.add_argument('--broker-url')
+    parser.add_argument('--model')
+    parser.add_argument('--live-compaction', action='store_true')
     args = parser.parse_args()
-    conversation(args.scenario, unpatched=args.unpatched)
+    if args.scenario == 'background':
+        background_compaction(args.broker_url, args.model, args.live_compaction)
+    else:
+        conversation(args.scenario, unpatched=args.unpatched)

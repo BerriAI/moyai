@@ -169,6 +169,11 @@ def test_new_access_person_keeps_personal_tools_and_slack_identity_rules(login, 
     app.state.store.identity(app.state.security.signer.loads(client.cookies['workspace_session']))
     assert app.state.credentials.same_requester(owner, slack_id)
     assert app.state.store.rows('SELECT linked_user_id FROM users WHERE id=?', (slack_id,))[0]['linked_user_id'] == owner
+    from app.model_preferences import preferred_model, save_model
+    from test_models import OPUS
+    with app.state.store.connect() as conn:
+        save_model(conn, slack_id, OPUS)
+        assert preferred_model(conn, app.state.settings, owner) == OPUS
     app.state.store.execute('UPDATE users SET profile_conflict=1 WHERE id=?', (slack_id,))
     assert not app.state.credentials.same_requester(owner, slack_id)
 

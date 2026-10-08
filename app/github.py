@@ -21,6 +21,7 @@ from sandbox.github_limits import MAX_FILE, MAX_TOTAL
 from .connector_errors import ConnectorError
 from .db import now
 from .github_repositories import GitHubRepositories
+from .github_write_access import GitHubWriteAccess
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
@@ -163,6 +164,7 @@ class Update(Changes):
 
 
 TOOLS = {
+    'github_request_pull_request_write_access': ('github', True, PullRequest, 'Request or check explicit requester permission to edit and comment on this exact external PR in this saved chat. Cannot grant permission. Pending, denied and revoked states never authorize writes. Only the requester can approve in the chat UI. Never operate the consent UI yourself.'),
     'github_rulesets': ('github', False, Rulesets, 'List repository and inherited organization rulesets, including disabled rules. Use this to investigate automatic reviewer requests even when CODEOWNERS and workflows have no matching rule. Follow next_page until null.'),
     'github_ruleset': ('github', False, Ruleset, 'Read a ruleset, its branch conditions, required reviewers and other rules, plus a revision for editing. Inspection only needs Metadata read access; it does not need Administration permission.'),
     'github_update_ruleset_reviewers': ('github', True, RulesetReviewers, 'Change required reviewing teams/file patterns in one repository branch ruleset when requested by the user. Read github_ruleset first and pass its revision. Preserves approval count, code owner review, status checks and all other rules/settings. Requires GitHub Administration write access. Cannot edit inherited organization rulesets. On an uncertain result, read the ruleset before retrying; never retry blindly.'),
@@ -171,13 +173,13 @@ TOOLS = {
     'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
     'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
-    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open Moyai PR created by any chat in this workspace under the current GitHub connection. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
-    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open Moyai PR created by any chat in this workspace under the current GitHub connection, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
+    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
+    'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
 }
 
 
-class GitHub(GitHubRepositories):
+class GitHub(GitHubWriteAccess, GitHubRepositories):
     def __init__(self, store, security, settings, connectors):
         self.store, self.security, self.settings, self.connectors = store, security, settings, connectors
         self.write_lock = asyncio.Lock()
@@ -185,6 +187,7 @@ class GitHub(GitHubRepositories):
         self.setup_lock = asyncio.Lock()
         self.tokens = {}
         self.init_repositories()
+        self.init_write_access()
         store.execute('CREATE TABLE IF NOT EXISTS github_app (id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL)')
         store.execute('''CREATE TABLE IF NOT EXISTS github_publications (
             id TEXT PRIMARY KEY, run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
@@ -294,6 +297,9 @@ class GitHub(GitHubRepositories):
     async def call(self, run, name, arguments):
         if name not in TOOLS:
             raise ConnectorError('This GitHub operation is not available.')
+        if name == 'github_request_pull_request_write_access':
+            async with self.write_lock:
+                return await self.request_write_access(run, PullRequest.model_validate(arguments))
         if name == 'github_update_ruleset_reviewers':
             async with self.write_lock:
                 return await self.update_ruleset_reviewers(run, RulesetReviewers.model_validate(arguments))
@@ -466,12 +472,19 @@ class GitHub(GitHubRepositories):
 
     def ensure_publish_allowed(self, run, connection_version, tool='github_create_pull_request'):
         current = self.store.run(run['id'])
-        if (not current or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
+        if (not current or current.get('deleted_at') or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or current['active_message_id'] != run['active_message_id'] or not current['token_hash']
                 or current['token_hash'] != run['token_hash'] or 'github' not in current['plugins']
                 or connection_version != self.connection_version()
                 or not self.connectors.allowed(tool)):
             raise ConnectorError('The session or GitHub connection changed. Publication has stopped; inspect the destination before retrying.')
+
+        scope = run.get('_pr_write_scope')
+        if scope:
+            rows = self.store.rows("SELECT * FROM github_write_access WHERE id=? AND status='approved'", (scope[2],))
+            if (not rows or not self.same_write_requester(rows[0]['actor_id'], current['active_user_id'])
+                    or current['active_user_id'] != run.get('active_user_id')):
+                raise ConnectorError('PR write approval was revoked or the requester changed.')
 
     async def validate_tree_paths(self, token, tree_sha, changes, repository=''):
         """Reject implicit directory deletion, symlinks and submodules in the base."""
@@ -653,26 +666,33 @@ class GitHub(GitHubRepositories):
         target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
-        publication = self.owned_publication(target, args.number, version)
+        publication = self.write_authority(run, target, args.number, version, tool)
+        if publication.get('grant'):
+            run = {**run, '_pr_write_scope': (target, args.number, publication['id'])}
         row = self.followup(run, tool, args, version, target)
-        if row['result']:
+        if row['result'] and not publication.get('grant'):
             return self.receipt(row['result'], target)
         token = await self.installation_token(repository=target, write=True)
-        pr = await self.owned_pr(token, target, args.number, publication)
+        pr = await self.authorized_pr(run, token, target, args.number, publication, version, tool)
+        if row['result']:
+            return self.receipt(row['result'], target)
+        head_target = publication.get('head_repository_id', target)
+        head_token = token if head_target == target else await self.installation_token(repository=self.target(head_target), write=True)
         commit = row['commit_sha']
         if pr['head']['sha'] != args.base_sha and (not commit or pr['head']['sha'] != commit):
             raise ConnectorError('The PR head changed. Check out its current head in a fresh directory and reapply the changes with a new request_key.')
         if not commit:
-            commit = await self.create_change_commit(run, args, token, target, version, tool)
+            commit = await self.create_change_commit(run, args, head_token, head_target, version, tool)
             self.store.execute('UPDATE github_followups SET commit_sha=? WHERE id=?', (commit, row['id']))
-        prefix = f'/repositories/{target}'
-        ref = await self.request('GET', prefix + '/git/ref/heads/' + publication['branch'], token=token)
+        prefix = f'/repositories/{head_target}'
+        branch_path = quote(publication['branch'], safe='/')
+        ref = await self.request('GET', prefix + '/git/ref/heads/' + branch_path, token=head_token)
         if ref['object']['sha'] != commit:
             if ref['object']['sha'] != args.base_sha:
                 raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
-            await self.owned_pr(token, target, args.number, publication)
+            await self.authorized_pr(run, token, target, args.number, publication, version, tool)
             self.ensure_publish_allowed(run, version, tool)
-            await self.request('PATCH', prefix + '/git/refs/heads/' + publication['branch'], token=token,
+            await self.request('PATCH', prefix + '/git/refs/heads/' + branch_path, token=head_token,
                                json={'sha': commit, 'force': False})
         result = {**self.receipt(publication['result'], target), 'commit': commit, 'state': pr['state'], 'draft': pr['draft']}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
@@ -685,12 +705,16 @@ class GitHub(GitHubRepositories):
         target = await self.selected_target(run, args.repository, args.repository_id)
         version = run.get('github_connection_version') or self.connection_version()
         self.ensure_publish_allowed(run, version, tool)
-        publication = self.owned_publication(target, args.number, version)
+        publication = self.write_authority(run, target, args.number, version, tool)
+        if publication.get('grant'):
+            run = {**run, '_pr_write_scope': (target, args.number, publication['id'])}
         row = self.followup(run, tool, args, version, target)
-        if row['result']:
+        if row['result'] and not publication.get('grant'):
             return self.receipt(row['result'], target)
         token = await self.installation_token(repository=target, write=True)
-        await self.owned_pr(token, target, args.number, publication)
+        await self.authorized_pr(run, token, target, args.number, publication, version, tool)
+        if row['result']:
+            return self.receipt(row['result'], target)
         path = f'/repositories/{target}/issues/{args.number}/comments'
         marker = '<!-- moyai-comment:' + row['id'] + ' -->'
         comment = None
