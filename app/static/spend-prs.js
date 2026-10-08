@@ -65,6 +65,7 @@ function spendPRPanel(tab){
   return `${error?`<div class="error-banner" role="alert">Could not load pull request analytics. ${esc(error.message)} <button id="spend-pr-retry">Retry</button></div>`:''}${data?(tab==='leaderboard'?spendPRLeaderboard(data):spendPRList(data)):error?'':'<p class="subtext" role="status">Loading pull request analytics…</p>'}`;
 }
 function bindSpendPRControls(data,tab,request){
+  if(tab==='users'){bindSpendUsersControls(data);return;}
   const redraw=focus=>{if(!spendPRCurrent(data,tab,request))return;paintSpendPRPanel(data,tab,request);if(focus)$('#'+focus)?.focus();};
   if(spendPRState.error)$('#spend-pr-retry').onclick=()=>loadSpendPRReport(data,tab,request,true);
   if(!spendPRState.data)return;
@@ -78,6 +79,7 @@ function bindSpendPRControls(data,tab,request){
   }
 }
 function paintSpendPRPanel(data,tab,request){
+  if(tab==='users'){paintSpendUsersPanel(data);return;}
   const active=document.activeElement,focus=active?.id?.startsWith('spend-pr-')?active.id:null,position=active?.selectionStart;
   $('#spend-panel').innerHTML=spendPRPanel(tab);
   bindSpendPRControls(data,tab,request);
@@ -88,7 +90,7 @@ async function loadSpendPRReport(data,tab,request,refresh=false){
   if(!spendPRCurrent(data,tab,request))return;
   if(refresh){spendPRState.promise=null;spendPRState.error=null;}
   if(spendPRState.data&&!refresh&&!spendPRState.promise){bindSpendPRControls(data,tab,request);scheduleSpendPRRefresh(data,tab,request);return;}
-  $('#spend-export').disabled=true;
+  if(tab!=='users')$('#spend-export').disabled=true;
   const query=new URLSearchParams({start:data.start,end:data.end});
   const promise=spendPRState.promise||(spendPRState.promise=api('/api/admin/pull-requests?'+query));
   try{
@@ -102,7 +104,7 @@ async function loadSpendPRReport(data,tab,request,refresh=false){
   if(!spendPRCurrent(data,tab,request))return;
   spendPRState.promise=null;
   paintSpendPRPanel(data,tab,request);
-  $('#spend-export').disabled=!spendPRState.data||!!spendPRState.error;
+  if(tab!=='users')$('#spend-export').disabled=!spendPRState.data||!!spendPRState.error;
   if(!spendPRState.error)scheduleSpendPRRefresh(data,tab,request);
 }
 function scheduleSpendPRRefresh(data,tab,request){

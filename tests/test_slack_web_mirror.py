@@ -242,16 +242,20 @@ def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, t
 
 
 def test_pending_progress_survives_recovery_but_ambiguous_send_never_replays(mirror, monkeypatch):
-    app, _, run_id = start(mirror)
+    app, client, run_id = start(mirror)
+    app_loop = app.state.slack.chat.watcher.get_loop()
     store = app.state.store
     store.claim_message(run_id)
     store.event(run_id, 'message', 'Opening update')
     app.state.slack.chat.collect()
     chat = app.state.slack.chat = SlackChat(app.state.slack)
-    async def recover_without_delivery():
+    async def recover_without_delivery() -> None:
         chat.recover()
+        watcher = chat.watcher
+        assert watcher.get_loop() is app_loop
         await chat.shutdown()
-    asyncio.run(recover_without_delivery())
+        assert watcher.cancelled()
+    client.portal.call(recover_without_delivery)
     assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'pending'}]
     attempts = []
     async def uncertain(*args, **kwargs):

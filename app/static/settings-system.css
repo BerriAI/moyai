@@ -496,3 +496,5 @@
  .analytics-pr-filters label:first-child { flex-basis:100%; }
  .settings-view button.analytics-pr-person-link { min-height:44px; }
 }
+
+.settings-view .analytics-page .spend-users-table :is(th,td).spend-user-pr-status { text-align:start;min-width:200px;white-space:normal; }
