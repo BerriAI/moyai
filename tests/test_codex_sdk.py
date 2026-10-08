@@ -528,6 +528,8 @@ def test_raw_output_before_native_start_preserves_receipt_lifecycle(codex_agent,
             for _ in range(2):
                 yield sdk_event('item/completed', {'item': finished})
         yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+        if not native_completion:
+            yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
 
     install_codex_client(monkeypatch, agent, stream)
     results = [asyncio.run(agent._run('Continue.', 'Moyai')) for _ in range(2 if native_completion else 1)]

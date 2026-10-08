@@ -114,7 +114,8 @@ class CodexAgent(HarnessAgent):
             'mcp_servers': {'moyai': ctx.config['mcp_servers']['workspace']},
             'projects': {str(Path(ctx.cwd).resolve()): {'trust_level': 'untrusted'}},
             'project_doc_max_bytes': 0, 'web_search': 'disabled',
-            'features': {'hooks': False, 'apps': False, 'memories': False,
+            # Moyai owns plugins; native marketplace sync outlives SDK shutdown.
+            'features': {'hooks': False, 'apps': False, 'plugins': False, 'memories': False,
                          'multi_agent': False, 'unified_exec': False, 'shell_snapshot': False},
             'skills': {'include_instructions': False, 'bundled': {'enabled': False}},
             'agents': {'enabled': False},

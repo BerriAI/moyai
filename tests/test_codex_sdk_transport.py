@@ -284,6 +284,7 @@ def test_native_code_mode_yield_polls_live_tool_without_checkpointing(tmp_path, 
 def test_native_settlement_collects_late_command_receipts(tmp_path, monkeypatch, outcome):
     proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome)
     limited = outcome == 'settle-limit'
+    assert proof['native_plugins'] == [False]
     assert proof['completed'] is not limited, proof
     assert proof['pending_tools'] == int(limited)
     assert proof['completed_receipts'] == int(not limited)
@@ -322,10 +323,19 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             'finally:\n print("slow-tool-complete", flush=True)\n')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
-    native_errors = []
+    native_errors, native_plugins = [], []
     from openai_codex.async_client import AsyncCodexClient
     from sandbox.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
+        async def initialize(self):
+            from openai_codex.generated.v2_all import ExperimentalFeatureListResponse
+            result = await super().initialize()
+            features = await self.request('experimentalFeature/list', {},
+                                         response_model=ExperimentalFeatureListResponse)
+            native_plugins.extend(feature.enabled for feature in features.data if feature.name == 'plugins')
+            progress('Native plugin marketplace enabled: ' + json.dumps(native_plugins))
+            return result
+
         async def next_turn_notification(self, turn_id):
             event = await super().next_turn_notification(turn_id)
             if event.method == 'error':
@@ -457,7 +467,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             tool_executions=sum(kind == 'start' for kind, _ in events),
             completed_receipts=len(receipts), pending_tools=len(store.pending),
             tool_events=[kind for kind, _ in events], faults=faults, transport_errors=diagnostics,
-            sdk_failure=result.get('sdk_failure'), native_errors=native_errors,
+            sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
