@@ -37,6 +37,27 @@ function setup(scope = 'personal') {
   return {context, elements, calls, data,prData};
 }
 
+function fakeTimers(c){
+  const timers=new Map();let id=0;
+  c.setTimeout=(fn,delay)=>{timers.set(++id,{fn,delay});return id;};
+  c.clearTimeout=id=>timers.delete(id);
+  return {timers,async tick(delay){
+    const entry=[...timers].find(([,timer])=>timer.delay===delay);
+    assert.ok(entry,'expected a scheduled '+delay+'ms poll');
+    timers.delete(entry[0]);entry[1].fn();await settle();
+  }};
+}
+
+// Replacing innerHTML destroys browser handlers. The small DOM fake normally
+// reuses its element objects, so explicitly model destruction in these tests.
+function destroyHandlersOnPageReplacement(e){
+  const root=e.get('#content');let html=root.innerHTML;
+  Object.defineProperty(root,'innerHTML',{get:()=>html,set:value=>{
+    html=value;
+    for(const el of e.values())for(const key of ['onclick','oninput','onchange','onsubmit'])delete el[key];
+  }});
+}
+
 test('personal Spend uses server scope even with a stale admin role and user filter', async () => {
   const {context, elements, calls} = setup();
   vm.runInContext("spendState.user='someone-else'", context);
@@ -485,4 +506,225 @@ for (const scope of ['personal','organization']) test(scope+' request costs dist
   assert.match(html,/\$0\.0123456789/);
   assert.match(html,/Receipt access required/);
   assert.doesNotMatch(html,/In progress/);
+});
+
+for(const background of [false,true])test(`same-range ${background?'automatic':'manual'} refresh retains the mounted leaderboard through both fetches`,async()=>{
+  const {context:c,elements:e,data,prData}=setup('organization');
+  c.settingsInteractionActive=()=>false;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  e.get('#person-google:maya').onclick();
+  const original=c.api,pending=[];
+  c.api=url=>url.startsWith('/api/spend?')||url.includes('pull-requests')?new Promise(resolve=>pending.push(resolve)):original(url);
+  const html=e.get('#content').innerHTML;
+  const refresh=c.renderSpend(background);
+  assert.equal(e.get('#content').innerHTML,html,'mounted content is never replaced by a loader');
+  pending.shift()(data);await refresh;
+  assert.match(e.get('#content').innerHTML,/PR leaderboard/);
+  assert.match(e.get('#content').innerHTML,/Pull requests · Maya/);
+  assert.doesNotMatch(e.get('#content').innerHTML,/Loading pull request analytics/);
+  pending.shift()({...prData,total_merged:42});await settle();
+  assert.match(e.get('#spend-panel').innerHTML,/42/);
+  assert.match(e.get('#spend-panel').innerHTML,/Pull requests · Maya/);
+});
+
+for(const endpoint of ['spend','identities','pull-requests'])test(`${endpoint} refresh failure retains data and retry recovers`,async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const mounted=e.get('#content').innerHTML;
+  const original=c.api;c.api=url=>url.includes(endpoint)?Promise.reject(Error('<offline>')):original(url);
+  await c.renderSpend();await settle();
+  if(endpoint!=='pull-requests')assert.equal(e.get('#content').innerHTML,mounted);
+  assert.match(e.get('#spend-panel').innerHTML,/PR leaderboard/);
+  if(endpoint==='pull-requests'){
+    assert.match(e.get('#spend-panel').innerHTML,/Maya/);
+    assert.match(e.get('#spend-panel').innerHTML,/&lt;offline>/);
+  }else assert.match(e.get('#spend-refresh-status').textContent,/<offline>/);
+  c.api=original;await c.renderSpend();await settle();
+  assert.match(e.get('#spend-panel').innerHTML,/Maya/);
+  assert.equal(e.get('#spend-export').disabled,false);
+});
+
+for(const status of [401,403])test(`authorization ${status} clears retained report`,async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  c.api=()=>Promise.reject(Object.assign(Error('Access denied'),{status}));
+  await c.renderSpend();
+  assert.doesNotMatch(e.get('#content').innerHTML,/PR leaderboard|Maya/);
+  assert.equal(vm.runInContext('spendPRState.data',c),null);
+});
+
+test('date changes and route changes do not reuse a displayed report',async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  let finish;const original=c.api;c.api=url=>url.startsWith('/api/spend?')?new Promise(resolve=>finish=resolve):original(url);
+  vm.runInContext("spendState.start='2026-10-03'",c);
+  const pending=c.renderSpend();assert.match(e.get('#content').innerHTML,/Loading spend/);
+  c.state.view='settings';c.state.pageVersion++;e.get('#content').innerHTML='Settings';
+  await c.renderSpend();assert.equal(e.get('#content').innerHTML,'Settings');
+  finish(await original('/api/spend?'));await pending;assert.equal(e.get('#content').innerHTML,'Settings');
+});
+
+test('hidden polling and interactions that start during transport leave the DOM untouched',async()=>{
+  const {context:c,elements:e,calls,data}=setup('organization');const timers=new Map();let id=0,interacting=false;
+  c.setTimeout=fn=>{timers.set(++id,fn);return id;};c.clearTimeout=id=>timers.delete(id);
+  c.settingsInteractionActive=()=>interacting;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const html=e.get('#content').innerHTML,count=calls.length;
+  c.document.hidden=true;await c.renderSpend(true);assert.equal(calls.length,count);assert.equal(timers.size,1);
+  c.document.hidden=false;let finish;c.api=()=>new Promise(resolve=>finish=resolve);
+  const pending=c.renderSpend(true);interacting=true;finish({...data,scope:'personal'});await pending;
+  assert.doesNotMatch(e.get('#content').innerHTML,/PR leaderboard/,'scope downgrade still clears while interacting');
+  assert.equal(vm.runInContext('spendPRState.data',c),null);
+});
+
+test('a background response defers commit when interaction begins during the request',async()=>{
+  const {context:c,elements:e,data}=setup();const timers=new Map();let id=0,interacting=false;
+  c.setTimeout=fn=>{timers.set(++id,fn);return id;};c.clearTimeout=id=>timers.delete(id);c.settingsInteractionActive=()=>interacting;
+  await c.renderSpend();const html=e.get('#content').innerHTML;
+  let finish;c.api=()=>new Promise(resolve=>finish=resolve);
+  const pending=c.renderSpend(true);interacting=true;finish({...data,total:{...data.total,spend:'99'}});await pending;
+  assert.equal(e.get('#content').innerHTML,html);assert.equal(timers.size,1);
+});
+
+test('old PR completion is rejected while a different date range is still loading spend',async()=>{
+  const {context:c,elements:e,prData,data}=setup('organization'),original=c.api;
+  let finishPR,finishSpend;
+  c.api=url=>url.includes('pull-requests')?new Promise(resolve=>finishPR=resolve):original(url);
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  vm.runInContext("spendState.start='2026-10-03'",c);
+  c.api=url=>url.startsWith('/api/spend?')?new Promise(resolve=>finishSpend=resolve):original(url);
+  const pending=c.renderSpend();c.$('#spend-panel').innerHTML='unmounted';
+  finishPR(prData);await settle();
+  assert.match(e.get('#content').innerHTML,/Loading spend/);
+  assert.equal(e.get('#spend-panel').innerHTML,'unmounted');
+  finishSpend({...data,start:'2026-10-03'});await pending;await settle();
+});
+
+test('clearing PR filters does not restore the previous DOM values over the new state',async()=>{
+  const {context:c,elements:e}=setup('organization');
+  await c.renderSpend();selectTab(e,'prs');await settle();
+  const search=c.$('#spend-pr-search'),status=c.$('#spend-pr-status'),panel=c.$('#spend-panel');
+  Object.assign(search,{id:'spend-pr-search',matches:()=>true,value:'missing phrase'});
+  Object.assign(status,{id:'spend-pr-status',matches:()=>true,value:'open'});
+  const query=c.document.querySelectorAll;
+  c.document.querySelectorAll=selector=>selector==='#content [id]'?[search,status]:query(selector);
+  c.document.getElementById=id=>e.get('#'+id);
+  let html=panel.innerHTML;
+  Object.defineProperty(panel,'innerHTML',{get:()=>html,set:value=>{
+    html=value;search.value=/id="spend-pr-search"[^>]*value="([^"]*)"/.exec(value)?.[1]||'';
+    status.value=/<option value="([^"]*)" selected>/.exec(value)?.[1]||'';
+  }});
+  search.oninput();status.onchange();e.get('#spend-pr-clear').onclick();
+  assert.equal(search.value,'');assert.equal(status.value,'');
+  assert.match(panel.innerHTML,/Keep saved filters/);
+});
+
+for(const tab of ['prs','leaderboard'])test(tab+' controls work while parent-triggered PR refresh is in flight',async()=>{
+  const {context:c,elements:e,prData}=setup('organization');
+  await c.renderSpend();selectTab(e,tab);await settle();
+  destroyHandlersOnPageReplacement(e);
+  const original=c.api;let finish;
+  c.api=url=>url.includes('pull-requests')?new Promise(resolve=>finish=resolve):original(url);
+  await c.renderSpend();
+  if(tab==='prs'){
+    assert.equal(typeof e.get('#spend-pr-search').oninput,'function');
+    e.get('#spend-pr-search').value='Keep saved';
+    e.get('#spend-pr-search').oninput();
+    e.get('#spend-pr-status').value='merged';e.get('#spend-pr-status').onchange();
+  }else{
+    assert.equal(typeof e.get('#person-google:maya').onclick,'function');
+    e.get('#person-google:maya').onclick();
+  }
+  finish(prData);await settle();
+  if(tab==='prs'){
+    assert.match(e.get('#spend-panel').innerHTML,/value="Keep saved"/);
+    assert.match(e.get('#spend-panel').innerHTML,/value="merged" selected/);
+    e.get('#spend-pr-clear').onclick();
+    assert.equal(vm.runInContext('spendPRState.search+spendPRState.status',c),'');
+  }else assert.match(e.get('#spend-panel').innerHTML,/Pull requests · Maya/);
+});
+
+for(const endpoint of ['spend','identities'])test(endpoint+' failure does not stop independent PR status polling',async()=>{
+  const {context:c,elements:e,prData}=setup('organization'),clock=fakeTimers(c);
+  prData.pending_refresh=true;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const original=c.api;
+  c.api=url=>url.includes(endpoint)?Promise.reject(Error('offline')):original(url);
+  await c.renderSpend();
+  assert.match(e.get('#spend-panel').innerHTML,/Checking GitHub status/);
+  prData.pending_refresh=false;
+  await clock.tick(4000);
+  assert.doesNotMatch(e.get('#spend-panel').innerHTML,/Checking GitHub status/);
+  assert.equal(vm.runInContext('spendPRState.data.pending_refresh',c),false);
+  assert.equal(clock.timers.size,0);
+});
+
+for(const reason of ['hidden','interaction'])test(reason+' starting during spend transport preserves PR polling',async()=>{
+  const {context:c,elements:e,data,prData}=setup('organization'),clock=fakeTimers(c);
+  let interacting=false;c.settingsInteractionActive=()=>interacting;c.document.querySelector=()=>null;
+  prData.pending_refresh=true;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const original=c.api;let finish;
+  c.api=url=>url.startsWith('/api/spend?')?new Promise(resolve=>finish=resolve):original(url);
+  const refresh=c.renderSpend(true);
+  if(reason==='hidden')c.document.hidden=true;else interacting=true;
+  finish(data);await refresh;
+  c.document.hidden=false;interacting=false;prData.pending_refresh=false;
+  await clock.tick(4000);
+  assert.doesNotMatch(e.get('#spend-panel').innerHTML,/Checking GitHub status/);
+  assert.equal(vm.runInContext('spendPRState.data.pending_refresh',c),false);
+});
+
+test('a transient PR polling failure retains data and automatically recovers',async()=>{
+  const {context:c,elements:e,prData}=setup('organization'),clock=fakeTimers(c);
+  prData.pending_refresh=true;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const original=c.api;
+  c.api=url=>url.includes('pull-requests')?Promise.reject(Error('offline')):original(url);
+  await clock.tick(4000);
+  assert.match(e.get('#spend-panel').innerHTML,/offline/);
+  assert.match(e.get('#spend-panel').innerHTML,/Maya/);
+  c.api=original;prData.pending_refresh=false;
+  await clock.tick(4000);
+  assert.doesNotMatch(e.get('#spend-panel').innerHTML,/offline/);
+  assert.doesNotMatch(e.get('#spend-panel').innerHTML,/Checking GitHub status/);
+  assert.equal(vm.runInContext('spendPRState.data.pending_refresh',c),false);
+  assert.equal(e.get('#spend-export').disabled,false);
+  assert.equal(clock.timers.size,0);
+});
+
+for(const status of [401,403])test('PR authorization '+status+' clears cached data and stops polling',async()=>{
+  const {context:c,elements:e,prData}=setup('organization'),clock=fakeTimers(c);
+  prData.pending_refresh=true;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  c.api=()=>Promise.reject(Object.assign(Error('Access denied'),{status}));
+  await clock.tick(4000);
+  assert.doesNotMatch(e.get('#spend-panel').innerHTML,/Maya|PR leaderboard/);
+  assert.equal(vm.runInContext('spendPRState.data',c),null);
+  assert.equal(clock.timers.size,0);
+});
+
+test('parent refreshes share a slow PR request without starving its completion',async()=>{
+  const {context:c,elements:e,prData}=setup('organization');
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  const original=c.api;let finish,count=0;
+  c.api=url=>url.includes('pull-requests')?(count++,new Promise(resolve=>finish=resolve)):original(url);
+  await c.renderSpend();await c.renderSpend();await c.renderSpend();
+  assert.equal(count,1);
+  finish({...prData,total_merged:42});await settle();
+  assert.match(e.get('#spend-panel').innerHTML,/42/);
+  assert.equal(e.get('#spend-export').disabled,false);
+});
+
+test('pending spend costs recover automatically after a transient refresh failure',async()=>{
+  const {context:c,elements:e,data}=setup(),clock=fakeTimers(c);
+  c.settingsInteractionActive=()=>false;data.total.pending_costs=1;
+  await c.renderSpend();const original=c.api;
+  c.api=()=>Promise.reject(Error('offline'));
+  await clock.tick(5000);
+  assert.match(e.get('#spend-refresh-status').textContent,/offline/);
+  c.api=original;data.total.pending_costs=0;
+  await clock.tick(5000);
+  assert.match(e.get('#content').innerHTML,/All tracked LLM requests priced/);
+  assert.equal(clock.timers.size,0);
 });
