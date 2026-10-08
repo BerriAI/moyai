@@ -215,6 +215,13 @@ def create_app(settings: Settings | None = None):
         harness_gateway.maintenance.recover()
         await manager.recover()
         await checkpoints.flush()
+        if settings.backup_dir and settings.backup_on_startup:
+            try:
+                from .db_maintenance import backup_database
+                await asyncio.to_thread(backup_database, settings.data_dir, settings.backup_dir, keep=settings.backup_keep)
+            except Exception:
+                import logging as _logging
+                _logging.getLogger(__name__).warning("Startup database backup failed; continuing without a new backup.", exc_info=True)
         slack.recover()
         identities.start()
         environments.start()
@@ -354,7 +361,54 @@ def create_app(settings: Settings | None = None):
 
     @app.get("/health")
     async def health():
+        # Load-balancer probe: stay backwards compatible ({"status": "ok"})
+        # but fail fast when the database is corrupt or the disk is full so
+        # Render/Docker stop sending traffic instead of serving a broken app.
+        try:
+            from .db_maintenance import MIN_FREE_BYTES, verify_database
+            import shutil as _shutil
+            db_path = settings.data_dir / "workspace.db"
+            if db_path.exists():
+                checked = await asyncio.to_thread(verify_database, db_path)
+                if not checked["ok"]:
+                    return JSONResponse({"status": "unhealthy", "reason": "database integrity check failed"}, status_code=503)
+            try:
+                free = _shutil.disk_usage(settings.data_dir if settings.data_dir.exists() else Path("/tmp")).free
+                if free < MIN_FREE_BYTES:
+                    return JSONResponse({"status": "unhealthy", "reason": "low disk space"}, status_code=503)
+            except OSError:
+                pass
+        except Exception:
+            pass
         return {"status": "ok"}
+
+    @app.get("/api/health/detailed")
+    async def health_detailed(request: Request):
+        security.require(request, admin=True)
+        from .db_maintenance import health_summary
+        summary = await asyncio.to_thread(health_summary, settings.data_dir, checkpoint_dir=settings.checkpoint_dir)
+        status_code = 200 if summary["ok"] else 503
+        return JSONResponse(summary, status_code=status_code)
+
+    class BackupRequest(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        vacuum: bool = False
+
+    @app.post("/api/admin/backup", status_code=201)
+    async def create_backup(body: BackupRequest, request: Request):
+        security.require(request, mutation=True, admin=True)
+        if not settings.backup_dir:
+            raise HTTPException(409, "Set BACKUP_DIR before creating a backup.")
+        from .db_maintenance import backup_database
+        try:
+            manifest = await asyncio.to_thread(
+                backup_database, settings.data_dir, settings.backup_dir,
+                keep=settings.backup_keep, vacuum=body.vacuum)
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(422, str(exc))
+        return manifest
 
     @app.get("/api/session")
     async def session(request: Request):

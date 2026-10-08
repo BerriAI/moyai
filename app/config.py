@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     object_storage_secret_access_key: str = Field(default='', repr=False)
     object_storage_session_token: str = Field(default='', repr=False)
     checkpoint_dir: Path | None = None
+    backup_dir: Path | None = None
+    backup_keep: int = Field(default=7, ge=1, le=90)
+    backup_on_startup: bool = False
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
     public_url: str = "http://127.0.0.1:8787"

@@ -21,9 +21,32 @@ def restore_checkpoint(settings):
     target = settings.data_dir / "workspace.db"
     if source.exists() and not target.exists():
         settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if source.is_symlink() or not source.is_file():
+            raise RuntimeError("Checkpoint is not a regular file; refusing to restore.")
         staged = target.with_suffix(".restore")
         shutil.copy2(source, staged)
+        try:
+            staged.chmod(0o600)
+        except OSError:
+            pass
+        # Never boot a corrupt checkpoint: verify the staged copy before
+        # publishing it. A corrupt source aborts startup instead of serving
+        # bad data.
+        from .db_maintenance import verify_database
+        checked = verify_database(staged)
+        if not checked["ok"]:
+            try:
+                staged.unlink()
+            except OSError:
+                pass
+            log.error("Checkpoint restore refused: %s", "; ".join(checked["errors"]))
+            raise RuntimeError(f"Checkpoint failed integrity validation: {'; '.join(checked['errors'])}")
         staged.replace(target)
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+        log.info("Restored checkpoint database (%s).", target)
         archives = settings.checkpoint_dir / "artifacts"
         if archives.exists():
             shutil.copytree(archives, settings.data_dir / "artifacts", dirs_exist_ok=True)
