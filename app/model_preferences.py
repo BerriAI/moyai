@@ -9,8 +9,17 @@ def account_id(conn, user_id):
 
 
 def preferred_model(conn, settings, user_id):
+    canonical_id = account_id(conn, user_id)
     row = conn.execute('SELECT model FROM user_model_preferences WHERE user_id=?',
-                       (account_id(conn, user_id),)).fetchone()
+                       (canonical_id,)).fetchone()
+    if row is None:
+        # Linking may happen after a Slack choice was saved. Both web and Slack
+        # must see that choice until the person saves a canonical preference.
+        row = conn.execute("""SELECT p.model FROM user_model_preferences p
+            JOIN users u ON u.id=p.user_id
+            JOIN users target ON target.id=u.linked_user_id AND target.kind='google'
+            WHERE u.kind='slack' AND target.id=?
+            ORDER BY u.id LIMIT 1""", (canonical_id,)).fetchone()
     if row:
         try:
             return settings.resolve_model(row['model'])

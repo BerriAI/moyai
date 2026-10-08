@@ -71,3 +71,48 @@ def test_new_slack_thread_inherits_saved_model(slack_app):
     assert client.post('/hooks/slack/events', **signed(second)).status_code == 200
     assert len(submitted) == 2
     assert submitted[-1]['model'] == OPUS
+
+
+def test_slack_preference_survives_automatic_linking(tmp_path):
+    from app.config import Settings
+    from app.db import now
+
+    settings = Settings(data_dir=tmp_path)
+    store = Store(tmp_path, default_model=ASTRA, auto_link_identities=True)
+    with store.connect() as conn:
+        slack = store.slack_identity_in(conn, 'T12345678', 'U12345678')
+        save_model(conn, slack, OPUS)
+        conn.execute('UPDATE users SET email=?,profile_eligible=1,profile_checked_at=? WHERE id=?',
+                     ('alice@example.com', now(), slack))
+    alice = store.identity({'method': 'google', 'identity': {'sub': 'alice', 'email': 'alice@example.com'}})
+    bob = store.identity({'method': 'google', 'identity': {'sub': 'bob', 'email': 'bob@example.com'}})
+    with store.connect() as conn:
+        assert conn.execute('SELECT linked_user_id FROM users WHERE id=?', (slack,)).fetchone()[0] == alice
+        # Web reads first: no Slack request or migration is required after linking.
+        assert preferred_model(conn, settings, alice) == OPUS
+        assert preferred_model(conn, settings, slack) == OPUS
+        assert preferred_model(conn, settings, bob) == settings.resolve_model()
+        save_model(conn, slack, GLM)
+        assert preferred_model(conn, settings, alice) == GLM
+        assert preferred_model(conn, settings, slack) == GLM
+    reopened = Store(tmp_path, default_model=ASTRA, auto_link_identities=True)
+    with reopened.connect() as conn:
+        assert preferred_model(conn, settings, alice) == GLM
+        assert preferred_model(conn, settings, slack) == GLM
+
+
+def test_existing_google_preference_wins_after_linking(tmp_path):
+    from app.config import Settings
+
+    settings = Settings(data_dir=tmp_path)
+    store = Store(tmp_path, default_model=ASTRA)
+    alice = store.identity({'method': 'google', 'identity': {'sub': 'alice', 'email': 'alice@example.com'}})
+    with store.connect() as conn:
+        slack = store.slack_identity_in(conn, 'T12345678', 'U12345678')
+        save_model(conn, slack, OPUS)
+        save_model(conn, alice, GLM)
+        conn.execute('UPDATE users SET linked_user_id=? WHERE id=?', (alice, slack))
+        assert preferred_model(conn, settings, slack) == GLM
+        assert preferred_model(conn, settings, alice) == GLM
+        save_model(conn, alice, 'removed-model')
+        assert preferred_model(conn, settings, slack) == settings.resolve_model()
