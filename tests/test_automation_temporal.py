@@ -53,6 +53,9 @@ async def test_real_schedule_upgrade_allows_overlap_and_survives_replacement(tmp
             await eventually(lambda: bool(store.rows('SELECT run_id FROM automation_runs WHERE run_id IS NOT NULL')),seconds=25)
             run_id=store.rows('SELECT run_id FROM automation_runs WHERE run_id IS NOT NULL')[0]['run_id']
             assert store.run(run_id)['owner_id']==owner
+            # Temporal's manual trigger IDs use second-resolution timestamps.
+            # Keep the first session active, but start a distinct clock occurrence.
+            await asyncio.sleep(1.1)
             await handle.trigger()  # Launch another occurrence while the first remains active.
             await eventually(lambda:len(store.rows('SELECT * FROM automation_runs'))==2,seconds=25)
             receipts=store.rows('SELECT occurrence,run_id FROM automation_runs ORDER BY rowid')
