@@ -120,7 +120,56 @@ function bindHarnessPicker(harness,model,onchange=()=>{},automatic=true){
 }
 function harnessModels(harness){return state.config.models||[];}
 function providerLogo(model){const url=MoyaiProviderLogos.src(model);return `<img class="provider-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
-function modelPicker(id,selected,disabled=false,harness=state.config.harness||'claude-agent-sdk'){return `<label class="model-picker" title="Model">${providerLogo(selected)}<span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select>${pickerChevron()}</label>`;}
+function modelPicker(id,selected,disabled=false,harness=state.config.harness||'claude-agent-sdk'){
+  return `<div class="model-picker custom-model-picker" title="Model"><select hidden aria-hidden="true" tabindex="-1" id="${id}" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select><button type="button" class="model-picker-trigger" aria-label="Model for next message" aria-haspopup="listbox" aria-expanded="false" aria-describedby="${id}-value" aria-controls="${id}-menu" ${disabled?'disabled':''}>${providerLogo(selected)}<span id="${id}-value" class="model-picker-value"></span>${pickerChevron()}</button><div id="${id}-menu" class="model-picker-menu" popover="auto" role="listbox" aria-label="Model for next message"></div></div>`;
+}
+function syncModelPicker(select){
+  if(!select)return;
+  const trigger=select.parentElement.querySelector('.model-picker-trigger');
+  if(!trigger)return;
+  trigger.disabled=select.disabled;
+  trigger.querySelector('.model-picker-value').textContent=select.selectedOptions[0]?.textContent||'Choose model';
+  MoyaiProviderLogos.sync(trigger.querySelector('.provider-logo'),select.value,MoyaiProviderLogos.src);
+}
+function bindModelPicker(select){
+  if(!select)return;
+  const trigger=select.parentElement.querySelector('.model-picker-trigger'),menu=select.parentElement.querySelector('.model-picker-menu');
+  const close=()=>{menu.hidePopover();trigger.focus();};
+  const open=()=>{
+    if(select.disabled)return;
+    menu.innerHTML=[...select.options].map(option=>`<button type="button" role="option" tabindex="-1" data-value="${esc(option.value)}" aria-selected="${option.selected}">${providerLogo(option.value)}<span>${esc(option.textContent)}</span><span class="model-picker-check" aria-hidden="true">${option.selected?'✓':''}</span></button>`).join('');
+    menu.showPopover();
+    const rect=trigger.getBoundingClientRect(),gap=6,edge=8;
+    menu.style.left=`${Math.max(edge,Math.min(rect.right-menu.offsetWidth,innerWidth-menu.offsetWidth-edge))}px`;
+    menu.style.top=`${Math.max(edge,rect.top>=menu.offsetHeight+gap+edge?rect.top-menu.offsetHeight-gap:Math.min(rect.bottom+gap,innerHeight-menu.offsetHeight-edge))}px`;
+    menu.querySelector('[aria-selected="true"]')?.focus();
+  };
+  trigger.addEventListener('click',()=>menu.matches(':popover-open')?close():open());
+  trigger.addEventListener('keydown',event=>{if(['ArrowDown','ArrowUp'].includes(event.key)){event.preventDefault();open();}});
+  menu.addEventListener('toggle',()=>trigger.setAttribute('aria-expanded',String(menu.matches(':popover-open'))));
+  menu.addEventListener('click',event=>{
+    const option=event.target.closest('[role="option"]');if(!option)return;
+    select.value=option.dataset.value;
+    select.dispatchEvent(new Event('change',{bubbles:true}));close();
+  });
+  menu.addEventListener('keydown',event=>{
+    const options=[...menu.querySelectorAll('[role="option"]')],index=options.indexOf(document.activeElement);
+    let next;
+    if(event.key==='ArrowDown')next=(index+1)%options.length;
+    else if(event.key==='ArrowUp')next=(index-1+options.length)%options.length;
+    else if(event.key==='Home')next=0;
+    else if(event.key==='End')next=options.length-1;
+    else if(event.key==='Escape'){event.preventDefault();close();}
+    else if(event.key==='Tab'){menu.hidePopover();trigger.focus();}
+    else if(event.key.length===1&&!event.ctrlKey&&!event.metaKey&&event.key!==' '){
+      next=options.findIndex((_,offset)=>options[(index+1+offset)%options.length].textContent.trim().toLowerCase().startsWith(event.key.toLowerCase()));
+      if(next>=0)next=(index+1+next)%options.length;else next=undefined;
+    }
+    if(next!==undefined){event.preventDefault();options[next]?.focus();}
+  });
+  select.addEventListener('change',()=>syncModelPicker(select));
+  syncModelPicker(select);
+}
 
 function openSessionSearch(){$('.session-search').hidden=false;$('#search-sessions').setAttribute('aria-expanded','true');$('#session-search').focus();}
 function closeSessionSearch(){if($('#session-search').value)return;$('.session-search').hidden=true;$('#search-sessions').setAttribute('aria-expanded','false');}
@@ -321,8 +370,9 @@ async function renderHome(){
   if(draft.mode&&($('#mode option[value="'+draft.mode+'"]').disabled===false))$('#mode').value=draft.mode;
   const saveDraft=()=>{state.newDraft={prompt:$('#prompt').value,repo:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value)};};
   $('#task-form').oninput=saveDraft;$('#task-form').onchange=saveDraft;$('#task-form').onsubmit=submitTask;
+  bindModelPicker($('#new-model'));
   bindHarnessPicker($('#new-harness'),$('#new-model'),saveDraft);
-  $('#mode').addEventListener('change',()=>{$('#new-model').disabled=$('#mode').value==='demo';$('#mode-note').textContent=$('#mode').value==='demo'?'Demo responses · audio uses transcription':'Your own cloud workspace';});
+  $('#mode').addEventListener('change',()=>{$('#new-model').disabled=$('#mode').value==='demo';syncModelPicker($('#new-model'));$('#mode-note').textContent=$('#mode').value==='demo'?'Demo responses · audio uses transcription':'Your own cloud workspace';});
   $('#mode').dispatchEvent(new Event('change'));
   bindComposer($('#prompt'),$('#task-form'));
   document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
@@ -421,6 +471,7 @@ function renderChat(run){
   $('#followup').value=state.drafts[id]||'';
   if(run.parent_run_id)$('#followup').placeholder='Message this agent directly…';
   document.querySelector('[data-open-parent]')?.addEventListener('click',()=>openRun(run.parent_run_id||run.side_chat_of).catch(showError));
+  bindModelPicker($('#chat-model'));
   if($('#chat-model'))$('#chat-model').onchange=()=>{state.modelDrafts[id]=$('#chat-model').value;};
   $('#followup').oninput=()=>{state.drafts[id]=$('#followup').value;};
   bindComposer($('#followup'),$('#message-form'));
@@ -474,7 +525,7 @@ function connectChatStream(run){
 function updateChatStatus(run){
   if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
   run=state.chatRun||run;
-  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').parentElement.querySelector('.provider-logo'),run.model);}
+  if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;syncModelPicker($('#chat-model'));}
   $('#run-status').innerHTML=statusLabel(run.status);
   const busy=!terminal.has(run.status)||run.active;
   $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
