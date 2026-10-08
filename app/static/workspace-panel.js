@@ -9,8 +9,8 @@
     try{
       const data=JSON.parse(value);
       const tabs=(Array.isArray(data.tabs)?data.tabs:[]).filter(t=>t&&['computer','captures','files','file','activity','chat','pulls','pr'].includes(t.kind)&& (t.kind!=='pr'||prUrl(t.url))&&typeof t.id==='string'&&t.id.length<1200&&(!t.chatId||/^[a-f0-9]{32}$/.test(t.chatId))).slice(0,16).map(t=>({...t,title:String(t.title||'Tab').slice(0,200),draft:String(t.draft||'').slice(0,16000)}));
-      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||60)),tabs};
-    }catch{return {visible:false,active:'',width:60,tabs:[]};}
+      return {visible:!!data.visible,active:String(data.active||''),width:Math.max(30,Math.min(70,Number(data.width)||40)),tabs};
+    }catch{return {visible:false,active:'',width:40,tabs:[]};}
   }
   function fileTree(files){
     const root={directories:new Map(),files:[],path:''};

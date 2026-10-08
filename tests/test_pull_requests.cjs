@@ -5,6 +5,13 @@ const vm=require('node:vm');
 const panelPath=process.env.PANEL_SOURCE||'app/static/workspace-panel.js';
 const {prUrl,restore}=require(require('node:path').resolve(panelPath));
 const url='https://github.com/BerriAI/moyai/pull/145';
+test('panel defaults leave most space for chat and preserve saved resize choices',()=>{
+  for(const value of [null, '{', '{}', JSON.stringify({width:0})])
+    assert.equal(restore(value).width,40);
+  for(const [width,expected] of [[30,30],[48,48],[60,60],[70,70],[10,30],[90,70]])
+    assert.equal(restore(JSON.stringify({width})).width,expected);
+});
+
 test('only canonical PR destinations survive tab restore',()=>{
   for(const repository of ['moyai','.github','_config','-tools','Mixed.Case-repo_1']){
     const accepted=url.replace('moyai',repository);
