@@ -100,7 +100,7 @@ async function loadSpendPRReport(data,tab,request,refresh=false,background=false
   try{
     const report=await promise;
     if(!spendPRCurrent(data,tab,request)||spendPRState.promise!==promise)return;
-    if(background&&(document.hidden||typeof settingsInteractionActive==='function'&&settingsInteractionActive())){spendPRState.promise=null;scheduleSpendPRRefresh(data,tab,request);$('#spend-export').disabled=!spendPRState.data||!!spendPRState.error;return;}
+    if(background&&(document.hidden||typeof settingsInteractionActive==='function'&&settingsInteractionActive())){scheduleSpendPRRefresh(data,tab,request);$('#spend-export').disabled=!spendPRState.data||!!spendPRState.error;return;}
     spendPRState.data=report;spendPRState.error=null;
   }catch(error){
     if(!spendPRCurrent(data,tab,request)||spendPRState.promise!==promise)return;
@@ -116,7 +116,9 @@ async function loadSpendPRReport(data,tab,request,refresh=false,background=false
 }
 function scheduleSpendPRRefresh(data,tab,request){
   clearTimeout(spendPRState.timer);
-  if(spendPRState.data?.pending_refresh)spendPRState.timer=setTimeout(()=>{if(!spendPRCurrent(data,tab,request))return;if(document.hidden||typeof settingsInteractionActive==='function'&&document.querySelector('#spend-panel')?.contains(document.activeElement)&&settingsInteractionActive()){scheduleSpendPRRefresh(data,tab,request);return;}loadSpendPRReport(data,tab,request,true,true);},4000);
+  // A resolved promise awaiting a safe paint remains consumable by Retry or
+  // the next poll, even when the last displayed report had no pending status.
+  if(spendPRState.promise||spendPRState.data?.pending_refresh)spendPRState.timer=setTimeout(()=>{if(!spendPRCurrent(data,tab,request))return;if(document.hidden||typeof settingsInteractionActive==='function'&&document.querySelector('#spend-panel')?.contains(document.activeElement)&&settingsInteractionActive()){scheduleSpendPRRefresh(data,tab,request);return;}loadSpendPRReport(data,tab,request,true,true);},4000);
 }
 function spendPRExport(tab){
   const data=spendPRState.data;

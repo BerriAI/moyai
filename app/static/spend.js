@@ -26,18 +26,24 @@ function bindSpendFilters(){
   $('#sync-spend').onclick=async()=>{const button=$('#sync-spend');button.disabled=true;button.textContent='Refreshing…';try{await renderSpend();}catch(e){showError(e);button.disabled=false;button.textContent='Refresh';}};
 }
 function spendContext(start=spendState.start,end=spendState.end){return [state.pageVersion,state.role,start,end].join('/');}
+function spendSupportsSelection(el){
+  return el?.tagName==='TEXTAREA'||el?.tagName==='INPUT'&&['text','search','url','tel','password'].includes(el.type);
+}
 function preserveSpendView(preserveValues=true){
   const root=$('#content'),active=document.activeElement;
   if(typeof document.querySelectorAll!=='function')return ()=>{};
   const nodes=[...document.querySelectorAll('#content [id]')].map(el=>({id:el.id,open:el.open,value:preserveValues&&el.matches?.('input,select,textarea')?el.value:undefined,top:el.scrollTop,left:el.scrollLeft}));
   const details=[...document.querySelectorAll('#content details')].map(el=>({label:el.querySelector('summary')?.textContent,open:el.open}));
   const scrollers=[...document.querySelectorAll('#content .spend-table-wrap')].map(el=>({label:el.getAttribute('aria-label'),left:el.scrollLeft,top:el.scrollTop}));
-  const focus=active?.id,start=active?.selectionStart,end=active?.selectionEnd,top=root.scrollTop;
+  const focus=active?.id,top=root.scrollTop;
+  let selection;
+  // Selection APIs are only defined for text controls; some browsers throw.
+  if(spendSupportsSelection(active))try{selection=[active.selectionStart,active.selectionEnd,active.selectionDirection];}catch{}
   return ()=>{
     for(const saved of nodes){const el=document.getElementById?.(saved.id);if(!el)continue;if(saved.open!==undefined)el.open=saved.open;if(saved.value!==undefined)el.value=saved.value;el.scrollTop=saved.top;el.scrollLeft=saved.left;}
     for(const el of document.querySelectorAll('#content details')){const saved=details.find(s=>s.label===el.querySelector('summary')?.textContent);if(saved)el.open=saved.open;}
     for(const el of document.querySelectorAll('#content .spend-table-wrap')){const saved=scrollers.find(s=>s.label===el.getAttribute('aria-label'));if(saved){el.scrollTop=saved.top;el.scrollLeft=saved.left;}}
-    const el=focus?document.getElementById?.(focus):null;el?.focus?.({preventScroll:true});if(start!=null)el?.setSelectionRange?.(start,end);
+    const el=focus?document.getElementById?.(focus):null;el?.focus?.({preventScroll:true});if(selection?.[0]!=null&&spendSupportsSelection(el))try{el.setSelectionRange(...selection);}catch{}
     root.scrollTop=top;
   };
 }

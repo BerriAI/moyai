@@ -728,3 +728,43 @@ test('pending spend costs recover automatically after a transient refresh failur
   assert.match(e.get('#content').innerHTML,/All tracked LLM requests priced/);
   assert.equal(clock.timers.size,0);
 });
+
+for(const type of ['date','number','checkbox','select-one'])test(type+' focus never reads unsupported selection during refresh',async()=>{
+  const {context:c,elements:e}=setup();fakeTimers(c);
+  await c.renderSpend();
+  const input={id:'spend-start',tagName:type==='select-one'?'SELECT':'INPUT',type,focus(){}};
+  for(const key of ['selectionStart','selectionEnd'])Object.defineProperty(input,key,{get(){throw Error('Unsupported selection');}});
+  c.document.activeElement=input;c.document.getElementById=()=>input;
+  await c.renderSpend();
+  assert.match(e.get('#content').innerHTML,/Your LLM spend/);
+});
+
+test('text selection direction survives restoration and unsupported replacement is safe',()=>{
+  const {context:c}=setup();
+  let saved;
+  const input={id:'search',tagName:'INPUT',type:'search',selectionStart:2,selectionEnd:5,selectionDirection:'backward',focus(){},setSelectionRange(...args){saved=args;}};
+  c.document.activeElement=input;c.document.getElementById=()=>input;
+  c.preserveSpendView()();assert.deepEqual(saved,[2,5,'backward']);
+  const restore=c.preserveSpendView();input.type='date';input.setSelectionRange=()=>{throw Error('unsupported');};
+  assert.doesNotThrow(restore);
+});
+
+for(const foreground of [false,true])test('deferred shared PR response survives '+(foreground?'overlapping Retry':'until interaction ends'),async()=>{
+  const {context:c,elements:e,data,prData}=setup('organization'),clock=fakeTimers(c);
+  let interacting=false;c.settingsInteractionActive=()=>interacting;c.document.querySelector=()=>null;
+  await c.renderSpend();selectTab(e,'leaderboard');await settle();
+  let finish,count=0;c.api=()=>{count++;return new Promise(resolve=>finish=resolve);};
+  c.reportData=data;
+  const background=vm.runInContext("loadSpendPRReport(reportData,'leaderboard',spendAnalyticsState.request,true,true)",c);
+  interacting=true;
+  const manual=foreground?vm.runInContext("loadSpendPRReport(reportData,'leaderboard',spendAnalyticsState.request,true)",c):null;
+  finish({...prData,total_merged:42,pending_refresh:false});await background;await manual;
+  if(!foreground){
+    assert.doesNotMatch(e.get('#spend-panel').innerHTML,/42/);
+    interacting=false;await clock.tick(4000);
+  }
+  assert.equal(count,1,'completed response is reused, not fetched again');
+  assert.match(e.get('#spend-panel').innerHTML,/42/);
+  assert.equal(e.get('#spend-export').disabled,false);
+  assert.equal(clock.timers.size,0);
+});
