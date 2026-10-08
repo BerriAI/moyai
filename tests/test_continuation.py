@@ -15,6 +15,9 @@ def test_resume_context_does_not_claim_pending_workers_or_keys_have_finished():
     settled = resumed_context({'agent_results': {'settled':True, 'children':[]},
                                'credential_resolution': {'status':'declined'}})
     assert 'HAVE SETTLED' in settled and 'REQUEST RESOLVED' in settled
+    satisfied = resumed_context({'credential_resolution': {'status': 'satisfied'}})
+    assert 'REQUEST RESOLVED' in satisfied and 'verified' in satisfied.lower() and 'access' in satisfied.lower()
+    assert 'no credential was stored or granted' in satisfied.lower()
 
 
 def test_rotation_requests_stop_only_at_next_safe_step_and_checks_tool_results():

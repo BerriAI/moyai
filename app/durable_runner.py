@@ -369,7 +369,7 @@ class DurableRunner(RunManager):
             if state.get('resume_credential') and self.credentials:
                 spec['credential_resolution'] = self.credentials.resolution(run_id,state['resume_credential'])
                 resolution = spec['credential_resolution']
-                if resolution['status'] in {'provided', 'declined'} and 'generation' in resolution:
+                if resolution['status'] in {'provided', 'declined', 'satisfied'} and 'generation' in resolution:
                     state['credential_delivery'] = {'request_id': state['resume_credential'],
                                                     'generation': resolution['generation']}
             if self.settings.run_timeout_seconds:

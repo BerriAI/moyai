@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from app.credentials import CredentialRequest, Credentials, Invoke, Materialize, ReportFailure, Resolve, SaveSecret
@@ -13,7 +14,7 @@ from app.security import Security
 from app.session_lifecycle import SessionLifecycle
 from app.temporal_runtime import TemporalRunManager
 from sandbox.continuation import AgentWait
-from test_durable import durable, drive
+from test_durable import Cloud, durable, drive
 from test_spend import active, sign_in
 from test_workspace import workspace
 
@@ -304,21 +305,31 @@ def test_pause_happens_only_after_complete_credential_tool_round():
     assert waiting.can_continue(result)
 
 
-async def test_early_decline_before_checkpoint_is_seen_after_pause(durable):
+@pytest.mark.parametrize('status', ['declined', 'satisfied'])
+async def test_early_resolution_before_checkpoint_survives_restart(
+    durable: tuple[TemporalRunManager, Cloud, str], status: str,
+) -> None:
     manager,cloud,run_id=durable
     vault=attach(manager)
     manager.store.execute("UPDATE messages SET user_id='google:alice' WHERE run_id=?",(run_id,))
     await drive(manager,run_id,phase='monitor')
     request=vault.request(manager.store.run(run_id),CredentialRequest(provider='openai',reason='Run evaluation',request_key='key'))
-    vault.resolve(request['request_id'],Resolve(decision='decline'),'google:alice',False)
+    if status == 'declined':
+        vault.resolve(request['request_id'],Resolve(decision='decline'),'google:alice',False)
+    else:
+        await vault.call(manager.store.run(run_id), 'credentials_resolve', {
+            'request_id': request['request_id'], 'generation': 0, 'source': 'existing_credentials'})
     state=manager.state(run_id)
     result={'message':'Key requested','continuation':True,'completed':False,'wait_credential':request['request_id']}
     state.update(phase='save',exit_code=0,result=result)
     manager.store.update_run(run_id,pending_result=json.dumps(result))
     manager.save(run_id,state)
+    manager = restart(manager, cloud)
     await drive(manager,run_id)
-    assert cloud.machines[1].spec['credential_resolution']['status']=='declined'
+    assert cloud.machines[1].spec['credential_resolution']['status'] == status
     assert not manager.store.rows('SELECT * FROM provider_secrets')
+    assert not continuations(manager, run_id)
+    assert not {'credential_delivery', 'resume_credential', 'wait_credential'} & manager.state(run_id).keys()
 
 
 def test_credential_tools_require_durable_identity_and_do_not_return_values(workspace):
@@ -337,6 +348,120 @@ def test_credential_tools_require_durable_identity_and_do_not_return_values(work
     assert 'Invalid' in bad.text and KEY not in bad.text
     app.state.store.update_run(run['id'],token_hash='')
     assert client.post(endpoint+'/tools/call',json=body,headers=headers).status_code==401
+
+
+@pytest.mark.parametrize('provider,source', [('generic', 'browser_session'), ('openai', 'existing_credentials')])
+async def test_external_access_closes_historical_form_without_grant_or_replay(
+    workspace: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch, provider: str, source: str,
+) -> None:
+    app, client = workspace
+    sign_in(app, client)
+    app.state.settings.temporal_enabled = True
+    vault, original = app.state.credentials, active(app)
+    request = vault.request(original, CredentialRequest(provider=provider, name='service' if provider == 'generic' else '',
+                           reason='Verify the requested workflow', request_key='workflow'))
+    run = access_followup(app, original, 'google:alice')
+    unrelated = access_request(vault, run)
+    endpoint = '/broker/' + run['id']
+    headers = {'Authorization': 'Bearer capability'}
+    body = {'name': 'credentials_resolve', 'arguments': {
+        'request_id': request['request_id'], 'generation': 0, 'source': source}}
+    assert 'credentials_resolve' in [tool['name'] for tool in client.get(endpoint + '/tools', headers=headers).json()]
+    invalid = client.post(endpoint + '/tools/call', json={**body, 'arguments': {**body['arguments'], 'value': KEY}}, headers=headers)
+    assert 'Invalid' in invalid.text and KEY not in invalid.text
+    first = client.post(endpoint + '/tools/call', json=body, headers=headers)
+    assert first.status_code == 200 and first.json()['status'] == 'satisfied' and first.json()['generation'] == 0
+    assert 'moyai_wait_credential' not in first.json()
+    row, audit = vault.row(request['request_id']), vault.store.rows('SELECT * FROM credential_audit')
+    assert row['message_id'] == original['active_message_id'] and row['actor_id'] == 'google:alice'
+    assert row['secret_id'] == '' and row['resolution_pending'] == 0
+    assert client.post(endpoint + '/tools/call', json=body, headers=headers).json() == first.json()
+    assert vault.store.rows('SELECT * FROM credential_audit') == audit
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    value = generic_value('env') if provider == 'generic' else KEY
+    assert client.post('/api/credentials/requests/' + request['request_id'], json={
+        'generation': 0, 'scope': 'personal', 'lifetime': 'session', 'value': value}).status_code == 200
+    assert [item['id'] for item in client.get('/api/runs/' + run['id']).json()['credential_requests']] == [unrelated['request_id']]
+    assert not vault.store.rows('SELECT * FROM provider_secrets') and not vault.store.has_queued_messages(run['id'])
+    if provider == 'generic':
+        material = vault.materialize(run, Materialize(request_ids=[request['request_id']]))
+        assert material['status'] == 'satisfied' and 'bindings' not in material
+    else:
+        with pytest.raises(HTTPException) as error:
+            await vault.invoke(run, Invoke(request_id=request['request_id'], method='GET', path='/models'))
+        assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize('decision', ['provide', 'decline'])
+async def test_secure_form_wins_race_with_external_resolution(
+    workspace: tuple[FastAPI, TestClient], decision: str,
+) -> None:
+    app, client = workspace
+    sign_in(app, client)
+    vault, run = app.state.credentials, active(app)
+    request = access_request(vault, run)
+    body = Resolve(decision='decline') if decision == 'decline' else Resolve(
+        scope='personal', lifetime='session', value=SecretStr(generic_value('env')))
+    vault.resolve(request['request_id'], body, 'google:alice', False)
+    before = vault.row(request['request_id'])
+    result = await vault.call(run, 'credentials_resolve', {
+        'request_id': request['request_id'], 'generation': 0, 'source': 'browser_session'})
+    assert result['status'] == before['status'] and result['generation'] == 0
+    assert vault.row(request['request_id']) == before
+
+
+@pytest.mark.parametrize('mismatch', ['generation', 'actor', 'run', 'turn', 'token', 'status', 'message'])
+async def test_external_resolution_rejects_stale_or_foreign_scope(
+    workspace: tuple[FastAPI, TestClient], mismatch: str,
+) -> None:
+    app, client = workspace
+    sign_in(app, client)
+    vault, run = app.state.credentials, active(app)
+    request = access_request(vault, run)
+    args = {'request_id': request['request_id'], 'generation': 0, 'source': 'browser_session'}
+    if mismatch == 'generation':
+        args['generation'] = 1
+    elif mismatch == 'actor':
+        run = access_followup(app, run)
+    elif mismatch == 'run':
+        run = active(app)
+    elif mismatch == 'turn':
+        access_followup(app, run, 'google:alice')
+    elif mismatch == 'token':
+        vault.store.update_run(run['id'], token_hash='replacement-token-hash')
+    elif mismatch == 'status':
+        vault.store.update_run(run['id'], status='stopping')
+    else:
+        vault.store.finish_message(run['id'], run['active_message_id'], 'Done')
+    before = vault.row(request['request_id'])
+    with pytest.raises((HTTPException, ValueError)):
+        await vault.call(run, 'credentials_resolve', args)
+    assert vault.row(request['request_id']) == before
+    assert not vault.store.rows('SELECT * FROM provider_secrets')
+
+
+def test_provider_inventory_discovers_active_authorized_vault_and_pending_handles(
+    workspace: tuple[FastAPI, TestClient],
+) -> None:
+    app, client = workspace
+    sign_in(app, client)
+    app.state.settings.temporal_enabled = True
+    vault, run = app.state.credentials, active(app)
+    request = requested(app, run)
+    data = {'provider': 'generic', 'name': '1password-shared', 'label': 'Shared', 'scope': 'personal',
+            'lifetime': 'persistent', 'value': json.dumps({'OP_SERVICE_ACCOUNT_TOKEN': KEY}), 'client_id': 'active-vault'}
+    shared = client.post('/api/credentials/secrets', json=data).json()['id']
+    assert client.post('/api/credentials/secrets', json={**data, 'client_id': 'expired-vault',
+        'expires_at': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()}).status_code == 201
+    endpoint, headers = '/broker/' + run['id'] + '/tools/call', {'Authorization': 'Bearer capability'}
+    body = {'name': 'credentials_list', 'arguments': {'provider': 'fireworks'}}
+    result = client.post(endpoint, json=body, headers=headers).json()
+    assert result['credentials'] == [] and [item['id'] for item in result['credential_sources']] == [shared]
+    assert [(item['request_id'], item['generation']) for item in result['pending_requests']] == [(request['request_id'], 0)]
+    assert KEY not in json.dumps(result)
+    access_followup(app, run)
+    result = client.post(endpoint, json=body, headers=headers).json()
+    assert result['pending_requests'] == [] and result['credential_sources'] == []
 
 
 def access_request(vault,run,*,format='env',key='cluster'):

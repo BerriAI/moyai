@@ -24,6 +24,8 @@ def resumed_context(spec):
         instruction = ('ACCESS REQUEST IS STILL PENDING. Incorporate the user message in the same task; '
                        'do not claim access was supplied or create a duplicate request. '
                        if resolution['status'] == 'pending' else
+                       'ACCESS REQUEST RESOLVED. Continue using the verified existing access; no credential was stored or granted. '
+                       'Recheck that access when needed. ' if resolution['status'] == 'satisfied' else
                        'ACCESS REQUEST RESOLVED. Continue the original work if provided. If declined, explain '
                        'what can be done without this access; do not request it again unless the user asks. ')
         text += '\n\n' + instruction + '\n' + json.dumps(resolution)

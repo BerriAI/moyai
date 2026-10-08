@@ -127,6 +127,12 @@ class ListCredentials(Arguments):
     name: str = Field(default='', max_length=80)
 
 
+class ResolveExternal(Arguments):
+    request_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    generation: int = Field(ge=0)
+    source: Literal['browser_session', 'existing_credentials']
+
+
 class Materialize(Arguments):
     request_ids: list[str] = Field(min_length=1, max_length=8)
 
@@ -223,7 +229,8 @@ class UpdateSecret(Arguments):
 
 
 TOOLS = {
-    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized metadata only, including reuse scope, expiry and connection status; never secret values.'),
+    'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
+    'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Existing authorized access may be reused; otherwise the session checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
     'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
     'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication opens a secure replacement request and pauses the session. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
@@ -337,8 +344,18 @@ class Credentials:
 
     def inventory(self, run, args):
         rows = self.store.rows("SELECT * FROM provider_secrets WHERE revoked_at='' ORDER BY created_at DESC")
-        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in rows
-                if self.permitted(row, run, run['active_user_id'])
+        authorized = [row for row in rows if self.permitted(row, run, run['active_user_id'])]
+        with self.store.connect() as conn:
+            pending = self.pending_rows(conn, run['id'])
+        return {'credentials': [self.metadata(row, run['active_user_id'], False) for row in authorized
+                if (not args.provider or row['provider'] == args.provider)
+                and (not args.name or row['name'] == args.name.strip().lower())],
+                'credential_sources': [self.metadata(row, run['active_user_id'], False) for row in authorized
+                    if row['provider'] == 'generic' and row['name'] == '1password-shared' and self.status(row) == 'active'],
+                'pending_requests': [{'request_id': row['id'], **{key: row[key] for key in ('generation', 'provider', 'name', 'reason')}}
+                    for row in pending
+                    if (self.same_requester(row['actor_id'], run['active_user_id'])
+                        or self.same_requester(run['active_user_id'], row['actor_id']))
                 and (not args.provider or row['provider'] == args.provider)
                 and (not args.name or row['name'] == args.name.strip().lower())]}
 
@@ -413,6 +430,10 @@ class Credentials:
     def ready(self, request):
         if request['status'] == 'pending':
             return self.pending_result(request)
+        if request['status'] == 'satisfied':
+            return {'status': 'satisfied', 'request_id': request['id'], 'generation': request['generation'],
+                    'provider': request['provider'],
+                    'instructions': 'This request was closed after access was verified through another path. No credential was stored or granted. Continue using that access, rechecking it when needed. If it is no longer usable, create a new request with a new request_key.'}
         if request['status'] == 'declined':
             return {'status': 'declined', 'request_id': request['id'], 'provider': request['provider'],
                     'instructions': 'The user declined this access request. Continue without it, explain any limitation, and do not request it again unless the user asks.'}
@@ -549,15 +570,16 @@ class Credentials:
                        'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
                 conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
                 self.audit_in(conn, actor, row['secret_id'], 'reused' if secret else 'requested', run['id'])
-            if row['status'] in {'provided', 'declined'}:
+            if row['status'] in {'provided', 'declined', 'satisfied'}:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
-        self.store.event(run['id'], 'credential', 'Access ready' if row['status'] == 'provided' else 'Access requested', {'request_id': row['id']})
+        message = {'pending': 'Access requested', 'provided': 'Access ready'}.get(row['status'], 'Access request ' + row['status'])
+        self.store.event(run['id'], 'credential', message, {'request_id': row['id']})
         return self.ready(row)
 
     def acknowledge_in(self, conn, run_id, message_id, request_id, generation):
         """A receipt belongs to the exact generation delivered to its original turn."""
         conn.execute("""UPDATE credential_requests SET resolution_pending=0,resolution_error=''
-            WHERE id=? AND run_id=? AND message_id=? AND generation=? AND resolution_pending=1 AND status IN ('provided','declined')
+            WHERE id=? AND run_id=? AND message_id=? AND generation=? AND resolution_pending=1 AND status IN ('provided','declined','satisfied')
             AND EXISTS(SELECT 1 FROM messages m JOIN runs r ON r.id=m.run_id
                 WHERE m.id=? AND m.run_id=? AND m.status='running' AND r.active_message_id=m.id)""",
             (request_id, run_id, message_id, generation, message_id, run_id))
@@ -627,6 +649,31 @@ class Credentials:
                  'root_id': self.root(run), 'can_personal': self.same_requester(user_id, row['actor_id']), 'can_organization': admin,
                  **self.setup(row), 'provider_name': row['name'] or PROVIDERS[row['provider']]['name']}
                 for row in rows]
+
+    def resolve_external(self, run: dict[str, object], args: ResolveExternal) -> dict[str, object]:
+        with self.store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
+            if (not current or current['deleted_at'] or current['status'] != 'running'
+                    or not current['active_user_id'] or not current['token_hash']
+                    or any(current[key] != run[key] for key in ('active_message_id', 'active_user_id', 'token_hash'))
+                    or not conn.execute("SELECT 1 FROM messages WHERE id=? AND run_id=? AND status='running'",
+                                        (current['active_message_id'], current['id'])).fetchone()):
+                raise HTTPException(409, 'This agent turn is no longer active.')
+            row, _ = self.authorized_request(conn, current, args.request_id)
+            if row['generation'] != args.generation:
+                raise HTTPException(409, 'This access request changed. Check credentials_list again.')
+            if row['status'] == 'pending':
+                # The active caller consumes this result; never replay the historical requesting turn.
+                conn.execute("""UPDATE credential_requests SET status='satisfied',resolved_at=?,
+                    resolution_pending=0,resolution_error='' WHERE id=?""", (now(), row['id']))
+                self.audit_in(conn, current['active_user_id'], '', 'satisfied via ' + args.source, current['id'])
+                conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'credential',?,?,?)",
+                             (current['id'], 'Access request satisfied through verified existing access',
+                              json.dumps({'request_id': row['id'], 'source': args.source,
+                                          'turn_id': current['active_message_id']}), now()))
+                row = {**row, 'status': 'satisfied'}
+            return {**self.ready(row), 'generation': row['generation']}
 
     def resolve(self, request_id, body, user_id, admin):
         with self.store.connect() as conn:
@@ -755,6 +802,8 @@ class Credentials:
             return self.inventory(run, args)
         if name == 'credentials_request':
             return self.request(run, args)
+        if name == 'credentials_resolve':
+            return self.resolve_external(run, args)
         if name == 'credentials_report_failure':
             return self.report_failure(run, args)
         if name == 'credentials_run':

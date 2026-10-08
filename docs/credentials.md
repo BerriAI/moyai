@@ -14,6 +14,19 @@ the conversation/files, release the Modal sandbox and wait for a Temporal wake.
 Providing or declining access resumes the same message. Slack and subagent
 requests link to the same secure web flow; never paste credentials into chat.
 
+After verifying a manual browser login or existing authorized access, the agent
+uses `credentials_list` to find the pending request ID and generation, then
+`credentials_resolve` with `source=browser_session` or `existing_credentials`.
+This marks only that request `satisfied` and removes its secure form. It stores
+no secret, grants no access and does not replay the earlier requesting turn.
+The agent must verify access first; a chat message saying "signed in" alone is
+insufficient. Other requests stay pending. If the access later stops working,
+create a new request with a new `request_key` after checking existing access.
+
+Provider-filtered inventory also includes authorized active Shared vault
+connections in `credential_sources`. An empty provider-key list does not mean
+the vault is empty: inspect that source before asking for another key.
+
 For generic services, requests can include a verified service `setup_url` and
 plain-text `setup_instructions`. These appear in both the access card and secure
 form. The agent should explain the actual access method, such as an AWS access

@@ -424,7 +424,8 @@ def test_slack_access_choices_are_ordered_and_cas_preserves_changes_during_deliv
     assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key=?", ('credential:' + request_id,))) == 1
 
 
-def test_slack_access_legacy_card_reopens_and_resolves_in_place(access_delivery):
+@pytest.mark.parametrize('status', ['declined', 'satisfied'])
+def test_slack_access_legacy_card_reopens_and_resolves_in_place(access_delivery, status: str) -> None:
     from app.credentials import Resolve
 
     app, client, prepare, calls, deliver = access_delivery
@@ -447,11 +448,16 @@ def test_slack_access_legacy_card_reopens_and_resolves_in_place(access_delivery)
     assert client.post('/hooks/slack/interactions', **signed(scope_action(request_id), form=True)).status_code == 409
     current = scope_action(request_id, generation=1)
     assert client.post('/hooks/slack/interactions', **signed(current, form=True)).status_code == 200
-    vault.resolve(request_id, Resolve(decision='decline', generation=1), vault.row(request_id)['actor_id'], False)
+    if status == 'declined':
+        vault.resolve(request_id, Resolve(decision='decline', generation=1), vault.row(request_id)['actor_id'], False)
+    else:
+        store.update_run(vault.row(request_id)['run_id'], token_hash='active-test-capability-hash')
+        asyncio.run(vault.call(store.run(vault.row(request_id)['run_id']), 'credentials_resolve', {
+            'request_id': request_id, 'generation': 1, 'source': 'browser_session'}))
     app.state.slack.chat.collect()
     deliver()
     assert all(block['type'] != 'actions' for block in calls[-1][1]['blocks'])
-    assert 'declined' in calls[-1][1]['blocks'][-1]['text']['text']
+    assert status in calls[-1][1]['blocks'][-1]['text']['text']
     assert client.post('/hooks/slack/interactions', **signed(current, form=True)).status_code == 409
     assert sum(method == 'chat.postMessage' for method, _ in calls) == 1
 
