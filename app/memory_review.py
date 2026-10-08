@@ -247,7 +247,11 @@ class MemoryReview:
                 result = json.loads(b''.join(chunks))
                 capture.consume(result)
                 status = 'completed'
-                return Review.model_validate_json(result['choices'][0]['message']['content'])
+                choice = result['choices'][0]
+                if (choice.get('finish_reason') != 'stop' or choice['message'].get('refusal')
+                        or choice['message'].get('tool_calls')):
+                    raise ValueError('Incomplete memory review')
+                return Review.model_validate_json(choice['message']['content'])
             except asyncio.CancelledError:
                 status = 'interrupted'
                 raise
@@ -268,6 +272,11 @@ class MemoryReview:
                 return
             if self.inputs(job) != sources:
                 raise ValueError('Memory source changed')
+            repo = Note.repository(source['repo_url']) if source['repo_url'] else ''
+            current = {(n['id'], n['revision']) for n in self.memory.listing(job['owner_id'])
+                       if not n['repo_url'] or n['repo_url'] == repo}
+            if current != {(n['id'], n['revision']) for n in notes}:
+                raise ValueError('Memory library changed during review')
             saved, seen = 0, set()
             for item in review.memories:
                 if item.key in seen or item.source_quote not in source_by_id.get(item.source_message_id, ''):

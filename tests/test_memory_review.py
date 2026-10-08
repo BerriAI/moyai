@@ -46,7 +46,7 @@ def proposal(request, **changes):
 
 
 def completion(notes):
-    return httpx.Response(200, json={'choices': [{'message': {'content': json.dumps({'memories': notes})}}],
+    return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps({'memories': notes})}}],
         'usage': {'prompt_tokens': 100, 'completion_tokens': 30, 'total_tokens': 130}},
         headers={'x-litellm-call-id': 'test-receipt', 'x-litellm-response-cost': '0.001'})
 
@@ -261,6 +261,34 @@ async def test_noop_and_secret_inputs_do_not_create_notes(review_app):
     turn(app, 'The api_key=do-not-store-this belongs to my project.')
     await process(app, lambda r: pytest.fail('Secret-containing message sent to extractor'))
     assert not app.state.memory.listing('google:alice')
+
+
+@pytest.mark.parametrize('finish', ['length','content_filter','tool_calls'])
+async def test_partial_or_refused_completion_cannot_save_memory(review_app, finish):
+    app = review_app
+    turn(app)
+    def handler(request):
+        data = completion([proposal(request)]).json()
+        data['choices'][0]['finish_reason'] = finish
+        return httpx.Response(200, json=data)
+    with pytest.raises(ValueError): await process(app, handler)
+    assert not app.state.memory.listing('google:alice')
+
+
+async def test_concurrent_agent_save_requires_fresh_deduplication(review_app):
+    app = review_app
+    _, mid = turn(app)
+    def handler(request):
+        with app.state.store.connect() as conn:
+            app.state.memory.save_in(conn, 'google:alice', Note(key='agent-chosen-key', title='Benchmark reports',
+                content='Use p95 latency and error rate.', request_id='agent-save'),
+                source={'type':'chat','message_id':mid})
+        return completion([proposal(request)])
+    with pytest.raises(ValueError, match='library changed'): await process(app, handler)
+    assert len(app.state.memory.listing('google:alice')) == 1
+    app.state.store.execute("UPDATE memory_reviews SET available_at='' WHERE status='pending'")
+    await process(app, lambda r: completion([]))
+    assert jobs(app)[0]['status'] == 'completed' and jobs(app)[0]['saved_count'] == 0
 
 
 async def test_lifecycle_recovers_durable_job_and_stops_worker(review_app):
