@@ -18,7 +18,10 @@ def broker_headers(url: str, token: str) -> dict[str, str]:
             or not target.path.startswith('/broker/')
             or any('\r' in value or '\n' in value for value in (client_id, secret))):
         raise ValueError('Cloudflare credentials require the configured HTTPS broker destination.')
-    return {**headers, 'CF-Access-Client-Id': client_id, 'CF-Access-Client-Secret': secret}
+    # Cloudflare's browser integrity checks reject Python's default user agent
+    # before evaluating the service-token policy. Identify our machine client.
+    return {**headers, 'User-Agent': 'Moyai/1.0',
+            'CF-Access-Client-Id': client_id, 'CF-Access-Client-Secret': secret}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

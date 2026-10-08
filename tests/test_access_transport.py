@@ -51,6 +51,10 @@ def access_origin(tmp_path, monkeypatch):
                 self.send_header('Location', '/stolen')
                 self.end_headers()
                 return
+            if self.headers.get('User-Agent') != 'Moyai/1.0':
+                self.send_response(403)
+                self.end_headers()
+                return
             if (self.headers.get('CF-Access-Client-Id') != 'test-client'
                     or self.headers.get('CF-Access-Client-Secret') != 'test-edge-secret'
                     or self.headers.get('Authorization') != 'Bearer test-run'):
@@ -146,13 +150,14 @@ def test_git_headers_are_scoped_to_broker_url_and_do_not_persist_in_config(monke
     monkeypatch.setenv('WORKSPACE_ACCESS_CLIENT_ID', 'test-client')
     monkeypatch.setenv('WORKSPACE_ACCESS_CLIENT_SECRET', 'test-secret')
     env = git_environment(remote, 'test-run')
-    assert env['GIT_CONFIG_COUNT'] == '4'
-    for index in range(3):
+    assert env['GIT_CONFIG_COUNT'] == '5'
+    for index in range(4):
         assert env[f'GIT_CONFIG_KEY_{index}'] == 'http.' + remote + '/.extraHeader'
     assert env['GIT_CONFIG_VALUE_0'] == 'Authorization: Bearer test-run'
-    assert env['GIT_CONFIG_VALUE_2'] == 'CF-Access-Client-Secret: test-secret'
-    assert env['GIT_CONFIG_KEY_3'] == 'http.followRedirects'
-    assert env['GIT_CONFIG_VALUE_3'] == 'false'
+    assert env['GIT_CONFIG_VALUE_1'] == 'User-Agent: Moyai/1.0'
+    assert env['GIT_CONFIG_VALUE_3'] == 'CF-Access-Client-Secret: test-secret'
+    assert env['GIT_CONFIG_KEY_4'] == 'http.followRedirects'
+    assert env['GIT_CONFIG_VALUE_4'] == 'false'
 
 
 def test_public_activity_and_archives_redact_edge_credentials(monkeypatch, tmp_path):
