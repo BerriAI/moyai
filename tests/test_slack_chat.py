@@ -1135,8 +1135,10 @@ def test_media_rechecks_destination_after_awaits(media_delivery, monkeypatch, bo
     assert media[0]['status'] == 'uncertain'
 
 
-def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_delivery, monkeypatch):
+def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_delivery, slack_app, monkeypatch):
     app, prepare, calls, uploaded = media_delivery
+    client = slack_app[1]
+    app_loop = app.state.slack.chat.watcher.get_loop()
     run_id, answer = prepare()
     finish(app, run_id, answer)
     original = app.state.connectors.request
@@ -1154,8 +1156,11 @@ def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_del
     assert any(kwargs['json'].get('attachments') for method, kwargs in calls if method == 'chat.postMessage')
     async def restart() -> None:
         app.state.slack.recover()
+        watcher = app.state.slack.chat.watcher
+        assert watcher.get_loop() is app_loop
         await app.state.slack.chat.shutdown()
-    asyncio.run(restart())
+        assert watcher.cancelled()
+    client.portal.call(restart)
     app.state.slack.chat.collect()
     drain_answers(app)
     assert sum(method == 'files.completeUploadExternal' for method, _ in calls) == 1
