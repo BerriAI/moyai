@@ -38,6 +38,7 @@ class CodexAgent(HarnessAgent):
         self.journal = None
         self.calls = {}
         self.completed = set()
+        self.observed_outputs = set()
         self.compaction_window = None
         self.boundary_failed = False
         self.boundary_reason = ''
@@ -77,8 +78,9 @@ class CodexAgent(HarnessAgent):
                 # Input IDs are only a barrier; wire text never becomes a receipt.
                 # A code-mode output may yield while nested tools are still live.
                 # Let the model poll them; lifecycle work below must still wait.
-                if not self.receipts.wait_for(lambda: expected <= self.completed or self.stopped.is_set(),
-                                              timeout=RECEIPT_TIMEOUT_SECONDS):
+                if not self.receipts.wait_for(
+                        lambda: expected <= self.completed | self.observed_outputs or self.stopped.is_set(),
+                        timeout=RECEIPT_TIMEOUT_SECONDS):
                     self.boundary_failed = True
                     self.boundary_reason = 'native output notification timed out'
                     return False
@@ -193,6 +195,7 @@ class CodexAgent(HarnessAgent):
         self.model_calls = 0
         self.calls.clear()
         self.completed.clear()
+        self.observed_outputs.clear()
         self.journal.call_namespace = uuid4().hex
         message_items = {}
         finished, answer = False, ''
@@ -221,11 +224,11 @@ class CodexAgent(HarnessAgent):
                             if event.method == 'rawResponseItem/completed':
                                 item = payload.get('item', {})
                                 if item.get('type') in {'function_call_output', 'custom_tool_call_output'}:
-                                    # Astra's code-mode outer call ID differs from
-                                    # nested tool item IDs. A yielded outer output
-                                    # does not settle its nested tool receipts.
+                                    # Output observation admits polling; only native
+                                    # completion settles a receipt, even when both
+                                    # events carry the same ID.
                                     with self.receipts:
-                                        self.completed.add(item['call_id'])
+                                        self.observed_outputs.add(item['call_id'])
                                         self.receipts.notify_all()
                             elif event.method in {'item/started', 'item/completed'}:
                                 item = payload['item']

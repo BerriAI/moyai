@@ -385,7 +385,9 @@ def test_each_invocation_uses_disposable_native_state_and_preserves_public_recei
 
 
 @pytest.mark.parametrize('outer_marker_first', [False, True])
-def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(codex_agent, monkeypatch, outer_marker_first):
+@pytest.mark.parametrize('output_id', ['outer-code-call', 'native-call'])
+def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(
+        codex_agent, monkeypatch, outer_marker_first, output_id):
     agent, _, _ = codex_agent
     notifications, processed = queue.Queue(), queue.Queue()
     stepped = threading.Event()
@@ -413,11 +415,11 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(c
             return notification
     monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
     monkeypatch.setattr(agent, 'validate', lambda: None)
-    request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': 'outer-code-call',
+    request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': output_id,
                                     'output': 'wire-private-marker'}]}).encode()
     nested = event('item/completed', {'item': finished})
     outer = event('rawResponseItem/completed', {'item': {
-        'type': 'custom_tool_call_output', 'call_id': 'outer-code-call', 'output': 'raw-private-marker'}})
+        'type': 'custom_tool_call_output', 'call_id': output_id, 'output': 'raw-private-marker'}})
     with ThreadPoolExecutor(max_workers=2) as executor:
         run = executor.submit(agent.run_conversation, 'Do the task.', conversation_history=[], system_message='Moyai')
         try:
@@ -429,11 +431,12 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(c
             first, second = (outer, nested) if outer_marker_first else (nested, outer)
             notifications.put(first)
             assert processed.get(timeout=2) == first.method
-            assert not stepped.wait(0.05)
             if outer_marker_first:
+                assert not stepped.wait(0.05)
                 assert boundary.result(timeout=2) is True
                 assert agent.journal.pending and agent.model_calls == 1
-            else:
+            elif output_id != 'native-call':
+                assert not stepped.wait(0.05)
                 assert not boundary.done()
             notifications.put(second)
             assert processed.get(timeout=2) == second.method
@@ -451,6 +454,40 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(c
     assert 'private-marker' not in json.dumps(result)
 
 
+@pytest.mark.parametrize('native_completion', [False, True])
+def test_raw_output_before_native_start_preserves_receipt_lifecycle(codex_agent, monkeypatch, native_completion):
+    agent, events, store = codex_agent
+    started, finished = native_item('mcpToolCall', failed=True)
+
+    async def stream():
+        # A fresh invocation must not inherit output IDs from its predecessor.
+        assert not getattr(agent, 'observed_outputs', set())
+        yield sdk_event('rawResponseItem/completed', {'item': {
+            'type': 'function_call_output', 'call_id': started['id'], 'output': 'raw-private-marker'}})
+        yield sdk_event('item/started', {'item': started})
+        assert agent.journal.pending == {started['id']} and store.pending
+        if native_completion:
+            for _ in range(2):
+                yield sdk_event('item/completed', {'item': finished})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    install_codex_client(monkeypatch, agent, stream)
+    results = [asyncio.run(agent._run('Continue.', 'Moyai')) for _ in range(2 if native_completion else 1)]
+    assert all(result['completed'] is native_completion for result in results)
+    assert bool(store.pending) is (not native_completion)
+    receipts = [message for message in results[-1]['messages'] if message.get('role') == 'tool']
+    assert len(receipts) == (2 if native_completion else 0)
+    saved = [json.loads(row[0]) for row in store.db.execute('SELECT message FROM journal')]
+    saved_receipts = [message for message in saved if message.get('role') == 'tool']
+    assert len({receipt['tool_call_id'] for receipt in saved_receipts}) == len(receipts)
+    tool_events = [event[2]['phase'] for event in events if event[0] == 'tool']
+    assert tool_events == (['started', 'error'] * 2 if native_completion else ['started'])
+    assert 'raw-private-marker' not in json.dumps([results, events, store.history()])
+    if not native_completion:
+        assert results[-1]['sdk_failure']['source'] == 'incomplete_turn'
+        assert results[-1]['sdk_failure']['pending_tools'] == 1
+
+
 def test_polling_counts_toward_limit_without_checkpointing_live_tools(codex_agent, monkeypatch):
     from sandbox.transport_recovery import recovery_marker
     agent, _, store = codex_agent
@@ -458,7 +495,7 @@ def test_polling_counts_toward_limit_without_checkpointing_live_tools(codex_agen
     maintenance = []
     monkeypatch.setattr(codex_harness, 'maintain_context', lambda *_: maintenance.append(True))
     agent.record_item(native_item('commandExecution')[0], completed=False)
-    agent.completed.add('outer')
+    agent.observed_outputs.add('outer')
     agent.context = agent.context.__class__(agent.context.spec, agent.context.relay, agent.context.config,
         agent.context.activity, lambda: pytest.fail('Cannot checkpoint a running tool'), agent.context.cwd)
     request = json.dumps({'input': [{'type': 'custom_tool_call_output', 'call_id': 'outer'}]})
