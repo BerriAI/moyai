@@ -32,6 +32,7 @@ class InputPending(Exception):
 
 class BrokerRelay:
     def __init__(self, remote, token, notify=None, report_error=None):
+        self.notify = notify
         self.last_error = ''
         self.last_failure = None
         self.uncertain_tool = False
@@ -43,6 +44,7 @@ class BrokerRelay:
         self.repository_startup = False
         self.steering = None
         self.before_model = None
+        self.on_context_ready = None
         self.context_required = None
         self.context_recovery = False
         relay = self
@@ -309,8 +311,8 @@ class BrokerRelay:
     def context_window(self):
         request = urllib.request.Request(self.remote.rstrip('/') + '/context/window',
             headers={'Authorization': 'Bearer ' + self.token, 'X-Moyai-Request-ID': uuid4().hex})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            value = json.loads(response.read(8192))
+        value = read_with_reconnect(request, lambda response: json.loads(response.read(8192)),
+                                    stage='context_window', notify=self.notify)
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
             raise ValueError('The broker did not return a usable compaction window.')
         return value

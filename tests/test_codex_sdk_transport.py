@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from sandbox.codex_harness import CodexAgent
+from sandbox.broker_relay import BrokerRelay
 from sandbox.context_store import ContextStore
 
 
@@ -33,12 +34,13 @@ def send_response(handler, output, sequence, input_tokens=500):
 
 
 @pytest.mark.parametrize('outcome', [
-    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
+    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit', 'startup-reconnect'])
 def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, outcome):
     requests, attempts, calls, events, faults = [], [], [], [], []
     samples, summaries = [], []
     boundaries, recovered = [], []
-    successful = outcome in {'complete', 'compaction', 'context-recovery-limit'}
+    successful = outcome in {'complete', 'compaction', 'context-recovery-limit', 'startup-reconnect'}
+    context_reads = []
     max_iterations = {'context-recovery-limit': 4, 'iteration-limit': 2}.get(outcome, 12)
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -67,6 +69,11 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             self.wfile.write(raw)
 
         def do_GET(self):
+            if self.path == '/context/window' and outcome == 'startup-reconnect':
+                context_reads.append(len(requests))
+                status = 502 if len(context_reads) == 1 else 200
+                print(f'Context GET: HTTP {status}; model requests so far: {len(requests)}', flush=True)
+                return self.reply({'input_budget': 64000}, status)
             if self.path != '/tools':
                 faults.append('Unexpected GET ' + self.path)
                 return self.reply({'error': {'message': 'Unknown route'}}, 404)
@@ -132,6 +139,10 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     relay.url = f'http://127.0.0.1:{server.server_port}'
+    if outcome == 'startup-reconnect':
+        context_relay = BrokerRelay(relay.url, 'fixture-capability', notify=lambda message: print(message, flush=True))
+        context_relay.server.server_close()  # Only its direct metadata reader is needed.
+        relay.context_window = context_relay.context_window
     if outcome == 'compaction':
         relay.context_window = lambda: {'input_budget': 35000}
     store = ContextStore(tmp_path / 'context.sqlite3', 'codex-transport')
@@ -245,6 +256,10 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])
         assert 'codex-mcp-ok' in json.dumps(requests[-1])
+        if outcome == 'startup-reconnect':
+            assert context_reads == [0, 0, 4]
+            print('PASS: recovered startup, completed 3 real tools, cold-restored SQLite receipts; '
+                  'MCP action executed once across both invocations.', flush=True)
         saved = ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
         assert 'requester-private-first-marker' not in saved
         assert 'requester-private-second-marker' not in saved
