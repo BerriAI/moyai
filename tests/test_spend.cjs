@@ -486,3 +486,85 @@ for (const scope of ['personal','organization']) test(scope+' request costs dist
   assert.match(html,/Receipt access required/);
   assert.doesNotMatch(html,/In progress/);
 });
+
+test('Users joins PR identities without replacing period spend and exports the filtered exact metrics',async()=>{
+  const {context:c,elements,prData,data,calls}=withActivity();
+  Object.assign(prData.leaderboard[0],{created_prs:3,status_counts:{open:2,merged:1},merged_prs:2,cost_per_merged_pr:'3.1415926535897932384626433832',spend:'6.2831853071795864769252867664'});
+  prData.leaderboard.push({user_id:'slack:only',name:'Maya',email:'maya@example.com',created_prs:1,status_counts:{draft:1},merged_prs:0,cost_per_merged_pr:null});
+  prData.leaderboard.push({user_id:'unattributed',name:'Unattributed',created_prs:0,merged_prs:1,cost_per_merged_pr:'0',spend:'0'});
+  data.users.push({...data.users[0],id:'spend-only',email:'spend@example.com',spend:'99'});
+  await c.renderSpend();await selectTab(elements,'users');await settle();
+  const html=elements.get('#spend-users').innerHTML;
+  for(const text of ['PRs by status','$ per PR merged','Open 2','Draft 1','$3.14','$1.25','Partial','No PRs created','No merged PRs','Unattributed'])assert.ok(html.includes(text),text);
+  const joined=c.spendUsersWithPRs(data);
+  assert.equal(joined.length,4);
+  assert.equal(joined.find(u=>u.id==='google:maya').spend,'1.25');
+  assert.equal(joined.find(u=>u.id==='slack:only').spend,'0');
+  let rows;c.downloadAnalyticsCSV=(_name,value)=>rows=value;
+  const activityHTML=elements.get('#spend-activity').innerHTML,requests=calls.length;
+  c.$('#spend-user').value='google:maya';elements.get('#spend-user').onchange();elements.get('#spend-export').onclick();
+  const value=name=>rows[1][rows[0].indexOf(name)];
+  assert.equal(value('LLM spend USD'),'1.25');
+  assert.equal(value('Merged PRs (created in period)'),1);
+  assert.equal(value('PRs merged in period'),2);
+  assert.equal(value('Cost per merged PR USD (linked spend / merged PRs)'),'3.1415926535897932384626433832');
+  assert.equal(value('PR cost coverage'),'Partial');
+  c.$('#spend-user').value='slack:only';elements.get('#spend-user').onchange();elements.get('#spend-export').onclick();
+  assert.equal(value('Draft PRs (created in period)'),1);
+  assert.equal(value('Cost per merged PR USD (linked spend / merged PRs)'),null);
+  assert.equal(value('PR cost coverage'),'No merged PRs');
+  assert.equal(elements.get('#spend-activity').innerHTML,activityHTML);
+  assert.equal(calls.length,requests);
+  assert.ok(rows.some(row=>row[0]==='Team activity (all users)'));
+  await c.renderSpend();await settle();
+  assert.equal(vm.runInContext('spendState.user',c),'slack:only');
+  assert.match(elements.get('#spend-users').innerHTML,/Draft 1/);
+  const afterRefresh=calls.length;
+  await selectTab(elements,'leaderboard');await settle();assert.equal(calls.length,afterRefresh);
+});
+
+test('Users keeps spend export honest through loading, PR outage, retry and stale refresh',async()=>{
+  const {context:c,elements,prData,data}=withActivity();
+  c.testSpendData=data;
+  const api=c.api;let reject;c.api=url=>url.includes('/pull-requests?')?new Promise((_resolve,no)=>reject=no):api(url);
+  await c.renderSpend();await selectTab(elements,'users');
+  assert.match(elements.get('#content').innerHTML,/Loading pull request analytics/);
+  let rows;c.downloadAnalyticsCSV=(_name,value)=>rows=value;
+  elements.get('#spend-export').onclick();
+  const value=name=>rows[1][rows[0].indexOf(name)];
+  assert.equal(value('PR analytics'),'Loading');assert.equal(value('PRs merged in period'),null);
+  reject(Error('offline <test>'));await settle();
+  assert.match(elements.get('#spend-users').innerHTML,/offline &lt;test>/);
+  assert.doesNotMatch(elements.get('#spend-users').innerHTML,/No merged PRs/);
+  elements.get('#spend-export').onclick();assert.equal(value('PR analytics'),'Unavailable');
+  c.api=api;await elements.get('#spend-pr-retry').onclick();
+  elements.get('#spend-export').onclick();assert.equal(value('PR analytics'),'Available');
+  assert.equal(value('PRs merged in period'),1);
+  c.api=async url=>{if(url.includes('/pull-requests?'))throw Error('Refresh failed');return api(url);};
+  await vm.runInContext("loadSpendPRReport(testSpendData,'users',spendAnalyticsState.request,true)",c).catch(error=>{throw error;});
+  elements.get('#spend-export').onclick();assert.equal(value('PR analytics'),'May be outdated');
+  assert.match(elements.get('#spend-users').innerHTML,/PR metrics below may be outdated/);
+});
+
+test('Users PR and activity requests settle independently and late reports cannot replace a new view',async()=>{
+  for(const first of ['pr','activity']){
+    const {context:c,elements,prData}=withActivity();const api=c.api;let finishPR,finishActivity;
+    c.api=url=>url.includes('/pull-requests?')?new Promise(resolve=>finishPR=resolve):url.includes('/adoption?')?new Promise(resolve=>finishActivity=resolve):api(url);
+    await c.renderSpend();const rendered=selectTab(elements,'users');
+    if(first==='pr'){finishPR(prData);await settle();assert.notEqual(elements.get('#spend-export').disabled,false);finishActivity(activity);}
+    else{finishActivity(activity);await settle();assert.equal(elements.get('#spend-export').disabled,false);finishPR(prData);}
+    await rendered;await settle();assert.equal(elements.get('#spend-export').disabled,false);
+    assert.match(elements.get('#spend-activity').innerHTML,/Team activity/);
+    assert.match(elements.get('#spend-users').innerHTML,/Merged 1/);
+  }
+  for(const destination of ['history','leaderboard','dates','page']){
+    const {context:c,elements,prData}=withActivity();const api=c.api;let finish;
+    c.api=url=>url.includes('/pull-requests?')?new Promise(resolve=>finish=resolve):api(url);
+    await c.renderSpend();await selectTab(elements,'users');
+    if(destination==='page')c.state.pageVersion++;
+    else if(destination==='dates'){c.api=api;c.$('#spend-start').value='2026-10-02';c.$('#spend-end').value='2026-10-04';elements.get('#spend-filter-form').onsubmit({preventDefault(){}});await settle();}
+    else await selectTab(elements,destination);
+    c.$('#spend-users').innerHTML='Current view';
+    finish(prData);await settle();assert.equal(elements.get('#spend-users').innerHTML,'Current view',destination);
+  }
+});

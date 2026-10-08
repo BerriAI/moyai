@@ -4,7 +4,7 @@ const {readFileSync}=require('node:fs');
 const vm=require('node:vm');
 function setup(){
  const c={esc:v=>String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),modelName:v=>v,dollars:v=>'$'+Number(v).toFixed(6),spendCount:v=>String(v),spendState:{user:''}};
- vm.createContext(c);for(const file of ['analytics','spend-analytics'])vm.runInContext(readFileSync('app/static/'+file+'.js','utf8'),c);return c;
+ vm.createContext(c);for(const file of ['analytics','spend-prs','spend-analytics'])vm.runInContext(readFileSync('app/static/'+file+'.js','utf8'),c);return c;
 }
 test('empty, all-zero, and one-day charts have finite geometry and escaped labels',()=>{
  const c=setup();
