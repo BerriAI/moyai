@@ -5,23 +5,32 @@ import urllib.error
 import urllib.request
 
 
+# The local caller must outlive the relay's complete metadata reconnect window.
+REPOSITORY_METADATA_BUDGET = 180
+
+
 class StartupUnavailable(RuntimeError):
     def __init__(self, stage, reason):
         self.stage, self.reason = stage, reason
         super().__init__('Workspace services are temporarily unavailable. Reconnecting before starting work.')
 
 
-def read_with_reconnect(request, reader, *, stage, notify=None, budget=45,
-                        opener=None, clock=None, sleep=None):
+def read_with_reconnect(request, reader, **options):
     if request.get_method() != 'GET':
         raise ValueError('Only read-only startup requests may be retried')
+    return _read_with_reconnect(request, reader, **options)
+
+
+def _read_with_reconnect(request, reader, *, stage, notify=None, budget=45, attempt_timeout=10,
+                         opener=None, clock=None, sleep=None):
+    # Callers must establish read-only semantics before entering this loop.
     opener, clock, sleep = opener or urllib.request.urlopen, clock or time.monotonic, sleep or time.sleep
     deadline, attempt = clock() + budget, 0
     while True:
         if attempt and clock() >= deadline:
             raise StartupUnavailable(stage, reason) from None
         try:
-            with opener(request, timeout=min(10, max(1, deadline - clock()))) as response:
+            with opener(request, timeout=min(attempt_timeout, max(1, deadline - clock()))) as response:
                 result = reader(response)
             if attempt and notify:
                 notify('Workspace services reconnected. Preparing the agent.')

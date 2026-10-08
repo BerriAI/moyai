@@ -17,7 +17,7 @@ try:
     from .github_tools import checkout as github_checkout
     from .attachments import prepare_attachments
     from .activity import ActivityReporter, split_focus
-    from .startup import StartupUnavailable
+    from .startup import StartupUnavailable, REPOSITORY_METADATA_BUDGET
     from .project_environment import prepare_project
     from .memory_history import scrub_memory_history
     from .context_store import open_context, ContextUnavailable
@@ -33,7 +33,7 @@ except ImportError:
     from github_tools import checkout as github_checkout
     from attachments import prepare_attachments
     from activity import ActivityReporter, split_focus
-    from startup import StartupUnavailable
+    from startup import StartupUnavailable, REPOSITORY_METADATA_BUDGET
     from project_environment import prepare_project
     from memory_history import scrub_memory_history
     from context_store import open_context, ContextUnavailable
@@ -123,10 +123,19 @@ def _run_agent(spec, relay):
             def broker(path, body):
                 request = urllib.request.Request(relay.url + path, data=json.dumps(body).encode(),
                     headers={'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN'], 'Content-Type': 'application/json'})
-                with urllib.request.urlopen(request, timeout=90) as response:
-                    return json.load(response)
+                try:
+                    with urllib.request.urlopen(request, timeout=REPOSITORY_METADATA_BUDGET + 10) as response:
+                        return json.load(response)
+                except urllib.error.HTTPError:
+                    if relay.startup_failure and relay.startup_failure.stage == 'repository_metadata':
+                        raise relay.startup_failure from None
+                    raise
             emit('tool', 'Preparing the shared GitHub repository')
-            checked_out = github_checkout(broker, spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], **({'repository_id': spec['github_repository_id']} if spec.get('github_repository_id') else {'repository': requested_repo}))
+            relay.repository_startup = True
+            try:
+                checked_out = github_checkout(broker, spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], **({'repository_id': spec['github_repository_id']} if spec.get('github_repository_id') else {'repository': requested_repo}))
+            finally:
+                relay.repository_startup = False
             if checked_out.get('error'):
                 raise RuntimeError('The shared GitHub checkout was not confirmed')
         elif not (workspace / "repo").exists():

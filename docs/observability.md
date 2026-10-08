@@ -37,6 +37,15 @@ travels in `X-Moyai-Request-ID`. Use the response's Render ID to correlate with 
 request logs. An edge failure without an application start record narrows the
 failure boundary; it does not establish a particular proxy reset or timeout cause.
 
+Before agent execution, the initial GitHub checkout's repository/PR metadata
+reads reconnect through temporary HTTP or network failures. Each metadata lookup
+keeps its 90-second timeout within a 180-second reconnect window; the local caller
+waits another 10 seconds for the relay result. Exhaustion emits a
+`repository_metadata` startup marker for the existing bounded durable startup
+recovery. This applies only to `github_checkout` and `github_repository` metadata
+inside repository preparation. Permanent HTTP rejections, later Git operations,
+tool writes and metadata calls after startup retain their existing failure policy.
+
 With Temporal enabled, a transient model failure before any response reaches the
 SDK can continue automatically after the SDK exits, current tool receipts settle,
 and the filesystem checkpoint succeeds. Recovery retains the original user turn,
