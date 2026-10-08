@@ -79,7 +79,7 @@ does not produce another event. Legacy tasks without chat messages are out of sc
 
 The native source needs no webhook or Slack credentials. Automatic runs still
 require Temporal and retain the existing owner identity, connections, hourly cap,
-overlap rules and bounded inbox. Under load, capture waits without blocking users.
+workspace capacity and bounded inbox. Under load, capture waits without blocking users.
 A durable indexed message cursor and receipt commit together; restarts cannot
 relaunch the same delivery. Source context includes a session link, at most ten
 prior messages (1000 characters each), the triggering text (4000 characters), and
@@ -165,11 +165,19 @@ and cannot be rearmed by routine sync. Dates are stored in UTC and displayed in
 local time. Custom schedules use numeric cron, not raw RRULE.
 
 A schedule workflow launches the existing durable session runner and waits for
-it to finish, including input waits. Scheduled occurrences skip overlap
-and have a 15-minute catch-up window. Event deliveries persist before acknowledgement
-and queue while a previous run (including children) is active, the automation's
-hourly limit is full, or session capacity is unavailable. Queued events expire
-after 24 hours. A stopped/replaced worker resumes dispatch from SQLite.
+it to finish, including input waits, without blocking other occurrences. Every distinct
+matching event or scheduled occurrence creates an independent session: 20 feedback
+events can start 20 sessions, and one later event creates one more. Duplicate
+deliveries still return the original receipt. Scheduled occurrences allow overlap
+and retain their 15-minute catch-up window. Existing schedules automatically resync
+the overlap policy without changing their definition revision or invalidating queued events.
+
+Event deliveries persist before acknowledgement. The dispatcher admits bounded
+batches in rounds across automations, without waiting for earlier sessions or their
+children. Events queue when the automation's hourly limit is full, workspace session
+capacity is unavailable, or project setup is not ready. Active sandbox concurrency
+is controlled separately by the workspace runner. Queued events expire after 24 hours.
+A stopped/replaced worker resumes dispatch from SQLite.
 
 Launch receipts, the session, its initial message, and its Temporal wake commit
 atomically. A retry returns the same session. Pending edits retry after outages;

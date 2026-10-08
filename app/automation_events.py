@@ -214,11 +214,16 @@ class AutomationEvents:
             return
         async with self.lock:
             await self.capture_sessions()
-            # One head item per automation avoids a busy inbox starving others.
-            rows = self.store.rows("""SELECT e.* FROM automation_events e WHERE e.status='pending' AND e.rowid IN
-                (SELECT MIN(rowid) FROM automation_events WHERE status='pending' GROUP BY automation_id)
-                ORDER BY e.received_at LIMIT 200""")
+            # Drain bursts in bounded rounds across automations. Earlier sessions
+            # do not block new events; a full cap or unavailable setup still does.
+            rows = self.store.rows("""SELECT * FROM (
+                SELECT e.*,ROW_NUMBER() OVER (PARTITION BY automation_id ORDER BY rowid) AS position
+                FROM automation_events e WHERE status='pending')
+                ORDER BY position,received_at,automation_id LIMIT 200""")
+            waiting = set()
             for event in rows:
+                if event['automation_id'] in waiting:
+                    continue
                 try:
                     result = await self.automations.launch(event['automation_id'], event['revision'], event['occurrence'], event['expires_at'], event=True)
                 except HTTPException as exc:
@@ -226,6 +231,7 @@ class AutomationEvents:
                         raise
                     continue
                 if result['outcome'] == 'waiting':
+                    waiting.add(event['automation_id'])
                     self.store.execute('UPDATE automation_events SET detail=? WHERE occurrence=?',
                                        (result['detail'], event['occurrence']))
                 else:

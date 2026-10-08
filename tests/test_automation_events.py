@@ -133,7 +133,7 @@ def test_linear_label_trigger_requires_label_added_not_just_present():
     assert normalize(trigger, payload | {'data': payload['data'] | {'teamId': USER}}) is None
 
 
-def test_events_queue_through_active_runs_and_hourly_limit(workspace):
+def test_events_queue_at_hourly_limit_and_resume_while_earlier_runs_remain_active(workspace):
     app, client = workspace
     a = configured(app, client, max_runs_per_hour=1)
     events = app.state.automations.events
@@ -144,10 +144,8 @@ def test_events_queue_through_active_runs_and_hourly_limit(workspace):
     first = app.state.store.rows('SELECT * FROM runs')[0]
     asyncio.run(events.dispatch())
     queued = app.state.store.rows("SELECT * FROM automation_events WHERE status='pending'")[0]
-    assert 'previous run' in queued['detail']
-    complete(app, first['id'])
-    asyncio.run(events.dispatch())
-    assert 'hourly run limit' in app.state.store.rows("SELECT * FROM automation_events WHERE status='pending'")[0]['detail']
+    assert 'hourly run limit' in queued['detail']
+    assert first['status']=='queued'
     before = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     app.state.store.execute('UPDATE automation_runs SET created_at=?', (before,))
     asyncio.run(events.dispatch())

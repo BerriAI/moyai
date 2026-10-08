@@ -33,10 +33,10 @@ def test_drafts_require_explicit_enable_and_keep_identity(workspace, monkeypatch
     assert app.state.store.messages(run['id'])[0]['user_id']==owner
     assert run['chat_enabled'] and run['agent_label']=='Automation · Check tickets'
     blocked=client.post(path,json={'revision':1,'client_id':'another-occurrence'}).json()
-    assert blocked['outcome']=='skipped' and not blocked['run_id']
+    assert blocked['outcome']=='started' and blocked['run_id'] != run['id']
     app.state.store.update_run(run['id'],status='idle')
-    # Pending input still prevents overlapping work even if status is stale.
-    assert client.post(path,json={'revision':1,'client_id':'third-occurrence'}).json()['outcome']=='skipped'
+    # Pending input on an earlier session does not block an independent occurrence.
+    assert client.post(path,json={'revision':1,'client_id':'third-occurrence'}).json()['outcome']=='started'
     message=app.state.store.claim_message(run['id'])
     app.state.store.finish_message(run['id'],message['id'],'Finished with PR link','completed')
     app.state.store.update_run(run['id'],status='idle',summary='Finished with PR link')
@@ -73,7 +73,7 @@ def test_timing_and_repository_validation(workspace):
     assert client.post('/api/automations',json={'definition':{'name':'Job','prompt':'Do work','owner_id':'someone'}}).status_code==422
     a=create(client,timing={'frequency':'weekdays','time':'09:30','timezone':'America/Los_Angeles'})
     schedule=app.state.automations.schedule(app.state.automations.row(a['id']))
-    assert schedule.policy.overlap==ScheduleOverlapPolicy.SKIP
+    assert schedule.policy.overlap==ScheduleOverlapPolicy.ALLOW_ALL
     assert schedule.policy.catchup_window==timedelta(minutes=15)
     assert schedule.spec.time_zone_name=='America/Los_Angeles'
     assert schedule.spec.calendars[0].day_of_week[0].start==1
@@ -193,16 +193,21 @@ def test_my_linear_issues_uses_session_identity_not_connection_owner(workspace,m
     assert client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{'email':'someone@berri.ai'}}).status_code==422
 
 
-def test_concurrent_occurrences_admit_only_one_session(workspace,monkeypatch):
+def test_concurrent_occurrences_admit_independent_sessions(workspace,monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     app,client=workspace
     a=create(client)
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     def launch(i):return asyncio.run(app.state.automations.launch(a['id'],1,'concurrent-'+str(i),manual=True))
     with ThreadPoolExecutor(max_workers=4) as pool:
-        results=list(pool.map(launch,range(4)))
-    assert sum(bool(r['run_id']) for r in results)==1
-    assert len(app.state.store.rows('SELECT * FROM runs'))==1
+        results=list(pool.map(launch,range(20)))
+    assert all(r['outcome']=='started' for r in results)
+    assert len({r['run_id'] for r in results})==20
+    assert len(app.state.store.rows('SELECT * FROM runs'))==20
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        retries=list(pool.map(launch,range(20)))
+    assert retries==results
+    assert len(app.state.store.rows('SELECT * FROM runs'))==20
 
 
 def test_owner_access_is_rechecked_at_execution(workspace):
@@ -216,7 +221,7 @@ def test_owner_access_is_rechecked_at_execution(workspace):
 
 
 @pytest.mark.parametrize('depth', [1, 3])
-def test_active_child_keeps_automation_busy(workspace,monkeypatch,depth):
+def test_active_child_does_not_block_independent_occurrences(workspace,monkeypatch,depth):
     app,client=workspace
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     a=create(client)
@@ -230,6 +235,6 @@ def test_active_child_keeps_automation_busy(workspace,monkeypatch,depth):
         app.state.store.update_run(parent,status='completed')
         parent = child['id']
     assert not app.state.automations.finished(root)
-    assert client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'overlap-with-children'}).json()['outcome']=='skipped'
+    assert client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'overlap-with-children'}).json()['outcome']=='started'
     app.state.store.update_run(child['id'],status='completed')
     assert app.state.automations.finished(root)
