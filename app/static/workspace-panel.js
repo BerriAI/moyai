@@ -85,12 +85,12 @@
       t.element=document.createElement('section');t.element.className='panel-view panel-'+kind;t.element.id='view-'+t.uid;t.element.setAttribute('role','tabpanel');t.element.setAttribute('aria-labelledby','tab-'+t.uid);t.element.hidden=true;views.append(t.element);tabs.set(id,t);return t;
     }
     function open(kind,data={}){const t=make(kind,data);if(t)select(t.id);return true;}
-    function select(id,autoload=false){
+    function select(id){
       const t=tabs.get(id);if(disposed||!t||t.closing)return;
-      const previous=tabs.get(active);if(previous?.id===id&&visible&&!autoload)return;
+      const previous=tabs.get(active);if(previous?.id===id&&visible)return;
       if(t.kind==='computer'&&!tabs.has('captures')&&tabs.size<16)make('captures');
       previous?.deactivate?.();if(previous)previous.element.hidden=true;
-      active=id;closingStatus.hidden=true;if(autoload)t.autoload=true;t.element.hidden=false;setVisible(true);
+      active=id;closingStatus.hidden=true;t.element.hidden=false;setVisible(true);
       if(!t.loaded){t.loaded=true;mount(t);}
       t.activate?.();draw();save();q('[aria-selected="true"]')?.scrollIntoView({block:'nearest',inline:'nearest'});
     }
@@ -109,8 +109,6 @@
     async function remove(id){
       const t=tabs.get(id);if(!t||t.closing)return;
       t.closing=true;draw();
-      try{if(t.kind==='pr'&&run.mode==='modal')await computer.closeTab(run.id,t.url);}
-      catch(e){if(good(t)){t.closing=false;reconcile();toast(e.message);}return;}
       if(!good(t))return;
       if(id===active)t.deactivate?.();t.dispose?.();if(t.kind==='activity')parking.append(activity);
       t.element.remove();tabs.delete(id);reconcile();
@@ -122,8 +120,8 @@
       const epoch=t.epoch=(t.epoch||0)+1;const current=()=>good(t)&&epoch===t.epoch;
       if(t.kind==='pulls'){renderPulls(t.element);return;}
       if(t.kind==='pr'){
-        t.activate=()=>{const autoload=!!t.autoload;t.autoload=false;computer.open(run.id,t.element,{tab:t.url,title:t.title,autoload});};
-        t.deactivate=()=>computer.close();return;
+        Object.assign(t,MoyaiPullRequest.mount({element:t.element,url:t.url,markdown,escape:esc,
+          load:()=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`)}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
@@ -209,7 +207,7 @@
       const pr=pullRequests.find(item=>item.url.toLowerCase()===String(url).toLowerCase());
       if(!pr)return false;
       const t=make('pr',{url:pr.url,title:pr.title});
-      if(t)select(t.id,true);return !!t;
+      if(t)select(t.id);return !!t;
     }
     function syncPullRequests(data){
       if(disposed||data.id!==run.id||!Array.isArray(data.pull_requests))return;
@@ -296,7 +294,7 @@
     }
     function menuItems(search){
       // Search both the saved original request and its display title.
-      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Open this session’s PRs in the browser'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
+      return [...(run.mode==='modal'?[{kind:'computer',title:'Computer',detail:'Watch and use the sandbox desktop'}]:[]),{kind:'captures',title:'Saved captures',detail:'View screenshots and recordings from this session'},{kind:'files',title:'Files',detail:'Open saved files, screenshots, and videos'},{kind:'pulls',title:'Pull requests',detail:'Review this session’s PR details and changes'},{kind:'chat',title:'Side chat',detail:'A separate conversation about this session'},{kind:'activity',title:'Activity',detail:'Tools, approvals, and session details'},...sideChats.filter(c=>matchesSession(c,search)).map(c=>({kind:'chat',title:titleFor(c),detail:'Saved side chat',chatId:c.id}))].filter(i=>i.chatId||i.title.toLowerCase().includes(search));
     }
     function syncTitles(rows){
       // Do not replace chat tabs or drafts when a background title arrives.

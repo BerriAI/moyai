@@ -566,6 +566,13 @@ def create_app(settings: Settings | None = None):
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
 
+    @app.get('/api/runs/{run_id}/pull-request')
+    async def read_pull_request(run_id: str, request: Request, url: str = Query(max_length=512)):
+        security.require(request)
+        result = await session_pull_requests.read(run_id, url)
+        security.require(request)
+        return result
+
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):
         security.require(request, mutation=True)

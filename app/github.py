@@ -29,6 +29,12 @@ REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
 
 
+class GitHubError(ConnectorError):
+    def __init__(self, message, status_code):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def supports_permissions(actual, required=PERMISSIONS):
     """Accept broader installations; token issuance still narrows every operation."""
     levels = {'read': 1, 'write': 2}
@@ -229,7 +235,7 @@ class GitHub(GitHubRepositories):
                 if missing and response.status_code == 404:
                     return None
                 if not 200 <= response.status_code < 300:
-                    raise ConnectorError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.')
+                    raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.', response.status_code)
                 return response.json()
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
@@ -301,7 +307,15 @@ class GitHub(GitHubRepositories):
         if name == 'github_repositories':
             await self.refresh_connection()
             return {'repositories': self.repository_options()}
+        read_version = None
+        if name == 'github_pull_request':
+            self.ensure_read_allowed(run.get('github_connection_version'))
+            await self.ensure_connection()
+            read_version = run.get('github_connection_version', self.connection_version())
+            self.ensure_read_allowed(read_version)
         target = await self.selected_target(run, arguments.get('repository', ''), arguments.get('repository_id'))
+        if read_version:
+            self.ensure_read_allowed(read_version, target)
         if name in {'github_rulesets', 'github_ruleset'}:
             token = await self.installation_token(repository=target, rules=True)
             if name == 'github_rulesets':
@@ -314,6 +328,8 @@ class GitHub(GitHubRepositories):
                                       params={'includes_parents': 'true'})
             return self.ruleset_result(target, data)
         token = await self.installation_token(repository=target)
+        if read_version:
+            self.ensure_read_allowed(read_version, target)
         if name in {'github_repository', 'github_checkout'}:
             repo = {**await self.repository(token, target), 'git_path': f'/github/repositories/{target}.git'}
             if name == 'github_checkout' and arguments.get('number'):
@@ -335,19 +351,38 @@ class GitHub(GitHubRepositories):
         number = PullRequest.model_validate(arguments).number
         prefix = f'/repositories/{target}/pulls/{number}'
         pr = await self.request('GET', prefix, token=token)
+        self.ensure_read_allowed(read_version, target)
+        if pr['number'] != number or pr['base']['repo']['id'] != target:
+            raise ConnectorError('GitHub returned a different pull request or repository.')
+        self.remember_repository(pr['base']['repo'], self.saved_credentials())
         files = await self.request('GET', prefix + '/files', token=token, params={'per_page': 100})
+        self.ensure_read_allowed(read_version, target)
         remaining = 160000
         compact = []
-        for f in files:
+        for f in files[:100]:
             patch = (f.get('patch') or '')[:min(remaining, 16000)]
             remaining -= len(patch)
             compact.append({**{k: f.get(k) for k in ('filename', 'status', 'additions', 'deletions')},
                             'patch': patch, 'patch_truncated': len(f.get('patch') or '') > len(patch)})
-        return {**{k: pr.get(k) for k in ('number', 'title', 'state', 'draft', 'merged', 'html_url')},
+        return {**{k: pr.get(k) for k in ('number', 'title', 'state', 'draft', 'merged', 'html_url',
+                                       'additions', 'deletions', 'changed_files', 'created_at')},
+                'repository_id': target, 'repository': self.repository_name(target),
+                'author': (pr.get('user') or {}).get('login'), 'head_ref': pr['head'].get('ref'),
                 'body': (pr.get('body') or '')[:20000],
+                'body_truncated': len(pr.get('body') or '') > 20000,
                 'head': pr['head']['sha'], 'base': pr['base']['ref'],
                 'files': compact,
-                'files_truncated': pr['changed_files'] > len(files)}
+                'files_truncated': pr['changed_files'] > len(compact)}
+
+    def ensure_read_allowed(self, version=None, target=None):
+        if (not self.connectors.allowed('github_pull_request')
+                or (version is not None and version != self.connection_version())):
+            raise GitHubError('GitHub access changed. Refresh the pull request to try again.', 403)
+        try:
+            if target is not None:
+                self.target(target)
+        except ConnectorError as exc:
+            raise GitHubError(str(exc), 403) from None
 
     @staticmethod
     def ruleset_revision(data):

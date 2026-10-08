@@ -18,8 +18,25 @@
 .pull-request-row small{display:block;font-size:11px;line-height:1.5;color:var(--muted);overflow-wrap:anywhere;margin-top:4px}
 .pull-request-icon{color:var(--purple);align-self:flex-start;padding-top:2px;flex:none}
 .pull-request-row>.ui-icon{transform:rotate(-90deg);color:var(--muted);flex:none}
-.panel-pr>.computer-view{flex:1;min-height:0}
-.panel-pr .computer-address{padding:10px 20px;background:var(--soft);border-block:1px solid var(--line);font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
 @media(max-width:1100px){.chat-layout.has-pull-requests:not(.panel-open){grid-template-columns:minmax(0,1fr)}.session-pull-requests{display:none}}
-@media(max-width:760px){.pull-request-row{min-height:44px}.panel-pr .computer-heading{flex-wrap:wrap}.panel-pr .computer-heading a{font-size:13px}}
-.computer-github-link{font-size:12px;color:var(--purple);white-space:nowrap}.panel-pr .computer-heading>div:last-child{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+@media(max-width:760px){.pull-request-row{min-height:44px}}
+.computer-github-link{font-size:12px;color:var(--purple);white-space:nowrap}
+
+/* Native PR details share the workspace palette and never mount a desktop. */
+.native-pr{display:flex;flex-direction:column;min-height:0;height:100%;color:var(--text);font-size:14px;line-height:1.5}
+.pr-toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:20px 24px 8px;flex:none}
+.pr-toolbar-spacer{flex:1}.pr-toolbar button{min-height:36px;padding:6px 12px;font-size:13px}.pr-toolbar a{color:var(--purple);font-size:13px;text-decoration:none}
+.pr-state{display:inline-flex;align-items:center;border-radius:20px;background:var(--soft);color:var(--text);padding:4px 12px;font-size:13px;font-weight:500}
+.pr-state-open{background:#edf6ef;color:#32664a}.pr-state-merged{background:var(--brand-selected);color:#543d79}.pr-state-closed{background:#fff3f4;color:#a33946}
+.pr-state-draft{background:#f1eff5;color:#645e70}.pr-heading{padding:8px 24px 12px;flex:none;min-width:0}
+.pr-heading h2{font-size:20px;line-height:1.4;font-weight:600;margin:8px 0 16px;overflow-wrap:anywhere}.pr-repository{font-size:13px;color:#68636f;margin:0}
+.pr-branches{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;min-width:0}.pr-branches code{background:var(--soft);border-radius:12px;padding:2px 8px;font-size:12px;overflow-wrap:anywhere;min-width:0}.pr-author{margin-right:4px}
+.pr-stats{display:flex;align-items:center;flex-wrap:wrap;gap:12px;font-size:13px;color:#68636f;margin:16px 0 0;font-variant-numeric:tabular-nums}
+.pr-additions{color:#32664a}.pr-deletions{color:#a33946}.pr-load-status{font-size:13px;line-height:1.5;color:#68636f;margin:0;padding:8px 24px;flex:none}.pr-load-status:empty{display:none}
+.pr-sections{display:flex;gap:8px;padding:8px 24px;border-block:1px solid var(--line);flex:none}.pr-sections button{border:0;min-height:36px;padding:6px 12px;border-radius:20px;background:transparent;font-size:14px;color:#68636f}.pr-sections button[aria-pressed=true]{background:var(--soft);color:var(--text);font-weight:500}.pr-sections span{font-size:12px;margin-left:4px}
+.pr-content{flex:1;min-height:0;overflow:auto;padding:20px 24px;overscroll-behavior:contain}.pr-description{overflow-wrap:anywhere;font-size:14px;line-height:1.65}.pr-description>:first-child{margin-top:0}.pr-description img{max-width:100%}
+.pr-file{border:1px solid var(--line);border-radius:8px;margin-bottom:16px;overflow:hidden}.pr-file summary{display:flex;align-items:center;gap:8px;padding:12px;background:#faf9fc;cursor:pointer;font-size:12px;list-style:none}.pr-file summary:before{content:'›';font-size:18px;flex:none}.pr-file[open] summary:before{transform:rotate(90deg)}.pr-filename{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;min-width:0;flex:1}.pr-file-status{color:#68636f;font-size:11px}.pr-file summary>.pr-additions,.pr-file summary>.pr-deletions{flex:none;font-variant-numeric:tabular-nums}
+.pr-diff-scroll{overflow:auto;border-top:1px solid var(--line);max-height:640px}.pr-diff{border-collapse:collapse;width:100%;font-size:12px;line-height:1.6;table-layout:auto}.pr-diff td{border:0;padding:0;vertical-align:top}.pr-diff .pr-line{padding:0 8px;text-align:right;width:1%;min-width:32px;color:#68636f;user-select:none;font-variant-numeric:tabular-nums}.pr-code{white-space:pre}.pr-code code{font:inherit;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;display:block;padding:0 12px 0 4px}.pr-addition{background:#edf6ef}.pr-deletion{background:#fff3f4}.pr-hunk{background:var(--soft);color:#543d79}.pr-note{color:#68636f}.pr-notice{padding:12px 16px;font-size:13px;color:#68636f;line-height:1.6;margin:0}
+.native-pr :is(button,a,summary,[tabindex]):focus-visible{outline:2px solid var(--purple);outline-offset:-2px}
+@media(max-width:760px){.pr-toolbar{padding:16px 16px 8px;gap:8px}.pr-toolbar button,.pr-sections button{min-height:44px}.pr-heading{padding:8px 16px 12px}.pr-heading h2{font-size:18px}.pr-sections{padding:8px 16px}.pr-content{padding:16px}.pr-load-status{padding-inline:16px}.pr-file summary{flex-wrap:wrap}.pr-file-status{display:none}}

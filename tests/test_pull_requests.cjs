@@ -25,7 +25,7 @@ test('saved captures restore as a session tab with their selected state',()=>{
   assert.deepEqual(saved.tabs.map(tab=>tab.kind),['computer','captures']);
   assert.equal(saved.active,'captures');assert.equal(saved.visible,true);
 });
-test('only session PR links in the owning chat use the side browser; modified and embedded links stay native',()=>{
+test('only session PR links in the owning chat use the native panel; modified and embedded links stay native',()=>{
   const source=fs.readFileSync(panelPath,'utf8'),opened=[];
   const ctx={prUrl,openPullRequest:link=>{if(link!==url)return false;opened.push(link);return true;}};
   vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('    function followPullRequest('),source.indexOf("    layout.addEventListener('click',followPullRequest)")),ctx);
@@ -36,13 +36,13 @@ test('only session PR links in the owning chat use the side browser; modified an
   assert.equal(opened.length,1);assert.equal(prevented,1);
 });
 function closingPanel({active='pr:a',mode='modal'}={}){
-  const events=[],pending=new Map(),tabs=new Map();
+  const events=[],tabs=new Map();
   for(const id of ['pr:a','pr:b'])tabs.set(id,{id,kind:'pr',url:id==='pr:a'?url:url.replace('145','135'),loaded:true,
     element:{hidden:id!==active,remove(){events.push('remove:'+id);}},
     activate(){events.push('activate:'+id);},deactivate(){events.push('deactivate:'+id);}});
   const closingStatus={hidden:true};
   const ctx={tabs,active,visible:true,disposed:false,closingStatus,run:{id:'session',mode},
-    computer:{closeTab(id,tab){events.push('close:'+tab);return new Promise((resolve,reject)=>pending.set(tab,{resolve,reject}));}},
+    computer:{closeTab(id,tab){events.push('close:'+tab);throw Error('Native PR close must not use Computer');}},
     draw(){},save(){},toast:message=>events.push(message),q:()=>({scrollIntoView(){}}),
     document:{querySelector:()=>null},setVisible(value){ctx.visible=value;},
     pullRequests:[{url,title:'Review'}],make:()=>tabs.get('pr:a')};
@@ -51,85 +51,38 @@ function closingPanel({active='pr:a',mode='modal'}={}){
   vm.runInContext(source.slice(source.indexOf('    function select('),source.indexOf('    function error(')),ctx);
   vm.runInContext(source.slice(source.indexOf('    function hide('),source.indexOf('    function menu(')),ctx);
   vm.runInContext(source.slice(source.indexOf('    function openPullRequest('),source.indexOf('    function syncPullRequests(')),ctx);
-  return {ctx,tabs,events,closingStatus,settle(id,reject=false){const p=pending.get(id==='pr:a'?url:url.replace('145','135'));reject?p.reject(new Error('Stop recording, then retry.')):p.resolve();}};
+  return {ctx,tabs,events,closingStatus};
 }
-test('close waits for acknowledgment and keeps rejected recording controls reachable',async()=>{
-  const f=closingPanel(),a=f.tabs.get('pr:a'),closing=f.ctx.remove('pr:a');
-  await f.ctx.remove('pr:a');
-  assert.equal(f.events.filter(e=>e.startsWith('close:')).length,1);
-  assert.equal(f.tabs.size,2);assert.equal(f.ctx.active,'pr:a');assert.equal(a.element.hidden,false);
-  f.settle('pr:a',true);await closing;
-  assert.equal(f.tabs.get('pr:a'),a);assert.equal(a.closing,false);
-  assert.equal(f.events.some(e=>e.startsWith('deactivate:')),false);
-  const retry=f.ctx.remove('pr:a');f.settle('pr:a');await retry;
-  assert.equal(f.tabs.has('pr:a'),false);assert.equal(f.ctx.active,'pr:b');
-  assert.equal(f.events.filter(e=>e==='activate:pr:b').length,1);
-});
-test('every close order and rejection combination reconciles actual selection and pending status',async()=>{
-  for(const order of [['pr:a','pr:b'],['pr:b','pr:a']])for(const failA of [false,true])for(const failB of [false,true]){
-    const f=closingPanel(),jobs={'pr:a':f.ctx.remove('pr:a'),'pr:b':f.ctx.remove('pr:b')};
-    const failed={'pr:a':failA,'pr:b':failB};
-    for(const id of order){
-      f.settle(id,failed[id]);await jobs[id];
-      const selected=f.tabs.get(f.ctx.active);
-      assert.ok(!f.ctx.visible||selected||!f.closingStatus.hidden,'A visible panel has a view or a pending-close status');
-      if(selected)assert.equal(selected.element.hidden,false);
-    }
-    assert.equal(f.tabs.size,Number(failA)+Number(failB));
-    assert.equal(f.ctx.visible,failA||failB);
-    if(f.tabs.size){assert.ok(f.tabs.has(f.ctx.active));assert.equal(f.tabs.get(f.ctx.active).closing,false);}
-    else assert.equal(f.ctx.active,'');
-    assert.equal(f.closingStatus.hidden,true);
+test('cloud PR close is local and never asks the computer to close a browser',async()=>{
+  for(const hidden of [false,true]){
+    const f=closingPanel();if(hidden)f.ctx.hide();
+    await f.ctx.remove('pr:a');
+    assert.equal(f.events.some(e=>e.startsWith('close:')),false);
+    assert.equal(f.tabs.has('pr:a'),false);assert.equal(f.ctx.active,'pr:b');
+    assert.equal(f.ctx.visible,!hidden);
+    assert.equal(f.events.includes('activate:pr:b'),!hidden);
+    await f.ctx.remove('pr:b');assert.equal(f.tabs.size,0);assert.equal(f.ctx.visible,false);
   }
 });
-test('close settlement preserves hidden intent and never steals unrelated selection',async()=>{
-  for(const hidden of [false,true])for(const reject of [false,true]){
-    const f=closingPanel();
-    f.tabs.set('files',{id:'files',kind:'files',loaded:true,element:{hidden:true},activate(){f.events.push('activate:files');}});
-    const closing=f.ctx.remove('pr:a');f.ctx.select('files');if(hidden)f.ctx.hide();
-    f.settle('pr:a',reject);await closing;
-    assert.equal(f.ctx.active,'files');assert.equal(f.ctx.visible,!hidden);
-    assert.equal(f.events.filter(e=>e==='activate:files').length,1);
-  }
-  const f=closingPanel(),a=f.ctx.remove('pr:a'),b=f.ctx.remove('pr:b');
-  f.settle('pr:a');await a;f.ctx.hide();f.settle('pr:b',true);await b;
-  assert.equal(f.ctx.visible,false);assert.equal(f.ctx.active,'pr:b');
-  assert.equal(f.events.includes('activate:pr:b'),false,'Failure may restore selection but cannot reopen a hidden panel');
-  f.ctx.show();assert.equal(f.ctx.visible,true);assert.equal(f.events.includes('activate:pr:b'),true);
-});
-test('reopening the panel shows pending status without reactivating closing tabs',async()=>{
-  const f=closingPanel(),a=f.ctx.remove('pr:a'),b=f.ctx.remove('pr:b');
-  f.settle('pr:a');await a;f.ctx.hide();f.ctx.show();
-  assert.equal(f.ctx.visible,true);assert.equal(f.closingStatus.hidden,false);
-  assert.equal(f.events.includes('activate:pr:b'),false);
-  f.settle('pr:b',true);await b;
-  assert.equal(f.ctx.active,'pr:b');assert.equal(f.closingStatus.hidden,true);
-  assert.equal(f.events.filter(e=>e==='activate:pr:b').length,1);
-});
-test('late close completion ignores disposed or replaced tab instances',async()=>{
-  for(const replaced of [false,true]){
-    const f=closingPanel(),closing=f.ctx.remove('pr:a');
-    if(replaced)f.tabs.set('pr:a',{id:'pr:a'});else f.ctx.disposed=true;
-    f.settle('pr:a');await closing;
-    assert.equal(f.tabs.size,2);assert.equal(f.events.some(e=>e.startsWith('remove:')),false);
-  }
-});
-test('pending closes reject every activation path while other tabs stay reachable',async()=>{
-  for(const active of ['pr:a','pr:b'])for(const rejected of [false,true]){
-    const f=closingPanel({active}),a=f.tabs.get('pr:a'),closing=f.ctx.remove('pr:a');
-    assert.equal(f.ctx.openPullRequest(url),true,'The pending close consumes its PR link');
-    f.ctx.select('pr:b');assert.equal(f.ctx.active,'pr:b');
-    f.ctx.select('pr:a');f.ctx.openPullRequest(url);
-    assert.equal(f.ctx.active,'pr:b');assert.equal(f.events.includes('activate:pr:a'),false);assert.equal(a.autoload,undefined);
-    f.settle('pr:a',rejected);await closing;
-    if(rejected){f.ctx.openPullRequest(url);assert.equal(f.ctx.active,'pr:a');assert.equal(f.events.includes('activate:pr:a'),true);}
-    else{assert.equal(f.tabs.has('pr:a'),false);assert.equal(f.ctx.active,'pr:b');}
-  }
-});
-test('non-cloud close never requests a browser resource and hidden close stays hidden',async()=>{
-  const f=closingPanel({mode:'demo'});f.ctx.hide();await f.ctx.remove('pr:a');
+test('closing an inactive PR preserves the selected file tab',async()=>{
+  const f=closingPanel();
+  f.tabs.set('files',{id:'files',kind:'files',loaded:true,element:{hidden:true},activate(){f.events.push('activate:files');}});
+  f.ctx.select('files');await f.ctx.remove('pr:a');
+  assert.equal(f.ctx.active,'files');assert.equal(f.ctx.visible,true);
+  assert.equal(f.events.filter(e=>e==='activate:files').length,1);
   assert.equal(f.events.some(e=>e.startsWith('close:')),false);
-  assert.equal(f.ctx.visible,false);assert.equal(f.ctx.active,'pr:b');
+});
+test('PR mount delegates to native details for every run mode without touching Computer',async()=>{
+  for(const mode of ['modal','demo']){
+    const source=fs.readFileSync(panelPath,'utf8'),calls=[],element={};
+    const ctx={run:{id:'session',mode},good:()=>true,markdown:String,esc:String,encodeURIComponent,
+      api:async path=>{calls.push(path);return {};},
+      computer:new Proxy({},{get(){throw Error('PR viewing must never access Computer');}}),
+      MoyaiPullRequest:{mount(options){assert.equal(options.element,element);return {activate:options.load};}}};
+    vm.createContext(ctx);vm.runInContext(source.slice(source.indexOf('    async function mount('),source.indexOf('    function mountCaptures(')),ctx);
+    const tab={kind:'pr',url,element};await ctx.mount(tab);await tab.activate();
+    assert.deepEqual(calls,['/api/runs/session/pull-request?url='+encodeURIComponent(url)]);
+  }
 });
 test('switching between live views and captures runs each owning tab lifecycle',()=>{
   for(const id of ['computer','pr:a']){
@@ -263,4 +216,46 @@ test('returning to captures invalidates an earlier read before its delayed respo
   f.requests[0].resolve({files:[captured('stale.png')]});await settleCaptures();
   assert.equal(f.node('[data-captures]').innerHTML,current);assert.match(current,/current\.png/);
   assert.equal(f.timers.size,1);f.dispose();
+});
+
+const native=require('../app/static/pull-request.js');
+const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const details={number:145,title:'Native review',state:'open',draft:false,merged:false,base:'main',head:'abcdef0',head_ref:'feature',author:'alex',
+  additions:2,deletions:1,changed_files:2,body:'Description',files:[{filename:'src/view.js',status:'modified',additions:2,deletions:1,patch:'@@ -4,2 +4,3 @@\n-old\n+new\n+added\n context'},
+  {filename:'logo.png',status:'added',additions:0,deletions:0,patch:''}]};
+function nativePanel(){
+  const nodes=new Map(),requests=[];
+  function node(selector){
+    if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',className:'',disabled:false,scrollTop:0,dataset:{},setAttribute(){},querySelector:node,querySelectorAll(){return [];}});
+    return nodes.get(selector);
+  }
+  const lifecycle=native.mount({element:node('root'),url,escape,markdown:escape,
+    load:()=>new Promise((resolve,reject)=>requests.push({resolve,reject}))});
+  return {node,requests,...lifecycle};
+}
+test('native diffs show source line numbers, missing patches and truncation without interpreting code as HTML',()=>{
+  assert.deepEqual(native.diffRows(details.files[0].patch).map(r=>[r.old,r.next]),[['',''],[4,''],['',4],['',5],[5,6]]);
+  const html=native.changes({...details,files_truncated:true,files:[{...details.files[0],filename:'<script>.js',patch:'+<img onerror=x>',patch_truncated:true},details.files[1]]},escape,new Set());
+  assert.match(html,/&lt;script&gt;\.js/);assert.match(html,/&lt;img onerror=x&gt;/);assert.doesNotMatch(html,/<img/);
+  assert.match(html,/first 100 files/);assert.match(html,/diff is truncated/);assert.match(html,/did not provide a text diff/);
+});
+test('native PR refresh keeps prior data on temporary failure and clears it on access denial',async()=>{
+  const f=nativePanel(),first=f.activate();f.requests[0].resolve(details);await first;
+  const body=f.node('[data-content]').innerHTML;assert.match(body,/src\/view.js/);assert.match(f.node('[data-heading]').innerHTML,/Native review/);
+  const refresh=f.node('[data-refresh]').onclick();f.requests[1].reject(Object.assign(Error('Offline'),{status:502}));await refresh;
+  assert.equal(f.node('[data-content]').innerHTML,body);assert.match(f.node('[data-status]').textContent,/previous version/);
+  const denied=f.node('[data-refresh]').onclick();f.requests[2].reject(Object.assign(Error('Access removed'),{status:403}));await denied;
+  assert.equal(f.node('[data-content]').innerHTML,'');assert.equal(f.node('[data-heading]').innerHTML,'');assert.equal(f.node('[data-state]').textContent,'Unavailable');
+  const retry=f.node('[data-refresh]').onclick();f.requests[3].resolve(details);await retry;
+  assert.match(f.node('[data-content]').innerHTML,/src\/view.js/);assert.equal(f.node('[data-status]').textContent,'');
+});
+test('hidden, closed and reactivated PR tabs reject stale detail responses',async()=>{
+  for(const ending of ['deactivate','dispose']){
+    const f=nativePanel(),pending=f.activate();f[ending]();f.requests[0].resolve(details);await pending;
+    assert.equal(f.node('[data-heading]').innerHTML,'');
+  }
+  const f=nativePanel(),old=f.activate();f.deactivate();const current=f.activate();
+  f.requests[1].resolve({...details,title:'Current'});await current;
+  f.requests[0].resolve({...details,title:'Stale'});await old;
+  assert.match(f.node('[data-heading]').innerHTML,/Current/);assert.doesNotMatch(f.node('[data-heading]').innerHTML,/Stale/);
 });

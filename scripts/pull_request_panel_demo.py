@@ -2,13 +2,16 @@
 
 Run: uv run python scripts/pull_request_panel_demo.py --port 8846
 Sign-in and publication receipts are synthetic. No model or cloud calls are made.
-With --computer-container, real Chromium pages browse GitHub on explicit PR clicks. Use --static-root PATH to compare a pristine frontend with the same data.
+With --live-github, PR details are read from GitHub using the local gh login.
+Otherwise GitHub data is a deterministic fixture. No GitHub writes are allowed.
+Use --static-root PATH to compare a pristine frontend with the same data.
 """
 import argparse
 import asyncio
 import json
 from pathlib import Path
 import sys
+import subprocess
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
@@ -29,7 +32,7 @@ PULLS = [
 ]
 
 
-def demo(directory, port=8976, static_root=None, computer_container=None):
+def demo(directory, port=8976, static_root=None, computer_container=None, live_github=False):
     values = {key: field.get_default(call_default_factory=True) for key, field in Settings.model_fields.items()}
     values.update(data_dir=Path(directory), public_url=f'http://localhost:{port}',
                   google_client_id='local-fixture', google_client_secret='local-fixture',
@@ -56,11 +59,51 @@ def demo(directory, port=8976, static_root=None, computer_container=None):
         return response
 
     store = app.state.store
+    repository = (json.loads(subprocess.run(['gh', 'api', 'repos/' + REPOSITORY], check=True, capture_output=True).stdout)
+                  if live_github else {'id': 202, 'full_name': REPOSITORY, 'owner': {'id': 42}, 'default_branch': 'main',
+                                       'html_url': 'https://github.com/' + REPOSITORY, 'private': True})
+    repo_id = repository['id']
+    credentials = {'kind': 'github_app', 'installation_id': 10, 'account_id': repository['owner']['id'], 'repository_ids': [repo_id]}
+    github = app.state.connectors.github
+    github.remember_repository(repository, credentials)
+    app.state.connectors.save('github', credentials, 'Local PR demo')
+    async def token(*args, **kwargs):
+        return 'local-fixture'
+    async def github_read(method, path, **kwargs):
+        if method != 'GET' or not (path == f'/repositories/{repo_id}' or path.startswith(f'/repositories/{repo_id}/pulls/')):
+            raise RuntimeError('The demo supports only read-only repository and PR requests.')
+        if live_github:
+            command = ['gh', 'api', path, '--method', 'GET']
+            for key, value in kwargs.get('params', {}).items():
+                command.extend(['-f', f'{key}={value}'])
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await process.communicate()
+            if process.returncode:
+                from app.connector_errors import ConnectorError
+                raise ConnectorError('The local GitHub read failed. Check gh authentication.')
+            return json.loads(stdout)
+        if path == f'/repositories/{repo_id}':
+            return repository
+        number = int(path.split('/')[4])
+        if path.endswith('/files'):
+            return [{'filename': 'app/usage.py', 'status': 'modified', 'additions': 2, 'deletions': 1,
+                     'patch': '@@ -12,2 +12,3 @@\n-def usage():\n+def usage(response):\n+    return response.usage\n '},
+                    {'filename': 'tests/test_usage.py', 'status': 'added', 'additions': 2, 'deletions': 0,
+                     'patch': '@@ -0,0 +1,2 @@\n+def test_reported_usage():\n+    assert usage(response) == response.usage'}]
+        return {'number': number, 'html_url': f'https://github.com/{REPOSITORY}/pull/{number}',
+                'title': next((title for n, title, _, _ in PULLS if n == number), 'Demo pull request'),
+                'state': 'open' if number == 144 else 'closed', 'draft': False, 'merged': number != 144,
+                'requested_reviewers': [], 'requested_teams': [], 'created_at': '2026-10-07T12:00:00Z',
+                'body': '## Changes\n\nPreserve reported usage from the provider.\n\n## Verification\n\nFocused regression checks pass.',
+                'base': {'repo': repository, 'ref': 'main'}, 'head': {'sha': 'a' * 40, 'ref': 'litellm_reported_usage'},
+                'user': {'login': 'demo-contributor'}, 'additions': 4, 'deletions': 1, 'changed_files': 2}
+    github.installation_token = token
+    github.request = github_read
     owner = store.identity({'method': 'google', 'identity': IDENTITY})
 
     def session(prompt, answer, display_title='', parent_run_id='', agent_label=''):
         run = store.create_run(prompt, 'https://github.com/' + REPOSITORY, 'demo', ['github'],
-                               chat_enabled=True, user_id=owner, github_repository_id=202)
+                               chat_enabled=True, user_id=owner, github_repository_id=repo_id)
         message = store.claim_message(run['id'])
         store.finish_message(run['id'], message['id'], answer)
         store.update_run(run['id'], status='idle')
@@ -70,8 +113,9 @@ def demo(directory, port=8976, static_root=None, computer_container=None):
 
     root, root_message = session(
         'Keep my pull requests next to this conversation',
-        'This is a local UI fixture: the session and publication receipts are synthetic. '
-        'No model, cloud workspace or GitHub writes were used. PR clicks use a real local Chromium browser when enabled.\n\n'
+        'This is a local UI fixture: the session and publication receipts are synthetic. ' +
+        ('PR details are live read-only GitHub data. ' if live_github else 'PR details use sample GitHub data. ') +
+        'No model, cloud workspace or GitHub writes are used.\n\n'
         'The session has two pull requests and a direct child has one more:\n\n'
         + '\n'.join(f'- [{title}](https://github.com/{REPOSITORY}/pull/{number})'
                     for number, title, _, _ in PULLS)
@@ -84,7 +128,7 @@ def demo(directory, port=8976, static_root=None, computer_container=None):
     for index, (number, title, state, draft) in enumerate(PULLS + [(999, 'Unrelated pull request', 'open', False)]):
         source, message_id = (root, root_message) if index < 2 else (
             (child, child_message) if index == 2 else (unrelated, unrelated_message))
-        receipt = {'repository': REPOSITORY, 'repository_id': 202, 'number': number,
+        receipt = {'repository': REPOSITORY, 'repository_id': repo_id, 'number': number,
                    'url': f'https://github.com/{REPOSITORY}/pull/{number}', 'title': title,
                    'state': state, 'draft': draft, 'merged': state == 'closed'}
         store.execute('''INSERT INTO github_publications
@@ -133,7 +177,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=8976)
     parser.add_argument('--static-root', type=Path)
+    parser.add_argument('--live-github', action='store_true', help='Read real PRs with the local gh login; no writes')
     parser.add_argument('--computer-container', help='Disposable local container running the real sandbox browser')
     options = parser.parse_args()
     with TemporaryDirectory(prefix='pull-request-panel-') as directory:
-        uvicorn.run(demo(directory, options.port, options.static_root, options.computer_container), host='127.0.0.1', port=options.port)
+        uvicorn.run(demo(directory, options.port, options.static_root, options.computer_container, options.live_github), host='127.0.0.1', port=options.port)
