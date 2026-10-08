@@ -238,3 +238,30 @@ def test_active_child_does_not_block_independent_occurrences(workspace,monkeypat
     assert client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'overlap-with-children'}).json()['outcome']=='started'
     app.state.store.update_run(child['id'],status='completed')
     assert app.state.automations.finished(root)
+
+
+def test_builder_metadata_and_queue_setting_round_trip(workspace):
+    app, client = workspace
+    a = create(client, metadata={'team': 'engineering', 'owner': '<script>demo</script>'}, queue_events=False)
+    assert a['definition']['metadata']['team'] == 'engineering'
+    assert a['definition']['queue_events'] is False
+    saved = client.put('/api/automations/' + a['id'], json={
+        'revision': a['revision'], 'definition': {**a['definition'], 'metadata': {'team': 'platform'}, 'queue_events': True}})
+    assert saved.status_code == 200
+    current = client.get('/api/automations').json()['automations'][0]
+    assert current['paused'] and current['revision'] == 2
+    assert current['definition']['metadata'] == {'team': 'platform'}
+    assert current['definition']['queue_events'] is True
+    for metadata in ({' ': 'empty'}, {'a' * 81: 'long key'}, {'team': 'x' * 501}, {str(i): '' for i in range(21)}):
+        result = client.post('/api/automations', json={'definition': {**a['definition'], 'metadata': metadata}})
+        assert result.status_code == 422
+
+
+def test_library_templates_are_valid_editable_workflows(workspace):
+    app, client = workspace
+    templates = client.get('/api/automations').json()['templates']
+    assert {t['id'] for t in templates} == {'linear-pr', 'weekly-digest', 'ci-failure', 'daily-triage'}
+    for template in templates:
+        trigger = {'event': {**template['event'], 'repository': 'example/project'}} if template.get('event') else {'schedule': template.get('schedule', {})}
+        d = Definition(name=template['name'], prompt=template['prompt'], plugins=template['plugins'], triggers=[trigger])
+        assert not d.queue_events and not d.metadata
