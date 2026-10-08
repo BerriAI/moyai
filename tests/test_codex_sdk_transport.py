@@ -295,7 +295,9 @@ def test_native_settlement_collects_late_command_receipts(tmp_path, monkeypatch,
         '1 unresolved tool(s)). Saved tool receipts are preserved.' if limited else 'yield-test-complete')
 
 
-@pytest.mark.parametrize('outcome,delay,rounds,rejections', [('settle-context', 12, 1, 0), ('settle-context-preview', 0, 2, 1)])
+@pytest.mark.parametrize('outcome,delay,rounds,rejections', [
+    ('settle-context', 12, 1, 0), ('settle-context-preview', 0, 2, 1),
+    ('settle-context-during-compaction', 0, 1, 0)])
 def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypatch, outcome, delay, rounds, rejections):
     proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome,
                              context_delay=delay, context_rounds=rounds, compact_rejections=rejections)
@@ -305,6 +307,7 @@ def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypat
     assert proof['native_compactions'] == rejections + rounds
     assert proof['upstream_requests'] == proof['model_calls'] == 3 + 2 * rounds + rejections
     assert proof['corrections_delivered'] == int(rounds > 1)
+    assert proof['receipt_during_compaction'] == (outcome == 'settle-context-during-compaction')
     assert 'private-native-summary-marker' not in proof['saved_prose']
     assert proof['final_response'] == 'yield-test-complete'
 
@@ -326,6 +329,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     workspace.mkdir()
     settlement = outcome.startswith('settle-')
     context_case = outcome.startswith('settle-context')
+    finish_during_compaction = outcome == 'settle-context-during-compaction'
+    receipt_during_compaction = threading.Event()
     compactions = []
     corrections = []
     if settlement:
@@ -358,7 +363,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         async def next_turn_notification(self, turn_id):
             event = await super().next_turn_notification(turn_id)
             if (context_case and event.method == 'turn/completed'
-                    and agent.context.relay.context_required):
+                    and agent.context.relay.context_required and not finish_during_compaction):
                 # Finish only after the failed turn: recovery must keep the
                 # original runtime alive to obtain this command's receipt.
                 (workspace / 'release').touch()
@@ -427,6 +432,11 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     progress('Original preview still serves HTTP 200 during compaction')
                 sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
                 assert sessions, 'Native summary must retain the running command handle'
+                if finish_during_compaction:
+                    (workspace / 'release').touch()
+                    assert receipt_during_compaction.wait(5), 'Receipt must be saved while compaction is still running'
+                    assert not agent.journal.pending and agent.journal.completed_tools == 1
+                    progress('Original command receipt saved before the compaction response')
                 output = {'type': 'message', 'id': 'native-summary', 'role': 'assistant',
                     'status': 'completed', 'content': [{'type': 'output_text', 'text':
                     'private-native-summary-marker. A command is still running, session_id: ' + sessions[-1]
@@ -459,7 +469,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     'phase': 'final_answer', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
             elif settlement and sequence == (context_rounds + 2 if context_case else 3):
-                assert agent.journal.pending and agent.model_calls == sequence + len(compactions)
+                assert bool(agent.journal.pending) != finish_during_compaction
+                assert agent.model_calls == sequence + len(compactions)
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
                 sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
                 assert sessions, 'Native command must return a running session'
@@ -509,13 +520,18 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         if outcome == 'interrupt' and agent.journal.completed_tools:
             agent.interrupt()
 
+    def completed(*args):
+        events.append(('complete', args))
+        if relay.native_compacting:
+            receipt_during_compaction.set()
+
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60,
         'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
-            complete=lambda *args: events.append(('complete', args)), commentary=lambda text: None),
+            complete=completed, commentary=lambda text: None),
         step=step, cwd=str(workspace), definition=None, context_store=store)
     try:
         try:
@@ -535,6 +551,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             tool_events=[kind for kind, _ in events], faults=faults, transport_errors=diagnostics,
             sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
             native_clients=len(native_plugins), native_compactions=len(compactions),
+            receipt_during_compaction=receipt_during_compaction.is_set(),
             corrections_delivered=len(corrections),
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
         progress('Result: ' + json.dumps({key: proof[key] for key in (

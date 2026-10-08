@@ -213,27 +213,33 @@ class CodexAgent(HarnessAgent):
             except TransportClosedError:
                 pass  # Completed queues can still receive later tool results.
 
+    async def await_with_tool_events(self, client, turn_ids, operation):
+        # SDK startup can reach model admission before its RPC returns. Keep
+        # receipts flowing for live commands owned by already-completed turns.
+        request = asyncio.create_task(operation)
+        try:
+            while True:
+                await self.drain_tool_events(client, turn_ids)
+                done, _ = await asyncio.wait({request}, timeout=0.05)
+                if done:
+                    return await request
+        finally:
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
     async def compact_context(self, client, thread_id, turn_ids):
         # This public SDK operation subscribes to thread events only; it does
         # not create a native goal. Compact has no returned turn ID to subscribe
         # to. Release the route before starting another ordinary native turn.
         route = client.register_goal_operation(thread_id)
         self.context.relay.native_compacting = True
-        notification, compact_turn, compacted = None, None, False
-        try:
-            # Events already queued before subscription stay on their old route.
-            await self.drain_tool_events(client, turn_ids)
-            await client.thread_compact(thread_id)
-            while not self.stopped.is_set():
-                notification = asyncio.create_task(client.next_goal_notification(route))
-                while not self.stopped.is_set():
-                    done, _ = await asyncio.wait({notification}, timeout=0.05)
-                    if done:
-                        break
-                if self.stopped.is_set():
-                    return False
-                event = await notification
-                notification = None
+        result = None
+
+        async def read_events():
+            nonlocal result
+            compact_turn, compacted = None, False
+            while True:
+                event = await client.next_goal_notification(route)
                 payload = (event.payload.params if hasattr(event.payload, 'params') else
                            event.payload.model_dump(mode='json', by_alias=True))
                 self.record_tool_event(event.method, payload)
@@ -242,16 +248,26 @@ class CodexAgent(HarnessAgent):
                 elif event.method == 'item/completed' and payload['item']['type'] == 'contextCompaction':
                     compacted = True
                 elif event.method == 'turn/completed' and payload['turn']['id'] == compact_turn:
-                    return compacted and payload['turn']['status'] == 'completed'
-            return False
+                    result = compacted and payload['turn']['status'] == 'completed'
+
+        # The goal route owns new thread events, even for old turn IDs. Keep
+        # consuming it during the RPC and through the route's final queued event.
+        notifications = asyncio.create_task(read_events())
+        try:
+            await self.await_with_tool_events(client, turn_ids, client.thread_compact(thread_id))
+            while result is None and not self.stopped.is_set():
+                await self.drain_tool_events(client, turn_ids)
+                done, _ = await asyncio.wait({notifications}, timeout=0.05)
+                if done:
+                    await notifications  # Propagate a failed reader, not a false success.
+            return result is True and not self.stopped.is_set()
         finally:
-            self.context.relay.native_compacting = False
-            # Cancelling an asyncio waiter does not stop the SDK's reader thread.
-            route.wake_notification_reader()
-            if notification is not None:
-                notification.cancel()
-                await asyncio.gather(notification, return_exceptions=True)
+            # Unsubscribe before adding the SDK's end marker. Let the reader
+            # save receipts queued after turn/completed instead of cancelling it.
             client.unregister_goal_operation(route)
+            route.wake_notification_reader()
+            await asyncio.gather(notifications, return_exceptions=True)
+            self.context.relay.native_compacting = False
 
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
@@ -355,9 +371,10 @@ class CodexAgent(HarnessAgent):
                                         message_items.clear()
                                         failure.clear()
                                         late_inputs.extend(self.inputs.take())
-                                        turn = await client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
+                                        turn = await self.await_with_tool_events(client, prior_turns,
+                                            client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
                                             'Continue the unfinished task after compaction. Existing commands are still '
-                                            'owned by this thread. Collect their results without restarting or replaying actions.')
+                                            'owned by this thread. Collect their results without restarting or replaying actions.'))
                                         late_inputs.clear()
                                         steered = False
                                         continue
@@ -370,11 +387,12 @@ class CodexAgent(HarnessAgent):
                                     settlement_turn = turn.turn.id
                                     prior_turns.add(turn.turn.id)
                                     message_items.clear()
-                                    turn = await client.turn_start(thread.thread.id,
+                                    turn = await self.await_with_tool_events(client, prior_turns,
+                                        client.turn_start(thread.thread.id,
                                         'Unfinished tool calls remain. Settle them before answering: '
                                         'wait for finite work, or deliberately stop preview servers you no longer need. '
                                         'Collect their actual results; do not restart or replay actions. '
-                                        'Then provide the final answer based on the confirmed results.')
+                                        'Then provide the final answer based on the confirmed results.'))
                                     steered = False
                                     continue
                                 if finished and not self.stopped.is_set() and not self.boundary_failed and not self.journal.pending:
@@ -389,9 +407,10 @@ class CodexAgent(HarnessAgent):
                                     if late_inputs or awaiting_answer or not self.inputs.close_if_empty():
                                         late_inputs.extend(self.inputs.take())
                                         message_items.clear()
-                                        turn = await client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
+                                        turn = await self.await_with_tool_events(client, prior_turns,
+                                            client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
                                             'Continue from the latest user correction already in this conversation. '
-                                            'Preserve completed work and answer the updated request.')
+                                            'Preserve completed work and answer the updated request.'))
                                         steered = False
                                         late_inputs.clear()
                                         continue

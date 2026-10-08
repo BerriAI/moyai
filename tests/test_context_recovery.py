@@ -244,6 +244,68 @@ def test_full_history_at_transport_ceiling_requests_recovery_before_inference(ro
         relay.close()
 
 
+@pytest.mark.parametrize('disconnect', ['headers', 'body'])
+def test_abandoned_compaction_error_does_not_poison_retry(monkeypatch, disconnect):
+    seen, failures, writes = [], [], []
+    finished = threading.Event()
+
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            seen.append(self.rfile.read(int(self.headers['Content-Length'])))
+            body = json.dumps({'detail': {'code': 'context_compaction_required',
+                'input_tokens': 20000, 'input_budget': 10000}}).encode()
+            self.send_response(409)
+            self.send_header('X-Moyai-Context', 'compact')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    edge = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    threading.Thread(target=edge.serve_forever, daemon=True).start()
+    relay = BrokerRelay(f'http://127.0.0.1:{edge.server_port}', 'cap', report_error=failures.append).start()
+    relay.context_recovery = relay.native_compacting = True
+    handler = relay.server.RequestHandlerClass
+    setup, finish = handler.setup, handler.finish
+
+    def broken_setup(self):
+        setup(self)
+        write = self.wfile.write
+        def broken_write(data):
+            prefix = b'HTTP/' if disconnect == 'headers' else b'data: '
+            if not writes and data.startswith(prefix):
+                writes.append(disconnect)
+                raise BrokenPipeError('Local SDK abandoned overflow response')
+            return write(data)
+        self.wfile.write = broken_write
+
+    def observed_finish(self):
+        try:
+            finish(self)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(handler, 'setup', broken_setup)
+    monkeypatch.setattr(handler, 'finish', observed_finish)
+    try:
+        with httpx.Client(base_url=relay.url, headers={'Authorization': 'Bearer cap'}, timeout=3) as client:
+            try:
+                client.post('/v1/responses', json={'input': []})
+            except httpx.HTTPError:
+                pass  # Delivery is deliberately broken; inspect the saved state.
+            assert finished.wait(3) and writes == [disconnect]
+            assert relay.context_required and not relay.model_failed
+            assert not relay.last_error and relay.last_failure is None and not failures
+            retry = client.post('/v1/responses', json={'input': []})
+            assert len(seen) == 2 and retry.status_code == 200
+            assert json.loads(retry.text.removeprefix('data: '))['response']['error']['code'] == 'context_length_exceeded'
+            assert not relay.model_failed
+    finally:
+        relay.close()
+        edge.shutdown()
+        edge.server_close()
+
+
 def test_old_unknown_outcome_does_not_block_new_question_recovery(tmp_path):
     agent, summaries = runtime(tmp_path)
     store = agent.context_store
