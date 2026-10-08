@@ -124,7 +124,14 @@ const server=http.createServer(async(req,res)=>{
   return json(res,data?200:422,data||{detail:'Choose a date range of up to 93 days, with start before end.'});
  }
  if(p==='/api/admin/identities/status')return json(res,200,{enabled:true,ready:true,missing_scopes:[]});
- if(p==='/api/admin/adoption')return json(res,200,empty?{...adoption,total_requests:0,active_users:0,daily:daily.map(d=>({...d,requests:0,active_users:0,seven_day_average:0})),weekly:{...adoption.weekly,requests:0,previous_requests:0,delta:0,percent_change:null}}:adoption);
+ if(p==='/api/admin/adoption'){
+  if(role!=='admin')return json(res,403,{detail:'Organization administrator access required.'});
+  if(fixture==='activity-error')return json(res,503,{detail:'This preview simulates an activity report outage.'});
+  const range=spendFixture(url.searchParams,false,true);
+  if(!range)return json(res,422,{detail:'Choose a date range of up to 93 days, with start before end.'});
+  const rows=range.daily.map(day=>(!empty&&daily.find(d=>d.date===day.date))||{date:day.date,requests:0,active_users:0,seven_day_average:0,partial:day.date===adoption.end});
+  return json(res,200,{...adoption,start:range.start,end:range.end,daily:rows,total_requests:rows.reduce((sum,d)=>sum+d.requests,0),active_users:Math.max(0,...rows.map(d=>d.active_users)),weekly:empty?{...adoption.weekly,requests:0,previous_requests:0,delta:0,percent_change:null}:adoption.weekly});
+ }
  return json(res,501,{detail:'This operation is not available in the visual preview.'});
 });
 server.listen(port,'127.0.0.1',()=>console.log(`Settings UI fixture at http://127.0.0.1:${port}. Synthetic data; no external services.`));

@@ -9,23 +9,28 @@ const settingsGroups = [
     {view:'secrets', title:'Secrets', description:'Manage personal and shared service access.'},
   ]},
   {id:'workspace', title:'Workspace', items:[
-    {view:'spend', title:'Spend', description:'See your own LLM usage and costs.', adminDescription:'See model usage and costs across your team.'},
+    {view:'spend', title:'Spend', description:'See your own LLM usage and costs.', memberOnly:true},
     {view:'runtime', title:'Runtime', description:'Check cloud setup and session limits.'},
     {view:'environments', title:'Environments', description:'Prepare repositories and workspace tools.', admin:true},
   ]},
   {id:'administration', title:'Administration', admin:true, items:[
     {view:'users', title:'Users', description:'Manage workspace members and roles.', admin:true},
-    {view:'adoption', title:'Usage analytics', description:'Track human requests and active teammates over time.', admin:true},
+    {view:'spend', title:'Spend & usage', description:'Review team costs, model usage, and human activity.', admin:true},
   ]},
 ];
-const settingsViews = new Set(['settings', ...settingsGroups.flatMap(group => group.items.map(item => item.view))]);
+// Keep old Usage analytics bookmarks routable without adding a second navigation entry.
+const settingsViews = new Set(['settings', 'adoption', ...settingsGroups.flatMap(group => group.items.map(item => item.view))]);
+
+function settingsItemVisible(item, role) {
+  return (!item.admin || role === 'admin') && (!item.memberOnly || role !== 'admin');
+}
 
 // The same destinations drive the overview and the persistent settings rail.
 function settingsNavigation(view, role) {
   const link = (target, title, icon) => `<a href="#${target}"${view === target ? ' aria-current="page"' : ''}>${icon ? settingsIcon(target) : '<span class="settings-overview-icon" aria-hidden="true">⊞</span>'}<span>${title}</span></a>`;
   return `<a class="settings-back" href="#tasks"><span aria-hidden="true">←</span> Back to workspace</a>
     <div class="settings-nav-title">Settings</div>${link('settings', 'Overview')}
-    ${settingsGroups.filter(group => !group.admin || role === 'admin').map(group => `<div class="settings-nav-group"><h2>${group.title}</h2>${group.items.filter(item => !item.admin || role === 'admin').map(item => link(item.view, item.title, true)).join('')}</div>`).join('')}`;
+    ${settingsGroups.filter(group => !group.admin || role === 'admin').map(group => `<div class="settings-nav-group"><h2>${group.title}</h2>${group.items.filter(item => settingsItemVisible(item, role)).map(item => link(item.view, item.title, true)).join('')}</div>`).join('')}`;
 }
 
 function updateSettingsNavigation() {
@@ -127,7 +132,7 @@ async function renderSettings() {
     <div class="settings-grid">${settingsGroups.filter(group => !group.admin || admin).map(group => `
       <section class="settings-group" aria-labelledby="settings-${group.id}">
         <h2 id="settings-${group.id}">${group.title}${group.admin ? '<span>Admin</span>' : ''}</h2>
-        <div class="settings-links">${group.items.filter(item => !item.admin || admin).map(item => `
+        <div class="settings-links">${group.items.filter(item => settingsItemVisible(item, state.role)).map(item => `
           <a class="settings-link" href="#${item.view}">
             <span class="settings-icon">${settingsIcon(item.view)}</span>
             <span class="settings-copy"><strong>${item.title}</strong><span>${admin && item.adminDescription || item.description}</span></span>

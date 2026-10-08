@@ -1,8 +1,9 @@
 # Usage analytics
 
-Organization administrators can open **Settings → Usage analytics** (`#adoption`).
+Organization administrators can open **Settings → Administration → Spend & usage → Human activity**.
+The report shares the Spend & usage date range, refresh, and export controls. Existing `#adoption` links open this tab on the consolidated `#spend` page.
 The page queries `GET /api/admin/adoption?start=YYYY-MM-DD&end=YYYY-MM-DD`.
-It defaults to the last 30 UTC calendar days, supports up to 93 days, and rejects future dates.
+It uses the selected Spend & usage range, supports up to 93 UTC calendar days, and rejects future dates.
 
 - Daily human chat submissions, with a seven-day moving average.
 - Distinct identified teammates in the selected period and daily breakdown.
@@ -21,7 +22,7 @@ Days without stored submissions are zero-filled. Missing or purged history and o
 
 ```sh
 uv run pytest tests/test_adoption.py tests/test_spend.py tests/test_sessions.py tests/test_message_queue.py -q
-node --test tests/test_adoption.cjs tests/test_settings.cjs
+node --test tests/test_adoption.cjs tests/test_spend.cjs tests/test_settings.cjs
 git diff --check
 ```
 

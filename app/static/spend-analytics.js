@@ -1,5 +1,5 @@
 /* Organization analytics; called only after /api/spend confirms organization scope. */
-const spendAnalyticsState={tab:'overall',model:'',sort:'spend',direction:-1};
+const spendAnalyticsState={tab:'overall',model:'',sort:'spend',direction:-1,request:0};
 function spendDailyBreakdown(data){
   return `<details class="analytics-breakdown" id="spend-daily-breakdown"><summary>Daily breakdown</summary><div class="spend-table-wrap" role="region" aria-label="Daily usage breakdown" tabindex="0"><table class="spend-table"><thead><tr><th>Date (UTC)</th><th>Active sessions</th><th>Active users</th><th>LLM requests</th><th>Tokens</th><th>Unpriced requests</th><th>LLM spend</th></tr></thead><tbody>${(data.daily||[]).map(d=>`<tr><td>${esc(d.date)}</td><td>${spendCount(d.sessions)}</td><td>${spendCount(d.active_users)}</td><td>${spendCount(d.requests)}</td><td>${spendCount(d.total_tokens)}</td><td>${spendCount(d.pending_costs+d.missing_costs)}</td><td>${dollars(d.spend)}</td></tr>`).join('')}</tbody></table></div></details>`;
 }
@@ -50,24 +50,41 @@ function spendExport(data){
   if(tab==='infrastructure')return [['Provider','Cost USD','Estimated USD','Covered days','Missing days'],...data.infrastructure.providers.map(p=>[p.name,p.spend,p.estimated,p.covered_days,p.missing_days])];
   return [['Date (UTC)','Active sessions','Active users','LLM requests','Tokens','LLM spend USD','Pending costs','Missing costs'],...(data.daily||[]).map(d=>[d.date,d.sessions,d.active_users,d.requests,d.total_tokens,d.spend,d.pending_costs,d.missing_costs])];
 }
-function renderAdminSpend(data,identityStatus){
+async function renderAdminSpend(data,identityStatus){
+  const version=state.pageVersion,spendVersion=spendState.version,request=++spendAnalyticsState.request;
+  const current=()=>version===state.pageVersion&&spendVersion===spendState.version&&request===spendAnalyticsState.request;
   if(!data.users.some(u=>u.id===spendState.user))spendState.user='';
   if(!data.models.some(m=>m.model===spendAnalyticsState.model))spendAnalyticsState.model='';
-  const tabs=[['overall','Overall'],['users','Users'],['history','Usage history'],['infrastructure','Infrastructure']],tab=spendAnalyticsState.tab;
+  const tabs=[['overall','Overall'],['users','Users'],['history','Usage history'],['activity','Human activity'],['infrastructure','Infrastructure']],tab=spendAnalyticsState.tab;
   const identityPanel=()=>renderSlackIdentities(data.identities.filter(u=>u.kind==='slack'),data.identities.filter(u=>u.kind==='google'),identityStatus);
-  const panel=tab==='users'?spendUsersPanel(data):tab==='history'?spendHistoryPanel(data):tab==='infrastructure'?renderCostSummary(data)+renderInfrastructure(data)+identityPanel():spendOverview(data);
-  $('#content').innerHTML=`<div class="analytics-page"><div class="page-heading"><div><h1>Spend & usage</h1><p class="subtext">Your team's costs and activity, at a glance.</p></div><div class="analytics-actions">${analyticsRange('spend',data.start,data.end)}<button id="sync-spend">Refresh</button></div></div><div class="analytics-toolbar"><div class="analytics-tabs" role="group" aria-label="Spend report view">${tabs.map(([key,label])=>`<button id="spend-tab-${key}" data-spend-tab="${key}" aria-pressed="${tab===key}">${label}</button>`).join('')}</div><button class="analytics-export" id="spend-export">Export CSV</button></div><div id="spend-panel">${panel}</div><details class="analytics-methodology" id="spend-methodology"><summary>About this data</summary><p>LLM costs are saved from Moyai’s inference responses across gateway key rotations. Calls using separate credential-proxy keys and usage outside Moyai are excluded. Failed or interrupted requests may have no returned cost. Infrastructure uses provider reports and monthly bills; estimates and missing coverage are marked.</p>${data.tracked_since?`<p>Per-user tracking began ${esc(new Date(data.tracked_since).toLocaleString())}.</p>`:''}</details></div>`;
+  const panel=tab==='activity'?'<p class="subtext" role="status">Loading human activity…</p>':tab==='users'?spendUsersPanel(data):tab==='history'?spendHistoryPanel(data):tab==='infrastructure'?renderCostSummary(data)+renderInfrastructure(data)+identityPanel():spendOverview(data);
+  $('#content').innerHTML=`<div class="analytics-page"><div class="page-heading"><div><h1>Spend & usage</h1><p class="subtext">Your team's costs and activity, at a glance.</p></div><div class="analytics-actions">${analyticsRange('spend',data.start,data.end)}<button id="sync-spend">Refresh</button></div></div><div class="analytics-toolbar"><div class="analytics-tabs" role="group" aria-label="Spend and usage report view">${tabs.map(([key,label])=>`<button id="spend-tab-${key}" data-spend-tab="${key}" aria-pressed="${tab===key}">${label}</button>`).join('')}</div><button class="analytics-export" id="spend-export" ${tab==='activity'?'disabled':''}>Export CSV</button></div><div id="spend-panel">${panel}</div>${tab==='activity'?'':`<details class="analytics-methodology" id="spend-methodology"><summary>About this data</summary><p>LLM costs are saved from Moyai’s inference responses across gateway key rotations. Calls using separate credential-proxy keys and usage outside Moyai are excluded. Failed or interrupted requests may have no returned cost. Infrastructure uses provider reports and monthly bills; estimates and missing coverage are marked.</p>${data.tracked_since?`<p>Per-user tracking began ${esc(new Date(data.tracked_since).toLocaleString())}.</p>`:''}</details>`}</div>`;
   bindSpendFilters();
-  const redraw=focus=>{renderAdminSpend(data,identityStatus);if(focus)$('#'+focus)?.focus();};
-  document.querySelectorAll('[data-spend-tab]').forEach(button=>button.onclick=()=>{spendAnalyticsState.tab=button.dataset.spendTab;redraw(button.id);});
+  const redraw=focus=>{const rendered=renderAdminSpend(data,identityStatus);if(focus)$('#'+focus)?.focus();return rendered;};
+  document.querySelectorAll('[data-spend-tab]').forEach(button=>button.onclick=()=>{spendAnalyticsState.tab=button.dataset.spendTab;return redraw(button.id).catch(showError);});
   $('#spend-export').onclick=()=>downloadAnalyticsCSV(`moyai-${tab}-${data.start}-${data.end}.csv`,spendExport(data));
   if(tab==='users'){
-    $('#spend-user').onchange=()=>{spendState.user=$('#spend-user').value;redraw('spend-user');};
-    if($('#spend-clear-user'))$('#spend-clear-user').onclick=()=>{spendState.user='';redraw('spend-user');};
-    document.querySelectorAll('[data-spend-sort]').forEach(button=>button.onclick=()=>{const key=button.dataset.spendSort;spendAnalyticsState.direction=spendAnalyticsState.sort===key?-spendAnalyticsState.direction:-1;spendAnalyticsState.sort=key;redraw();document.querySelector(`[data-spend-sort="${key}"]`)?.focus();});
+    $('#spend-user').onchange=()=>{spendState.user=$('#spend-user').value;redraw('spend-user').catch(showError);};
+    if($('#spend-clear-user'))$('#spend-clear-user').onclick=()=>{spendState.user='';redraw('spend-user').catch(showError);};
+    document.querySelectorAll('[data-spend-sort]').forEach(button=>button.onclick=()=>{const key=button.dataset.spendSort;spendAnalyticsState.direction=spendAnalyticsState.sort===key?-spendAnalyticsState.direction:-1;spendAnalyticsState.sort=key;redraw().catch(showError);document.querySelector(`[data-spend-sort="${key}"]`)?.focus();});
   }
-  if(tab==='history')$('#spend-model').onchange=()=>{spendAnalyticsState.model=$('#spend-model').value;redraw('spend-model');};
+  if(tab==='history')$('#spend-model').onchange=()=>{spendAnalyticsState.model=$('#spend-model').value;redraw('spend-model').catch(showError);};
   if(tab==='infrastructure'){bindInfrastructure(data);bindSpendIdentities();}
+  if(tab==='activity'){
+    const query=new URLSearchParams({start:data.start,end:data.end});
+    try{
+      const activity=await api('/api/admin/adoption?'+query);
+      if(!current())return false;
+      $('#spend-panel').innerHTML=adoptionDashboard(activity);
+      $('#spend-export').disabled=false;
+      $('#spend-export').onclick=()=>downloadAnalyticsCSV(`moyai-human-activity-${activity.start}-${activity.end}.csv`,adoptionExport(activity));
+    }catch(error){
+      if(!current())return false;
+      $('#spend-panel').innerHTML=`<div class="error-banner" role="alert">${esc(error.message)}</div><button id="activity-retry">Try again</button>`;
+      $('#activity-retry').onclick=()=>redraw('spend-tab-activity').catch(showError);
+    }
+  }
+  return true;
 }
 function bindSpendIdentities(){
   $('#refresh-identities').onclick=async()=>{const button=$('#refresh-identities');button.disabled=true;try{await api('/api/admin/identities/refresh',{method:'POST'});button.textContent='Profiles queued';toast('Profile refresh queued. Use Refresh above to see updated matches.');}catch(error){button.disabled=false;showError(error);}};

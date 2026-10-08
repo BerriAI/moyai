@@ -7,16 +7,17 @@
 
 ## Spend dashboard
 
-**Settings → Spend** (`#spend`) gives administrators four views:
+**Settings → Administration → Spend & usage** (`#spend`) gives administrators five tabs:
 
 - **Overall:** recorded infrastructure and model costs, active sessions, and model requests over time.
 - **Users:** daily active users and a sortable table of costs, sessions, requests, tokens, cost per session, and share of LLM spend. Filter a user to inspect their sessions.
 - **Usage history:** daily model costs, a cumulative cost line, a model filter, and exact request details.
+- **Human activity:** human chat submissions, a seven-day moving average, and active teammates.
 - **Infrastructure:** existing provider sync, monthly bills and estimates, coverage, and Slack identity controls.
 
 Use the date menu for presets or a custom UTC range of up to 93 days. **Export CSV** exports the current report and user/model filter. Charts and daily exports use the full scoped ledger; the request-detail disclosure remains limited to the latest 500 requests. An active session can appear on multiple days, while the period total counts it once. Unknown costs stay visibly unpriced, and averages use recorded costs only.
 
-Members continue to see their own model spend and established linked Slack activity. Organization charts and infrastructure controls require an administrator report from the server. Human chat submissions are reported separately in **Usage analytics** (`#adoption`), because one human submission can produce many model requests.
+Members retain **Settings → Workspace → Spend** for their own model spend and established linked Slack activity. Organization charts and infrastructure controls require an administrator report from the server. Human chat submissions have their own **Human activity** tab within the same page, because one human submission can produce many model requests. Existing `#adoption` links open that tab.
 
 For a local visual demo with synthetic data, run `node scripts/settings_ui_preview.cjs --port 8953` and open `http://127.0.0.1:8953/#spend`. This preview does not contact providers or exercise production authentication and billing writes.
 
@@ -26,7 +27,7 @@ For a local visual demo with synthetic data, run `node scripts/settings_ui_previ
 
 Initial verification exposed LiteLLM's rejection of request-level `turn_off_message_logging`. Moyai no longer sends that option; gateway security settings were not changed. Seven rejected attempts remain visible as unknown cost, rather than assigning an invented zero. A separate minimal diagnostic request cost `$0.00029` on the same key, outside the Moyai session ledger. The gateway still has no key-scoped logging integration, and `allowed_routes` remains `llm_api_routes`. The full 110-test suite passed before deployment; all 22 spend/model tests passed after the logging-policy correction.
 
-Administrators can open **Settings → Spend** to see USD model costs by user, session and model, with UTC date filters (up to 93 days). Google sign-in registers a stable account using the verified Google subject, so an email/name change does not create a different billing identity. New sessions record their creator; every queued message independently records its sender. A response, including its tool loops, retries and context compression calls, is attributed to that sender even when another teammate queues the next message. Conversations retain shared-workspace visibility; this adds ownership and accounting, not private chats.
+Administrators can open **Settings → Administration → Spend & usage** to see USD model costs by user, session and model, with UTC date filters (up to 93 days). Google sign-in registers a stable account using the verified Google subject, so an email/name change does not create a different billing identity. New sessions record their creator; every queued message independently records its sender. A response, including its tool loops, retries and context compression calls, is attributed to that sender even when another teammate queues the next message. Conversations retain shared-workspace visibility; this adds ownership and accounting, not private chats.
 
 Each model call is durably reserved before reaching LiteLLM, with the active message sender, session, selected model and existing key fingerprint. Sandbox-supplied attribution is ignored. All requests use the same existing gateway virtual key; SSO user/session accounting stays inside Moyai. No new gateway users, keys, callbacks or reporting permissions are required.
 

@@ -22,19 +22,23 @@ test('standalone Settings has working sections without depending on automations'
   const {context, elements} = setup();
   await context.renderSettings();
   const html = elements.get('#content').innerHTML;
-  for (const view of ['skills', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend', 'adoption']) {
+  for (const view of ['skills', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend']) {
     assert.match(html, new RegExp(`href="#${view}"`));
   }
-  assert.doesNotMatch(html, /href="#automations"/);
+  assert.doesNotMatch(html, /href="#(?:automations|adoption)"/);
+  assert.equal((html.match(/href="#spend"/g)||[]).length,1);
+  assert.match(html, /id="settings-administration"[\s\S]*href="#spend"/);
+  assert.equal(vm.runInContext("settingsViews.has('adoption')", context), true);
   assert.equal(vm.runInContext("settingsViews.has('automations')", context), false);
 });
 
-test('every Settings card renders a non-empty decorative icon, including Adoption', async () => {
+test('every Settings card renders a non-empty decorative icon, including Spend & usage', async () => {
   const {context, elements} = setup({automations: true});
   await context.renderSettings();
   const html = elements.get('#content').innerHTML;
   const views = vm.runInContext('settingsGroups.flatMap(group => group.items.map(item => item.view))', context);
-  assert.ok(views.includes('adoption'));
+  assert.ok(views.includes('spend'));
+  assert.ok(!views.includes('adoption'));
   for (const view of views) {
     const card = html.match(new RegExp(`<a class="settings-link" href="#${view}">([\\s\\S]*?)</a>`));
     assert.ok(card, `${view} card should be rendered`);
@@ -124,7 +128,12 @@ test('settings navigation selects exactly one destination and respects member ac
   assert.doesNotMatch(member, /href="#(?:users|adoption|environments)"/);
   assert.match(member, /href="#spend"/);
   const admin = context.settingsNavigation('spend', 'admin');
-  for (const view of ['automations','skills','memory','connections','secrets','runtime','environments','users','spend','adoption']) {
+  assert.equal((admin.match(/href="#spend"/g)||[]).length,1);
+  assert.match(admin, /<h2>Administration<\/h2>[\s\S]*href="#spend" aria-current="page"/);
+  assert.doesNotMatch(admin, /href="#adoption"/);
+  assert.match(member, /<h2>Workspace<\/h2>[\s\S]*href="#spend"/);
+  assert.doesNotMatch(member, /Administration/);
+  for (const view of ['automations','skills','memory','connections','secrets','runtime','environments','users','spend']) {
     assert.match(admin, new RegExp(`href="#${view}"`));
   }
 });

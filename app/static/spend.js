@@ -42,7 +42,7 @@ async function renderSpend(background = false){
     identityStatus=data.scope==='organization'?await api('/api/admin/identities/status'):null;
   }catch(error){
     if(!current())return;
-    $('#content').innerHTML=`<div class="page-heading"><h1>Spend</h1></div><div class="error-banner" role="alert">${esc(error.message)}</div>${renderSpendFilters(spendState.start,spendState.end)}`;
+    $('#content').innerHTML=`<div class="page-heading"><h1>${state.role==='admin'?'Spend & usage':'Spend'}</h1></div><div class="error-banner" role="alert">${esc(error.message)}</div>${renderSpendFilters(spendState.start,spendState.end)}`;
     bindSpendFilters();
     return;
   }
@@ -50,7 +50,7 @@ async function renderSpend(background = false){
   const admin=data.scope==='organization';
   spendState.start=data.start;spendState.end=data.end;
   if(admin){
-    renderAdminSpend(data,identityStatus);
+    if(!await renderAdminSpend(data,identityStatus)||!current())return;
     if(preserved){for(const id of preserved.open){const el=$('#'+id);if(el)el.open=true;}if(preserved.focus)$('#'+preserved.focus)?.focus({preventScroll:true});$('#content').scrollTop=preserved.scroll;}
     if(data.infrastructure.pending)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);
     return;

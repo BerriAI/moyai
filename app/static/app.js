@@ -247,16 +247,17 @@ function bindComposer(input,form){
   autoSize(input);
 }
 async function navigate(view) {
+  if(view==='adoption'){spendAnalyticsState.tab='activity';view='spend';}
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
-  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',adoption:'Usage analytics',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
+  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(settingsViews.has(view)) {
     $('#content').innerHTML='<p class="settings-loading" role="status">Loading…</p>';
     $('#content').scrollTop=0;
   }
   try {
-  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='adoption')await renderAdoption();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
+  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
   } catch(error) {
     if(version!==state.pageVersion)return;
     if(!settingsViews.has(view))throw error;
