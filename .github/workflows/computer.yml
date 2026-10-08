@@ -6,11 +6,13 @@ on:
       - 'app/durable_runner.py'
       - 'app/temporal_runtime.py'
       - 'app/static/computer.*'
+      - 'app/static/workspace-panel.js'
       - 'app/workspace_image.py'
       - 'sandbox/computer.py'
       - 'sandbox/mcp_bridge.py'
       - 'Dockerfile.sandbox'
       - 'tests/test_computer*'
+      - 'tests/test_pull_requests.cjs'
       - 'tests/test_idle_window.py'
       - 'scripts/computer_desktop_smoke.py'
       - '.github/workflows/computer.yml'
@@ -29,7 +31,7 @@ jobs:
       - name: Control, lifecycle and authorization regressions
         run: |
           uv run --python 3.13 pytest -q --tb=line tests/test_computer.py tests/test_idle_window.py tests/test_mcp_bridge.py
-          node --test tests/test_computer_lifecycle.cjs
+          node --test tests/test_computer_lifecycle.cjs tests/test_pull_requests.cjs
       - name: Build production desktop dependencies
         run: docker build --target transport -f Dockerfile.sandbox -t moyai-desktop .
       - name: Exercise real Chromium address bar, input and agent handoff

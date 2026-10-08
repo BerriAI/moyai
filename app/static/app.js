@@ -4,7 +4,7 @@ const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsR
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 let workspacePanel;
 const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,size:fileSize,onOpen:file=>workspacePanel?(file?workspacePanel.openFile(file):workspacePanel.open('files')):false});
-const computer = MoyaiComputer.create({api,escape:esc,onCapture:file=>workspacePanel?.openFile(file)});
+const computer = MoyaiComputer.create({api,escape:esc,onCaptures:()=>workspacePanel?.open('captures')});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
 async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...options.headers}});

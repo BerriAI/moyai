@@ -12,13 +12,13 @@ function node(){
       (this['on'+name]||listeners.get(name))?.(event);return event;},
     querySelector(s){if(!children.has(s))children.set(s,node());return children.get(s);},querySelectorAll(){return [];},append(el){this.child=el;}};
 }
-function browser(api){
+function browser(api,options={}){
   const timers=new Map(),intervals=new Map();let next=0,now=0;
   const document={hidden:false,createElement:node,addEventListener(name,fn){this[name]=fn;}};
   const context={window:{},document,performance:{now:()=>now},setTimeout:(fn,delay)=>{timers.set(++next,{fn,at:now+delay});return next;},
     clearTimeout:id=>timers.delete(id),setInterval:fn=>{intervals.set(++next,fn);return next;},clearInterval:id=>intervals.delete(id)};
   vm.createContext(context);vm.runInContext(fs.readFileSync(process.env.COMPUTER_SOURCE||'app/static/computer.js','utf8'),context);
-  const view=context.window.MoyaiComputer.create({api,escape:s=>s});
+  const view=context.window.MoyaiComputer.create({api,escape:s=>s,...options});
   return {view,document,async renew(){for(const fn of intervals.values())fn();await tick();},async flush(delay=25){
     now+=delay;
     for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}
@@ -293,6 +293,21 @@ test('the pending input queue is bounded and overflow stops rather than replays'
 
 const prA='https://github.com/BerriAI/moyai/pull/145',prB='https://github.com/BerriAI/moyai/pull/135';
 const prFrame=(tab,controller='')=>({...frame(tab,controller),surface:'browser',tab,controller,controller_tab:controller?tab:''});
+test('desktop and PR views open saved captures separately without acquiring control',async()=>{
+  for(const tab of ['',prA]){
+    const commands=[],opened=[];
+    const {view}=browser(async(path,options)=>{
+      if(options)commands.push(JSON.parse(options.body));
+      return {...(tab?prFrame(tab):frame(undefined,'')),captures:[{archive_path:'capture:proof.png',name:'proof.png',kind:'image',inline_url:'/proof.png',url:'/proof.png?download=true'}]};
+    },{onCaptures:()=>opened.push('captures')});
+    const host=node();await view.open('one',host,{tab});
+    assert.match(host.child.innerHTML,/data-saved-captures/);
+    assert.doesNotMatch(host.child.innerHTML,/data-captures|<section class="computer-captures"/);
+    await host.child.querySelector('[data-saved-captures]').onclick();
+    assert.deepEqual(opened,['captures']);assert.deepEqual(commands,[]);
+    view.close();await tick();
+  }
+});
 test('PR pages use explicit identity for open, control, poll and delayed release',async()=>{
   const requests=[];let finishClaim;
   const {view}=browser(async(path,options)=>{

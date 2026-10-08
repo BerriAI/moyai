@@ -1,6 +1,6 @@
 /* One private desktop and control lease, shared with the sandbox's agent. */
 window.MoyaiComputer = {
-  create({api, escape:esc, onCapture}) {
+  create({api, escape:esc, onCaptures}) {
     let dialog, runId, timer, leaseTimer, inputTimer, compositionTimer, current;
     let busy=false, inputInFlight=false, polling=null, changingControl=false, active=false, composing=false, closing=false, browserTab='', version=0, revision=0;
     let queue=[], pointer=null, inputError='', wakeError='', releasing=Promise.resolve(), pending=Promise.resolve();
@@ -65,11 +65,6 @@ window.MoyaiComputer = {
       q('[data-notice]').textContent=legacy()?'Restart this workspace to enable desktop control. This browser is running an older version.':wakeError||data.wake_error||inputError||data.notice||((data.shutting_down||!data.has_sandbox)&&data.wake_notice)||(own()?
         `You have control. Click and type in the ${surface()}. Ctrl+Alt+Esc returns to these controls.`:
         browserTab?'Take control to use this pull request’s browser.':'Watch Moyai work here. Take control to use the desktop.');
-      const captures=data.captures||[],signature=JSON.stringify(captures);
-      if(q('[data-captures]').dataset.signature!==signature){
-        q('[data-captures]').dataset.signature=signature;
-        q('[data-captures]').innerHTML=captures.length?captures.map(file=>`<article class="computer-capture">${file.kind==='image'?`<a href="${esc(file.inline_url)}" target="_blank" rel="noopener"><img src="${esc(file.inline_url)}" alt="${esc(file.name)}" loading="lazy"></a>`:`<video src="${esc(file.inline_url)}" controls preload="metadata"></video>`}<div><span title="${esc(file.name)}">${esc(file.name)}</span><a href="${esc(file.url)}" download="${esc(file.name)}" aria-label="Download ${esc(file.name)}">↓ Download</a></div></article>`).join(''):'<p class="computer-no-captures">Screenshots and recordings will appear here.</p>';
-      }
     }
     async function poll(){
       clearTimeout(timer);if(!active||document.hidden||(busy&&!inputInFlight)||changingControl||closing||polling===version)return;
@@ -194,8 +189,8 @@ window.MoyaiComputer = {
       dialog.innerHTML=`<header class="computer-heading"><div><h2>${browserTab?'Pull request':'Computer'}</h2><span data-status>Connecting…</span></div>${controls}</header>
         ${browserTab?'<div class="computer-address"><span data-address>Sandbox browser</span></div>':''}
         <div class="computer-stage"><img data-screen alt="Live ${surface()}. Take control to click and type." draggable="false" hidden><textarea data-keyboard class="computer-keyboard" aria-label="${browserTab?'Browser':'Desktop'} keyboard" aria-describedby="computer-input-hint" autocomplete="off" autocapitalize="off" spellcheck="false" tabindex="-1" readonly></textarea><div data-empty class="computer-empty"><span aria-hidden="true">▧</span><h3>Your ${browserTab?'browser':'computer'} in the cloud</h3><p data-empty-text>Connecting to the workspace…</p><button type="button" data-wake hidden>Wake up to see live</button><button type="button" data-open hidden>Open ${surface()}</button></div></div>
-        <div class="computer-toolbar"><div>${browserTab?'<button type="button" data-action="back" disabled>← Back</button>':'<button type="button" data-action="open" disabled>Open browser</button>'}<button type="button" data-action="screenshot" disabled>Screenshot</button><button type="button" data-action="record" data-record disabled>● Record flow</button></div><p id="computer-input-hint" data-notice role="status">Connecting…</p></div>
-        <section class="computer-captures"><div class="computer-captures-heading"><h3>Saved captures</h3><p>Available after the workspace closes · Shared with session viewers</p></div><div data-captures></div><p class="computer-limits">${browserTab?'Browser':'Desktop'} captures · No audio · Up to 10 minutes or 25 MB per recording · 64 MB of captures per session</p></section>`;
+        <div class="computer-toolbar"><div>${browserTab?'<button type="button" data-action="back" disabled>← Back</button>':'<button type="button" data-action="open" disabled>Open browser</button>'}<button type="button" data-action="screenshot" disabled>Screenshot</button><button type="button" data-action="record" data-record disabled>● Record flow</button></div><button type="button" data-saved-captures>Saved captures</button><p id="computer-input-hint" data-notice role="status">Connecting…</p></div>`;
+      q('[data-saved-captures]').onclick=()=>onCaptures?.();
       q('[data-control]').onclick=()=>{commitText();return command(own()&&!inputError?'release':'claim');};
       q('[data-open]').onclick=()=>command('claim');
       q('[data-wake]').onclick=()=>command('wake');
@@ -267,12 +262,6 @@ window.MoyaiComputer = {
         const scale=event.deltaMode===1?16:event.deltaMode===2?current.height:1;
         enqueue({type:'scroll',dx:Math.round(event.deltaX*scale),dy:Math.round(event.deltaY*scale)});
       },{passive:false});
-      dialog.addEventListener('click',event=>{
-        const link=event.target.closest('.computer-capture a');
-        if(!link||link.hasAttribute('download')||event.metaKey||event.ctrlKey)return;
-        const file=current?.captures?.find(item=>item.inline_url===link.getAttribute('href'));
-        if(file&&onCapture){event.preventDefault();onCapture(file);}
-      });
       await poll();
       if(!active||opening!==version)return;
       if(options.autoload&&current?.has_sandbox&&!legacy())await command('claim');

@@ -181,7 +181,7 @@ test('side-chat titles and menu search refresh without replacing tabs or drafts'
   const nodes=new Map(),q=selector=>{if(!nodes.has(selector))nodes.set(selector,{value:'',hidden:false,querySelectorAll:()=>[]});return nodes.get(selector);};
   let draws=0,saves=0;
   Object.assign(h,{tabs:new Map([['side',tab]]),sideChats:[{id:'side',prompt:'original typo serch',display_title:'Old'}],disposed:false,titleFor:h.sessionTitle,matchesSession:h.sessionMatches,run:{},q,draw:()=>draws++,save:()=>saves++});
-  vm.runInContext(panel.slice(panel.indexOf('function renderMenuItems(items)'),panel.indexOf('initial.tabs.forEach'))+panel.slice(panel.indexOf('drawMenu=function()'),panel.indexOf("q('.panel-menu input').oninput=drawMenu;",panel.indexOf('drawMenu=function()'))),h);
+  vm.runInContext(panel.slice(panel.indexOf('function renderMenuItems(items)'),panel.indexOf('initial.tabs.forEach'))+panel.slice(panel.indexOf('function drawMenu()'),panel.indexOf("q('.panel-menu input').oninput=drawMenu;")),h);
   h.syncTitles([{id:'side',display_title:'Readable side title'}]);
   assert.equal(tab.title,'Readable side title');assert.equal(tab.draft,'Keep this draft');assert.equal(h.tabs.get('side'),tab);assert.equal(draws,1);assert.equal(saves,1);
   for(const term of ['serch','Readable']){q('.panel-menu input').value=term;h.drawMenu();assert.match(q('[data-menu-items]').innerHTML,/Readable side title/);}
