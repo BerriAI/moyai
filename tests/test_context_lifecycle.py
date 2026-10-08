@@ -152,7 +152,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     monkeypatch.setattr(lifecycle, 'ActiveTurnSteering', Steering)
     monkeypatch.setattr('sandbox.continuation.AgentSteer', Steering)
     events, prompts, actions = [], [], []
-    monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, *a, **kw: events.append((kind, message, kw)))
+    monkeypatch.setattr(lifecycle, 'emit', lambda kind, message, data=None, **kw: events.append((kind, message, data, kw)))
     maintenance = []
     def maintain(snapshot, ack):
         maintenance.append(snapshot)
@@ -162,10 +162,14 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
         compact=lambda *a: pytest.fail('Reply must not wait for compaction'), last_error='', wait_group='', wait_credential='')
     class Adapter:
         compaction_window = 128_000
-        def __init__(self, context_store): self.store = context_store
+        def __init__(self, context_store, activity): self.store, self.activity = context_store, activity
         def validate(self): pass
         def close(self): pass
         def run_conversation(self, prompt, *, conversation_history, system_message):
+            self.activity.emit('status', 'Reconnecting',
+                {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'model_transport'})
+            self.activity.emit('status', 'Recovered',
+                {'activity_version': 1, 'phase': 'recovered', 'stage': 'model_transport'})
             self.store.maintain(relay, input_budget=self.compaction_window)
             history = self.store.history()
             journal = TurnJournal(history, prompt, self.store)
@@ -176,7 +180,7 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
             journal.tool_finished(f'call{number}', f'receipt-{number}')
             journal.finish('Done')
             return {'completed': True, 'messages': journal.messages, 'final_response': 'Done'}
-    monkeypatch.setattr('sandbox.harness_registry.create_agent', lambda *a, **kw: Adapter(kw['context_store']))
+    monkeypatch.setattr('sandbox.harness_registry.create_agent', lambda *a, **kw: Adapter(kw['context_store'], kw['activity']))
     session = tmp_path / 'session'
     session.mkdir()
     legacy = [{'role': 'user', 'content': 'Keep Escape support; do not deploy.'},
@@ -188,6 +192,8 @@ def test_production_lifecycle_restores_store_and_saves_only_new_events(tmp_path,
     spec = {'run_id': 'run', 'prompt': 'Continue', 'repo_url': '', 'model': 'configured-model', 'broker_url': 'http://relay.test',
             'harness': 'claude-agent-sdk', 'chat_enabled': True}
     assert lifecycle.run_agent(spec, relay) == 0
+    assert [data['phase'] for kind, _, data, _ in events
+            if kind == 'status' and data and data.get('stage') == 'model_transport'] == ['reconnecting', 'recovered']
     assert len(maintenance) == 2 and all(snapshot for snapshot in maintenance)
     assert legacy_path.read_bytes() == original
     store = ContextStore(session / 'context.sqlite3', 'run')

@@ -304,6 +304,46 @@ class CodexAgent(HarnessAgent):
             # Neither elapsed time nor raw output IDs are completion receipts.
             pass
 
+    async def wait_for_model(self, client, turn_ids, observed_failure):
+        """Keep native history/tools alive while the broker process restarts."""
+        relay = self.context.relay
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.context.spec.get('transport_recovery_seconds', 600)
+        probe, retry_at = None, 0
+        try:
+            while True:
+                await self.drain_tool_events(client, turn_ids)
+                limit = self.context.spec.get('max_iterations')
+                if (self.stopped.is_set() or self.boundary_failed or relay.uncertain_tool
+                        or relay.last_failure is not observed_failure or relay.context_required
+                        or (limit and self.model_calls >= limit)):
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    self.boundary_failed = True
+                    self.boundary_reason = 'model connection recovery timed out'
+                    return False
+                if probe is None and loop.time() >= retry_at:
+                    probe = asyncio.create_task(asyncio.to_thread(relay.model_ready, timeout=min(1, remaining)))
+                if probe is not None and probe.done():
+                    try:
+                        ready = probe.result()
+                    except Exception:
+                        # Revoked access and invalid replies cannot authorize a
+                        # live continuation or a fresh cold recovery window.
+                        self.boundary_failed = True
+                        self.boundary_reason = 'broker readiness could not be verified'
+                        return False
+                    probe = None
+                    if ready:
+                        return True
+                    retry_at = loop.time() + 1
+                await asyncio.sleep(min(0.05, remaining))
+        finally:
+            if probe is not None:
+                probe.cancel()
+                await asyncio.gather(probe, return_exceptions=True)
+
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
         from openai_codex.errors import InvalidRequestError
@@ -395,30 +435,33 @@ class CodexAgent(HarnessAgent):
                                     if payload['turn'].get('error'):
                                         failure.update(codex_details(payload['turn']['error']))
                                 relay = self.context.relay
+                                if failure.get('code') == 'responseStreamDisconnected':
+                                    relay.note_stream_disconnect()
                                 failed_request = getattr(relay, 'last_failure', None)
-                                if (payload['turn']['status'] == 'failed' and self.journal.pending and not self.stopped.is_set()
+                                if (payload['turn']['status'] == 'failed' and not self.stopped.is_set()
                                         and not self.boundary_failed and not getattr(relay, 'uncertain_tool', False)
                                         and not getattr(relay, 'context_required', None)
-                                        and retryable_failure(failed_request)
+                                        and retryable_failure(failed_request, live=True)
                                         and self.transport_attempt < MAX_TRANSPORT_ATTEMPTS):
                                     # Preserve the native thread and its running tools. A
                                     # preview server cannot settle merely by waiting before
                                     # a cold restart; the live agent must inspect/stop it.
                                     self.transport_attempt += 1
-                                    self.context.activity.commentary(
-                                        'Reconnecting to continue with the existing tools and saved results.')
+                                    self.context.activity.emit('status',
+                                        'Reconnecting to continue with the existing tools and saved results.',
+                                        {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'model_transport'})
                                     await asyncio.sleep(2 ** self.transport_attempt)
-                                    limit = self.context.spec.get('max_iterations')
-                                    if (not self.stopped.is_set() and not self.boundary_failed
-                                            and (not limit or self.model_calls < limit)
-                                            and relay.resume_model(failed_request)):
+                                    if (await self.wait_for_model(client, [turn.turn.id, *prior_turns], failed_request)
+                                            and relay.resume_model(failed_request, live=True)):
+                                        self.context.activity.emit('status', 'Connection restored. Continuing the task.',
+                                            {'activity_version': 1, 'phase': 'recovered', 'stage': 'model_transport'})
                                         prior_turns.add(turn.turn.id)
                                         message_items.clear()
                                         failure.clear()
                                         late_inputs.extend(self.inputs.take())
                                         turn = await self.await_with_tool_events(client, prior_turns,
                                             client.turn_start(thread.thread.id,
-                                            'The model connection failed before a response. Continue the same task '
+                                            'The model connection was interrupted. Continue the same task '
                                             'using this thread and its existing tool sessions. Do not restart or '
                                             'replay actions. Inspect pending tools, wait for finite work, and stop '
                                             'preview servers you no longer need. Collect actual results before '

@@ -194,7 +194,7 @@ def _run_agent(spec, relay):
         if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
     harness_activity = SimpleNamespace(start=activity.start, complete=tool_complete,
-                                       commentary=activity.commentary, failure=activity.failure)
+                                       commentary=activity.commentary, failure=activity.failure, emit=activity.emit)
     # Keep restored history outside every repository and downloadable artifact.
     # Otherwise an agent's `git add -A` could commit the private conversation.
     history_path = Path("/session/conversation.json")

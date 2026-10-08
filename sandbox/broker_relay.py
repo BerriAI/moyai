@@ -15,12 +15,12 @@ from collections import Counter
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
-    from .broker_failure import MODEL_ROUTES, failure
+    from .broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from .transport_recovery import retryable_failure
     from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
-    from broker_failure import MODEL_ROUTES, failure
+    from broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from transport_recovery import retryable_failure
     from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 
@@ -33,11 +33,18 @@ class InputPending(Exception):
     """This model request reached an adapter-owned live input boundary."""
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None  # Readiness never sends the run capability to another URL.
+
+
 class BrokerRelay:
     def __init__(self, remote, token, notify=None, report_error=None):
         self.notify = notify
         self.last_error = ''
         self.last_failure = None
+        self.model_response = None
+        self.report_error = report_error
         self.uncertain_tool = False
         self.retry_safe_tools = frozenset()
         self.model_failed = False
@@ -145,6 +152,7 @@ class BrokerRelay:
                         if (relay.context_recovery and relay.context_required
                                 and not (relay.native_compacting and route == '/v1/responses')):
                             return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
+                        relay.model_response = None
                         try:
                             if relay.before_model and not relay.before_model(raw):
                                 return self.error(409, 'Saving at a complete tool boundary.')
@@ -257,6 +265,11 @@ class BrokerRelay:
                         if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                             return  # A redirected request may complete/bill later; discard its output.
                         response_headers, response_status = response.headers, response.status
+                        if route == '/v1/responses':
+                            # Keep only transport metadata. The native consumer
+                            # identifies a clean EOF missing response.completed.
+                            relay.model_response = failure(route, request_id, http.client.IncompleteRead(b''),
+                                headers=response_headers, status=response_status, response_started=True)
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
                         response_started = True
@@ -343,11 +356,45 @@ class BrokerRelay:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.url = f'http://127.0.0.1:{self.server.server_port}'
 
-    def resume_model(self, observed_failure):
+    def note_stream_disconnect(self):
+        """Correlate the native protocol EOF with its last Responses request."""
+        with self.failure_lock:
+            if self.last_failure is not None or self.uncertain_tool or self.model_response is None:
+                return
+            self.last_failure = self.model_response
+            self.model_failed = True
+            self.last_error = 'The model connection closed before the response completed.'
+            diagnostic = self.last_failure
+        if self.report_error:
+            self.report_error(diagnostic)
+
+    def model_ready(self, *, timeout):
+        """One bounded authenticated read; the live runtime owns retry/cancel."""
+        request = urllib.request.Request(self.remote.rstrip('/') + '/v1/models',
+            headers={'Authorization': 'Bearer ' + self.token, 'X-Moyai-Request-ID': uuid4().hex})
+        try:
+            with urllib.request.build_opener(NoRedirect).open(request, timeout=timeout) as response:
+                raw = response.read(8193)
+                if len(raw) > 8192:
+                    raise ValueError('Invalid broker readiness response')
+                value = json.loads(raw)
+                if (not isinstance(value, dict) or value.get('object') != 'list'
+                        or not isinstance(value.get('data'), list)):
+                    raise ValueError('Invalid broker readiness response')
+                return True
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            if exc.code not in TRANSIENT_STATUSES:
+                raise
+            return False
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+            return False
+
+    def resume_model(self, observed_failure, *, live=False):
         """Reopen only the failed model boundary a live SDK has finished handling."""
         with self.failure_lock:
             if (self.last_failure is not observed_failure or not self.model_failed
-                    or self.uncertain_tool or not retryable_failure(observed_failure)):
+                    or self.uncertain_tool or not retryable_failure(observed_failure, live=live)):
                 return False
             self.last_failure = None
             self.last_error = ''

@@ -581,6 +581,9 @@ class DurableRunner(RunManager):
                         self.acknowledge_credential(run_id, state)
                         state.pop('startup_deadline', None)
                         self.running_status(run_id, 'running')
+                    elif (event.get('kind') == 'status' and event.get('data', {}).get('stage') == 'model_transport'
+                            and state.get('execution_started') and event_phase in {'reconnecting', 'recovered'}):
+                        self.running_status(run_id, 'running' if event_phase == 'recovered' else 'reconnecting')
                     elif event_phase == 'reconnecting' and not state.get('execution_started'):
                         self.running_status(run_id, 'reconnecting')
                     if event.get('kind') == 'error':

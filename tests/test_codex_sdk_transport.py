@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +15,7 @@ from sandbox.codex_harness import CodexAgent
 from sandbox.context_store import ContextStore, ContextUnavailable
 
 
-def send_response(handler, output, sequence, input_tokens=500):
+def send_response(handler, output, sequence, input_tokens=500, *, interrupted=None):
     response = {'id': f'resp_fixture_{sequence}', 'status': 'completed', 'output': [output],
                 'usage': {'input_tokens': input_tokens, 'output_tokens': 30, 'total_tokens': input_tokens + 30}}
     frames = [
@@ -23,13 +24,18 @@ def send_response(handler, output, sequence, input_tokens=500):
         {'type': 'response.output_item.done', 'output_index': 0, 'item': output},
         {'type': 'response.completed', 'response': response},
     ]
+    if interrupted:
+        frames.pop()
     raw = ''.join('event: ' + frame['type'] + '\ndata: ' + json.dumps(frame) + '\n\n'
                   for frame in frames).encode()
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream')
-    handler.send_header('Content-Length', str(len(raw)))
+    handler.send_header('Content-Length', str(len(raw) + (64 if interrupted == 'truncated' else 0)))
     handler.end_headers()
     handler.wfile.write(raw)
+    handler.wfile.flush()
+    if interrupted:
+        handler.close_connection = True
 
 
 @pytest.mark.parametrize('outcome', [
@@ -338,9 +344,41 @@ def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path,
     assert proof['final_response'] == 'yield-test-complete'
 
 
+def test_native_redeploy_outage_preserves_preview(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-transport-preview',
+                             outage_seconds=40, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['upstream_requests'] == proof['model_calls'] == 4
+    assert proof['transport_attempt'] == 1
+    assert proof['outage_elapsed'] >= 40
+    assert proof['readiness_statuses'][0] == 503 and proof['readiness_statuses'][-1] == 200
+    assert {sample['phase'] for sample in proof['preview_samples']} == {'before', 'during', 'after'}
+    assert len({(sample['pid'], sample['port']) for sample in proof['preview_samples']}) == 1
+    assert all(sample['status'] == 200 for sample in proof['preview_samples'])
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
+@pytest.mark.parametrize('interrupted', ['clean', 'truncated'])
+def test_native_interrupted_sse_preserves_existing_command(tmp_path, monkeypatch, interrupted):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-transport-preview',
+                             interrupted=interrupted, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['upstream_requests'] == proof['model_calls'] == 3
+    assert proof['transport_attempt'] == 1
+    assert len(proof['transport_errors']) == 1
+    assert proof['transport_errors'][0]['response_started'] is True
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
-                      context_rounds=1, compact_rejections=0):
+                      context_rounds=1, compact_rejections=0,
+                      outage_seconds=0, interrupted=None, on_outage=lambda: None,
+                      on_status=lambda kind, message, data: None):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
     The tool waits for the next model request to reach the upstream server.
@@ -351,6 +389,11 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     capability = 'yield-fixture-capability'
     release = threading.Event()
     calls, requests, steps, events, faults, diagnostics, read_attempts = [], [], [], [], [], [], []
+    outage_started = outage_until = 0
+    readiness_statuses, preview_samples, status_events = [], [], []
+    stop_observing = threading.Event()
+    observer = None
+    settlement_sent = False
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     settlement = outcome.startswith('settle-')
@@ -364,19 +407,37 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     corrections = []
     if settlement:
         (workspace / 'command.py').write_text(
-            'import http.server, pathlib, signal, sys, time\n'
+            'import http.server, os, pathlib, signal, sys, time\n'
             'signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n'
+            'with pathlib.Path("command-starts").open("a") as starts: starts.write(str(os.getpid()) + "\\n")\n'
             'try:\n' + (
                 ' server = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)\n'
                 ' pathlib.Path("preview-port").write_text(str(server.server_port))\n'
+                ' pathlib.Path("preview-pid").write_text(str(os.getpid()))\n'
                 ' print("preview-ready", flush=True)\n server.serve_forever()\n'
                 if preview else
                 ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n'
                 + (f' time.sleep({context_delay})\n' if context_case else '')) +
             'finally:\n print("slow-tool-complete", flush=True)\n')
+
+    def sample_preview(phase):
+        from urllib.request import urlopen
+        try:
+            port = int((workspace / 'preview-port').read_text())
+            pid = int((workspace / 'preview-pid').read_text())
+            with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
+                sample = {'phase': phase, 'pid': pid, 'port': port, 'status': response.status}
+            preview_samples.append(sample)
+            return sample
+        except (OSError, ValueError) as exc:
+            faults.append(f'Original preview unavailable {phase} recovery: {type(exc).__name__}')
+
+    def observe_outage():
+        while not stop_observing.wait(1) and time.monotonic() < outage_until:
+            sample_preview('during')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
-    native_errors, native_plugins, native_clients, native_threads = [], [], [], []
+    native_errors, native_error_payloads, native_plugins, native_clients, native_threads = [], [], [], [], []
     from openai_codex.async_client import AsyncCodexClient
     from sandbox.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
@@ -404,6 +465,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 (workspace / 'release').touch()
             if event.method == 'error':
                 payload = event.payload.model_dump(mode='json', by_alias=True)
+                native_error_payloads.append(payload)
+                if interrupted:
+                    progress('Synthetic fixture native error payload: ' + json.dumps(payload))
                 detail = codex_details(payload.get('error'), will_retry=payload.get('willRetry'))
                 native_errors.append(detail)
                 progress('Native SDK error: ' + json.dumps(detail))
@@ -427,6 +491,15 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 pass  # The baseline SDK exits with the fixture tool unresolved.
 
         def do_GET(self):
+            assert self.headers['Authorization'] == 'Bearer ' + capability
+            status = 503 if time.monotonic() < outage_until else 200
+            if self.path == '/v1/models':
+                readiness_statuses.append(status)
+                progress(f'Authenticated broker readiness: HTTP {status}')
+            if status == 503:
+                return self.reply({}, status)
+            if self.path == '/v1/models':
+                return self.reply({'object': 'list', 'data': [{'id': 'openai/gpt-6-astra'}]})
             if self.path == '/context/window':
                 return self.reply({'input_budget': 200000})
             assert self.path == '/tools'
@@ -435,8 +508,14 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
 
         def do_POST(self):
+            nonlocal outage_started, outage_until, observer, settlement_sent
+            assert self.headers['Authorization'] == 'Bearer ' + capability
             raw = self.rfile.read(int(self.headers['Content-Length']))
             body = json.loads(unseal(capability, self.path, raw))
+            if time.monotonic() < outage_until:
+                if self.path == '/v1/responses':
+                    requests.append(body)
+                return self.reply({}, 503)
             if self.path == '/context/maintenance':
                 if agent.journal is not None:
                     assert not agent.journal.pending
@@ -494,15 +573,27 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
                 output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
                           'name': 'exec', 'namespace': 'functions', 'input': code}
-            elif transport and sequence == 2:
+                if interrupted:
+                    progress('Interrupting SSE after the command output item, before response.completed')
+                    return send_response(self, output, sequence, interrupted=interrupted)
+            elif transport and sequence == 2 and not interrupted:
                 assert agent.journal.pending and steps == [0]
+                if outage_seconds:
+                    sample_preview('before')
+                    outage_started = time.monotonic()
+                    outage_until = outage_started + outage_seconds
+                    observer = threading.Thread(target=observe_outage, daemon=True)
+                    observer.start()
+                    progress(f'Broker unavailable for {outage_seconds} seconds; original preview stays running')
+                    on_outage()
+                    return self.reply({}, 503)
                 progress('Injecting an edge HTTP 502 with the existing command still running')
                 return self.reply({}, 502)
             elif context_case and 2 + int(transport) <= sequence <= context_rounds + 1 + int(transport):
                 assert agent.journal.pending and steps == [0]
                 return self.reply({'detail': {'code': 'context_compaction_required',
                     'input_tokens': 300000, 'input_budget': 200000}}, 409)
-            elif settlement and sequence == 2:
+            elif settlement and sequence == 2 and not interrupted:
                 assert agent.journal.pending and steps == [0]
                 if preview:
                     from urllib.request import urlopen
@@ -513,14 +604,12 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 output = {'type': 'message', 'id': 'premature', 'role': 'assistant',
                     'phase': 'final_answer', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
-            elif settlement and sequence == (context_rounds + 2 + int(transport) if context_case else 3):
+            elif (settlement and not settlement_sent and sequence >=
+                    (context_rounds + 2 + int(transport) if context_case else 2 if interrupted else 3)):
                 assert bool(agent.journal.pending) != finish_during_compaction
                 assert agent.model_calls == sequence + len(compactions)
                 if transport and preview:
-                    from urllib.request import urlopen
-                    port = (workspace / 'preview-port').read_text()
-                    with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
-                        assert response.status == 200
+                    sample_preview('after')
                     progress('After reconnect: original preview server still answers HTTP 200')
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
                 sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
@@ -532,7 +621,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     'input': 'text(await tools.write_stdin(' + json.dumps({
                         'session_id': int(sessions[-1]), 'yield_time_ms': 20000 if context_case else 1000,
                         'chars': '\u0003' if preview else ''}) + '));'}
-            elif sequence == 2:
+                settlement_sent = True
+            elif sequence == 2 and not settlement:
                 if read_outage and not calls:
                     faults.append('Safe read returned before recovery')
                     return send_response(self, {'type': 'message', 'id': 'unrecovered', 'role': 'assistant',
@@ -581,13 +671,20 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         if relay.native_compacting:
             receipt_during_compaction.set()
 
-    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60,
+    def emit_status(kind, message, data=None):
+        event = {'kind': kind, 'message': message, 'data': data or {}}
+        status_events.append(event)
+        progress('Status: ' + json.dumps(event))
+        on_status(kind, message, data or {})
+
+    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': max(60, outage_seconds + 45),
         'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
-            complete=completed, commentary=lambda text: None),
+            complete=completed, commentary=lambda text: None,
+            emit=emit_status),
         step=step, cwd=str(workspace), definition=None, context_store=store)
     try:
         try:
@@ -612,11 +709,19 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             read_attempts=len(read_attempts),
             receipt_during_compaction=receipt_during_compaction.is_set(),
             corrections_delivered=len(corrections),
+            native_error_payloads=native_error_payloads,
+            command_starts=len((workspace / 'command-starts').read_text().splitlines())
+                if (workspace / 'command-starts').exists() else 0,
+            outage_elapsed=time.monotonic() - outage_started if outage_started else 0,
+            readiness_statuses=readiness_statuses, preview_samples=preview_samples, status_events=status_events,
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
         return proof
     finally:
+        stop_observing.set()
+        if observer:
+            observer.join(timeout=3)
         release.set()
         (workspace / 'release').touch()
         agent.close()

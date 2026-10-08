@@ -8,10 +8,12 @@ except ImportError:
 MAX_TRANSPORT_ATTEMPTS = 3
 
 
-def retryable_failure(failure):
+def retryable_failure(failure, *, live=False):
     return (isinstance(failure, dict) and failure.get('version') == 1
             and failure.get('route') in {'/v1/messages', '/v1/responses', '/v1/chat/completions'}
-            and failure.get('transient') is True and failure.get('response_started') is False
+            and failure.get('transient') is True
+            and (failure.get('response_started') is False
+                 or (live and failure.get('transport_interrupted') is True))
             and not failure.get('uncertain_tool'))
 
 
