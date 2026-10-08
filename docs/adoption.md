@@ -1,13 +1,13 @@
-# Adoption dashboard
+# Usage analytics
 
-Organization administrators can open **Settings → Adoption** (`#adoption`).
+Organization administrators can open **Settings → Usage analytics** (`#adoption`).
 The page queries `GET /api/admin/adoption?start=YYYY-MM-DD&end=YYYY-MM-DD`.
 It defaults to the last 30 UTC calendar days, supports up to 93 days, and rejects future dates.
 
 - Daily human chat submissions, with a seven-day moving average.
 - Distinct identified teammates in the selected period and daily breakdown.
 - Last seven complete days versus the preceding seven, ending at the selected end date (or yesterday when today is selected). A zero baseline is labeled rather than divided by zero.
-- Date filters, refresh, an accessible chart, and an exact-value table.
+- Date presets, custom ranges, refresh, CSV export, accessible charts, and an exact-value table.
 
 Counts derive from retained `messages`, joined to sessions, identity links and automation history. No telemetry provider or new event capture is required, and existing chat history works immediately after deployment.
 

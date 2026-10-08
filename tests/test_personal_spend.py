@@ -71,6 +71,7 @@ def test_personal_report_includes_only_established_slack_links(workspace):
     data = report(client)
     assert data['total']['spend'] == '2.5'
     assert data['total']['requests'] == 2
+    assert data['daily'][-1]['active_users'] == 1
     assert {r['user_id'] for r in data['request_details']} == {bob}
     assert {u['id'] for u in data['identities']} == {bob, 'slack:linked'}
     assert [u['id'] for u in data['users']] == [bob]
@@ -158,3 +159,29 @@ def test_shared_member_password_cannot_expose_shared_spend(workspace):
     assert response.status_code == 403
     assert 'Sign in with your Google account' in response.json()['detail']
 
+
+
+def test_daily_analytics_uses_full_scoped_ledger_and_zero_fills_days(workspace):
+    app, client = workspace
+    alice = sign_in(app, client)
+    bob = sign_in(app, client, 'bob', 'bob@berri.ai')
+    _, run = record(app, bob, '0.1', created_at='2026-10-01T00:00:00+00:00')
+    with app.state.store.connect() as conn:
+        conn.executemany('''INSERT INTO model_requests(id,key_hash,run_id,user_id,model,created_at,cost,status)
+            VALUES(?,'',?,?,'own-model','2026-10-07T12:00:00+00:00','0.1','completed')''',
+            [(f'own-{i}', run['id'], bob) for i in range(501)])
+    record(app, bob, None, status='pending')
+    record(app, bob, None, status='failed')
+    record(app, alice, '999', model='private-model')
+    data = report(client)
+    assert len(data['request_details']) == 500
+    assert len(data['daily']) == 7
+    assert sum(d['requests'] for d in data['daily']) == data['total']['requests'] == 504
+    assert sum(Decimal(d['spend']) for d in data['daily']) == Decimal(data['total']['spend']) == Decimal('50.2')
+    assert data['daily'][1]['requests'] == data['daily'][1]['active_users'] == 0
+    last = data['daily'][-1]
+    assert last['active_users'] == 1
+    assert last['pending_costs'] == last['missing_costs'] == 1
+    assert all(m['model'] == 'own-model' for d in data['daily'] for m in d['models'])
+    assert all(sum(Decimal(m['spend']) for m in d['models']) == Decimal(d['spend']) for d in data['daily'])
+    assert 'private-model' not in json.dumps(data['daily'])

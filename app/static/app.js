@@ -249,7 +249,7 @@ function bindComposer(input,form){
 async function navigate(view) {
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
-  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',adoption:'Adoption',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
+  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:'Spend',adoption:'Usage analytics',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
   history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(settingsViews.has(view)) {
     $('#content').innerHTML='<p class="settings-loading" role="status">Loading…</p>';

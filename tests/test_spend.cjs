@@ -21,7 +21,7 @@ function setup(scope = 'personal') {
       throw new Error('Unexpected request: ' + url);
     },
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
-    modelName:value=>value,
+    modelName:value=>value, summaryDollars:value=>'$'+Number(value).toFixed(2),
     renderCostSummary:()=>{assert.equal(scope,'organization'); return '<div>Organization totals</div>';},
     renderInfrastructure:()=>{assert.equal(scope,'organization'); return '<div>Infrastructure costs</div>';},
     bindInfrastructure:()=>{assert.equal(scope,'organization');},
@@ -29,7 +29,7 @@ function setup(scope = 'personal') {
     showError:error=>{throw error;}, toast:()=>{},
   };
   vm.createContext(context);
-  vm.runInContext(readFileSync('app/static/spend.js','utf8'), context);
+  for(const file of ['analytics','spend-analytics','spend'])vm.runInContext(readFileSync('app/static/'+file+'.js','utf8'), context);
   return {context, elements, calls, data};
 }
 
@@ -65,10 +65,17 @@ test('admin Spend retains organization, infrastructure, user filters and identit
   await context.renderSpend();
   assert.deepEqual(calls, ['/api/spend?', '/api/admin/identities/status']);
   const html = elements.get('#content').innerHTML;
-  for (const text of ['Spend', 'Organization totals', 'Infrastructure costs', 'LLM spend by user', 'All users', 'Slack identities']) {
-    assert.ok(html.includes(text), text);
+  for (const text of ['Spend &amp;', 'Organization totals', 'Usage history']) {
+    assert.ok(html.includes(text) || html.includes(text.replace('&amp;', '&')), text);
   }
+  vm.runInContext("spendAnalyticsState.tab='users'", context);
+  await context.renderSpend();
+  assert.match(elements.get('#content').innerHTML, /LLM spend by user/);
   assert.equal(typeof elements.get('#spend-user').onchange, 'function');
+  vm.runInContext("spendAnalyticsState.tab='infrastructure'", context);
+  await context.renderSpend();
+  assert.match(elements.get('#content').innerHTML, /Infrastructure costs/);
+  assert.match(elements.get('#content').innerHTML, /Slack identities/);
   assert.equal(typeof elements.get('#refresh-identities').onclick, 'function');
 });
 

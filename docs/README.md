@@ -29,7 +29,7 @@ Follow the [installation walkthrough](getting-started.md) to deploy Moyai on Mod
 | [Model and infrastructure costs](costs.md) | Spend attribution, provider imports, and bills |
 | [Tracing](observability.md) | Trace configuration, redaction, delivery, and verification |
 | [Tracing comparison](tracing-comparison.md) | Backend comparison and rollout findings |
-| [Adoption dashboard](adoption.md) | Usage metrics and coverage limits |
+| [Usage analytics](adoption.md) | Usage metrics and coverage limits |
 
 ## Understand and contribute
 

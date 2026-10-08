@@ -228,6 +228,11 @@ class Spend:
             return {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0, 'sessions': set()}
         groups = {user['id']: empty() for user in users.values() if user['kind'] == 'google'}
         sessions, models = {}, {}
+        # Aggregate the entire scoped ledger, before the 500-row detail limit.
+        daily = {(start + timedelta(days=i)).isoformat(): empty()
+                 for i in range((end - start).days + 1)}
+        daily_users = {day: set() for day in daily}
+        daily_models = {day: {} for day in daily}
         def add(bucket, row):
             bucket['requests'] += 1
             bucket['pending_costs'] += row['cost'] is None and row['status'] == 'pending'
@@ -245,6 +250,11 @@ class Spend:
             add(total, row)
             add(groups.setdefault(attributed_user, empty()), row)
             add(models.setdefault(row['model'], empty()), row)
+            day = stamp(row['created_at'])[:10]
+            add(daily[day], row)
+            add(daily_models[day].setdefault(row['model'], empty()), row)
+            if attributed_user != 'unattributed':
+                daily_users[day].add(attributed_user)
             if row['run_id']:
                 add(sessions.setdefault((attributed_user, row['run_id']), empty()), row)
         def clean(bucket):
@@ -256,6 +266,10 @@ class Spend:
         result = {'scope': 'personal' if user_id is not None else 'organization',
                 'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
                 'priced_requests': sum(row['cost'] is not None for row in rows),
+                'daily': [{'date': day, **clean(value), 'active_users': len(daily_users[day]),
+                           'models': [{'model': model, **clean(bucket)}
+                                      for model, bucket in daily_models[day].items()]}
+                          for day, value in daily.items()],
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],

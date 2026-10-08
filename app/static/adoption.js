@@ -1,33 +1,41 @@
 const adoptionState={start:'',end:'',request:0};
 function adoptionChart(daily){
-  const width=900,height=240,left=44,right=16,top=20,bottom=36;
-  const plotWidth=width-left-right,plotHeight=height-top-bottom;
-  const max=Math.max(1,...daily.map(d=>Math.max(d.requests,d.seven_day_average)));
-  const step=plotWidth/Math.max(1,daily.length),x=i=>left+step*(i+.5),y=v=>top+plotHeight*(1-v/max);
-  const grid=[0,.5,1].map(f=>`<line x1="${left}" x2="${width-right}" y1="${y(max*f)}" y2="${y(max*f)}" class="adoption-grid"/><text x="${left-9}" y="${y(max*f)+4}" text-anchor="end">${Number((max*f).toFixed(1))}</text>`).join('');
-  const bars=daily.map((d,i)=>`<rect x="${x(i)-step*.32}" y="${y(d.requests)}" width="${step*.64}" height="${plotHeight*d.requests/max}" class="adoption-bar ${d.partial?'partial':''}"><title>${esc(d.date)}: ${d.requests} requests${d.partial?' (partial day)':''}</title></rect>`).join('');
-  const line=daily.map((d,i)=>`${x(i)},${y(d.seven_day_average)}`).join(' ');
-  const ticks=[...new Set([0,Math.floor((daily.length-1)/2),daily.length-1])].filter(i=>daily[i]).map(i=>`<text x="${x(i)}" y="${height-9}" text-anchor="${i===0?'start':i===daily.length-1?'end':'middle'}">${esc(daily[i].date)}</text>`).join('');
-  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Daily human requests and seven-day moving average. Exact values are in the daily breakdown below.">${grid}${bars}<polyline points="${line}" class="adoption-average"/>${ticks}</svg>`;
+  return analyticsChart(daily,[{key:'requests',label:'Human requests'}],{title:'Daily human requests and seven-day moving average',line:{key:'seven_day_average'}});
 }
 function adoptionDashboard(data){
   const w=data.weekly;
   const trend=w.percent_change===null?(w.requests?'No prior-week baseline':'No requests in either week'):`${w.percent_change>0?'+':''}${w.percent_change}% vs previous week`;
-  return `<div class="page-heading"><div><h1>Adoption</h1><p class="subtext">Understand how your team uses Moyai over time.</p></div><span class="badge">UTC</span></div>
-    <form id="adoption-filters" class="spend-filters"><label>From<input name="start" type="date" value="${esc(data.start)}" required></label><label>Through<input name="end" type="date" value="${esc(data.end)}" required></label><button type="submit">Apply dates</button><button type="button" id="adoption-refresh">Refresh</button><span class="subtext">Up to 93 days · today is partial</span></form>
-    <div class="spend-cards adoption-cards"><section class="card"><span>Human requests</span><strong>${spendCount(data.total_requests)}</strong><small>In the selected period</small></section><section class="card"><span>Active teammates</span><strong>${spendCount(data.active_users)}</strong><small>Distinct identified requesters</small></section><section class="card"><span>Last 7 complete days</span><strong>${spendCount(w.requests)}</strong><small>${esc(trend)}</small><small>${esc(w.start)} – ${esc(w.end)}</small></section></div>
-    <section class="card spend-section"><div class="section-header"><h2>Requests per day</h2><div class="adoption-legend"><span>▮ Daily requests</span><span>━ 7-day average</span></div></div>${data.total_requests?'':'<p class="subtext">No recorded human requests in this period.</p>'}${adoptionChart(data.daily)}<p class="subtext">Previous week (${esc(w.previous_start)} – ${esc(w.previous_end)}): ${spendCount(w.previous_requests)} requests. Change: ${w.delta>0?'+':''}${spendCount(w.delta)}. Comparisons exclude today.</p></section>
-    <details class="card spend-section"><summary>Daily breakdown</summary><div class="spend-table-wrap" role="region" aria-label="Daily adoption breakdown" tabindex="0"><table class="spend-table"><thead><tr><th>Date (UTC)</th><th>Requests</th><th>7-day average</th><th>Active teammates</th></tr></thead><tbody>${[...data.daily].reverse().map(d=>`<tr><td>${esc(d.date)}${d.partial?' · partial':''}</td><td>${spendCount(d.requests)}</td><td>${d.seven_day_average}</td><td>${spendCount(d.active_users)}</td></tr>`).join('')}</tbody></table></div></details>
-    <details class="settings-hint"><summary>What counts as a request?</summary><p class="subtext adoption-definition">One request = one saved human chat submission, including initial prompts, follow-ups, and steering messages from Slack or the web. Submission retries count once. Includes queued, cancelled, failed, and subsequently deleted submissions; excludes demo sessions, delegated agents, and automation launch prompts. Human follow-ups to automations count. LLM calls and tool calls do not count.</p><p class="subtext adoption-definition">Uses retained message history; days without records appear as zero. Earlier non-chat tasks and purged history cannot be reconstructed. Linked Slack and Google accounts count as one teammate; anonymous requests are included in totals, not active teammates. The moving average includes the preceding six days, even outside the selected range. Trends show correlation, not whether a product change caused adoption to change.</p></details>`;
+  return `<div class="analytics-page"><div class="page-heading"><div><h1>Usage analytics</h1><p class="subtext">Understand how your team uses Moyai over time.</p></div><div class="analytics-actions">${analyticsRange('adoption',data.start,data.end)}<button id="adoption-refresh">Refresh</button></div></div>
+    <div class="analytics-toolbar"><div class="analytics-tabs"><a href="#spend">Spend & usage</a><span aria-current="page">Human activity</span></div><button id="adoption-export" class="analytics-export">Export CSV</button></div>
+    <section class="analytics-section"><h2>Human requests</h2>${analyticsMetrics([['Requests in period',spendCount(data.total_requests)],['Last 7 complete days',spendCount(w.requests),trend],['Previous week',spendCount(w.previous_requests),w.previous_start+' – '+w.previous_end]])}<div class="analytics-chart-heading"><h3>Requests over time</h3><span>Daily · UTC</span></div>${analyticsLegend([{label:'Human requests'},{label:'7-day average',line:true}])}${data.total_requests?'':'<p class="subtext">No recorded human requests in this period.</p>'}${adoptionChart(data.daily)}<p class="subtext analytics-footnote">Weekly comparison: ${esc(w.start)} – ${esc(w.end)}. Change: ${w.delta>0?'+':''}${spendCount(w.delta)}. Comparisons exclude today.</p></section>
+    <section class="analytics-section"><h2>Active teammates</h2>${analyticsMetrics([['Active in period',spendCount(data.active_users),'Distinct identified requesters']])}<div class="analytics-chart-heading"><h3>Active teammates over time</h3><span>Daily · UTC</span></div>${analyticsChart(data.daily,[{key:'active_users',label:'Active teammates'}],{title:'Active teammates over time',area:true})}<p class="subtext analytics-footnote">Today is partial. Linked Slack and Google accounts count as one teammate.</p></section>
+    <details class="analytics-breakdown" id="adoption-breakdown"><summary>Daily breakdown</summary><div class="spend-table-wrap" role="region" aria-label="Daily adoption breakdown" tabindex="0"><table class="spend-table"><thead><tr><th>Date (UTC)</th><th>Requests</th><th>7-day average</th><th>Active teammates</th></tr></thead><tbody>${[...data.daily].reverse().map(d=>`<tr><td>${esc(d.date)}${d.partial?' · partial':''}</td><td>${spendCount(d.requests)}</td><td>${d.seven_day_average}</td><td>${spendCount(d.active_users)}</td></tr>`).join('')}</tbody></table></div></details>
+    <details class="analytics-methodology" id="adoption-methodology"><summary>What counts as a request?</summary><p class="subtext adoption-definition">One request = one saved human chat submission, including initial prompts, follow-ups, and steering messages from Slack or the web. Submission retries count once. Includes queued, cancelled, failed, and subsequently deleted submissions; excludes demo sessions, delegated agents, and automation launch prompts. Human follow-ups to automations count. LLM calls and tool calls do not count.</p><p class="subtext adoption-definition">Uses retained message history; days without records appear as zero. Earlier non-chat tasks and purged history cannot be reconstructed. Linked Slack and Google accounts count as one teammate; anonymous requests are included in totals, not active teammates. The moving average includes the preceding six days, even outside the selected range. Trends show correlation, not whether a product change caused adoption to change.</p></details></div>`;
 }
 async function renderAdoption(){
   if(state.role!=='admin'){$('#content').innerHTML='<div class="error-banner">Adoption reports are available to organization administrators.</div>';return;}
   const version=state.pageVersion,request=++adoptionState.request;
+  const current=()=>version===state.pageVersion&&request===adoptionState.request;
   const query=new URLSearchParams();if(adoptionState.start)query.set('start',adoptionState.start);if(adoptionState.end)query.set('end',adoptionState.end);
-  const data=await api('/api/admin/adoption?'+query);
-  if(version!==state.pageVersion||request!==adoptionState.request)return;
+  const preserved=typeof document.querySelector==='function'&&document.querySelector('.analytics-page')?{open:[...document.querySelectorAll('#content details[id][open]')].map(el=>el.id),focus:document.activeElement?.id,scroll:$('#content').scrollTop}:null;
+  $('#content').innerHTML='<p class="subtext" role="status">Loading usage…</p>';
+  let data;
+  try{data=await api('/api/admin/adoption?'+query);}catch(error){
+    if(!current())return;
+    const today=new Date().toISOString().slice(0,10);
+    $('#content').innerHTML=`<div class="analytics-page"><div class="page-heading"><h1>Usage analytics</h1></div><div class="error-banner" role="alert">${esc(error.message)}</div><div class="analytics-actions">${analyticsRange('adoption',adoptionState.start||today,adoptionState.end||today)}<button id="adoption-refresh">Try again</button></div></div>`;
+    bindAdoptionFilters();return;
+  }
+  if(!current())return;
   adoptionState.start=data.start;adoptionState.end=data.end;
   $('#content').innerHTML=adoptionDashboard(data);
-  $('#adoption-filters').onsubmit=e=>{e.preventDefault();adoptionState.start=e.currentTarget.elements.start.value;adoptionState.end=e.currentTarget.elements.end.value;renderAdoption().catch(showError);};
+  bindAdoptionFilters();
+  $('#adoption-export').onclick=()=>downloadAnalyticsCSV(`moyai-usage-${data.start}-${data.end}.csv`,[['Date (UTC)','Human requests','7-day average','Active teammates','Partial day'],...data.daily.map(d=>[d.date,d.requests,d.seven_day_average,d.active_users,d.partial])]);
+  if(preserved){for(const id of preserved.open){const el=$('#'+id);if(el)el.open=true;}if(preserved.focus)$('#'+preserved.focus)?.focus({preventScroll:true});$('#content').scrollTop=preserved.scroll;}
+}
+function bindAdoptionFilters(){
+  const apply=range=>{if($('#adoption-range'))$('#adoption-range').open=false;$('#adoption-range-toggle')?.focus?.();Object.assign(adoptionState,range);renderAdoption().catch(showError);};
+  $('#adoption-filter-form').onsubmit=e=>{e.preventDefault();apply({start:e.currentTarget.elements.start.value,end:e.currentTarget.elements.end.value});};
+  bindAnalyticsPreset('adoption',apply);
   $('#adoption-refresh').onclick=()=>renderAdoption().catch(showError);
 }

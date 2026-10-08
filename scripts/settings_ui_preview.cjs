@@ -40,6 +40,21 @@ let automations=[
 const providers=[{provider:'modal',name:'Modal',spend:42.75,covered_days:7,missing_days:0,sync_enabled:true,last_synced_at:stamp},{provider:'render',name:'Render',spend:5.70,covered_days:7,missing_days:0,sync_enabled:false},{provider:'temporal',name:'Temporal Cloud',spend:3.42,covered_days:6,missing_days:1,sync_enabled:true,last_synced_at:stamp}];
 const spendUsers=users.map((u,i)=>({...u,id:'user-'+i,kind:'google',sessions:[32,24,19,15,11,5][i],requests:[720,510,386,230,164,84][i],total_tokens:[720,510,386,230,164,84][i]*3000,spend:[421.32,304.16,187.54,112.8,98.63,57.11][i],pending_costs:0,missing_costs:0}));
 const spend={start:'2026-10-01',end:'2026-10-07',total:{spend:1181.56,requests:2094,total_tokens:6282000,pending_costs:0,missing_costs:12},priced_requests:2082,cost_summary:{total:1233.43,llm:1181.56,infrastructure:51.87,incomplete:true,estimated:5.70},infrastructure:{spend:51.87,pending:false,providers,bills:[{provider:'render',month:'2026-10',amount:'25.25',kind:'estimate',revision:1,note:'Hosting and storage. Reconcile to the final invoice.'}]},users:spendUsers,identities:[],models:[{model,spend:962.30,requests:1670},{model:'anthropic/claude-opus-5-5',spend:219.26,requests:424}],sessions:[{run_id:'a'.repeat(32),title:'Review release readiness',user_id:'user-0',user_name:'Alex Morgan',requests:28,spend:18.22},{run_id:'b'.repeat(32),title:'Investigate gateway latency',user_id:'user-1',user_name:'Sam Rivera',requests:42,spend:24.75}],request_details:[],tracked_since:'2026-09-01'};
+// Daily aggregates match the report totals and are independent of request_details.
+function spendFixture(params,personal=false,empty=false){
+ const own=spendUsers[0],source=personal?{...spend,total:{...own,prompt_tokens:1440000,completion_tokens:720000},users:[own],identities:[own],models:[{model,spend:own.spend,requests:own.requests,total_tokens:own.total_tokens}],sessions:spend.sessions.filter(s=>s.user_id===own.id)}:spend;
+ const start=params.get('start')||spend.start,end=params.get('end')||spend.end;
+ if(start>end||(new Date(end)-new Date(start))/86400000>92)return null;
+ const weights=[.11,.16,.22,.08,.18,.15,.10],amount=(n,i)=>Math.round(Number(n)*weights.slice(0,i+1).reduce((a,b)=>a+b,0)*100)/100-Math.round(Number(n)*weights.slice(0,i).reduce((a,b)=>a+b,0)*100)/100;
+ const days=Array.from({length:Math.round((new Date(end)-new Date(start))/86400000)+1},(_,i)=>{
+  const date=new Date(new Date(start).getTime()+i*86400000).toISOString().slice(0,10),index=Number(date.slice(-2))-1,has=!empty&&date>=spend.start&&date<=spend.end;
+  const models=has?source.models.map((m,mi)=>({...m,spend:amount(m.spend,index).toFixed(2),requests:Math.round(m.requests*weights.slice(0,index+1).reduce((a,b)=>a+b,0))-Math.round(m.requests*weights.slice(0,index).reduce((a,b)=>a+b,0)),total_tokens:Math.round(amount(m.requests*3000,index)),pending_costs:0,missing_costs:!personal&&index===6&&mi===0?12:0})):[];
+  return {date,spend:models.reduce((n,m)=>n+Number(m.spend),0).toFixed(2),requests:models.reduce((n,m)=>n+m.requests,0),total_tokens:models.reduce((n,m)=>n+m.total_tokens,0),sessions:has?(personal?[5,8,12,3,11,7,6][index]:[28,39,54,18,42,36,31][index]):0,active_users:has?(personal?1:[4,5,6,3,6,5,4][index]):0,pending_costs:0,missing_costs:has&&!personal&&index===6?12:0,models};
+ });
+ const ratio=empty?0:days.reduce((n,d)=>n+Number(d.spend),0)/Number(source.total.spend);
+ const scale=u=>({...u,spend:(Number(u.spend)*ratio).toFixed(2),requests:Math.round(u.requests*ratio),sessions:Math.round((u.sessions||106)*ratio),total_tokens:Math.round(u.total_tokens*ratio)});
+ return {...source,scope:personal?'personal':'organization',start,end,daily:days,total:{...scale(source.total),pending_costs:0,missing_costs:days.reduce((n,d)=>n+d.missing_costs,0)},priced_requests:days.reduce((n,d)=>n+d.requests-d.missing_costs,0),users:empty?[]:source.users.map(scale),models:empty?[]:source.models.map(m=>scale({...m,total_tokens:m.requests*3000})),sessions:empty?[]:source.sessions,infrastructure:personal?undefined:source.infrastructure,cost_summary:personal?undefined:{...source.cost_summary,llm:(Number(source.total.spend)*ratio).toFixed(2),total:(Number(source.total.spend)*ratio+source.infrastructure.spend).toFixed(2)}};
+}
 const daily=Array.from({length:30},(_,i)=>({date:new Date(Date.UTC(2026,8,8+i)).toISOString().slice(0,10),requests:[4,8,6,5,12,9,11,8,16,12,18,21,16,19,24,28,18,26,31,29,35,27,42,38,45,34,51,48,58,36][i],active_users:Math.min(6,2+Math.floor(i/6)),partial:i===29}));
 daily.forEach((d,i)=>d.seven_day_average=Number((daily.slice(Math.max(0,i-6),i+1).reduce((n,d)=>n+d.requests,0)/7).toFixed(1)));
 const adoption={start:daily[0].date,end:daily.at(-1).date,total_requests:daily.reduce((n,d)=>n+d.requests,0),active_users:6,daily,weekly:{requests:312,previous_requests:198,percent_change:57.6,delta:114,start:'2026-09-30',end:'2026-10-06',previous_start:'2026-09-23',previous_end:'2026-09-29'}};
@@ -105,9 +120,8 @@ const server=http.createServer(async(req,res)=>{
  if(p.startsWith('/api/automations/')&&p.endsWith('/state')){const a=automations.find(a=>a.id===p.split('/')[3]);a.paused=body.paused;return json(res,200,{});}
  if(p==='/api/admin/spend')return json(res,200,spend);
  if(p==='/api/spend'){
-  if(role==='admin')return json(res,200,{...spend,scope:'organization'});
-  const own=spendUsers[0],total={...own,prompt_tokens:1440000,completion_tokens:720000};
-  return json(res,200,{...spend,scope:'personal',total,priced_requests:own.requests,users:[own],identities:[own],sessions:spend.sessions.filter(s=>s.user_id===own.id),models:[{model,spend:own.spend,requests:own.requests}],infrastructure:undefined,cost_summary:undefined});
+  const data=spendFixture(url.searchParams,role!=='admin',empty);
+  return json(res,data?200:422,data||{detail:'Choose a date range of up to 93 days, with start before end.'});
  }
  if(p==='/api/admin/identities/status')return json(res,200,{enabled:true,ready:true,missing_scopes:[]});
  if(p==='/api/admin/adoption')return json(res,200,empty?{...adoption,total_requests:0,active_users:0,daily:daily.map(d=>({...d,requests:0,active_users:0,seven_day_average:0})),weekly:{...adoption.weekly,requests:0,previous_requests:0,delta:0,percent_change:null}}:adoption);

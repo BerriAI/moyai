@@ -15,7 +15,7 @@ const settingsGroups = [
   ]},
   {id:'administration', title:'Administration', admin:true, items:[
     {view:'users', title:'Users', description:'Manage workspace members and roles.', admin:true},
-    {view:'adoption', title:'Adoption', description:'Track human requests and active teammates over time.', admin:true},
+    {view:'adoption', title:'Usage analytics', description:'Track human requests and active teammates over time.', admin:true},
   ]},
 ];
 const settingsViews = new Set(['settings', ...settingsGroups.flatMap(group => group.items.map(item => item.view))]);

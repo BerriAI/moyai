@@ -5,6 +5,21 @@
 > This guide retains the detailed reference material from the original README.
 > Dated acceptance reports describe past checks, not a current deployment or test result.
 
+## Spend dashboard
+
+**Settings → Spend** (`#spend`) gives administrators four views:
+
+- **Overall:** recorded infrastructure and model costs, active sessions, and model requests over time.
+- **Users:** daily active users and a sortable table of costs, sessions, requests, tokens, cost per session, and share of LLM spend. Filter a user to inspect their sessions.
+- **Usage history:** daily model costs, a cumulative cost line, a model filter, and exact request details.
+- **Infrastructure:** existing provider sync, monthly bills and estimates, coverage, and Slack identity controls.
+
+Use the date menu for presets or a custom UTC range of up to 93 days. **Export CSV** exports the current report and user/model filter. Charts and daily exports use the full scoped ledger; the request-detail disclosure remains limited to the latest 500 requests. An active session can appear on multiple days, while the period total counts it once. Unknown costs stay visibly unpriced, and averages use recorded costs only.
+
+Members continue to see their own model spend and established linked Slack activity. Organization charts and infrastructure controls require an administrator report from the server. Human chat submissions are reported separately in **Usage analytics** (`#adoption`), because one human submission can produce many model requests.
+
+For a local visual demo with synthetic data, run `node scripts/settings_ui_preview.cjs --port 8953` and open `http://127.0.0.1:8953/#spend`. This preview does not contact providers or exercise production authentication and billing writes.
+
 ## Per-user model spend
 
 **Live verification (September 29, 2026):** deployed commit `87aa874` on Render. Session `9895bd3b52a9403a988f4dc06c7545dd`, started by `tin@berri.ai`, completed an Astra response, then an Opus follow-up that recalled `granite-27`, wrote a local file and read it back. Three successful inference responses supplied `x-litellm-response-cost`: `$0.061130000000000004`, `$0.037141`, and `$0.0042726`, totaling `$0.102543600000000004` (displayed as `$0.102544`). User, session and model totals agree. Both successful turns saved filesystem/conversation snapshots and terminated their Modal sandboxes. The admin UI exposed the exact header amounts; unauthenticated spend access returned 401 and the removed callback route returned 404.
@@ -25,7 +40,7 @@ User totals add up to costs returned for tracked Moyai requests; the dashboard s
 
 Slack messages capture the sender from verified Slack events. With `SLACK_IDENTITY_LINKING_ENABLED=true` (default), Moyai looks up a sender’s Slack profile in the background on first use, creates a local profile labelled with their company email, and automatically links it to a unique Google identity with that exact email. Slack-first and Google-first usage both work: a first Google login combines earlier Slack spend automatically. Original message, session-owner, and inference sender IDs remain immutable; automatic and manual link changes are audited.
 
-Reconnect the dedicated Slack app with **bot scopes `users:read` and `users:read.email`** to enable lookup. Existing senders with recorded sessions/messages are backfilled automatically; **Spend → Slack identities → Refresh profiles** queues a recheck. Profiles are refreshed daily, with failures retried after five minutes. Missing permission or lookup failure never blocks a chat. Only members of the installed Slack workspace with an email in `GOOGLE_ALLOWED_DOMAINS` qualify; guests, external Slack Connect users, bots and deleted users do not. Emails are trimmed and lowercased, without alias, dot or plus-address normalization. Email changes and ambiguous matches require administrator review; automatic matching never retargets an existing link, and explicit admin overrides survive refreshes. The secondary **Administrator overrides** controls remain available for exceptions.
+Reconnect the dedicated Slack app with **bot scopes `users:read` and `users:read.email`** to enable lookup. Existing senders with recorded sessions/messages are backfilled automatically; **Spend → Infrastructure → Slack identities → Refresh profiles** queues a recheck. Profiles are refreshed daily, with failures retried after five minutes. Missing permission or lookup failure never blocks a chat. Only members of the installed Slack workspace with an email in `GOOGLE_ALLOWED_DOMAINS` qualify; guests, external Slack Connect users, bots and deleted users do not. Emails are trimmed and lowercased, without alias, dot or plus-address normalization. Email changes and ambiguous matches require administrator review; automatic matching never retargets an existing link, and explicit admin overrides survive refreshes. The secondary **Administrator overrides** controls remain available for exceptions.
 
 This is **just-in-time identity provisioning and accounting linkage**, not SCIM: it does not create a Google Workspace account, grant a web session or administrator role, or synchronize directory groups and deprovisioning. Web access still requires verified Google OIDC login. Before that first Google login, the Slack-created profile and its spend appear under the company email.
 
