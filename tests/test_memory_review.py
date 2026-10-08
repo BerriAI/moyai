@@ -10,6 +10,7 @@ from app.config import Settings
 from app.db import Store
 from app.main import create_app
 from app.memory import Note
+from app.model_slots import ModelSlots
 
 
 @pytest.fixture
@@ -307,3 +308,60 @@ async def test_lifecycle_recovers_durable_job_and_stops_worker(review_app):
     client = service.client
     await service.close()
     assert service.worker is None and client.is_closed
+
+
+@pytest.mark.parametrize('preempted', [False, True])
+@pytest.mark.parametrize('close_count', [1, 2])
+async def test_shutdown_drains_in_flight_review_cleanup(review_app, monkeypatch, preempted, close_count):
+    app = review_app
+    turn(app)
+    service = app.state.memory_review
+    service.slots = ModelSlots(1)
+    requested, checkpoint_started = asyncio.Event(), asyncio.Event()
+    release_checkpoint, checkpoint_saved = asyncio.Event(), asyncio.Event()
+
+    async def response(request):
+        requested.set()
+        await asyncio.Future()
+
+    async def flush():
+        if jobs(app)[0]['status'] == 'pending':
+            checkpoint_started.set()
+            await release_checkpoint.wait()
+            checkpoint_saved.set()
+
+    async def foreground():
+        async with service.slots:
+            pass
+
+    monkeypatch.setattr(service.memory.checkpoints, 'flush', flush)
+    service.start()
+    await service.client.aclose()
+    service.client = httpx.AsyncClient(transport=httpx.MockTransport(response))
+    closers, foreground_request = [], None
+    try:
+        await asyncio.wait_for(requested.wait(), 3)
+        child, client = service.current, service.client
+        if preempted:
+            foreground_request = asyncio.create_task(foreground())
+            await asyncio.wait_for(checkpoint_started.wait(), 3)
+        closers = [asyncio.create_task(service.close()) for _ in range(close_count)]
+        await asyncio.wait_for(checkpoint_started.wait(), 3)
+        # Shutdown must not interrupt the retry checkpoint if a foreground
+        # request already cancelled this review and its cleanup is still running.
+        await asyncio.wait(closers, timeout=.05)
+        assert not any(closer.done() for closer in closers) and not client.is_closed
+        assert child.cancelling() == 1
+    finally:
+        release_checkpoint.set()
+        await asyncio.wait_for(asyncio.gather(*closers) if closers else service.close(), 3)
+        if foreground_request:
+            await asyncio.wait_for(foreground_request, 3)
+    assert checkpoint_saved.is_set() and child.done()
+    assert client.is_closed and service.worker is None and service.current is None
+    assert jobs(app)[0]['status'] == 'pending'
+    assert not app.state.memory.listing('google:alice')
+    assert app.state.store.rows('SELECT status FROM model_requests')[0]['status'] == 'interrupted'
+    async with asyncio.timeout(3):
+        async with service.slots:
+            pass

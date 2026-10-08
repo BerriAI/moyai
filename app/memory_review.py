@@ -138,7 +138,9 @@ class MemoryReview:
         while True:
             try:
                 self.current = self.slots.run_maintenance(self.process_next())
-                processed = await self.current
+                # Own cancellation here: shutdown must not cancel a review a
+                # second time while foreground preemption is flushing its retry.
+                processed = await asyncio.shield(self.current)
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling():
                     raise
@@ -147,7 +149,11 @@ class MemoryReview:
                 log.warning('Background memory review unavailable')
                 processed = False
             finally:
-                self.current = None
+                if self.current:
+                    if not self.current.done() and not self.current.cancelling():
+                        self.current.cancel()
+                    await asyncio.gather(self.current, return_exceptions=True)
+                    self.current = None
             await asyncio.sleep(1 if processed else 5)
 
     def inputs(self, job):
@@ -303,7 +309,8 @@ class MemoryReview:
 
     async def close(self):
         if self.worker:
-            self.worker.cancel()
+            if not self.worker.cancelling():
+                self.worker.cancel()
             await asyncio.gather(self.worker, return_exceptions=True)
             self.worker = None
         if self.client:
