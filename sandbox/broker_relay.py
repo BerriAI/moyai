@@ -45,6 +45,7 @@ class BrokerRelay:
         self.before_model = None
         self.context_required = None
         self.context_recovery = False
+        self.native_compacting = False
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -61,6 +62,19 @@ class BrokerRelay:
                     self.wfile.write(content)
                 except (ConnectionError, http.client.HTTPException):
                     pass  # The local SDK may have already abandoned its request.
+
+            def context_error(self, message):
+                if self.path != '/v1/responses' or not relay.native_compacting:
+                    return self.error(400, message, 'context_length_exceeded')
+                # The pinned Codex compactor trims and retries this SSE error;
+                # HTTP 400 maps to InvalidRequest and aborts its native recovery.
+                body = ('data: ' + json.dumps({'type': 'response.failed', 'response': {
+                    'error': {'code': 'context_length_exceeded', 'message': message}}}) + '\n\n').encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def handle_request(self):
                 steering, generation = None, None
@@ -100,15 +114,15 @@ class BrokerRelay:
                             # Full uncovered history can reach the transport
                             # ceiling before the provider's token check runs.
                             relay.context_required = {'input_tokens': size, 'input_budget': body_limit(self.path)}
-                            return self.error(400, 'Saved context exceeds transport capacity. Compact before retrying.',
-                                              'context_length_exceeded')
+                            return self.context_error('Saved context exceeds transport capacity. Compact before retrying.')
                         return self.error(413, 'Broker request is too large.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
                     if route in MODEL_ROUTES:
                         if relay.model_failed:
                             return self.error(409, 'The failed model request is saved. Waiting for durable recovery.', 'broker_recovery_required')
-                        if relay.context_recovery and relay.context_required:
+                        if (relay.context_recovery and relay.context_required
+                                and not (relay.native_compacting and route == '/v1/responses')):
                             return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
                         try:
                             if relay.before_model and not relay.before_model(raw):
@@ -248,7 +262,7 @@ class BrokerRelay:
                                     relay.context_required = pressure
                                 # Hermes owns native overflow recovery. Give it
                                 # the standard structured error, not a generic 502.
-                                return self.error(400, 'Context length exceeded. Compact history before the next model call.', 'context_length_exceeded')
+                                return self.context_error('Context length exceeded. Compact history before the next model call.')
                             credential = value.get('moyai_wait_credential') if credential_route else None
                             if isinstance(credential, str) and re.fullmatch(r'[0-9a-f]{32}', credential):
                                 relay.wait_credential = credential

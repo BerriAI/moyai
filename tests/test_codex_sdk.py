@@ -313,43 +313,66 @@ def test_settlement_uses_original_receipts_and_budget_before_publishing(codex_ag
         assert result['sdk_failure']['exception_type'] == 'TimeoutError'
 
 
-@pytest.mark.parametrize('outcome', ['receipt', 'unknown', 'stop', 'deadline'])
-def test_context_receipt_drain_preserves_unknowns_and_respects_stop(codex_agent, monkeypatch, outcome):
+@pytest.mark.parametrize('outcome', ['receipt', 'queued', 'unknown', 'unconfirmed', 'failed', 'stop', 'deadline'])
+def test_native_compaction_keeps_receipts_private_and_respects_controls(codex_agent, outcome):
     from openai_codex.errors import TransportClosedError
     agent, events, store = codex_agent
     started, finished = native_item('commandExecution')
     agent.record_item(started, completed=False)
-    monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.15)
-    reads = []
+    pressure = {'input_tokens': 30000, 'input_budget': 20000}
+    agent.context.relay.context_required = pressure
+    compacted = {'type': 'contextCompaction', 'id': 'summary'}
+    queued = [sdk_event('item/completed', {'item': finished})] if outcome == 'queued' else []
+    messages = [sdk_event('turn/started', {'turn': {'id': 'compact'}}),
+        sdk_event('rawResponseItem/completed', {'item': {'type': 'custom_tool_call_output',
+            'call_id': started['id'], 'output': 'raw-private-marker'}}),
+        sdk_event('item/completed', {'item': {'type': 'agentMessage', 'id': 'private-summary',
+            'text': 'native-private-marker'}})]
+    if outcome == 'receipt':
+        messages.extend([sdk_event('item/completed', {'item': finished})] * 2)
+    if outcome != 'unconfirmed':
+        messages.append(sdk_event('item/completed', {'item': compacted}))
+    messages.append(sdk_event('turn/completed', {'turn': {
+        'id': 'compact', 'status': 'failed' if outcome == 'failed' else 'completed'}}))
+    cleanup = []
+    route = SimpleNamespace(wake_notification_reader=lambda: cleanup.append('wake'))
 
     class Client:
+        def register_goal_operation(self, thread_id):
+            assert thread_id == 'same-thread'
+            return route
+        def unregister_goal_operation(self, value):
+            assert value is route
+            cleanup.append('unregister')
+        async def thread_compact(self, thread_id):
+            assert agent.context.relay.native_compacting
+            assert agent.before_model()
         async def next_turn_notification(self, turn_id):
-            reads.append(turn_id)
-            if len(reads) == 1:
-                # Even an output for this exact ID is not a durable receipt.
-                return sdk_event('rawResponseItem/completed', {'item': {
-                    'type': 'custom_tool_call_output', 'call_id': started['id'],
-                    'output': 'raw-private-marker'}})
+            assert turn_id == 'original'
+            if queued:
+                return queued.pop()
+            raise TransportClosedError('Turn is no longer streaming')
+        async def next_goal_notification(self, value):
             if outcome == 'stop':
                 agent.interrupt()
-            if outcome == 'receipt' and turn_id == 'original':
-                return sdk_event('item/completed', {'item': finished})
-            raise TransportClosedError('Turn is no longer streaming')
+            if outcome in {'stop', 'deadline'}:
+                await asyncio.sleep(60)
+            return messages.pop(0)
 
-    async def drain():
+    async def run():
         if outcome == 'deadline':
-            # The enclosing task deadline wins over the receipt grace period.
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(0.02):
-                    await agent.settle_context_receipts(Client(), ['settlement', 'original'])
+                    await agent.compact_context(Client(), 'same-thread', ['original'])
         else:
-            await agent.settle_context_receipts(Client(), ['settlement', 'original'])
-
-    asyncio.run(drain())
-    assert bool(agent.journal.pending) == bool(store.pending) == (outcome != 'receipt')
-    assert agent.journal.completed_tools == int(outcome == 'receipt')
-    assert agent.model_calls == 0
-    assert 'raw-private-marker' not in json.dumps([agent.journal.messages, events, store.history()])
+            assert await agent.compact_context(Client(), 'same-thread', ['original']) == (outcome not in {'unconfirmed', 'failed', 'stop'})
+    asyncio.run(run())
+    assert bool(agent.journal.pending) == bool(store.pending) == (outcome not in {'receipt', 'queued'})
+    assert agent.journal.completed_tools == int(outcome in {'receipt', 'queued'})
+    assert agent.model_calls == 1 and cleanup == ['wake', 'unregister']
+    assert agent.context.relay.context_required is pressure and not agent.context.relay.native_compacting
+    saved = json.dumps([agent.journal.messages, events, store.history()])
+    assert 'raw-private-marker' not in saved and 'native-private-marker' not in saved
 
 
 def test_native_restart_accepts_reused_message_ids(codex_agent, monkeypatch):

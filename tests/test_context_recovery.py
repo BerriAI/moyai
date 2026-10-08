@@ -142,17 +142,26 @@ def test_failed_compaction_keeps_cursor_and_receipts_across_cold_restore(tmp_pat
     restored.close()
 
 
-@pytest.mark.parametrize('managed', [True, False], ids=['fresh-session-adapter', 'hermes-native'])
-def test_relay_preserves_context_signal_and_never_replays_rejected_request(managed):
-    seen = []
+@pytest.mark.parametrize('mode', ['fresh-session-adapter', 'hermes-native', 'codex-compact'])
+@pytest.mark.parametrize('route', ['/v1/messages', '/v1/responses', '/v1/chat/completions'])
+def test_relay_preserves_context_signal_and_never_replays_rejected_request(mode, route):
+    seen, boundaries = [], []
+    allowed, upstream_failure = True, False
+    managed = mode != 'hermes-native'
+    native_compact = mode == 'codex-compact' and route == '/v1/responses'
+    def before_model(raw):
+        boundaries.append(raw)
+        return allowed
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_POST(self):
             seen.append(self.rfile.read(int(self.headers['Content-Length'])))
-            raw = json.dumps({'detail': {'code': 'context_compaction_required',
-                'input_tokens': 20000, 'input_budget': 10000}}).encode()
-            self.send_response(409)
-            self.send_header('X-Moyai-Context', 'compact')
+            raw = json.dumps({'error': {'message': 'Temporary fixture failure'}} if upstream_failure else
+                {'detail': {'code': 'context_compaction_required',
+                    'input_tokens': 20000, 'input_budget': 10000}}).encode()
+            self.send_response(503 if upstream_failure else 409)
+            if not upstream_failure:
+                self.send_header('X-Moyai-Context', 'compact')
             self.send_header('Content-Length', str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -160,16 +169,45 @@ def test_relay_preserves_context_signal_and_never_replays_rejected_request(manag
     threading.Thread(target=edge.serve_forever, daemon=True).start()
     relay = BrokerRelay(f'http://127.0.0.1:{edge.server_port}/broker/run', 'cap').start()
     relay.context_recovery = managed
+    relay.native_compacting = mode == 'codex-compact'
+    relay.before_model = before_model
     try:
-        with httpx.Client(base_url=relay.url) as client:
-            response = client.post('/v1/chat/completions', json={'messages': []}, headers={'Authorization': 'Bearer cap'})
-            assert response.status_code == 400
-            assert response.json()['error']['code'] == 'context_length_exceeded'
+        with httpx.Client(base_url=relay.url, headers={'Authorization': 'Bearer cap'}) as client:
+            response = client.post(route, json={'messages': []})
+            assert response.status_code == (200 if native_compact else 400)
+            if native_compact:
+                assert response.headers['Content-Type'] == 'text/event-stream'
+                event = json.loads(response.text.removeprefix('data: '))
+                assert event['type'] == 'response.failed'
+                assert event['response']['error']['code'] == 'context_length_exceeded'
+            else:
+                assert response.json()['error']['code'] == 'context_length_exceeded'
             assert bool(relay.context_required) == managed
-            assert not relay.last_error and len(seen) == 1
-            if managed:
-                client.post('/v1/chat/completions', json={'messages': []}, headers={'Authorization': 'Bearer cap'})
-                assert len(seen) == 1
+            assert not relay.last_error and not relay.model_failed and relay.last_failure is None
+            assert len(seen) == len(boundaries) == 1
+            # Only an explicit native Responses compact may pass the pressure
+            # latch; Hermes retains its existing ownership without a latch.
+            client.post(route, json={'messages': []})
+            assert len(seen) == len(boundaries) == (2 if native_compact or not managed else 1)
+            assert bool(relay.context_required) == managed
+            if native_compact:
+                allowed = False
+                assert client.post(route, json={}).status_code == 409
+                assert len(seen) == 2 and len(boundaries) == 3
+                allowed, relay.model_failed = True, True
+                response = client.post(route, json={})
+                assert response.status_code == 409
+                assert response.json()['error']['code'] == 'broker_recovery_required'
+                assert len(seen) == 2 and len(boundaries) == 3
+                relay.model_failed, relay.native_compacting = False, False
+                assert client.post(route, json={}).status_code == 400
+                assert len(seen) == 2 and len(boundaries) == 3
+                relay.native_compacting, upstream_failure = True, True
+                response = client.post(route, json={})
+                assert response.status_code == 503
+                assert response.headers['Content-Type'] == 'application/json'
+                assert response.json()['error']['code'] == 'broker_error'
+                assert relay.model_failed and len(seen) == 3 and len(boundaries) == 4
     finally:
         relay.close()
         edge.shutdown()
@@ -177,19 +215,30 @@ def test_relay_preserves_context_signal_and_never_replays_rejected_request(manag
 
 
 @pytest.mark.parametrize('route', ['/v1/messages', '/v1/responses', '/v1/chat/completions'])
-def test_full_history_at_transport_ceiling_requests_recovery_before_inference(route):
+@pytest.mark.parametrize('native_compacting', [False, True])
+def test_full_history_at_transport_ceiling_requests_recovery_before_inference(route, native_compacting):
     import http.client
     from sandbox.broker_transport import MAX_BODY
     relay = BrokerRelay('http://127.0.0.1:1/unreachable', 'cap').start()
     relay.context_recovery = True
+    relay.native_compacting = native_compacting
     connection = http.client.HTTPConnection('127.0.0.1', relay.server.server_port)
     try:
         # The declared length is rejected before reading or forwarding a body.
         connection.request('POST', route, headers={'Authorization': 'Bearer cap', 'Content-Length': str(MAX_BODY + 1)})
         response = connection.getresponse()
-        assert response.status == 400 and json.loads(response.read())['error']['code'] == 'context_length_exceeded'
+        native_compact = native_compacting and route == '/v1/responses'
+        assert response.status == (200 if native_compact else 400)
+        body = response.read().decode()
+        if native_compact:
+            assert response.headers['Content-Type'] == 'text/event-stream'
+            event = json.loads(body.removeprefix('data: '))
+            assert event['type'] == 'response.failed'
+            assert event['response']['error']['code'] == 'context_length_exceeded'
+        else:
+            assert json.loads(body)['error']['code'] == 'context_length_exceeded'
         assert relay.context_required == {'input_tokens': MAX_BODY + 1, 'input_budget': MAX_BODY}
-        assert not relay.last_error
+        assert not relay.last_error and not relay.model_failed and relay.last_failure is None
     finally:
         connection.close()
         relay.close()
