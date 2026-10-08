@@ -11,7 +11,7 @@ function setup(status='pending'){
   api:async()=>{},toast:()=>{},Event:class{}};
  vm.createContext(context);
  const script=readFileSync('app/static/app.js','utf8');
- vm.runInContext(script.slice(script.indexOf('function renderPrWriteAccess(')),context);
+ vm.runInContext(script.slice(script.indexOf('function renderPrWriteAccess('),script.indexOf('async function changeSessionScope()')),context);
  const run={id:'chat',pr_write_access:[{id:'scope',repository:'org/repo',number:7,title:'<img onerror=alert(1)>',head_repository_id:9,branch:'<script>',base_branch:'main',status}]};
  return {context,area,input,run,buttons,continuations};
 }
