@@ -1,66 +1,51 @@
-"""Convert Markdown tables before reply chunking loses their row structure."""
+"""Convert parsed Markdown tables into bounded Slack Block Kit payloads."""
 import re
 
+from markdown_it import MarkdownIt
 
-def cells(line):
-    value = line.strip()
-    if '|' not in value:
-        return None
-    if value.startswith('|'):
-        value = value[1:]
-    if value.endswith('|') and not value.endswith(r'\|'):
-        value = value[:-1]
-    return [part.strip().replace(r'\|', '|') for part in re.split(r'(?<!\\)\|', value)]
+
+_MARKDOWN = MarkdownIt('commonmark').enable('table')
 
 
 def reply_parts(text, format_text, split_text):
-    """Yield (fallback, blocks) with one bounded table per message.
+    """Return (fallback, blocks) pairs, with one bounded table per message.
 
-    Cell text stays literal, so table content cannot trigger Slack mentions.
-    Unsupported widths/oversized rows retain the existing text fallback.
+    markdown-it-py handles table recognition, escaped pipes, alignment and code
+    fences. Source maps preserve non-table text instead of re-rendering it.
+    Nested tables stay in their original list/quote context as text. Cell text
+    stays literal, so table content cannot trigger Slack mentions.
     """
-    lines = text.splitlines(keepends=True)
-    pending, result = [], []
+    # Match Markdown's CR/LF line boundaries, not Unicode paragraph separators.
+    lines = re.findall(r'[^\r\n]*(?:\r\n|\r|\n|$)', text)[:-1]
+    result, cursor = [], 0
+    tokens = _MARKDOWN.parse(text)
 
-    def flush():
-        if pending and ''.join(pending).strip():
-            result.extend((chunk, None) for chunk in split_text(format_text(''.join(pending))))
-        pending.clear()
+    def emit_text(start, end):
+        source = ''.join(lines[start:end])
+        if source.strip():
+            result.extend((chunk, None) for chunk in split_text(format_text(source)))
 
-    i, fence = 0, None
-    while i < len(lines):
-        marker = re.match(r'^ {0,3}(`{3,}|~{3,})', lines[i])
-        if marker:
-            token = marker[1]
-            if fence is None:
-                fence = token
-            elif token[0] == fence[0] and len(token) >= len(fence):
-                fence = None
-            pending.append(lines[i])
-            i += 1
+    for index, token in enumerate(tokens):
+        if token.type != 'table_open' or token.level != 0:
             continue
-        header = cells(lines[i]) if fence is None else None
-        separator = cells(lines[i + 1]) if header and i + 1 < len(lines) else None
-        if not (separator and len(header) == len(separator) and len(header) <= 20
-                and all(re.fullmatch(r':?-+:?', cell) for cell in separator)):
-            pending.append(lines[i])
-            i += 1
-            continue
-        end, rows = i + 2, [header]
-        while end < len(lines):
-            row = cells(lines[end])
-            if row is None or len(row) != len(header):
+        start, end = token.map
+        rows, settings = [], []
+        for child in tokens[index + 1:]:
+            if child.type == 'table_close':
                 break
-            rows.append(row)
-            end += 1
+            if child.type == 'tr_open':
+                rows.append([])
+            elif child.type == 'th_open':
+                alignment = child.attrGet('style') or 'text-align:left'
+                settings.append({'align': alignment.removeprefix('text-align:'), 'is_wrapped': True})
+            elif child.type == 'inline':
+                rows[-1].append(child.content)
+        header = rows[0]
         sizes = [sum(map(len, row)) for row in rows]
-        if sizes[0] > 10000 or any(sizes[0] + size > 10000 for size in sizes[1:]):
-            pending.extend(lines[i:end])
-            i = end
+        if (len(header) > 20 or sizes[0] > 10000
+                or any(sizes[0] + size > 10000 for size in sizes[1:])):
             continue
-        flush()
-        settings = [{'align': 'center' if cell.startswith(':') and cell.endswith(':') else
-                     'right' if cell.endswith(':') else 'left', 'is_wrapped': True} for cell in separator]
+        emit_text(cursor, start)
 
         def emit(batch):
             block = {'type': 'table', 'column_settings': settings,
@@ -76,6 +61,6 @@ def reply_parts(text, format_text, split_text):
             batch.append(row)
             size += row_size
         emit(batch)
-        i = end
-    flush()
+        cursor = end
+    emit_text(cursor, len(lines))
     return result or [(chunk, None) for chunk in split_text(format_text(text))]

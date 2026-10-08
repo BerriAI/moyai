@@ -59,3 +59,31 @@ def test_adjacent_tables_do_not_create_empty_messages():
     result = parts(text)
     assert len(result) == len(tables(result)) == 2
     assert all(fallback.strip() for fallback, _ in result)
+
+
+@pytest.mark.parametrize('text', [
+    '    | a | b |\n    | --- | --- |\n    | c | d |\n',
+    '> | a | b |\n> | --- | --- |\n> | c | d |\n',
+    '- item\n\n  | a | b |\n  | --- | --- |\n  | c | d |\n',
+    '```\n```not-a-closing-fence\n| a | b |\n| --- | --- |\n| c | d |\n```',
+])
+def test_code_and_nested_contexts_preserve_original_text(text):
+    assert parts(text) == [(chunk, None) for chunk in split_reply(slack_text(text))]
+
+
+def test_parser_pads_missing_cells_and_stops_at_heading():
+    result = parts('| A | B |\n| --- | --- |\n| x |\n# Next\nProse')
+    assert tables(result)[0]['rows'][1] == [
+        {'type': 'raw_text', 'text': 'x'}, {'type': 'raw_text', 'text': ''}]
+    assert result[-1] == (slack_text('# Next\nProse'), None)
+
+
+@pytest.mark.parametrize('newline', ['\n', '\r\n', '\r'])
+def test_source_maps_preserve_text_with_unicode_line_separators(newline):
+    before = 'Before\u2028still prose' + newline * 2
+    after = newline + 'After'
+    text = before + newline.join(['| A |', '| --- |', '| x |', '']) + after
+    result = parts(text)
+    assert result[0] == (slack_text(before), None)
+    assert tables(result)[0]['rows'][1][0]['text'] == 'x'
+    assert result[-1] == (slack_text(after), None)

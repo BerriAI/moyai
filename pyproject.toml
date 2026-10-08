@@ -18,6 +18,7 @@ dependencies = [
   "itsdangerous>=2.2,<3",
   "PyJWT[crypto]>=2.10,<3",
   "agentchat",
+  "markdown-it-py>=4.2,<5",
   "temporalio>=1.20,<2",
   "pillow>=11.3,<13",
   "opentelemetry-sdk>=1.39,<2",

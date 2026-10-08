@@ -503,7 +503,7 @@ class SlackChat:
                         sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                     else:
                         if data.get('pull_requests') or data.get('blocks'):
-                            content = self.owner.channel.rich_reply(source, row['text'], data.get('pull_requests', ()), data.get('blocks'))
+                            content = self.owner.channel.build_rich_reply(source, row['text'], data.get('pull_requests', ()), data.get('blocks'))
                             response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
                         else:
                             response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
