@@ -52,7 +52,7 @@ class SlackThread(Args):
 
 
 class SlackSend(Args):
-    channel: str = Field(pattern=r"^[CDGUW][A-Z0-9]{7,30}$", description="Channel/conversation ID, or a recipient's Slack user ID (U…/W…) to open a DM from the Moyai bot. Do not reuse another person's DM ID.")
+    channel: str = Field(pattern=r"^(?:me|[CDGUW][A-Z0-9]{7,30})$", description="Use 'me' to DM the authenticated requester (the owner in an automation run), resolved through their verified Slack/Google account. Otherwise use a channel/conversation or Slack user ID. Do not reuse another person's DM ID.")
     text: str = Field(min_length=1, max_length=10000, description="Message body only. The server adds the requesting person's name as 'Name: message'; do not add a sender prefix yourself.")
 
 
@@ -75,7 +75,8 @@ TOOLS = {
     "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
     "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
     "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation. To verify a bot DM sent with slack_send, use as_bot=true and the returned channel and ts as thread_ts."),
-    "slack_send": ("slack", True, SlackSend, "Send a Slack message as the Moyai app, never as the shared connection owner. The server prefixes the body with the current requester's profile name: 'Name: message'. For a DM, pass the recipient's Slack user ID as channel; the server opens the bot's own DM. Requires the installed bot; never falls back to a user token. No administrator approval step is required."),
+    "slack_me": ("slack", False, Args, "Resolve the authenticated requester's verified Slack user ID, workspace, work email and name. Use when asked who the current user is or for their Slack recipient ID, including the owner of an automation run. No email or user ID argument is needed. Never infer the requester from the shared connection owner or a triggering message."),
+    "slack_send": ("slack", True, SlackSend, "Send a Slack message as the Moyai app, prefixed with the current requester's name. For 'DM me' use channel='me'; the server resolves the requester's verified account and opens the bot's DM. Save channel='me' in automations that notify their owner. For an explicitly named other recipient, pass their Slack user ID. Requires the installed bot; never falls back to a user token. No administrator approval step is required."),
     "notion_search": ("notion", False, Search, "Search Notion page titles visible to the connected integration (not full-text content)."),
     "notion_page": ("notion", False, NotionPage, "Read a Notion page's first 100 top-level blocks. Nested blocks are indicated, not expanded."),
     "notion_append": ("notion", True, NotionAppend, "Append a paragraph to a Notion page directly. No administrator approval step is required."),
@@ -87,6 +88,7 @@ class Connectors:
         self.store, self.security, self.settings = store, security, settings
         self.locks = {provider: asyncio.Lock() for provider in ("linear", "slack", "notion", "github")}
         self.github = GitHub(store, security, settings, self)
+        self.slack_identities = None
 
     def configured_oauth(self, provider):
         if provider == 'github':
@@ -257,6 +259,8 @@ class Connectors:
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         if name == 'slack_send':
             return await self.slack_send(args, run)
+        if name == 'slack_me':
+            return await self.slack_identities.requester(run)
         if name == 'slack_thread' and args['as_bot']:
             headers = {'Authorization': f'Bearer {await self.slack_bot_token()}'}
             if args['channel'].startswith('D') and 'im:history' not in self.slack_installation().get('scopes', []):
@@ -342,11 +346,15 @@ class Connectors:
 
     async def slack_send(self, args, run):
         text = f"{self.slack_sender_name(run)}: {args['text']}"
+        installation = self.slack_installation()
+        identity = await self.slack_identities.requester(run) if args['channel'] == 'me' else None
         # Sending must not load or refresh the shared search user's credential.
         # Slack DMs belong to their participants: resolve the recipient as the bot.
         headers = {'Authorization': f'Bearer {await self.slack_bot_token()}'}
         scopes = set(self.slack_installation().get('scopes', []))
-        channel = args['channel']
+        channel = identity['user_id'] if identity else args['channel']
+        if identity:
+            self.slack_identities.check_requester(run, installation)
         if 'chat:write' not in scopes:
             raise ConnectorError('Reconnect Slack with the Moyai bot chat:write permission to send messages.')
         if not self.allowed('slack_send'):
@@ -359,6 +367,11 @@ class Connectors:
             channel = (result.get('channel') or {}).get('id')
             if not isinstance(channel, str) or not re.fullmatch(r'D[A-Z0-9]{7,30}', channel):
                 raise ConnectorError('Slack did not return a bot DM conversation. No message was sent.')
+        if identity:
+            self.slack_identities.check_requester(run, installation)
+            if await self.slack_identities.requester(run) != identity:
+                raise ConnectorError('Your Slack recipient changed. Resolve your identity again before sending.')
+            self.slack_identities.check_requester(run, installation)
         if not self.allowed('slack_send'):
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         return await self.request('POST', 'https://slack.com/api/chat.postMessage', headers=headers,

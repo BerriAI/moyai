@@ -198,7 +198,8 @@ def create_app(settings: Settings | None = None):
     slack.session_titles = session_titles
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
-    identities = SlackIdentities(store, connectors, settings, security, checkpoints)
+    identities = SlackIdentities(store, connectors, settings, security, checkpoints, credentials.same_requester)
+    connectors.slack_identities = identities
     slack.identities = identities
     manager.prepare_context = slack.prepare
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
@@ -918,7 +919,7 @@ def create_app(settings: Settings | None = None):
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
-                      else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
+                      else await connectors.call(body.name, arguments, run=run) if body.name in {'slack_send', 'slack_me'}
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
             return result
