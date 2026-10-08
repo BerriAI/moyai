@@ -25,6 +25,10 @@ jobs:
           node-version: '22'
       - name: Test session search and sidebar interactions
         run: node --test tests/test_agent_sidebar.cjs tests/test_session_titles.cjs tests/test_harness_picker.cjs tests/test_automation_editor.cjs
+      - name: Test saved source citations and archive access
+        run: |
+          node --test tests/test_saved_files.cjs tests/test_file_tree.cjs
+          uv run --python 3.13 pytest -q --tb=line tests/test_artifacts.py tests/test_artifact_files.py
       - name: Test PR correlation and leaderboard
         run: |
           uv run --python 3.13 pytest -q --tb=line tests/test_pr_analytics.py tests/test_pr_delivery.py tests/test_personal_spend.py

@@ -85,7 +85,8 @@ def routes(settings, store, security):
         if media and not (settings.data_dir / 'artifacts' / (run_id + '.zip')).exists():
             return {'revision': 'captures', 'files': media, 'limited': False, 'note': 'Saved browser captures.'}
         with saved_archive(settings, store, run_id) as (_, files, revision, skipped):
-            ordered = sorted(files.values(), key=lambda i: (not i.filename.startswith('new-files/'), i.filename.casefold()))
+            # Source inventories must not crowd recovery artifacts out of the capped catalog.
+            ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
             return {'revision': revision, 'files': media + [file_info(run_id, i, revision) for i in ordered[:MAX_LIST]],
                     'limited': len(ordered) > MAX_LIST or bool(skipped),
                     'note': 'Latest saved files. The workspace ZIP contains code and patches; browser captures download separately.'}

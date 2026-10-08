@@ -22,6 +22,7 @@ def git(repo, *args):
 def collect_archive(workspace, artifacts, token):
     workspace, artifacts = Path(workspace).resolve(), Path(artifacts)
     repositories, loose_files, omitted = [], [], []
+    tracked_files = []
     directories = 0
     for current, dirs, files in os.walk(workspace, followlinks=False):
         directories += 1
@@ -76,6 +77,13 @@ def collect_archive(workspace, artifacts, token):
                         continue
                     path = repo / name
                     add_file(path, "new-files/" + path.relative_to(workspace).as_posix(), workspace)
+                # Committing a generated file must not make its download disappear
+                # on the next conversational turn. Collect current tracked contents
+                # after edits and loose files so repository source cannot crowd them out.
+                for raw in git(repo, "ls-files", "--cached", "-z").split(b"\0"):
+                    name = Path(os.fsdecode(raw))
+                    if raw and not name.is_absolute() and ".." not in name.parts and eligible(name):
+                        tracked_files.append(repo / name)
             except (OSError, subprocess.SubprocessError):
                 omitted.append(label + " (repository collection failed)")
         if len(repositories) > 50:
@@ -85,8 +93,12 @@ def collect_archive(workspace, artifacts, token):
         if len(loose_files) > 1000:
             omitted.append("Loose file count limit reached")
         add_file(artifacts / "browser.png", "browser.png", artifacts.resolve())
+        for path in dict.fromkeys(tracked_files[:1000]):
+            add_file(path, "new-files/" + path.relative_to(workspace).as_posix(), workspace)
+        if len(tracked_files) > 1000:
+            omitted.append("Tracked file count limit reached")
         archive.writestr("recovery-manifest.json", json.dumps({
             "repositories": repo_details,
             "omitted": omitted,
-            "note": "Recovery files and uncommitted patches, not a complete workspace backup. Dependencies are excluded.",
+            "note": "Bounded workspace files and uncommitted patches, not a complete workspace backup. Dependencies are excluded; see omitted for collection limits.",
         }, indent=2))

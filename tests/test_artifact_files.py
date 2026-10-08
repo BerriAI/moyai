@@ -46,6 +46,20 @@ def test_existing_archive_supports_exact_file_preview_and_download(workspace):
         assert client.get(endpoint).status_code == 401
 
 
+def test_catalog_cap_preserves_recovery_artifacts_before_source(workspace):
+    primary = {'result.md': b'Answer', 'browser.png': b'screenshot', 'changes.patch': b'root patch',
+               'repositories/repo/changes.patch': b'nested patch', 'recovery-manifest.json': b'{}'}
+    sources = [(f'new-files/repo/source-{i:04}.js', 'source') for i in range(artifact_files.MAX_LIST)]
+    client, url, _ = saved(workspace, sources + list(primary.items()))
+    listing = client.get(url).json()
+    files = {file['archive_path']: file for file in listing['files']}
+    assert listing['limited'] and len(files) == artifact_files.MAX_LIST
+    assert primary.keys() <= files.keys()
+    for name, content in primary.items():
+        assert files[name]['workspace_path'] is None
+        assert client.get(files[name]['url']).content == content
+
+
 def test_paths_symlinks_duplicates_and_oversized_entries_are_not_served(workspace):
     link = zipfile.ZipInfo('new-files/symlink.md')
     link.create_system = 3

@@ -45,7 +45,7 @@
     layout.append(panel);const q=s=>panel.querySelector(s),views=q('.panel-views'),parking=q('[data-parking]');
     const closingStatus=document.createElement('div');closingStatus.className='panel-empty';closingStatus.setAttribute('role','status');closingStatus.textContent='Closing tabs…';closingStatus.hidden=true;views.append(closingStatus);
     if(activity){parking.append(activity);activity.hidden=false;}
-    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
+    function save(){if(restoring)return;try{localStorage.setItem(key,JSON.stringify({visible,active,width,tabs:[...tabs.values()].map(t=>({id:t.id,kind:t.kind,title:t.title,path:t.path,sourceRef:t.sourceRef,url:t.url,chatId:t.chatId,draft:t.draft||'',clientId:t.clientId,submission:t.submission,model:t.model}))}));}catch{}}
     function resize(next){width=Math.max(30,Math.min(70,next));layout.style.setProperty('--panel-width',width+'%');layout.closest('.workspace')?.style.setProperty('--workspace-panel-width',width+'%');q('.panel-resize').setAttribute('aria-valuenow',String(Math.round(width)));save();}
     resize(width);q('.panel-resize').setAttribute('aria-valuemin','30');q('.panel-resize').setAttribute('aria-valuemax','70');
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
@@ -129,7 +129,7 @@
       if(t.kind==='captures'){mountCaptures(t);return;}
       if(t.kind==='activity'){t.element.append(activity);return;}
       if(t.kind==='chat'){mountChat(t);return;}
-      loading(t);
+      t.renderPreview=null;loading(t);
       try{
         const catalog=await api(`/api/runs/${run.id}/files`);if(!current())return;
         if(t.kind==='files'){
@@ -152,7 +152,17 @@
         t.title=file.name;draw();t.element.innerHTML=`<header class="panel-file-heading"><div><strong>${esc(file.name)}</strong><small>${esc(file.path)}</small></div><a href="${esc(file.url)}" download="${esc(file.name)}">↓ Download</a><button type="button" data-refresh aria-label="Refresh file">↻</button></header><div class="panel-file-content"></div>`;
         const content=t.element.querySelector('.panel-file-content');t.element.querySelector('[data-refresh]').onclick=()=>mount(t);
         if(file.inline_url&&['image','video'].includes(file.kind)){content.classList.add('panel-media');content.innerHTML=file.kind==='video'?`<video controls preload="metadata" src="${esc(file.inline_url)}"></video>`:`<img src="${esc(file.inline_url)}" alt="${esc(file.name)}">`;}
-        else{const result=await api(file.preview_url);if(!current()||!content.isConnected)return;content.innerHTML=result.text===null?'<p class="panel-empty">No preview for this file type. Download it to open it.</p>':`${result.truncated?'<p class="saved-file-notice">Showing the first 128 KB. Download for the complete file.</p>':''}${result.format==='markdown'?`<div class="markdown">${markdown(result.text)}</div>`:`<pre class="saved-file-text">${esc(result.text)}</pre>`}`;decorate(content,catalog.files);}
+        else{
+          const result=await api(file.preview_url);if(!current()||!content.isConnected)return;
+          t.renderPreview=()=>{
+            if(!current()||!content.isConnected)return;
+            const location=MoyaiFiles.reference(t.sourceRef);
+            t.element.querySelector('.panel-file-heading small').textContent=file.path+(location?.line?':'+location.line+(location.endLine!==location.line?'–'+location.endLine:''):'');
+            content.innerHTML=MoyaiFiles.preview(result,t.sourceRef,{escape:esc,markdown});decorate(content,catalog.files);
+            if(visible&&active===t.id)MoyaiFiles.reveal(content);
+          };
+          t.renderPreview();
+        }
         t.deactivate=()=>t.element.querySelectorAll('video').forEach(v=>v.pause());
       }catch(e){if(current())error(t,e);}
     }
@@ -225,7 +235,10 @@
     }
     layout.addEventListener('click',followPullRequest);
     syncPullRequests(run);
-    function openFile(file){return open('file',{path:file.archive_path,title:file.name});}
+    function openFile(file,ref=null){
+      const t=make('file',{path:file.archive_path,title:file.name});if(!t||t.closing)return true;
+      t.sourceRef=typeof ref==='string'?ref:null;select(t.id);t.renderPreview?.();save();return true;
+    }
     function decorate(element,files){
       MoyaiFiles.decorate(element,files,{onOpen:openFile});
       element.querySelectorAll('.copy-code').forEach(b=>b.onclick=async()=>{try{await navigator.clipboard.writeText(b.closest('.code-block').querySelector('code').textContent);b.textContent='Copied';}catch{b.textContent='Select to copy';}});

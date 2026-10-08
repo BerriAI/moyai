@@ -3,7 +3,7 @@ const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&l
 const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsRefresh:0, config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{}};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 let workspacePanel;
-const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,size:fileSize,onOpen:file=>workspacePanel?(file?workspacePanel.openFile(file):workspacePanel.open('files')):false});
+const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,size:fileSize,onOpen:(file,ref)=>workspacePanel?(file?workspacePanel.openFile(file,ref):workspacePanel.open('files')):false});
 const computer = MoyaiComputer.create({api,escape:esc,onCaptures:()=>workspacePanel?.open('captures')});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
 async function api(path, options = {}) {
