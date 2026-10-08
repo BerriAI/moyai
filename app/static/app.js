@@ -693,7 +693,7 @@ async function boot(){
     [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
     $('#logout').hidden=!!session.local;
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';}
-    $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{await api('/api/logout',{method:'POST'});location.reload();}catch(error){button.disabled=false;showError(error);}};
+    $('#logout').onclick=async()=>{if(hasUnsentWork()&&!confirm('Sign out and discard unsent messages and attachments?'))return;const button=$('#logout');button.disabled=true;try{await api('/api/logout',{method:'POST'});state.authenticated=false;location.reload();}catch(error){button.disabled=false;showError(error);}};
     const linkedRun=parseSessionLink(location.hash); if(linkedRun)await openRun(linkedRun.runId,linkedRun.hash);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
     registerWebMCP();
@@ -711,6 +711,14 @@ function registerWebMCP(){
 matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
 document.addEventListener('change',e=>{const picker=e.target.closest?.('.model-picker select'),logo=picker?.parentElement.querySelector('.provider-logo');if(logo&&picker.id!=='new-harness')MoyaiProviderLogos.sync(logo,picker.value,MoyaiProviderLogos.src);});
 setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
+function hasUnsentWork(){
+  return !!(state.newDraft.prompt || Object.values(state.drafts).some(Boolean)
+    || Object.values(state.queueDrafts).some(drafts=>drafts.size)
+    || [...attachmentDrafts.values()].some(draft=>draft.items.length));
+}
+window.addEventListener('beforeunload',event=>{
+  if(state.authenticated&&hasUnsentWork()){event.preventDefault();event.returnValue='';}
+});
 boot();
 
 setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected&&(state.chatRun?.agents?.groups?.length||state.runs.find(r=>r.id===state.selected)?.children?.length))refreshChat(state.selected).catch(()=>{});},10000);
