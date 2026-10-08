@@ -121,6 +121,7 @@ function bindInlineSkillPicker(input, form) {
     const value = skillCompletion(input.value, current, skill);
     if (input.maxLength > 0 && value.length > input.maxLength) {toast('Shorten your message before adding this skill.'); return;}
     const caret = current.start + completionToken(skill).length + 1;
+    input.setSkillCatalog?.([skill]);
     input.value = value;
     input.focus();
     input.setSelectionRange(caret, caret);
