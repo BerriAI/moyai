@@ -323,6 +323,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
             self.context_store = kwargs['context_store']
             self.context = SimpleNamespace(relay=relay)
             self.stopped = Event()
+            self.transport_attempt = 2
         def run_conversation(self, prompt, **kwargs):
             from sandbox.harness_agent import TurnJournal
             journal = self.journal = TurnJournal([], prompt, self.context_store)
@@ -352,6 +353,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     spec = {'run_id': 'harness-test', 'harness': 'claude-agent-sdk', 'broker_url': 'http://test', 'repo_url': '', 'model': OPUS,
             'prompt': 'test request', 'chat_enabled': True, 'max_iterations': 2, 'timeout': None}
     assert agent.run_agent(spec, relay) == (75 if transport_failure else 0)
+    assert next(e[2] for e in events if e[0] == 'final')['transport_attempt'] == 2
     if transport_failure:
         final = next(e[2] for e in events if e[0] == 'final')
         assert not final['completed'] and not final['continuation']
@@ -364,7 +366,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
         return
     assert next(e for e in events if e[0] == 'final')[1:] == ('SDK result', {
         'completed': True, 'continuation': False, 'wait_group': '', 'wait_credential': '',
-        'steer_message_id': None, 'steering_applied': []})
+        'steer_message_id': None, 'steering_applied': [], 'transport_attempt': 2})
     from sandbox.context_store import read_records
     assert json.loads(read_records(tmp_path / 'session/context.sqlite3')[-1]['text'])['content'] == 'SDK result'
 

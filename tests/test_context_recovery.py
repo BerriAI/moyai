@@ -10,7 +10,7 @@ from sandbox.broker_relay import BrokerRelay
 from sandbox.context_recovery import run_with_context_recovery
 from sandbox.context_store import ContextStore, ContextUnavailable
 from sandbox.harness_agent import TurnJournal
-from sandbox.transport_recovery import recovery_marker, validate_recovery
+from sandbox.transport_recovery import recovery_marker, retryable_failure, validate_recovery
 
 
 def runtime(tmp_path):
@@ -28,7 +28,8 @@ def runtime(tmp_path):
     return agent, summaries
 
 
-@pytest.mark.parametrize('unsafe', ['', 'pending', 'stopped', 'partial', 'completed', 'tool_transport', 'stream', 'permanent', 'missing_store'])
+@pytest.mark.parametrize('unsafe', ['', 'pending', 'stopped', 'partial', 'completed', 'tool_transport',
+    'stream', 'permanent', 'boundary_failed', 'missing_store', 'different_store'])
 def test_transport_recovery_requires_settled_durable_receipts(tmp_path, unsafe):
     agent, _ = runtime(tmp_path)
     store = agent.context_store
@@ -44,8 +45,14 @@ def test_transport_recovery_requires_settled_durable_receipts(tmp_path, unsafe):
     if unsafe == 'tool_transport': agent.context.relay.uncertain_tool = True
     if unsafe == 'stream': failure['response_started'] = True
     if unsafe == 'permanent': failure['transient'] = False
+    if unsafe == 'boundary_failed': agent.boundary_failed = True
     if unsafe == 'missing_store': agent.context_store = None
+    if unsafe == 'different_store': agent.journal.context_store = object()
     try:
+        # A live native thread can retain its tools through an eligible model
+        # failure; that does not authorize restoring unknown tools into a new one.
+        if unsafe == 'pending':
+            assert retryable_failure(failure)
         marker = recovery_marker(agent, result)
         assert bool(marker) is (unsafe == '')
         if marker:

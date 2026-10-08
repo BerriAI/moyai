@@ -297,18 +297,33 @@ def test_native_settlement_collects_late_command_receipts(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize('outcome,delay,rounds,rejections', [
     ('settle-context', 12, 1, 0), ('settle-context-preview', 0, 2, 1),
-    ('settle-context-during-compaction', 0, 1, 0)])
+    ('settle-context-during-compaction', 0, 1, 0), ('settle-context-transport-preview', 0, 1, 0)])
 def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypatch, outcome, delay, rounds, rejections):
     proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome,
                              context_delay=delay, context_rounds=rounds, compact_rejections=rejections)
     assert proof['completed'] and not proof['pending_tools'], proof
     assert proof['tool_executions'] == proof['completed_receipts'] == 1
-    assert proof['native_clients'] == 1
+    assert proof['native_clients'] == proof['native_threads'] == 1
     assert proof['native_compactions'] == rejections + rounds
-    assert proof['upstream_requests'] == proof['model_calls'] == 3 + 2 * rounds + rejections
+    transport_retry = int(outcome == 'settle-context-transport-preview')
+    assert proof['transport_attempt'] == transport_retry
+    assert proof['upstream_requests'] == proof['model_calls'] == 3 + 2 * rounds + rejections + transport_retry
     assert proof['corrections_delivered'] == int(rounds > 1)
     assert proof['receipt_during_compaction'] == (outcome == 'settle-context-during-compaction')
     assert 'private-native-summary-marker' not in proof['saved_prose']
+    assert proof['final_response'] == 'yield-test-complete'
+
+
+@pytest.mark.parametrize('outcome', ['settle-transport-finite', 'settle-transport-preview'])
+def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypatch, outcome):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == 1
+    assert proof['upstream_requests'] == 4 and proof['transport_attempt'] == 1
+    assert len(proof['transport_errors']) == 1
+    assert proof['transport_errors'][0]['http_status'] == 502
+    assert proof['transport_errors'][0]['response_started'] is False
     assert proof['final_response'] == 'yield-test-complete'
 
 
@@ -328,6 +343,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     settlement = outcome.startswith('settle-')
+    preview = outcome.endswith('preview')
+    transport = outcome.startswith('settle-transport-') or outcome == 'settle-context-transport-preview'
     context_case = outcome.startswith('settle-context')
     finish_during_compaction = outcome == 'settle-context-during-compaction'
     receipt_during_compaction = threading.Event()
@@ -341,23 +358,29 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 ' server = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)\n'
                 ' pathlib.Path("preview-port").write_text(str(server.server_port))\n'
                 ' print("preview-ready", flush=True)\n server.serve_forever()\n'
-                if outcome.endswith('preview') else
+                if preview else
                 ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n'
                 + (f' time.sleep({context_delay})\n' if context_case else '')) +
             'finally:\n print("slow-tool-complete", flush=True)\n')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
-    native_errors, native_plugins = [], []
+    native_errors, native_plugins, native_clients, native_threads = [], [], [], []
     from openai_codex.async_client import AsyncCodexClient
     from sandbox.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
         async def initialize(self):
+            native_clients.append(self)
             from openai_codex.generated.v2_all import ExperimentalFeatureListResponse
             result = await super().initialize()
             features = await self.request('experimentalFeature/list', {},
                                          response_model=ExperimentalFeatureListResponse)
             native_plugins.extend(feature.enabled for feature in features.data if feature.name == 'plugins')
             progress('Native plugin marketplace enabled: ' + json.dumps(native_plugins))
+            return result
+
+        async def thread_start(self, options):
+            result = await super().thread_start(options)
+            native_threads.append(result.thread.id)
             return result
 
         async def next_turn_notification(self, turn_id):
@@ -424,7 +447,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     assert len(json.dumps(body)) < len(json.dumps(compactions[0]))
                 if context_rounds > 1 and len(compactions) == compact_rejections + context_rounds:
                     assert agent.accept_input({'id': 42, 'content': 'Keep the final response concise.'})
-                if outcome.endswith('preview'):
+                if preview:
                     from urllib.request import urlopen
                     port = (workspace / 'preview-port').read_text()
                     with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
@@ -453,13 +476,17 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
                 output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
                           'name': 'exec', 'namespace': 'functions', 'input': code}
-            elif context_case and 2 <= sequence <= context_rounds + 1:
+            elif transport and sequence == 2:
+                assert agent.journal.pending and steps == [0]
+                progress('Injecting an edge HTTP 502 with the existing command still running')
+                return self.reply({}, 502)
+            elif context_case and 2 + int(transport) <= sequence <= context_rounds + 1 + int(transport):
                 assert agent.journal.pending and steps == [0]
                 return self.reply({'detail': {'code': 'context_compaction_required',
                     'input_tokens': 300000, 'input_budget': 200000}}, 409)
             elif settlement and sequence == 2:
                 assert agent.journal.pending and steps == [0]
-                if outcome == 'settle-preview':
+                if preview:
                     from urllib.request import urlopen
                     port = (workspace / 'preview-port').read_text()
                     with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
@@ -468,9 +495,15 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 output = {'type': 'message', 'id': 'premature', 'role': 'assistant',
                     'phase': 'final_answer', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
-            elif settlement and sequence == (context_rounds + 2 if context_case else 3):
+            elif settlement and sequence == (context_rounds + 2 + int(transport) if context_case else 3):
                 assert bool(agent.journal.pending) != finish_during_compaction
                 assert agent.model_calls == sequence + len(compactions)
+                if transport and preview:
+                    from urllib.request import urlopen
+                    port = (workspace / 'preview-port').read_text()
+                    with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
+                        assert response.status == 200
+                    progress('After reconnect: original preview server still answers HTTP 200')
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
                 sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
                 assert sessions, 'Native command must return a running session'
@@ -480,7 +513,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     'name': 'exec', 'namespace': 'functions',
                     'input': 'text(await tools.write_stdin(' + json.dumps({
                         'session_id': int(sessions[-1]), 'yield_time_ms': 20000 if context_case else 1000,
-                        'chars': '\u0003' if outcome.endswith('preview') else ''}) + '));'}
+                        'chars': '\u0003' if preview else ''}) + '));'}
             elif sequence == 2:
                 assert len(calls) == 1 and agent.journal.pending
                 assert steps == [0], 'Lifecycle must not run while the nested tool is pending'
@@ -550,7 +583,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             completed_receipts=len(receipts), pending_tools=len(store.pending),
             tool_events=[kind for kind, _ in events], faults=faults, transport_errors=diagnostics,
             sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
-            native_clients=len(native_plugins), native_compactions=len(compactions),
+            native_clients=len(native_clients), native_threads=len(native_threads),
+            transport_attempt=agent.transport_attempt, native_compactions=len(compactions),
             receipt_during_compaction=receipt_during_compaction.is_set(),
             corrections_delivered=len(corrections),
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))

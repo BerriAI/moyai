@@ -164,6 +164,9 @@ class Store:
                     name TEXT NOT NULL, linked_user_id TEXT REFERENCES users(id),
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS user_model_preferences (
+                    user_id TEXT PRIMARY KEY REFERENCES users(id), model TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS identity_audit (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
                     source_id TEXT NOT NULL, target_id TEXT NOT NULL, created_at TEXT NOT NULL

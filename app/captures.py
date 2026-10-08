@@ -55,13 +55,17 @@ def read(path: Path, *, store) -> tuple[bytes, str]:
 
 def response(path: Path, request, download=False, *, store):
     raw, mime = read(path, store=store)
+    return bytes_response(raw, mime, path.name, request, download)
+
+
+def bytes_response(raw: bytes, mime: str, name: str, request, download=False):
     headers = {'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes',
-               'Content-Disposition': ('attachment' if download else 'inline') + "; filename*=UTF-8''" + quote(path.name)}
+               'Content-Disposition': ('attachment' if download else 'inline') + "; filename*=UTF-8''" + quote(name)}
     status = 200
-    ranges = request.headers.get('range')
+    ranges = request.headers.get('range') if not request.headers.get('if-range') else None
     if ranges and not download:
         match = re.fullmatch(r'bytes=(\d*)-(\d*)', ranges)
-        if not match or not any(match.groups()):
+        if not match or not any(match.groups()) or len(ranges) > 100:
             raise HTTPException(416, 'Invalid byte range.', headers={'Content-Range': f'bytes */{len(raw)}'})
         first, last = match.groups()
         start = int(first) if first else max(0, len(raw) - int(last))

@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import now
+from .model_preferences import save_model
 
 
 class Listing(BaseModel):
@@ -79,6 +80,8 @@ class ModelTools:
             default = fresh['model'] if queued else selected
             conn.execute('UPDATE runs SET active_model=?,model=?,updated_at=? WHERE id=?', (selected, default, now(), run['id']))
             conn.execute('INSERT INTO model_switch_operations VALUES(?,?,?,?)', (*operation, selected))
+            if not queued:
+                save_model(conn, fresh['active_user_id'], selected)
             label = next(item['name'] for item in self.settings.model_choices() if item['id'] == selected)
             data = {'turn_id': args.turn_id, 'model': selected, 'previous_model': fresh['active_model'], 'public_update': True}
             conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'message',?,?,?)",

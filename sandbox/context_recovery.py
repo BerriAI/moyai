@@ -3,9 +3,11 @@ import time
 try:
     from .context_store import ContextUnavailable
     from .sdk_failure import report_failure
+    from .startup import StartupUnavailable
 except ImportError:
     from context_store import ContextUnavailable
     from sdk_failure import report_failure
+    from startup import StartupUnavailable
 
 
 def maintain_context(agent, *, refresh=False):
@@ -19,11 +21,23 @@ def maintain_context(agent, *, refresh=False):
 
 
 def prepare_context(agent, history):
+    agent.context_started_at = time.monotonic()
     relay = agent.context.relay
     if hasattr(relay, 'context_window'):
-        agent.compaction_window = relay.context_window()['input_budget']
+        try:
+            agent.compaction_window = relay.context_window()['input_budget']
+        except StartupUnavailable as exc:
+            if getattr(agent, 'journal', None) is not None:
+                # A later goal/steering invocation owns completed work. Save it
+                # through the normal failure path, never a fresh startup retry.
+                raise ContextUnavailable('Context services did not reconnect. Completed work is preserved.') from exc
+            raise
     maintain_context(agent, refresh=True)
-    return agent.context_store.history() if agent.context_store is not None else history
+    history = agent.context_store.history() if agent.context_store is not None else history
+    ready = getattr(relay, 'on_context_ready', None)
+    if ready is not None:
+        ready()
+    return history
 
 
 def run_with_context_recovery(agent, prompt, history, invoke):
@@ -34,7 +48,7 @@ def run_with_context_recovery(agent, prompt, history, invoke):
     previous = None
     attempts = 0
     timeout = ctx.spec.get('timeout')
-    deadline = time.monotonic() + timeout if timeout else None
+    deadline = getattr(agent, 'context_started_at', time.monotonic()) + timeout if timeout else None
     while True:
         agent.context_timeout = max(0, deadline - time.monotonic()) if deadline else None
         if deadline and not agent.context_timeout:

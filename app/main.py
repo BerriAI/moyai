@@ -30,6 +30,7 @@ from .security import Security, digest
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
+from .model_preferences import preferred_model, save_model
 from .access_logging import configure_access_logging
 from .broker_diagnostics import BrokerDiagnosticsMiddleware, upstream_headers
 from .slack import SlackSessions
@@ -52,6 +53,7 @@ from .artifact_files import routes as artifact_file_routes
 from .automations import Automations
 from .computer import Computer
 from . import captures
+from .media_shares import MediaShares, TOOLS as MEDIA_TOOLS
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, wire_limit, unseal
 
 STATIC = Path(__file__).parent / "static"
@@ -198,7 +200,8 @@ def create_app(settings: Settings | None = None):
     slack.session_titles = session_titles
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
-    identities = SlackIdentities(store, connectors, settings, security, checkpoints)
+    identities = SlackIdentities(store, connectors, settings, security, checkpoints, credentials.same_requester)
+    connectors.slack_identities = identities
     slack.identities = identities
     manager.prepare_context = slack.prepare
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
@@ -285,6 +288,9 @@ def create_app(settings: Settings | None = None):
     session_folders = SessionFolders(store, security, checkpoints)
     app.state.session_folders = session_folders
     app.include_router(session_folders.routes())
+    media_shares = MediaShares(store, settings, security)
+    app.state.media_shares = media_shares
+    app.include_router(media_shares.routes())
     app.include_router(store.attachments.routes(security, settings))
     app.include_router(artifact_file_routes(settings, store, security))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
@@ -340,7 +346,7 @@ def create_app(settings: Settings | None = None):
         response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         if request.url.path == '/auth/github/register':
             response.headers['Content-Security-Policy'] += ' https://github.com'
-        if request.url.path.startswith(("/api/", "/oauth/", "/auth/", "/broker/")):
+        if request.url.path.startswith(("/api/", "/oauth/", "/auth/", "/broker/", "/media/")):
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -412,13 +418,35 @@ def create_app(settings: Settings | None = None):
             missing.append("PUBLIC_URL (reachable HTTPS address)")
         return missing
 
+    class ModelPreference(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        model: str = Field(min_length=1, max_length=120)
+
+    @app.put('/api/settings/model-preference')
+    async def set_model_preference(body: ModelPreference, request: Request):
+        security.require(request, mutation=True)
+        try:
+            selected = settings.resolve_model(body.model)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        actor = store.identity(security.session_info(request))
+        with store.connect() as conn:
+            save_model(conn, actor, selected)
+        await checkpoints.flush()
+        return {'model': selected}
+
+    def user_model(request):
+        actor = store.identity(security.session_info(request))
+        with store.connect() as conn:
+            return preferred_model(conn, settings, actor)
+
     @app.get("/api/config")
     async def config(request: Request):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
         return {"harnesses": choices(), "harness": settings.default_harness(), "cloud_ready": not missing, "missing": missing,
-                "model": settings.resolve_model(), "models": [{**model, "default_harness": settings.default_harness(model["id"])} for model in settings.model_choices()],
+                "model": user_model(request), "models": [{**model, "default_harness": settings.default_harness(model["id"])} for model in settings.model_choices()],
                 "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
@@ -505,8 +533,9 @@ def create_app(settings: Settings | None = None):
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
-            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.default_harness(body.model))
-            model = settings.harness_model(harness, body.model)
+            requested_model = body.model if body.model is not None else user_model(request)
+            harness = body.harness or (parent['harness'] if body.side_chat_of else settings.default_harness(requested_model))
+            model = settings.harness_model(harness, requested_model)
         except ValueError as exc:
             raise HTTPException(422, str(exc))
         if body.mode == "modal" and not metadata_request:
@@ -822,7 +851,7 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.post("/broker/{run_id}/tools/call")
@@ -832,6 +861,17 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in MEDIA_TOOLS:
+            try:
+                result = await asyncio.to_thread(media_shares.call, run, body.name, body.arguments)
+            except ValidationError:
+                result = {'error': 'Invalid media arguments. Use media_list and the current tool schema.', 'status_code': 422}
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+                result = {'error': exc.detail, 'status_code': exc.status_code}
+            await checkpoints.flush()
+            return result
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
@@ -918,7 +958,7 @@ def create_app(settings: Settings | None = None):
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
-                      else await connectors.call(body.name, arguments, run=run) if body.name == 'slack_send'
+                      else await connectors.call(body.name, arguments, run=run) if body.name in {'slack_send', 'slack_me'}
                       else await connectors.call(body.name, arguments))
             store.event(run_id, "tool", f"{body.name} completed")
             return result

@@ -23,8 +23,8 @@ class AutomationWorkflow:
             run_id = result.get('run_id', '')
             if not run_id:
                 return result
-        # Keep the schedule action open while its session works or awaits input.
-        # Temporal's SKIP policy then prevents overlapping scheduled actions.
+        # Track this occurrence until its session and children finish. The
+        # schedule's ALLOW_ALL policy lets later occurrences start independently.
         for _ in range(1000):
             finished = await workflow.execute_activity(
                 'automation_finished', run_id, start_to_close_timeout=timedelta(seconds=30),

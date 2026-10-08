@@ -5,14 +5,21 @@ except ImportError:
     from context_store import ContextUnavailable
 
 
+MAX_TRANSPORT_ATTEMPTS = 3
+
+
+def retryable_failure(failure):
+    return (isinstance(failure, dict) and failure.get('version') == 1
+            and failure.get('route') in {'/v1/messages', '/v1/responses', '/v1/chat/completions'}
+            and failure.get('transient') is True and failure.get('response_started') is False
+            and not failure.get('uncertain_tool'))
+
+
 def valid_retry(marker):
     if not isinstance(marker, dict) or marker.get('version') != 1:
         return False
     failure, checkpoint = marker.get('failure'), marker.get('checkpoint')
-    return (isinstance(failure, dict) and failure.get('version') == 1
-            and failure.get('route') in {'/v1/messages', '/v1/responses', '/v1/chat/completions'}
-            and failure.get('transient') is True and failure.get('response_started') is False
-            and not failure.get('uncertain_tool')
+    return (retryable_failure(failure)
             and isinstance(checkpoint, dict) and isinstance(checkpoint.get('epoch'), str)
             and bool(checkpoint['epoch']) and type(checkpoint.get('seq')) is int and checkpoint['seq'] > 0)
 

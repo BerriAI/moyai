@@ -15,10 +15,12 @@ from contextlib import nullcontext
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from .broker_failure import MODEL_ROUTES, failure
+    from .transport_recovery import retryable_failure
     from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from broker_failure import MODEL_ROUTES, failure
+    from transport_recovery import retryable_failure
     from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 
 EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
@@ -32,10 +34,12 @@ class InputPending(Exception):
 
 class BrokerRelay:
     def __init__(self, remote, token, notify=None, report_error=None):
+        self.notify = notify
         self.last_error = ''
         self.last_failure = None
         self.uncertain_tool = False
         self.model_failed = False
+        self.failure_lock = threading.Lock()
         self.wait_group = ''
         self.wait_credential = ''
         self.remote, self.token = remote, token
@@ -43,6 +47,7 @@ class BrokerRelay:
         self.repository_startup = False
         self.steering = None
         self.before_model = None
+        self.on_context_ready = None
         self.context_required = None
         self.context_recovery = False
         self.native_compacting = False
@@ -88,14 +93,17 @@ class BrokerRelay:
                 response_headers, response_status = {}, None
                 request_started = time.monotonic()
 
-                def record_failure(exc, *, headers=None, status=None):
+                def record_failure(exc, *, headers=None, status=None, message=None):
                     diagnostic = failure(route, request_id, exc, headers=headers,
                         status=status, response_started=response_started, response_bytes=response_bytes)
                     diagnostic.update(occurred_at=time.time(), duration_ms=round((time.monotonic() - request_started) * 1000))
-                    relay.last_failure = diagnostic
-                    relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
-                    if route in MODEL_ROUTES:
-                        relay.model_failed = True
+                    with relay.failure_lock:
+                        if message is not None:
+                            relay.last_error = message
+                        relay.last_failure = diagnostic
+                        relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
+                        if route in MODEL_ROUTES:
+                            relay.model_failed = True
                     if report_error:
                         report_error(diagnostic)
                 if self.path == '/v1/messages?beta=true':
@@ -277,26 +285,24 @@ class BrokerRelay:
                         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as read_error:
                             response_bytes += len(getattr(read_error, 'partial', b''))
                     message = str(message or 'The cloud connection failed before a response could finish.')
-                    if not credential_route:
-                        relay.last_error = message
-                    record_failure(exc, headers=exc.headers, status=exc.code)
+                    record_failure(exc, headers=exc.headers, status=exc.code,
+                                   message=message if not credential_route else None)
                     exc.close()
                     self.error(502 if exc.code == 403 else exc.code, message)
                 except (ValueError, KeyError, TypeError, AttributeError) as exc:
                     if not response_started:
                         self.error(422, 'Unsupported or invalid model wire payload.')
                     else:
-                        relay.last_error = 'The cloud reply could not be decoded. Your message is saved.'
-                        record_failure(exc, headers=response_headers, status=response_status)
+                        record_failure(exc, headers=response_headers, status=response_status,
+                                       message='The cloud reply could not be decoded. Your message is saved.')
                         self.close_connection = True
                 except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as exc:
                     if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                         return
                     message = 'The cloud connection timed out or could not be reached. Your message is saved.'
                     response_bytes += len(getattr(exc, 'partial', b''))
-                    if not credential_route:
-                        relay.last_error = message
-                    record_failure(exc, headers=response_headers, status=response_status)
+                    record_failure(exc, headers=response_headers, status=response_status,
+                                   message=message if not credential_route else None)
                     if not response_started:
                         self.error(502, message)
                     else:
@@ -307,6 +313,17 @@ class BrokerRelay:
         self.server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.url = f'http://127.0.0.1:{self.server.server_port}'
+
+    def resume_model(self, observed_failure):
+        """Reopen only the failed model boundary a live SDK has finished handling."""
+        with self.failure_lock:
+            if (self.last_failure is not observed_failure or not self.model_failed
+                    or self.uncertain_tool or not retryable_failure(observed_failure)):
+                return False
+            self.last_failure = None
+            self.last_error = ''
+            self.model_failed = False
+            return True
 
     def start(self):
         self.thread.start()
@@ -328,8 +345,8 @@ class BrokerRelay:
     def context_window(self):
         request = urllib.request.Request(self.remote.rstrip('/') + '/context/window',
             headers={'Authorization': 'Bearer ' + self.token, 'X-Moyai-Request-ID': uuid4().hex})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            value = json.loads(response.read(8192))
+        value = read_with_reconnect(request, lambda response: json.loads(response.read(8192)),
+                                    stage='context_window', notify=self.notify)
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
             raise ValueError('The broker did not return a usable compaction window.')
         return value

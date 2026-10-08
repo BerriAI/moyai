@@ -158,14 +158,19 @@ async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durabl
             await manager.shutdown()
 
 
-async def test_real_temporal_startup_retry_timer_survives_worker_replacement(durable):
+@pytest.mark.parametrize('stage', ['workspace_tools', 'context_window'])
+async def test_real_temporal_startup_retry_timer_survives_worker_replacement(durable, stage):
     from test_startup_recovery import startup_report
     manager, cloud, run_id = durable
     command = cloud.command
     recovered = False
+    resumed_deadlines = []
     async def startup_outage(machine, action, directory, value, **kwargs):
         if action == 'read' and not recovered:
-            return json.dumps(startup_report())
+            return json.dumps(startup_report(stage=stage))
+        if action == 'start' and recovered:
+            state = successor.state(run_id)
+            resumed_deadlines.append((state['turn_started'], state['startup_deadline']))
         return await command(machine, action, directory, value, **kwargs)
     manager.command = startup_outage
     async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
@@ -176,7 +181,9 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
         try:
             await manager.recover()
             await eventually(lambda: manager.state(run_id).get('phase') == 'startup_wait', seconds=25)
-            first_message = manager.state(run_id)['message_id']
+            first_state = manager.state(run_id)
+            first_message = first_state['message_id']
+            original_deadlines = (first_state['turn_started'], first_state['startup_deadline'])
             await manager.shutdown()
             assert cloud.machines[0].alive
             recovered = True
@@ -187,6 +194,7 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             await eventually(lambda: successor.store.run(run_id)['status'] == 'idle', seconds=30)
             assert successor.state(run_id)['message_id'] == first_message
             assert len(cloud.launches) == 2 and len(cloud.machines) == 1
+            assert resumed_deadlines == [original_deadlines]
             assert [m['content'] for m in successor.store.messages(run_id) if m['role']=='assistant'] == ['Saved answer']
             handle = env.client.get_workflow_handle('moyai-session-' + run_id)
             history = await handle.fetch_history()

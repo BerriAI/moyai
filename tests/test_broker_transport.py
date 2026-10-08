@@ -93,6 +93,17 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
         # The SDK may automatically retry 502; it must not resubmit inference.
         assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 409
         assert len(calls) == 1 and len(diagnostics) == 1
+        # A live native continuation must explicitly consume this exact failure.
+        assert not relay.resume_model(dict(saved))
+        assert relay.resume_model(saved)
+        assert not relay.last_error and relay.last_failure is None and not relay.model_failed
+        assert not relay.resume_model(saved)
+        assert client.post('/v1/messages', json={}).status_code == 502
+        assert len(calls) == 2
+        current = relay.last_failure
+        assert not relay.resume_model(saved) and relay.last_failure is current
+        relay.uncertain_tool = True
+        assert not relay.resume_model(current) and relay.model_failed
 
 
 @pytest.mark.parametrize('status,upstream,transient', [(502, 401, False), (502, 403, False),
@@ -113,6 +124,7 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
         assert relay.last_failure['upstream_status'] == upstream
         assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
         assert relay.last_failure['transient'] is transient
+        assert relay.resume_model(relay.last_failure) is transient
 
 
 @pytest.mark.parametrize('route,uncertain_tool', [('/v1/messages', False), ('/tools/call', True),
@@ -133,6 +145,7 @@ def test_dropped_connection_is_recorded_once_without_replaying_tools(route, unce
         assert saved['http_status'] is None and saved['response_bytes'] == 0
         assert saved['transient'] and not saved['response_started']
         assert saved['uncertain_tool'] is uncertain_tool and relay.uncertain_tool is uncertain_tool
+        assert relay.resume_model(saved) is (not uncertain_tool)
 
 
 def test_partial_stream_is_recorded_without_sending_another_http_status():

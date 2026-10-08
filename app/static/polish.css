@@ -189,7 +189,7 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .new-task:hover kbd, .new-task:focus-visible kbd { opacity: 1; }
 .session-search { display: flex; flex-shrink: 0; margin: 2px 6px 8px; padding: 8px; gap: 10px; border-radius: 7px; color: #3d3d3d; background: #fff; box-shadow: inset 0 0 0 1px #e3e3e3; }
 .session-search[hidden] { display: none; }
-.session-search input { font-size: 14px; padding: 0; }
+.session-search input { font-size: 14px; padding: 0; border-radius: 0; }
 .session-search-snippet { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
 .sidebar-empty button { font-size: inherit; text-decoration: underline; }
 .session-search:focus-within input { box-shadow: none; }

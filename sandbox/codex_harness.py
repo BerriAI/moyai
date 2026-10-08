@@ -12,11 +12,13 @@ try:
     from .harness_dependencies import prepare_codex
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
+    from .transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from harness_dependencies import prepare_codex
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
+    from transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
 
 
 RECEIPT_TIMEOUT_SECONDS = 10
@@ -44,6 +46,7 @@ class CodexAgent(HarnessAgent):
         self.boundary_failed = False
         self.boundary_reason = ''
         self.model_calls = 0
+        self.transport_attempt = spec.get('transport_attempt', 0)
         relay.before_model = self.before_model
         relay.context_recovery = True
 
@@ -269,6 +272,38 @@ class CodexAgent(HarnessAgent):
             await asyncio.gather(notifications, return_exceptions=True)
             self.context.relay.native_compacting = False
 
+    async def settle_pending_receipts(self, client, turn_ids):
+        """Keep the native runtime alive for late receipts before a handoff.
+
+        A failed inference turn can finish while its yielded commands are still
+        running. The SDK's completed turn queue remains readable, but reports
+        TransportClosedError whenever it is temporarily empty. Closing the
+        client here would discard those commands' eventual completion events.
+        """
+        from openai_codex.errors import TransportClosedError
+        try:
+            async with asyncio.timeout(RECEIPT_TIMEOUT_SECONDS):
+                while self.journal.pending:
+                    for turn_id in turn_ids:
+                        while self.journal.pending:
+                            try:
+                                event = await client.next_turn_notification(turn_id)
+                            except TransportClosedError:
+                                break
+                            if event.method == 'item/completed':
+                                payload = event.payload.model_dump(mode='json', by_alias=True)
+                                self.record_item(payload['item'], completed=True)
+                    # Stop cancels grace waiting, but already-queued native
+                    # completions still belong to the durable journal.
+                    if self.stopped.is_set():
+                        break
+                    if self.journal.pending:
+                        await asyncio.sleep(0.05)
+        except TimeoutError:
+            # The shared recovery gate still rejects genuinely unknown outcomes.
+            # Neither elapsed time nor raw output IDs are completion receipts.
+            pass
+
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
         from openai_codex.errors import InvalidRequestError
@@ -283,7 +318,7 @@ class CodexAgent(HarnessAgent):
         message_items = {}
         finished, answer = False, ''
         failure = {}
-        settlement_turn = None
+        settlement_started = False
         prior_turns = set()
         compaction_progress, compaction_attempts = 0, 0
         late_inputs = []
@@ -359,6 +394,38 @@ class CodexAgent(HarnessAgent):
                                         if payload['turn']['status'] in {'failed', 'interrupted'} else 'unknown')
                                     if payload['turn'].get('error'):
                                         failure.update(codex_details(payload['turn']['error']))
+                                relay = self.context.relay
+                                failed_request = getattr(relay, 'last_failure', None)
+                                if (payload['turn']['status'] == 'failed' and self.journal.pending and not self.stopped.is_set()
+                                        and not self.boundary_failed and not getattr(relay, 'uncertain_tool', False)
+                                        and not getattr(relay, 'context_required', None)
+                                        and retryable_failure(failed_request)
+                                        and self.transport_attempt < MAX_TRANSPORT_ATTEMPTS):
+                                    # Preserve the native thread and its running tools. A
+                                    # preview server cannot settle merely by waiting before
+                                    # a cold restart; the live agent must inspect/stop it.
+                                    self.transport_attempt += 1
+                                    self.context.activity.commentary(
+                                        'Reconnecting to continue with the existing tools and saved results.')
+                                    await asyncio.sleep(2 ** self.transport_attempt)
+                                    limit = self.context.spec.get('max_iterations')
+                                    if (not self.stopped.is_set() and not self.boundary_failed
+                                            and (not limit or self.model_calls < limit)
+                                            and relay.resume_model(failed_request)):
+                                        prior_turns.add(turn.turn.id)
+                                        message_items.clear()
+                                        failure.clear()
+                                        late_inputs.extend(self.inputs.take())
+                                        turn = await self.await_with_tool_events(client, prior_turns,
+                                            client.turn_start(thread.thread.id,
+                                            'The model connection failed before a response. Continue the same task '
+                                            'using this thread and its existing tool sessions. Do not restart or '
+                                            'replay actions. Inspect pending tools, wait for finite work, and stop '
+                                            'preview servers you no longer need. Collect actual results before '
+                                            'answering.\n\n' + '\n\n'.join(late_inputs)))
+                                        late_inputs.clear()
+                                        steered = False
+                                        continue
                                 if (getattr(self.context.relay, 'context_required', None)
                                         and not self.stopped.is_set() and not self.boundary_failed):
                                     finished = False
@@ -378,13 +445,17 @@ class CodexAgent(HarnessAgent):
                                         late_inputs.clear()
                                         steered = False
                                         continue
+                                if ((not finished or getattr(relay, 'context_required', None))
+                                        and self.journal.pending):
+                                    finished = False
+                                    await self.settle_pending_receipts(client, [turn.turn.id, *prior_turns])
                                     break
-                                if (finished and self.journal.pending and not settlement_turn
+                                if (finished and self.journal.pending and not settlement_started
                                         and not self.stopped.is_set() and not self.boundary_failed):
                                     # One settlement turn shares this invocation's
                                     # deadline and model-call cap. Never publish an
                                     # answer that preceded its tool results.
-                                    settlement_turn = turn.turn.id
+                                    settlement_started = True
                                     prior_turns.add(turn.turn.id)
                                     message_items.clear()
                                     turn = await self.await_with_tool_events(client, prior_turns,

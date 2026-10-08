@@ -71,6 +71,10 @@ Responses and Chat Completions for durable summary generation. For Astra it must
 also preserve native Responses items such as `additional_tools`, tool namespaces,
 custom tool calls/outputs and streamed completion events.
 
+Transient model connection failures with pending tools continue in the same live
+native thread, preserving existing command sessions under the original turn
+retry limit. See [cloud recovery](observability.md#cloud-request-failures-and-recovery).
+
 When context rejection ends a Codex turn, the adapter compacts the same native
 thread while commands remain alive. Only explicit native compaction can pass
 the relay's context-pressure latch; authentication, model-call limits and the
@@ -80,6 +84,12 @@ events from earlier turns remain attached to their original calls, and private
 native summaries never enter the public journal. After verified compaction the
 same thread continues; failed compaction still permits a fresh runtime only
 when all tool outcomes are confirmed. User Stop retains priority.
+
+After a terminal failure, the adapter allows up to 10 seconds for queued and
+late command receipts before closing the native client, within the original
+task deadline. This grace period issues no model or tool calls. Stop permits
+saving already-queued receipts but cancels the wait; unknown outcomes continue
+to block automatic restart.
 
 ## Claude Agent SDK
 
