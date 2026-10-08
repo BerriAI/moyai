@@ -948,13 +948,14 @@ def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
     assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'sent'
 
 
-def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app):
+@pytest.mark.parametrize('greeting', ['', 'Hey ', 'Hi, ', 'Hello ', 'hey: '])
+def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app, greeting):
     app, client, run_id = start(slack_app)
     for index, text in enumerate(['<@U88888888> what is <@U99999999>?', '<@U88888888> please continue'], 1):
-        send(client, index, text)
+        send(client, index, greeting + text)
     assert len(app.state.store.messages(run_id)) == 1
-    send(client, 3, '<@U99999999> tell me about <@U88888888>')
-    send(client, 4, '<@U88888888> <@U99999999> please both explain')
+    send(client, 3, greeting + '<@U99999999> tell me about <@U88888888>')
+    send(client, 4, greeting + '<@U88888888> <@U99999999> please both explain')
     assert len(app.state.store.messages(run_id)) == 3
     assert '<@U88888888>' in app.state.store.messages(run_id)[-2]['content']
 
