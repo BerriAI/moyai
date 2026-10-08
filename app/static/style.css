@@ -65,11 +65,11 @@
 .rail{width:288px;flex-basis:288px}.parent-session{display:flex;align-items:flex-start}.parent-session>.session-link{min-width:0;flex:1;padding-left:4px}.agent-disclosure,.agent-disclosure-space{width:22px;flex:0 0 22px;margin-top:9px}.agent-disclosure{height:26px;padding:0;border:0;background:transparent;color:#81808a;font-size:1.15rem;border-radius:5px;line-height:1}.agent-disclosure:hover{background:#e5e3eb}.agent-disclosure:focus-visible,.session-link:focus-visible{outline:2px solid #9680b7;outline-offset:-2px}.child-sessions{margin:0 0 8px 22px;padding-left:8px;border-left:1px solid #e5e3e9}.child-sessions[hidden]{display:none}.child-session{gap:8px;padding:9px 10px 9px 4px}.child-mark{flex:0 0 9px;color:#c8c5cf;line-height:1.2}.child-session .session-link-title{font-size:.81rem}.child-session small{font-size:.67rem;margin-top:3px}.session-dot{margin-left:auto;margin-top:7px;width:6px;height:6px;flex-basis:6px}.session-dot.idle,.session-dot.completed{background:#91a69a}.session-dot.waiting_children{background:#9d80d4}.parent-session-link{font-size:.72rem;white-space:nowrap}.agent-summary{font-size:.76rem;border-top:1px solid var(--line);padding:15px 0}.agent-summary h3{font-size:.78rem;margin-bottom:9px}.agent-summary p{color:var(--muted);margin:5px 0}@media(max-width:850px){.rail{width:288px}.parent-session-link{font-size:0}.parent-session-link:before{content:'← Parent';font-size:.7rem}}
 
 /* Task names lead; status and real repository context remain secondary. */
-.session-list .session-group{margin-bottom:5px}
-.session-list .session-link{padding-top:10px;padding-bottom:10px;gap:8px}
-.session-list .session-link-title{font-size:13px;font-weight:500;line-height:1.45;white-space:normal;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;color:#35313d}
+.session-list .session-group{margin-bottom:1px}
+.session-list .session-link{min-height:44px;padding:6px 4px;gap:8px}
+.session-list .session-link-title{font-size:13px;font-weight:500;line-height:20px;white-space:nowrap;display:block;overflow:hidden;text-overflow:ellipsis;color:#35313d}
 .session-list .selected .session-link-title{color:#4f376a;font-weight:600}
-.session-link-meta{display:flex;align-items:center;flex-wrap:wrap;gap:3px 10px;margin-top:6px;font-size:11px;line-height:1.5;color:#6e6878;font-weight:400}
+.session-link-meta{display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px;margin-top:2px;font-size:11px;line-height:16px;color:#6e6878;font-weight:400}
 .session-title-row{display:flex;align-items:flex-start;gap:8px}
 .session-title-row .session-link-title{flex:1;min-width:0}
 .session-indicator{display:flex;align-items:center;justify-content:center;flex:0 0 12px;width:12px;height:18px;color:var(--purple)}
@@ -83,8 +83,10 @@
 @media(prefers-reduced-motion:reduce){.session-spinner{animation:none}.session-completion.is-read{animation:none;opacity:0}}
 .session-state .session-dot{margin:0;flex:0 0 6px}
 .session-updated{white-space:nowrap;font-variant-numeric:tabular-nums;color:#746d7e}
-.session-link-context{display:block;margin-top:3px;font-size:11px;font-weight:400;line-height:1.5;color:#746d7e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.session-list .child-sessions{margin-bottom:10px;border-left-color:#dcd6e4}
+.session-link-context{flex:1;min-width:0;font-size:11px;font-weight:400;color:#746d7e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* Keyboard users can read the full title and supporting context in place. */
+.session-list .session-link:focus-visible .session-link-title,.session-link:focus-visible .session-link-context{white-space:normal;overflow-wrap:anywhere}
+.session-list .child-sessions{margin-bottom:4px;border-left-color:#dcd6e4}
 .session-list .child-session .session-link-title{font-size:12px}
 .session-list .child-mark{color:#84788f;margin-top:2px}
 .session-state .session-dot.failed,.session-state .session-dot.interrupted{background:#b35b65}
