@@ -59,8 +59,10 @@ def test_native_pr_reads_confirmed_family_receipts_without_a_computer(native_pr)
         'body': 'A **native** PR', 'body_truncated': False}
     state['pr'].update(number=101, html_url=child_url)
     assert client.get(endpoint, params={'url': child_url}).status_code == 200
+    state['pr'].update(number=102, html_url=grandchild_url)
+    assert client.get(endpoint, params={'url': grandchild_url}).status_code == 200
     count = len(calls)
-    for denied in [grandchild_url, foreign_url, url + '/files', url + '?fake=1', url.replace('github.com', 'evil.example')]:
+    for denied in [ foreign_url, url + '/files', url + '?fake=1', url.replace('github.com', 'evil.example')]:
         assert client.get(endpoint, params={'url': denied}).status_code == 404
     store.execute("UPDATE runs SET deleted_at='deleted' WHERE id=?", (child,))
     assert client.get(endpoint, params={'url': child_url}).status_code == 404
@@ -156,7 +158,7 @@ def test_native_pr_distinguishes_revoked_missing_and_transient_reads(native_pr, 
     assert client.get(f'/api/runs/{run_id}/pull-request', params={'url': url}).status_code == 200
 
 
-def test_pr_cards_require_a_receipt_from_this_run_or_a_direct_child(workspace):
+def test_pr_cards_require_a_receipt_from_this_subtree(workspace):
     app, client = workspace
     store = app.state.store
     runs = [store.create_run('PR handoff', '', 'demo', [])['id'] for _ in range(4)]
@@ -167,10 +169,10 @@ def test_pr_cards_require_a_receipt_from_this_run_or_a_direct_child(workspace):
     answer = '\n'.join(f'[View PR]({url})' for url in urls)
     with store.connect() as conn:
         selected = pr_delivery.select_prs(conn, parent, answer)
-        assert [pr.url for pr in selected] == [urls[0], urls[2]]
+        assert [pr.url for pr in selected] == [urls[0], urls[2], urls[3]]
         # A child cannot borrow its parent's publication receipt.
         assert [pr.url for pr in pr_delivery.select_prs(conn, child, answer)] == [urls[2], urls[3]]
-    for run_id, expected in [(parent, [urls[0], urls[2]]), (child, [urls[2], urls[3]])]:
+    for run_id, expected in [(parent, [urls[0], urls[2], urls[3]]), (child, [urls[2], urls[3]])]:
         data = client.get(f'/api/runs/{run_id}').json()
         assert data['pull_requests'] == data['pr_summary']['pull_requests']
         assert [pr['url'] for pr in data['pull_requests']] == expected
@@ -358,10 +360,10 @@ async def test_sidebar_pr_family_deduplicates_receipts_and_never_counts_answer_l
     service, calls, responses = sidebar_github(app, monkeypatch)
     responses.update({n: pr_response(n) for n in (100, 101, 102)})
     first = service.summaries([parent])[parent]
-    assert first['unknown'] == 2 and first['label'] == ''
+    assert first['unknown'] == 3 and first['label'] == ''
     result = await refreshed(service, [parent, child, deleted])
-    assert result[parent]['open'] == 2 and result[parent]['label'] == 'PR is ready'
-    assert {pr['number'] for pr in result[parent]['pull_requests']} == {100, 101}
+    assert result[parent]['open'] == 3 and result[parent]['label'] == 'PR is ready'
+    assert {pr['number'] for pr in result[parent]['pull_requests']} == {100, 101, 102}
     assert {pr['number'] for pr in result[child]['pull_requests']} == {100, 101, 102}
     assert result[deleted]['pull_requests'] == []
     assert len(calls) == 3

@@ -58,8 +58,8 @@ class SlackCredentials:
         root = conn.execute("SELECT 1 FROM runs WHERE id=? AND deleted_at=''", (binding['run_id'],)).fetchone()
         if not root or not data.get('credential_request_id') or any(data.get(key) != value for key, value in destination.items()):
             raise HTTPException(409, 'This Slack access card is no longer available.')
-        row = conn.execute('SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id WHERE q.id=? AND (r.id=? OR r.parent_run_id=?)',
-                           (data['credential_request_id'], binding['run_id'], binding['run_id'])).fetchone()
+        row = conn.execute('SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id WHERE q.id=? AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)',
+                           (data['credential_request_id'], binding['run_id'])).fetchone()
         if not row:
             raise HTTPException(409, 'This Slack access card is no longer available.')
         pending = any(item['id'] == row['id'] for item in self.owner.manager.credentials.pending_rows(conn, binding['run_id'], include_children=True))

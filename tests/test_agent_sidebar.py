@@ -376,3 +376,30 @@ def test_session_search_treats_sql_characters_literally_and_bounds_input(workspa
     assert client.get('/api/runs', params={'search': 'x' * 201}).status_code == 422
     client.cookies.clear()
     assert client.get('/api/runs', params={'search': 'user_name'}).status_code == 401
+
+
+def test_nested_search_participation_archive_restore_and_delete_are_root_scoped(workspace, monkeypatch):
+    app, client = workspace
+    store = app.state.store
+    parent, batch, group = seeded_group(app)
+    middle, reviewer, review_group = seeded_group(app)
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (batch, middle))
+    store.execute("UPDATE runs SET agent_label='Independent security reviewer' WHERE id=?", (reviewer,))
+    data = client.get('/api/runs?search=security').json()
+    assert len(data) == 1 and data[0]['id'] == parent
+    leaf = data[0]['children'][0]['children'][0]['children'][0]
+    assert leaf['id'] == reviewer and leaf['search_match']
+    assert client.get('/api/runs/' + reviewer).json()['workflow_root_id'] == parent
+    store.execute("UPDATE messages SET user_id='google:participant' WHERE run_id=?", (reviewer,))
+    assert store.sidebar_run_ids('google:participant') == [parent]
+    assert client.post('/api/runs/' + parent + '/archive', json={'archived': True}).status_code == 200
+    assert client.get('/api/runs/' + reviewer).json()['archived']
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    assert client.post('/api/runs/' + reviewer + '/messages', json={'content': 'Inspect the saved result', 'client_id': 'restore-deep'}).status_code == 202
+    assert not client.get('/api/runs/' + parent).json()['archived']
+    assert client.delete('/api/runs/' + parent).status_code == 409
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (reviewer,))
+    store.update_run(reviewer, status='idle')
+    assert client.delete('/api/runs/' + parent).status_code == 200
+    assert all(store.run(identity)['deleted_at'] for identity in (parent, batch, middle, reviewer))
+    assert client.get('/api/runs/' + reviewer).status_code == 404

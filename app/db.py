@@ -15,7 +15,7 @@ from .slack_mentions import SlackMentions
 # Read canonical messages so edits and deletion need no index synchronization.
 SESSION_SEARCH_CTE = """WITH search_input(term) AS (VALUES {terms}),
     searchable_sessions AS (
-        SELECT r.id,r.parent_run_id,term,
+        SELECT r.id,r.parent_run_id,roots.root_id,term,
             instr(unicode_lower(r.display_title || ' ' || r.agent_label || ' ' || r.prompt || ' ' || r.summary),term)>0 AS title_match,
             (SELECT substr(m.content,max(1,instr(unicode_lower(m.content),term)-50),200)
              FROM messages m WHERE m.run_id=r.id AND m.status!='deleted'
@@ -23,9 +23,9 @@ SESSION_SEARCH_CTE = """WITH search_input(term) AS (VALUES {terms}),
              ORDER BY m.id DESC LIMIT 1) AS message_match,
             CASE WHEN instr(unicode_lower(r.summary),term)>0
                  THEN substr(r.summary,max(1,instr(unicode_lower(r.summary),term)-50),200) END AS summary_match
-        FROM runs r CROSS JOIN search_input WHERE r.deleted_at=''
+        FROM runs r JOIN run_roots roots ON roots.run_id=r.id CROSS JOIN search_input WHERE r.deleted_at=''
     ), session_matches AS (
-        SELECT id,parent_run_id,term,coalesce(message_match,summary_match,'') AS search_snippet
+        SELECT id,parent_run_id,root_id,term,coalesce(message_match,summary_match,'') AS search_snippet
         FROM searchable_sessions WHERE title_match OR message_match IS NOT NULL OR summary_match IS NOT NULL
     )"""
 
@@ -219,6 +219,16 @@ class Store:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_participant ON messages(user_id,run_id) WHERE role='user'")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_users_linked ON users(linked_user_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
+            # Durable direct-parent edges own ancestry. UNION bounds corrupt
+            # cycles; rootless/orphaned chains never gain another root's scope.
+            conn.execute("""CREATE VIEW IF NOT EXISTS run_ancestry AS
+                WITH RECURSIVE tree(ancestor_id,run_id) AS (
+                    SELECT id,id FROM runs UNION
+                    SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
+                ) SELECT ancestor_id,run_id FROM tree""")
+            conn.execute("""CREATE VIEW IF NOT EXISTS run_roots AS
+                SELECT a.run_id,r.id AS root_id FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id
+                WHERE r.parent_run_id=''""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_title_backfill ON runs(created_at DESC,id DESC) WHERE chat_enabled=1 AND parent_run_id='' AND agent_label='' AND display_title='' AND title_attempted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
@@ -283,8 +293,7 @@ class Store:
             UNION SELECT run_id FROM messages
                 WHERE role='user' AND user_id IN (SELECT id FROM identities)
         ), mine AS (
-            SELECT CASE WHEN parent_run_id='' THEN id ELSE parent_run_id END AS id
-            FROM runs WHERE id IN (SELECT id FROM contributed)
+            SELECT root_id AS id FROM run_roots WHERE run_id IN (SELECT id FROM contributed)
         ) """, [user_id, user_id, user_id]
 
     def sidebar_metadata(self, user_id: str, run_ids: list[str]) -> dict[str, dict[str, bool]]:
@@ -343,7 +352,7 @@ class Store:
             # Each keyword may match any conversation in the family. The
             # sidebar passes one phrase; the chat tool keeps its keyword AND.
             missing = """NOT EXISTS(SELECT 1 FROM session_matches m WHERE m.term=needle.term
-                AND (m.id=runs.id OR m.parent_run_id=runs.id))"""
+                AND m.root_id=runs.id)"""
             if search_folders and archive_owner is not None and archived is False:
                 missing += """ AND NOT EXISTS(SELECT 1 FROM session_folder_memberships m
                     JOIN session_folders f ON f.id=m.folder_id AND f.owner_id=m.owner_id
@@ -371,10 +380,37 @@ class Store:
         for offset in range(0, len(root_ids), 400):
             batch = root_ids[offset:offset + 400]
             slots = ','.join('?' for _ in batch)
-            rows = self.rows(SESSION_SEARCH_CTE.format(terms='(?)') + f' SELECT id,search_snippet FROM session_matches WHERE id IN ({slots}) OR parent_run_id IN ({slots})',
-                             [search.lower(), *batch, *batch])
+            rows = self.rows(SESSION_SEARCH_CTE.format(terms='(?)') + f' SELECT id,search_snippet FROM session_matches WHERE root_id IN ({slots})',
+                             [search.lower(), *batch])
             matches.update({row['id']: row['search_snippet'] for row in rows})
         return matches
+
+    @staticmethod
+    def root_id_in(conn, run_id: str) -> str:
+        row = conn.execute("""WITH RECURSIVE ancestors(id,parent_run_id) AS (
+            SELECT id,parent_run_id FROM runs WHERE id=? UNION
+            SELECT r.id,r.parent_run_id FROM runs r JOIN ancestors child ON r.id=child.parent_run_id
+        ) SELECT id AS root_id FROM ancestors WHERE parent_run_id=''""", (run_id,)).fetchone()
+        if not row:
+            raise ValueError('Session has no valid workflow root.')
+        return row['root_id']
+
+    def root_id(self, run_id: str) -> str:
+        with self.connect() as conn:
+            return self.root_id_in(conn, run_id)
+
+    def subtree(self, run_id: str):
+        return self.subtrees([run_id])
+
+    def subtrees(self, run_ids):
+        rows = []
+        for offset in range(0, len(run_ids), 400):
+            batch = run_ids[offset:offset + 400]
+            rows.extend(self.rows("""WITH RECURSIVE tree(ancestor_id,run_id) AS (
+                SELECT id,id FROM runs WHERE id IN (""" + ','.join('?' for _ in batch) + """) UNION
+                SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
+            ) SELECT r.*,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
+        return rows
 
     def run(self, run_id: str):
         rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -574,7 +610,7 @@ class Store:
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         if restore_archived:
             conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?',
-                         (self.session_view_owner_in(conn, user_id), row['parent_run_id'] or run_id))
+                         (self.session_view_owner_in(conn, user_id), self.root_id_in(conn, run_id)))
         conn.execute('UPDATE runs SET model=?,updated_at=? WHERE id=?', (model, stamp, run_id))
         if send_now or send_immediately:
             # Automatic follow-ups retain their own steering intent. Preserve

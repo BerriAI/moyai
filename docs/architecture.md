@@ -270,7 +270,7 @@ can temporarily change the observed count; capacity above the ceiling queues.
 memory, concurrency and account quotas still apply; the app setting is not a
 reservation of provider capacity. Each sandbox currently requests 2 CPU/4 GiB.
 
-With Temporal enabled, a top-level chat can use `agents_fanout` to supply either
+With Temporal enabled, any chat agent can use `agents_fanout` to supply either
 explicit labeled assignments or common instructions plus an ordered list of
 items. The server divides items into balanced contiguous partitions and assigns
 each a stable one-based index. For example, 100 items with `workers=5` creates
@@ -279,12 +279,13 @@ five workers with exactly 20 cases each. Repeated launch calls with the same
 requires a new key. Each child inherits the initiating message's user, selected
 model, repository and enabled app set, and receives an isolated snapshot of the
 parent's current files. Finish file writes before delegating. Child conversations
-start fresh; child changes are not automatically merged. Workers cannot launch
-further children. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
+start fresh; child changes are not automatically merged. Workers can delegate their assigned work to further agents with the same shared
+queue and concurrency bounds. Each level keeps its direct parent and original workflow ancestry;
+credentials still require the current requester and original session scope. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
 
 After the delegation tool completes, the coordinator checkpoints between tool
 rounds, terminates its sandbox and waits durably. Its original user message stays
-open. Once every child has settled (including failures), it reacquires capacity,
+open. Once every child and its descendants have settled (including failures), it reacquires capacity,
 restores its checkpoint and continues the same request with the worker reports.
 This works even with only one available sandbox slot. Each child is an ordinary
 Temporal `SessionWorkflow`; parent/group relationships and result data are stored

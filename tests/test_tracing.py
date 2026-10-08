@@ -458,3 +458,23 @@ def test_model_usage_rejects_invalid_counts_and_preserves_explicit_zero(tmp_path
     for key in ('gen_ai.response.id', 'gen_ai.response.model', 'litellm.call_id', 'gen_ai.usage.input_tokens',
                 'gen_ai.usage.total_tokens', 'gen_ai.usage.cache_write.input_tokens'):
         assert key not in attrs
+
+
+def test_nested_trace_keeps_root_trace_and_direct_parent_span(tmp_path):
+    from app.agents import AgentCoordinator
+    from app.db import now
+    store = Store(tmp_path)
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    AgentCoordinator(store, settings, None)
+    tracing = AgentTracing(store, settings, processor=Processor())
+    root, batch, reviewer = [store.create_run('Trace task', '', 'demo', [], chat_enabled=True) for _ in range(3)]
+    for parent, child, group in [(root, batch, 'batch-group'), (batch, reviewer, 'review-group')]:
+        message_id = store.messages(parent['id'])[0]['id']
+        store.execute("INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at) VALUES(?,?,?,'trace','{}','running',?)", (group, parent['id'], message_id, now()))
+        store.execute('UPDATE runs SET parent_run_id=?,agent_group_id=? WHERE id=?', (parent['id'], group, child['id']))
+    identities = [tracing.identity(store.run(r['id']), store.messages(r['id'])[0]['id']) for r in (root, batch, reviewer)]
+    assert len({identity[0] for identity in identities}) == 1
+    assert [identity[3] for identity in identities] == [root['id']] * 3
+    assert identities[2][2] == identities[1][1]
+    store.execute("UPDATE agent_groups SET status='completed'")
+    assert tracing.identity(store.run(reviewer['id']), store.messages(reviewer['id'])[0]['id']) == identities[2]

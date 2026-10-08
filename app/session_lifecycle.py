@@ -84,7 +84,7 @@ class SessionLifecycle:
 
     def metadata(self, run, actor, admin, archives=None):
         archives = self.archives(actor) if archives is None else archives
-        return {'archived': (run['parent_run_id'] or run['id']) in archives,
+        return {'archived': self.store.root_id(run['id']) in archives,
                 'can_delete': self.can_delete(run, actor, admin)}
 
     def archive(self, run_id, actor, archived):
@@ -114,7 +114,7 @@ class SessionLifecycle:
             if not self.can_delete(run, actor, admin):
                 raise HTTPException(403, 'Only the session creator or an administrator can delete this session.')
             if not run['deleted_at']:
-                family = conn.execute('SELECT id,status FROM runs WHERE id=? OR parent_run_id=?', (run_id, run_id)).fetchall()
+                family = conn.execute('SELECT id,status FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)', (run_id,)).fetchall()
                 durable = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_sessions'").fetchone()
                 for member in family:
                     pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected') LIMIT 1", (member['id'],)).fetchone()
@@ -123,10 +123,10 @@ class SessionLifecycle:
                     if (member['status'] not in TERMINAL or pending or sending or self.manager.is_active(member['id'])
                             or (state and json.loads(state['state']).get('phase', 'idle') != 'idle')):
                         raise HTTPException(409, 'Stop this session and its agents, wait for cleanup to finish, then delete it.')
-                conn.execute("UPDATE runs SET deleted_at=?,token_hash='' WHERE id=? OR parent_run_id=?", (now(), run_id, run_id))
-                conn.execute("DELETE FROM native_sessions WHERE run_id IN (SELECT id FROM runs WHERE id=? OR parent_run_id=?)", (run_id, run_id))
-                conn.execute("DELETE FROM browser_sessions WHERE run_id IN (SELECT id FROM runs WHERE id=? OR parent_run_id=?)", (run_id, run_id))
-                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND run_id IN (SELECT id FROM runs WHERE id=? OR parent_run_id=?)", (run_id, run_id))
+                conn.execute("UPDATE runs SET deleted_at=?,token_hash='' WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)", (now(), run_id))
+                conn.execute("DELETE FROM native_sessions WHERE run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
+                conn.execute("DELETE FROM browser_sessions WHERE run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
         return {'id': run_id, 'deleted': True}
 
     def routes(self):

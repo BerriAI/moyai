@@ -69,7 +69,7 @@ function syncSessionTitle(run){
 }
 function syncRunSummary(run){
   if(state.selected===run.id&&state.chatRun?.id===run.id&&!document.hidden)markSessionRead(run);
-  const item=state.runs.flatMap(parent=>[parent,...(parent.children||[])]).find(item=>item.id===run.id);
+  const item=sessionRows(state.runs).find(item=>item.id===run.id);
   if(item)for(const key of ['agent_label','display_title','prompt','status','updated_at']){if(Object.hasOwn(run,key))item[key]=run[key];}
   syncSessionTitle(item?{...run,...item}:run);
   renderSidebar();
@@ -102,6 +102,7 @@ function sessionIndicator(run){
   if(!marker&&['failed','interrupted','waiting_credential','awaiting_approval'].includes(run.status))return `<span class="session-indicator session-attention ${esc(run.status)}" title="${esc(label)}" aria-hidden="true">!</span>`;
   return '<span class="session-indicator" aria-hidden="true"></span>';
 }
+function sessionRows(runs){return runs.flatMap(run=>[run,...sessionRows(run.children||[])]);}
 function modelName(model=state.config.model){return (state.config.models||[]).find(m=>m.id===model)?.name||model||'Moyai';}
 function harnessName(harness='hermes'){return (state.config.harnesses||[]).find(h=>h.id===harness)?.name||harness;}
 function harnessLogo(harness){const url=MoyaiProviderLogos.harness(harness);return `<img class="provider-logo harness-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
@@ -129,7 +130,7 @@ function sidebarGroups(runs,search){
   return runs.map(parent=>{
     const children=parent.children||[];
     const parentMatch=sessionMatches(parent,search);
-    const visible=parentMatch?children:children.filter(child=>sessionMatches(child,search));
+    const visible=sidebarGroups(children,parentMatch?'':search);
     return {...parent,children:visible,totalChildren:children.length,visible:parentMatch||visible.length>0};
   }).filter(parent=>parent.visible);
 }
@@ -173,12 +174,12 @@ function sidebarPersonalSection(id,label,icon,groups,search){
   const expanded=!!search||!state.closedFolders.has(id);
   return `<section class="session-personal-section"><button class="session-section-heading" data-toggle-folder="${id}" aria-expanded="${expanded}" aria-controls="section-${id}">${globalThis.MoyaiIcon?.(icon,16)||''}<span>${label}</span><span class="session-section-count">${groups.length}</span>${globalThis.MoyaiIcon?.('chevron',12)||''}</button><div id="section-${id}" ${expanded?'':'hidden'}>${sidebarRenderSessions(groups,search)}</div></section>`;
 }
-function sidebarRenderSessions(groups,search){return groups.map(parent=>{
-    const hasChildren=parent.totalChildren>0,expanded=!!search||state.expandedParents.has(parent.id);
-    return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent)}<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button></div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${parent.children.map(child=>sidebarRow(child,true)).join('')}</div>`:''}</div>`;
+function sidebarRenderSessions(groups,search,child=false){return groups.map(parent=>{
+    const hasChildren=(parent.totalChildren??parent.children?.length??0)>0,expanded=!!search||state.expandedParents.has(parent.id);
+    return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent,child)}${child?'':`<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button>`}</div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${sidebarRenderSessions(parent.children,search,true)}</div>`:''}</div>`;
   }).join('');}
 function renderSidebar(){
-  const summaries=state.runs.flatMap(parent=>[parent,...(parent.children||[])]),selected=summaries.find(run=>run.id===state.selected);
+  const summaries=sessionRows(state.runs),selected=summaries.find(run=>run.id===state.selected);
   if(selected){
     if(state.chatRun?.id===selected.id)for(const key of ['agent_label','display_title','prompt']){if(Object.hasOwn(selected,key))state.chatRun[key]=selected[key];}
     syncSessionTitle(selected);
@@ -361,7 +362,7 @@ async function openRun(id,hash='#run='+id){
     if(error.status===404){await showUnavailableSession(id);return;}
     throw error;
   }
-  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id||'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;
+  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id?(run.workflow_root_id||run.parent_run_id):'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.workflow_root_id||run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;let ancestor=run.parent_run_id;while(ancestor){state.expandedParents.add(ancestor);ancestor=sessionRows(state.runs).find(r=>r.id===ancestor)?.parent_run_id;}
   if(sessionEdits!==(state.sessionEdits||0))return openRun(id,hash);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
   if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',targetHash);
@@ -558,7 +559,7 @@ function renderAgentDetails(team){
   const signature=JSON.stringify(team);if(target.dataset.team===signature)return;target.dataset.team=signature;
   const children=(team?.groups||[]).flatMap(g=>g.children);
   target.innerHTML=children.length?`<section class="agent-summary"><h3>Parallel agents</h3><p>${children.filter(c=>['idle','completed'].includes(c.status)).length} of ${children.length} ready · Open agents from the Subagents toolbox or sidebar.</p>${team.spend!==null?`<p>${dollars(team.spend)} including parent${team.missing_costs?' · some costs missing':team.pending_costs?' · some costs pending':''}</p>`:''}</section>`:'';
-  const parent=state.runs.find(r=>r.id===state.selected);
+  const parent=sessionRows(state.runs).find(r=>r.id===state.selected);
   if(parent&&children.length){
     parent.children=children.map(child=>({...parent.children?.find(c=>c.id===child.id),...child,parent_run_id:parent.id,mode:parent.mode}));
     renderSidebar();

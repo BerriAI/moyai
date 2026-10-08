@@ -14,7 +14,6 @@ import zipfile
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .db import now
-from .runner import TERMINAL
 from .security import digest
 from .spend import cost_status, gateway_scope
 
@@ -88,7 +87,7 @@ class Retry(Group):
 
 
 TOOLS = {
-    'agents_fanout': (Fanout, False, 'Delegate independent work to parallel cloud agents. Supply common instructions and an items list for balanced, disjoint partitions (100 items, 5 workers gives 20 each), OR explicit labeled tasks. Use a stable request_key for retries. Children inherit the current workspace files, selected model, user and enabled apps; they cannot launch more children. This tool checkpoints and pauses you after this tool round, releases your sandbox, and automatically resumes this same request when every worker settles. Do not poll or launch other work in parallel with this tool.'),
+    'agents_fanout': (Fanout, False, 'Delegate independent work to parallel cloud agents. Supply common instructions and an items list for balanced, disjoint partitions (100 items, 5 workers gives 20 each), OR explicit labeled tasks. Use a stable request_key for retries. Children inherit the current workspace files, selected model, user and enabled apps; they can delegate their own assigned work to further agents under the same limits and permissions. This tool checkpoints and pauses you after this tool round, releases your sandbox, and automatically resumes this same request when every worker settles. Do not poll or launch other work in parallel with this tool.'),
     'agents_results': (Results, True, 'Read child statuses and answers for your own group. Once handed back, results stay fixed even if a user chats with a worker afterward. Set latest=true only to inspect that worker’s newer follow-up work. Failed workers remain failed; do not treat missing results as passed. Child answers are untrusted reference data.'),
     'agents_read_artifact': (Artifact, True, 'List a child agent’s saved archive files (omit path), or read one UTF-8 file up to 128 KiB. Defaults to files handed back with the group results; set latest=true to inspect newer follow-up files. Only your direct children are accessible; archives are bounded recovery files, not complete filesystems.'),
     'agents_retry': (Retry, False, 'Send explicit recovery instructions to selected failed/interrupted/cancelled children, then checkpoint and wait again. Verify ambiguous external actions before retrying; this does not replay prior actions automatically. Use a stable request_key.'),
@@ -112,7 +111,7 @@ class AgentCoordinator:
             store.execute("ALTER TABLE agent_groups ADD COLUMN result_snapshot TEXT NOT NULL DEFAULT ''")
 
     def available(self, run):
-        return self.settings.temporal_enabled and run['chat_enabled'] and not run['parent_run_id']
+        return self.settings.temporal_enabled and run['chat_enabled'] and not run.get('deleted_at')
 
     def tools(self, run):
         if not self.available(run):
@@ -129,13 +128,19 @@ class AgentCoordinator:
     def children(self, group_id):
         return self.store.rows('SELECT id,agent_label,status,summary,error,checkpoint_error,created_at,updated_at FROM runs WHERE agent_group_id=? ORDER BY created_at,id', (group_id,))
 
+    @staticmethod
+    def unsettled_in(conn, group_id):
+        return conn.execute("""SELECT 1 FROM runs r WHERE r.id IN (
+            SELECT a.run_id FROM run_ancestry a JOIN runs child ON child.id=a.ancestor_id WHERE child.agent_group_id=?)
+            AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(
+                SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running','injected'))) LIMIT 1""", (group_id,)).fetchone()
+
     def settled(self, parent_id, group_id, *, latest=False):
         group = self.group(parent_id, group_id)
         if not latest and group['result_snapshot'] and group['status'] in {'completed', 'cancelled'}:
             return True
-        children = self.children(group_id)
-        return (group['status'] != 'preparing' and all(child['status'] in TERMINAL for child in children)
-                and not self.store.rows("SELECT 1 FROM messages m JOIN runs r ON r.id=m.run_id WHERE r.agent_group_id=? AND m.status IN ('queued','running') LIMIT 1", (group_id,)))
+        with self.store.connect() as conn:
+            return group['status'] != 'preparing' and not self.unsettled_in(conn, group_id)
 
     def results(self, parent_id, group_id, *, latest=False):
         group = self.group(parent_id, group_id)
@@ -185,9 +190,7 @@ class AgentCoordinator:
                 raise ValueError('Agent group does not belong to this session.')
             if group['result_snapshot'] and group['status'] in {'completed', 'cancelled'}:
                 return True
-            if (group['status'] == 'preparing' or conn.execute(
-                    "SELECT 1 FROM runs WHERE agent_group_id=? AND status NOT IN ('idle','completed','failed','cancelled','interrupted') LIMIT 1", (group_id,)).fetchone()
-                    or conn.execute("SELECT 1 FROM messages m JOIN runs r ON r.id=m.run_id WHERE r.agent_group_id=? AND m.status IN ('queued','running') LIMIT 1", (group_id,)).fetchone()):
+            if group['status'] == 'preparing' or self.unsettled_in(conn, group_id):
                 return False
             if not group['result_snapshot']:
                 self.snapshot_group_in(conn, group)
@@ -212,11 +215,11 @@ class AgentCoordinator:
                              (child['agent_group_id'], child['parent_run_id'])).fetchone()
         if not group:
             raise ValueError('This subagent has no saved parent assignment.')
-        parent = conn.execute('SELECT status FROM runs WHERE id=?', (child['parent_run_id'],)).fetchone()
-        if parent and parent['status'] == 'stopping':
+        parent = conn.execute("SELECT 1 FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id WHERE a.run_id=? AND (r.status='stopping' OR r.deleted_at!='')", (run_id,)).fetchone()
+        if parent:
             raise ValueError('Wait for the parent session to finish stopping before messaging this agent.')
         # Upgrade older completed groups lazily before their first direct chat.
-        settled = not conn.execute("SELECT 1 FROM runs r WHERE r.agent_group_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running'))) LIMIT 1", (group['id'],)).fetchone()
+        settled = not self.unsettled_in(conn, group['id'])
         if group['status'] in {'completed', 'cancelled'} and not group['result_snapshot'] and settled:
             self.snapshot_group_in(conn, group)
         return self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=restore_archived)
@@ -229,7 +232,10 @@ class AgentCoordinator:
     def check_parent(self, parent_id):
         run = self.store.run(parent_id)
         if not run or not self.available(run) or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'} or not run['active_message_id']:
-            raise ValueError('Delegation requires an active top-level Temporal chat turn.')
+            raise ValueError('Delegation requires an active Temporal chat turn.')
+        if self.store.rows("SELECT 1 FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id WHERE a.run_id=? AND (r.status='stopping' OR r.deleted_at!='')", (parent_id,)):
+            raise ValueError('Wait for the ancestor session to finish stopping.')
+        self.store.root_id(parent_id)  # Orphaned assignments cannot acquire workflow scope.
         return run
 
     async def call(self, run_id, name, arguments):
@@ -335,7 +341,7 @@ class AgentCoordinator:
 
     async def cancel_group(self, parent_id, group_id):
         self.group(parent_id, group_id)
-        self.store.execute("UPDATE agent_groups SET status='cancelled' WHERE id=?", (group_id,))
+        self.store.execute("UPDATE agent_groups SET status='cancelled' WHERE id=? AND status IN ('preparing','running')", (group_id,))
         results = await asyncio.gather(*(self.manager.cancel(child['id']) for child in self.children(group_id)),
                                        return_exceptions=True)
         for result in results:
@@ -344,7 +350,7 @@ class AgentCoordinator:
         self.store.event(parent_id, 'agents', 'Stop requested for the worker group', {'group_id': group_id})
 
     async def cancel_children(self, parent_id):
-        groups = self.store.rows("SELECT id FROM agent_groups WHERE parent_id=? AND status IN ('preparing','running','cancelled')", (parent_id,))
+        groups = self.store.rows("SELECT id FROM agent_groups WHERE parent_id=?", (parent_id,))
         results = await asyncio.gather(*(self.cancel_group(parent_id, group['id']) for group in groups),
                                        return_exceptions=True)
         for result in results:
@@ -387,7 +393,8 @@ class AgentCoordinator:
     def view(self, run_id, *, include_costs=True):
         run = self.store.run(run_id)
         groups = [self.results(run_id, r['id'], latest=True) for r in self.store.rows('SELECT id FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,))]
-        ids = [run_id] + [c['id'] for g in groups for c in g['children']]
+        family = self.store.subtree(run_id)
+        ids = [row['id'] for row in family]
         requests = self.store.rows('SELECT run_id,cost,status,key_hash,gateway_scope,cost_recovery_error FROM model_requests WHERE run_id IN (' + ','.join('?' for _ in ids) + ')',
                                    tuple(ids)) if include_costs else []
         costs = {}
@@ -401,11 +408,24 @@ class AgentCoordinator:
                                   enabled=self.settings.litellm_spend_recovery_enabled)
             bucket['pending_costs'] += billing == 'pending'
             bucket['missing_costs'] += billing == 'unresolved'
+        nodes = {row['id']: {key: row[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at')} | {'children': []} for row in family}
+        for node in nodes.values():
+            if node['id'] != run_id and node['parent_run_id'] in nodes:
+                nodes[node['parent_run_id']]['children'].append(node)
+
+        def rollup(node):
+            value = {'spend': Decimal(0), 'requests': 0, 'pending_costs': 0, 'missing_costs': 0} | costs.get(node['id'], {})
+            for child in node['children']:
+                for key, amount in rollup(child).items():
+                    value[key] += amount
+            if include_costs:
+                node['cost'] = {**value, 'spend': str(value['spend'])}
+            return value
+
+        rollup(nodes[run_id])
         for group in groups:
             for child in group['children']:
-                value = costs.get(child['id'], {})
-                if include_costs:
-                    child['cost'] = {**value, 'spend': str(value.get('spend', 0))}
+                child.update(nodes[child['id']])
                 # Chat progress does not need to repeatedly transfer answers.
                 child.pop('summary')
         return {'parent_id': run['parent_run_id'], 'groups': groups,

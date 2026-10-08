@@ -215,15 +215,20 @@ def test_owner_access_is_rechecked_at_execution(workspace):
     assert not app.state.store.rows('SELECT * FROM runs')
 
 
-def test_active_child_keeps_automation_busy(workspace,monkeypatch):
+@pytest.mark.parametrize('depth', [1, 3])
+def test_active_child_keeps_automation_busy(workspace,monkeypatch,depth):
     app,client=workspace
     monkeypatch.setattr(app.state.manager,'submit',lambda run:None)
     a=create(client)
     root=client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'root-with-children'}).json()['run_id']
     app.state.store.update_run(root,status='idle')
     app.state.store.execute("UPDATE messages SET status='completed' WHERE run_id=?",(root,))
-    child=app.state.store.create_run('Work still running','','demo',[])
-    app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?',(root,child['id']))
+    parent = root
+    for _ in range(depth):
+        child=app.state.store.create_run('Work still running','','demo',[])
+        app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?',(parent,child['id']))
+        app.state.store.update_run(parent,status='completed')
+        parent = child['id']
     assert not app.state.automations.finished(root)
     assert client.post(f"/api/automations/{a['id']}/run",json={'revision':1,'client_id':'overlap-with-children'}).json()['outcome']=='skipped'
     app.state.store.update_run(child['id'],status='completed')

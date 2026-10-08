@@ -61,22 +61,18 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
     with store.connect() as conn:
         conn.execute('BEGIN')
         publications = [dict(row) for row in conn.execute('''SELECT p.*,r.owner_id,r.chat_enabled,
-            r.parent_run_id,m.user_id AS actor_id FROM github_publications p
-            JOIN runs r ON r.id=p.run_id
+            roots.root_id,m.user_id AS actor_id FROM github_publications p
+            JOIN runs r ON r.id=p.run_id JOIN run_roots roots ON roots.run_id=r.id
             LEFT JOIN messages m ON m.id=p.message_id AND m.run_id=p.run_id
             WHERE p.result!='' ORDER BY p.created_at,p.id''')]
         users = {row['id']: dict(row) for row in conn.execute('SELECT id,kind,name,email,linked_user_id FROM users')}
-        runs = {row['id']: dict(row) for row in conn.execute('''SELECT id,parent_run_id,display_title,prompt,deleted_at
-            FROM runs WHERE id IN (SELECT run_id FROM github_publications)
-            OR id IN (SELECT parent_run_id FROM runs WHERE id IN (SELECT run_id FROM github_publications))''')}
-        ledger = [dict(row) for row in conn.execute('''SELECT q.run_id,q.cost,q.status,r.parent_run_id,
+        runs = {row['id']: dict(row) for row in conn.execute('''SELECT id,display_title,prompt,deleted_at
+            FROM runs WHERE id IN (SELECT root_id FROM run_roots WHERE run_id IN (SELECT run_id FROM github_publications))''')}
+        ledger = [dict(row) for row in conn.execute('''SELECT q.run_id,q.cost,q.status,roots.root_id,
             q.key_hash,q.gateway_scope,q.cost_recovery_error
-            FROM model_requests q JOIN runs r ON r.id=q.run_id
-            WHERE r.id IN (SELECT run_id FROM github_publications)
-            OR r.parent_run_id IN (SELECT run_id FROM github_publications)
-            OR r.id IN (SELECT parent_run_id FROM runs WHERE id IN (SELECT run_id FROM github_publications))
-            OR r.parent_run_id IN (SELECT parent_run_id FROM runs WHERE id IN (SELECT run_id FROM github_publications)
-                                  AND parent_run_id!='')''')]
+            FROM model_requests q JOIN run_roots roots ON roots.run_id=q.run_id
+            WHERE roots.root_id IN (SELECT root_id FROM run_roots WHERE run_id IN (SELECT run_id FROM github_publications))''')]
+
 
     parsed: list[tuple[dict[str, object], Receipt]] = []
     receipt_ids: dict[str, set[int]] = defaultdict(set)
@@ -94,7 +90,7 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
     key_hash = digest(settings.litellm_api_key) if settings.litellm_api_key else ''
     scope = gateway_scope(settings.litellm_api_base)
     for row in ledger:
-        family = row['parent_run_id'] or row['run_id']
+        family = row['root_id']
         billing = cost_status(row, key_hash=key_hash, gateway_scope=scope,
                               enabled=settings.litellm_spend_recovery_enabled)
         family_costs[family].add(LinkedSpend(spend=Decimal(row['cost'] or '0'), requests=1,
@@ -140,9 +136,9 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
             pr.state, pr.draft = snapshot.state, snapshot.draft
             pr.created_at, pr.merged_at = snapshot.created_at, snapshot.merged_at
         pr.stale = bool(cached and (cached.failed or (snapshot and cached.fresh_until <= clock)))
-        root = row['parent_run_id'] or row['run_id']
+        root = row['root_id']
         if all(session.id != root for session in pr.sessions):
-            run = runs.get(root, runs[row['run_id']])
+            run = runs[root]
             pr.sessions.append(Session(id=root, title=run['display_title'] or run['prompt'].split('\n')[0][:150],
                                        deleted=bool(run['deleted_at'])))
             pr.costs.add(family_costs[root])

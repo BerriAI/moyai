@@ -261,3 +261,60 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(du
             if successor:
                 await successor.shutdown()
             await manager.shutdown()
+
+
+async def test_real_temporal_nested_waits_release_one_slot_and_replay_after_restart(durable):
+    manager, cloud, root = durable
+    manager.settings.temporal_enabled = True
+    manager.settings.max_concurrent_runs = 1
+    cloud.saving_before_answer = False
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    ready, peak = set(), 0
+
+    async def command(machine, action, directory, value, **kwargs):
+        nonlocal peak
+        peak = max(peak, sum(m.alive for m in cloud.machines))
+        if action == 'read' and machine.spec['run_id'] not in ready:
+            return json.dumps({'state': 'running', 'events': [], 'cursor': 0})
+        return await cloud.command(machine, action, directory, value, **kwargs)
+
+    manager.command = command
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            return env.client
+        manager.connect_temporal = connect
+        successor = None
+        ids = [root]
+        try:
+            await manager.recover()
+            for parent in range(2):
+                identity = ids[parent]
+                await eventually(lambda: manager.state(identity).get('phase') == 'monitor', seconds=30)
+                result = await manager.coordinator.call(identity, 'agents_fanout', {
+                    'request_key': 'nested-review', 'tasks': [{'label': 'Batch' if parent == 0 else 'Reviewer', 'prompt': 'Verify assigned work independently.'}]})
+                ids.append(manager.coordinator.children(result['group_id'])[0]['id'])
+                machine = next(m for m in cloud.machines if m.alive and m.spec['run_id'] == identity)
+                machine.operations[manager.directory(manager.state(identity))].update(completed=False, continuation=True, wait_group=result['group_id'])
+                ready.add(identity)
+                await eventually(lambda: manager.state(identity).get('phase') == 'waiting_children', seconds=30)
+                assert not machine.alive
+            await eventually(lambda: manager.state(ids[-1]).get('phase') == 'monitor', seconds=30)
+            await manager.shutdown()
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.coordinator = AgentCoordinator(successor.store, successor.settings, successor)
+            successor.command = command
+            successor.connect_temporal = connect
+            ready.add(ids[-1])
+            await successor.recover()
+            await eventually(lambda: successor.store.run(root)['status'] == 'idle', seconds=60)
+            assert peak == 1 and len(cloud.machines) == 5
+            assert not any(m.alive for m in cloud.machines)
+            assert successor.store.root_id(ids[-1]) == root
+            for identity in ids:
+                handle = env.client.get_workflow_handle('moyai-session-' + identity)
+                await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
+                await handle.terminate('Nested integration complete')
+        finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()

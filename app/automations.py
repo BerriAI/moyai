@@ -401,7 +401,7 @@ class Automations:
                     if event:
                         return {'run_id': '', 'outcome': 'waiting', 'detail': environment_blocker}
                     error = reason = environment_blocker
-                elif conn.execute('''SELECT 1 FROM automation_runs a JOIN runs r ON (r.id=a.run_id OR r.parent_run_id=a.run_id)
+                elif conn.execute('''SELECT 1 FROM automation_runs a JOIN run_ancestry tree ON tree.ancestor_id=a.run_id JOIN runs r ON r.id=tree.run_id
                     WHERE a.automation_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted')
                     OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running','injected')))''', (automation_id,)).fetchone():
                     if event:
@@ -451,9 +451,9 @@ class Automations:
         run = self.store.run(run_id)
         if not run:
             raise RuntimeError('Scheduled session is unavailable')
-        return not self.store.rows("""SELECT 1 FROM runs r WHERE (r.id=? OR r.parent_run_id=?) AND
+        return not self.store.rows("""SELECT 1 FROM runs r WHERE r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?) AND
             (r.status NOT IN ('idle','completed','failed','cancelled','interrupted') OR EXISTS(
-                SELECT 1 FROM messages WHERE run_id=r.id AND status IN ('queued','running','injected')))""", (run_id, run_id))
+                SELECT 1 FROM messages WHERE run_id=r.id AND status IN ('queued','running','injected')))""", (run_id,))
 
     def tools(self, run):
         if not self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)):

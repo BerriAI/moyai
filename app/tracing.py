@@ -70,14 +70,16 @@ class AgentTracing:
                     saved['session_id'], saved['agent_name'])
         root = f"{run['id']}:{message_id or 0}"
         parent = None
+        inherited_trace = None
         session = run['id']
         if run.get('parent_run_id'):
             groups = connection.execute('SELECT * FROM agent_groups WHERE id=?', (run['agent_group_id'],)).fetchall()
             if groups and groups[0]['status'] in {'preparing', 'running'}:
-                session = run['parent_run_id']
-                root = f"{session}:{groups[0]['message_id']}"
-                parent = identifier('agent:' + root, 8)
-        trace_id = identifier('trace:' + root, 16)
+                parent_run = connection.execute('SELECT * FROM runs WHERE id=?', (run['parent_run_id'],)).fetchone()
+                if parent_run:
+                    self.store.root_id_in(connection, run['id'])
+                    inherited_trace, parent, _, session, _ = self.identity(dict(parent_run), groups[0]['message_id'], connection)
+        trace_id = inherited_trace or identifier('trace:' + root, 16)
         span_id = identifier(f"agent:{run['id']}:{message_id or 0}", 8)
         name = ' '.join(self.content(run.get('agent_label') or 'moyai').split())[:160] or 'moyai'
         # Freeze attribution before a group finishes or a label changes. A late

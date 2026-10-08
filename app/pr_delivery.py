@@ -37,7 +37,7 @@ def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullR
     result = []
     seen = set()
     rows = conn.execute('''SELECT p.result FROM github_publications p JOIN runs r ON r.id=p.run_id
-        WHERE (r.id=? OR r.parent_run_id=?) AND p.result IS NOT NULL ORDER BY p.created_at''', (run_id, run_id))
+        WHERE r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?) AND p.result IS NOT NULL ORDER BY p.created_at''', (run_id,))
     for row in rows:
         try:
             pr = PullRequest.model_validate_json(row['result'])

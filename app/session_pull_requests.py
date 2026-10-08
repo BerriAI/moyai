@@ -128,11 +128,12 @@ class SessionPullRequests:
         for offset in range(0, len(identities), 400):
             batch = identities[offset:offset + 400]
             marks = ','.join('?' for _ in batch)
-            rows.extend(self.store.rows(f'''SELECT p.result,r.id,r.parent_run_id FROM github_publications p
-                JOIN runs r ON r.id=p.run_id LEFT JOIN runs parent ON parent.id=r.parent_run_id
-                WHERE r.deleted_at='' AND (r.parent_run_id='' OR parent.deleted_at='')
-                AND (r.id IN ({marks}) OR r.parent_run_id IN ({marks})) ORDER BY p.created_at,p.id''',
-                [*batch, *batch]))
+            rows.extend(self.store.rows(f'''SELECT p.result,r.id,a.ancestor_id FROM github_publications p
+                JOIN runs r ON r.id=p.run_id JOIN run_ancestry a ON a.run_id=r.id
+                WHERE r.deleted_at='' AND a.ancestor_id IN ({marks})
+                AND NOT EXISTS(SELECT 1 FROM run_ancestry parents JOIN runs parent ON parent.id=parents.ancestor_id
+                    WHERE parents.run_id=r.id AND parent.deleted_at!='')
+                ORDER BY p.created_at,p.id''', batch))
         parsed = []
         for row in rows:
             try:
@@ -188,7 +189,7 @@ class SessionPullRequests:
         receipt_ids = {}
         for row, receipt in parsed:
             if receipt.repository_id:
-                for run_id in {row['id'], row['parent_run_id']} & result.keys():
+                for run_id in {row['ancestor_id']} & result.keys():
                     receipt_ids.setdefault((run_id, receipt.url.casefold()), set()).add(receipt.repository_id)
         seen = {identity: set() for identity in result}
         clock = time.monotonic()
@@ -205,7 +206,7 @@ class SessionPullRequests:
                     'state': 'unknown', 'draft': None, 'review_requested': False, 'stale': stale}
             if snapshot:
                 item.update(snapshot.model_dump())
-            for run_id in {row['id'], row['parent_run_id']} & result.keys():
+            for run_id in {row['ancestor_id']} & result.keys():
                 candidates = receipt_ids.get((run_id, receipt.url.casefold()), set())
                 legacy_id = next(iter(candidates)) if len(candidates) == 1 else None
                 identity = (target or receipt.repository_id or legacy_id or receipt.repository.casefold(), receipt.number)
