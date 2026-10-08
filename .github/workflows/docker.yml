@@ -37,6 +37,8 @@ jobs:
           node --test tests/test_spend.cjs
       - name: Test native Codex runtime and model defaults
         run: uv run --python 3.13 pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_config.py tests/test_models.py tests/test_claude_sdk.py
+      - name: Test active input delivery and queue ownership
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_steering_latency.py tests/test_active_steering.py tests/test_message_queue.py tests/test_send_now_interrupt.py
       - name: Test model trace content and parallel exports
         run: uv run --python 3.13 pytest -q --tb=line tests/test_tracing.py tests/test_parallel_tracing.py
       - name: Test persistent context and real SDK continuation

@@ -23,6 +23,14 @@ class HarnessContext:
 
 class HarnessAgent(ABC):
     """The only interface the workspace lifecycle needs from a harness."""
+    def accept_input(self, item):
+        inputs = getattr(self, 'inputs', None)
+        if inputs is not None:
+            return inputs.accept(item)
+        # Hermes owns its native inbox; other runtimes reject input until their
+        # public journal is ready instead of acknowledging an unowned message.
+        return None if callable(getattr(self, 'redirect', None)) else False
+
     @abstractmethod
     def validate(self): ...
 
@@ -34,6 +42,56 @@ class HarnessAgent(ABC):
 
     @abstractmethod
     def close(self): ...
+
+
+class HarnessInputs:
+    """Journaled corrections owned by one live SDK conversation."""
+    def __init__(self, journal):
+        self.journal = journal
+        self.lock = threading.Lock()
+        self.accepted = set()
+        self.items = []
+        self.closed = False
+
+    def accept(self, item):
+        if (not isinstance(item, dict) or type(item.get('id')) is not int or item['id'] <= 0
+                or not isinstance(item.get('content'), str)):
+            return False
+        with self.lock:
+            if self.closed:
+                return False
+            if item['id'] in self.accepted:
+                return True
+            text = '[User correction to the current task]\n' + item['content']
+            try:
+                with self.journal.lock:
+                    self.journal.append({'role': 'user', 'content': text})
+            except Exception:
+                return False  # Persistence must succeed before a delivery receipt.
+            self.items.append(text)
+            self.accepted.add(item['id'])
+            return True
+
+    def take(self):
+        with self.lock:
+            items, self.items = self.items, []
+            return items
+
+    @property
+    def pending(self):
+        with self.lock:
+            return bool(self.items)
+
+    def close_if_empty(self):
+        with self.lock:
+            if self.items:
+                return False
+            self.closed = True
+            return True
+
+    def close(self):
+        with self.lock:
+            self.closed = True
 
 
 class TurnJournal:

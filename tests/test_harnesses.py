@@ -8,7 +8,7 @@ import pytest
 
 from app.config import MODEL_CATALOG
 from app.db import Store
-from sandbox.broker_relay import BrokerRelay
+from sandbox.broker_relay import BrokerRelay, InputPending
 from sandbox.broker_transport import unseal
 from test_workspace import workspace
 from test_slack import slack_app, event, signed
@@ -204,6 +204,12 @@ def test_sdk_wire_uses_existing_sealed_model_broker():
             assert calls[0] == payload
             relay.before_model = lambda request: False
             assert client.post('/v1/messages', headers={'x-api-key': 'test-token'}, json=payload).status_code == 409
+            def input_boundary(request):
+                raise InputPending()
+            relay.before_model = input_boundary
+            response = client.post('/v1/messages', headers={'x-api-key': 'test-token'}, json=payload)
+            assert response.status_code == 400 and response.json()['error']['code'] == 'moyai_input_pending'
+            assert not relay.model_failed and not relay.last_error and relay.last_failure is None
             assert len(calls) == 1
     finally:
         relay.close()
@@ -232,6 +238,54 @@ def test_claude_boundary_preserves_receipts_without_recursive_history():
     assert deadline.can_continue({'interrupted': True, 'messages': agent.journal.messages})
     agent.close()
     assert relay.before_model is None
+
+
+@pytest.mark.parametrize('second_stops', [False, True])
+def test_overlapping_model_requests_keep_their_own_boundary_outcomes(tmp_path, second_stops):
+    from concurrent.futures import ThreadPoolExecutor
+    from sandbox.harness_agent import HarnessInputs, TurnJournal
+    from sandbox.harness_registry import create_agent
+    first_fenced, second_entered, release_second = (threading.Event() for _ in range(3))
+    steps = []
+    def step():
+        steps.append(True)
+        if len(steps) == 2:
+            if second_stops:
+                agent.interrupt()
+            second_entered.set()
+            assert release_second.wait(5)
+    relay = BrokerRelay('http://127.0.0.1:1', 'test-token').start()
+    agent = create_agent('tool-loop', spec={}, relay=relay, config={}, activity=None, step=step, cwd=str(tmp_path))
+    agent.journal = TurnJournal([], 'task')
+    agent.inputs = HarnessInputs(agent.journal)
+    assert agent.accept_input({'id': 1, 'content': 'correction'})
+    def boundary(raw):
+        try:
+            return agent.before_model(raw)
+        except InputPending:
+            if json.loads(raw)['request'] == 'first':
+                first_fenced.set()
+                assert second_entered.wait(5)
+            raise
+    relay.before_model = boundary
+    def request(name):
+        return httpx.post(relay.url + '/v1/chat/completions', json={'request': name},
+            headers={'Authorization': 'Bearer test-token'}, timeout=10)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(request, 'first')
+            assert first_fenced.wait(5)
+            second = executor.submit(request, 'second')
+            response = first.result(timeout=5)
+            release_second.set()
+            other = second.result(timeout=5)
+        assert response.status_code == 400 and response.json()['error']['code'] == 'moyai_input_pending'
+        assert other.status_code == (409 if second_stops else 400)
+        assert agent.model_calls == 0 and not relay.last_failure and not relay.model_failed
+    finally:
+        release_second.set()
+        agent.close()
+        relay.close()
 
 
 def test_claude_private_tool_prefixes_are_scrubbed():
@@ -441,6 +495,129 @@ def test_catalog_covers_upstream_harness_enum():
     assert {h.litellm_harness for h in HARNESSES.values() if h.litellm_harness} | {'CLAUDE_CODE', 'CODEX'} == {h.name for h in litellm.Harness}
 
 
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('boundary', ['startup', 'later_stream'])
+def test_real_litellm_first_request_fence_retains_each_prompt(tmp_path, monkeypatch, harness, boundary):
+    """Optional pinned SDK contract; inference is scripted locally, never external."""
+    monkeypatch.setenv('LITELLM_LOCAL_MODEL_COST_MAP', 'True')
+    sdk = pytest.importorskip('litellm.harness')
+    import importlib.metadata
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    import litellm
+    from sandbox import litellm_harness
+    from sandbox.context_store import ContextStore
+    from sandbox.harness_dependencies import LITELLM_REVISION, runtime_version
+    from sandbox.harness_registry import create_agent
+    revision = subprocess.run(['git', '-C', str(Path(litellm.__file__).parent.parent), 'rev-parse', 'HEAD'],
+        capture_output=True, text=True, check=True).stdout.strip()
+    assert revision == LITELLM_REVISION
+    if harness == 'deepagents':
+        pytest.importorskip('deepagents')
+        pytest.importorskip('langchain_litellm')
+        assert importlib.metadata.version('deepagents') == '0.7.22'
+        assert importlib.metadata.version('langchain-litellm') == '0.11.0'
+    if harness == 'opencode':
+        if not shutil.which('opencode'):
+            pytest.skip('Pinned OpenCode binary is not installed')
+        assert runtime_version('opencode') == '1.18.35'
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'synthetic-only')
+    monkeypatch.setattr(litellm_harness, 'prepare_runtime', lambda: None)
+    monkeypatch.setattr(litellm_harness, 'prepare_binary', lambda binding: None)
+    binding = litellm_harness.RUNTIME_BINDINGS[harness]
+    monkeypatch.setitem(litellm_harness.RUNTIME_BINDINGS, harness, SimpleNamespace(
+        sandbox_factory=binding.sandbox_factory, in_process=binding.in_process, instructions=binding.instructions,
+        options_factory=(lambda config: sdk.OpenCodeOptions()) if harness == 'opencode' else binding.options_factory,
+        tools=lambda cwd, config: []))
+    requests, fences, native_ids = [], [], []
+    session_factory = litellm.aagent_session
+    def capture_session(*args, **kwargs):
+        session = session_factory(*args, **kwargs)
+        astream = session.astream
+        def capture_stream(prompt):
+            native_ids.append(session.state().native_session_id)
+            return astream(prompt)
+        session.astream = capture_stream
+        return session
+    monkeypatch.setattr(litellm, 'aagent_session', capture_session)
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def reply(self, value, content_type='application/json'):
+            body = value if isinstance(value, bytes) else json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def do_GET(self):
+            assert self.path == '/context/window'
+            self.reply({'input_budget': 100000})
+        def do_POST(self):
+            value = json.loads(unseal('synthetic-only', self.path, self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path == '/context/maintenance':
+                return self.reply({})
+            if self.path == '/context/native':
+                return self.reply({'lease': value['lease'], 'saved': True, 'state': None})
+            assert self.path == '/v1/chat/completions'
+            requests.append(value)
+            if boundary == 'later_stream' and len(requests) == 1:
+                assert agent.accept_input({'id': 1, 'content': 'FIRST_CORRECTION'})
+            common = {'id': 'synthetic-response', 'created': 1, 'model': 'gpt-4o-mini'}
+            if not value.get('stream'):
+                return self.reply({**common, 'object': 'chat.completion', 'choices': [{'index': 0,
+                    'message': {'role': 'assistant', 'content': 'Synthetic answer'}, 'finish_reason': 'stop'}],
+                    'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}})
+            chunks = [{**common, 'object': 'chat.completion.chunk', 'choices': [choice]} for choice in (
+                {'index': 0, 'delta': {'role': 'assistant', 'content': 'Synthetic answer'}, 'finish_reason': None},
+                {'index': 0, 'delta': {}, 'finish_reason': 'stop'})]
+            self.reply((''.join('data: ' + json.dumps(chunk) + '\n\n' for chunk in chunks)
+                + 'data: [DONE]\n\n').encode(), 'text/event-stream')
+    edge = ThreadingHTTPServer(('127.0.0.1', 0), Edge)
+    threading.Thread(target=edge.serve_forever, daemon=True).start()
+    relay = BrokerRelay(f'http://127.0.0.1:{edge.server_port}', 'synthetic-only').start()
+    store = ContextStore(tmp_path / 'session/context.sqlite3', 'synthetic-run')
+    store.initialize([])
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    agent = create_agent(harness, spec={'model': 'gpt-4o-mini', 'timeout': 30, 'max_iterations': 4}, relay=relay,
+        config={}, activity=SimpleNamespace(commentary=lambda text: None), step=lambda: None,
+        cwd=str(workspace), context_store=store)
+    before_model = relay.before_model
+    injected = False
+    def fence(request=None):
+        nonlocal injected
+        expected_admissions = 0 if boundary == 'startup' else 1
+        if not injected and agent.model_calls == expected_admissions:
+            injected = True
+            assert agent.accept_input({'id': expected_admissions + 1,
+                'content': 'FIRST_CORRECTION' if boundary == 'startup' else 'SECOND_CORRECTION'})
+        try:
+            return before_model(request)
+        except InputPending:
+            fences.append(agent.model_calls)
+            raise
+    relay.before_model = fence
+    try:
+        result = agent.run_conversation('ORIGINAL_TASK', conversation_history=[], system_message='Synthetic local fixture')
+        assert result['completed'] and fences == ([0] if boundary == 'startup' else [1])
+        assert len(requests) == agent.model_calls == (1 if boundary == 'startup' else 2)
+        admitted_history = json.dumps(requests[-1]['messages'])
+        expected = ['ORIGINAL_TASK', 'FIRST_CORRECTION'] + (['SECOND_CORRECTION'] if boundary == 'later_stream' else [])
+        assert all(marker in admitted_history for marker in expected)
+        assert all(json.dumps(result['messages']).count(marker) == 1 for marker in expected)
+        if harness == 'opencode':
+            assert native_ids[0] is None and native_ids[1]
+            assert all(value == native_ids[1] for value in native_ids[1:])
+        assert not relay.model_failed and not relay.last_failure and not relay.last_error
+    finally:
+        agent.close()
+        relay.close()
+        store.close()
+        edge.shutdown()
+        edge.server_close()
+
+
 def test_responses_input_is_not_translated():
     from app.harness_gateway import authorized_payload
     from fastapi import HTTPException
@@ -497,7 +674,7 @@ def native_cli_runtime(tmp_path, monkeypatch):
         async def __aexit__(self, *args): pass
         def state(self): return self.saved
         def astream(self, prompt):
-            calls.append({'resumed': self.resumed, 'prompt': prompt, **self.options})
+            calls.append({'resumed': self.resumed, 'prompt': prompt, 'session': self, **self.options})
             native = self.options['sandbox'].native
             if native is not None:
                 path = native.cache / self.saved.harness / 'sessions' / 'native.jsonl'
@@ -552,6 +729,240 @@ def native_cli_runtime(tmp_path, monkeypatch):
             cwd=str(tmp_path), context_store=store)
     yield SimpleNamespace(create=create, store=store, calls=calls, host=host, stream=Stream, requests=requests)
     store.close()
+
+
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('arrival', ['boundary', 'final'])
+def test_litellm_corrections_keep_session_and_tool_receipts(native_cli_runtime, harness, arrival):
+    runtime = native_cli_runtime
+    agent = runtime.create(harness)
+    def turn():
+        assert agent.before_model()
+        if len(runtime.calls) == 1:
+            agent.journal.tool_started('write-once', 'Write', {})
+            agent.journal.tool_finished('write-once', 'Saved write receipt')
+            assert agent.accept_input({'id': 101, 'content': 'Use the saved receipt'})
+            assert agent.accept_input({'id': 102, 'content': 'Answer concisely'})
+            if arrival == 'boundary':
+                with pytest.raises(InputPending):
+                    agent.before_model()
+                runtime.stream.result.stop_reason = 'runtime_error'
+        else:
+            assert runtime.calls[-1]['session'] is runtime.calls[0]['session']
+            runtime.stream.result.stop_reason = 'done'
+            runtime.stream.result.text = 'Corrected answer'
+    runtime.host['during_turn'] = turn
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert result['completed'] and result['final_response'] == 'Corrected answer'
+        assert len(runtime.calls) == agent.model_calls == 2
+        assert runtime.calls[-1]['prompt'].index('Use the saved receipt') < runtime.calls[-1]['prompt'].index('Answer concisely')
+        assert agent.journal.completed_tools == 1
+        saved = json.dumps(runtime.store.history())
+        assert saved.count('Use the saved receipt') == saved.count('Answer concisely') == 1
+        assert 'Saved write receipt' in saved
+        assert not agent.accept_input({'id': 103, 'content': 'Too late'})
+    finally:
+        agent.close()
+
+
+def test_litellm_later_model_request_cannot_erase_stream_input_fence(native_cli_runtime):
+    runtime = native_cli_runtime
+    agent = runtime.create('tool-loop')
+    def turn():
+        assert agent.before_model()
+        if len(runtime.calls) == 1:
+            assert agent.accept_input({'id': 1, 'content': 'Keep the correction'})
+            with pytest.raises(InputPending):
+                agent.before_model()
+            # Another request can remain admissible while public tool receipts
+            # catch up. It must not erase this stream's earlier local fence.
+            agent.journal.tool_started('other', 'Read', {})
+            assert agent.before_model()
+            agent.journal.tool_finished('other', 'Read receipt')
+            runtime.stream.result.stop_reason = 'runtime_error'
+        else:
+            runtime.stream.result.stop_reason = 'done'
+    runtime.host['during_turn'] = turn
+    try:
+        result = agent.run_conversation('Task', conversation_history=[], system_message='Rules')
+        assert result['completed'] and len(runtime.calls) == 2
+        assert 'Keep the correction' in runtime.calls[-1]['prompt']
+        assert agent.model_calls == 3 and agent.journal.completed_tools == 1
+    finally:
+        agent.close()
+
+
+def test_litellm_delayed_model_request_cannot_fence_replacement_stream(native_cli_runtime):
+    from dataclasses import replace
+    from sandbox.harness_agent import HarnessInputs, TurnJournal
+    agent = native_cli_runtime.create('tool-loop')
+    agent.journal = TurnJournal([], 'task')
+    agent.inputs = HarnessInputs(agent.journal)
+    assert agent.accept_input({'id': 1, 'content': 'correction'})
+    original, replacement = agent.input_fence, threading.Event()
+    agent.context = replace(agent.context, step=lambda: setattr(agent, 'input_fence', replacement))
+    try:
+        assert agent.before_model() is False
+        assert not original.is_set() and not replacement.is_set()
+        assert agent.model_calls == 0 and agent.inputs.pending
+    finally:
+        agent.close()
+
+
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('correction', [False, True])
+def test_litellm_completed_answer_survives_expired_rotation(native_cli_runtime, harness, correction):
+    from sandbox.continuation import RotationDeadline
+    runtime = native_cli_runtime
+    agent = runtime.create(harness)
+    now = [0]
+    rotation = RotationDeadline(1, clock=lambda: now[0])
+    from dataclasses import replace
+    agent.context = replace(agent.context, step=lambda: rotation.step(agent))
+    def turn():
+        if len(runtime.calls) == 1:
+            assert agent.before_model()
+            now[0] = 2  # Rotation expires while the model finishes its answer.
+            if correction:
+                assert agent.accept_input({'id': 101, 'content': 'Do the next step'})
+        else:
+            assert not agent.before_model()  # Still fence any unfinished follow-up.
+            runtime.stream.result.stop_reason = 'runtime_error'
+    runtime.host['during_turn'] = turn
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert result['completed'] is not correction
+        assert result['interrupted'] is correction and rotation.requested is correction
+        assert len(runtime.calls) == (2 if correction else 1)
+        assert 'Completed once' in json.dumps(runtime.store.history())
+        if agent.native is not None:
+            assert (agent.native.staged is not None) is (not correction)
+    finally:
+        agent.close()
+
+
+@pytest.mark.parametrize('boundary', ['provider_failure', 'stop', 'pending_tool', 'model_cap'])
+def test_litellm_corrections_do_not_override_terminal_boundaries(native_cli_runtime, boundary):
+    runtime = native_cli_runtime
+    agent = runtime.create('tool-loop')
+    agent.context.spec['max_iterations'] = 1
+    def turn():
+        assert agent.before_model()
+        assert agent.accept_input({'id': 101, 'content': 'Retain this correction'})
+        if boundary == 'pending_tool':
+            agent.journal.tool_started('pending', 'Write', {})
+        elif boundary == 'stop':
+            agent.interrupt()
+        elif boundary == 'provider_failure':
+            agent.context.relay.model_failed = True
+            # A provider failure wins even when another request was fenced.
+            agent.input_fence.set()
+            runtime.stream.result.stop_reason = 'runtime_error'
+        else:
+            assert not agent.before_model() and agent.model_limit_reached
+            runtime.stream.result.stop_reason = 'runtime_error'
+    runtime.host['during_turn'] = turn
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert not result['completed'] and len(runtime.calls) == 1
+        assert 'Retain this correction' in json.dumps(runtime.store.history())
+        assert not agent.accept_input({'id': 102, 'content': 'Too late'})
+    finally:
+        agent.close()
+
+
+def test_litellm_final_admission_race_drains_before_completion(native_cli_runtime, monkeypatch):
+    runtime = native_cli_runtime
+    agent = runtime.create('tool-loop')
+    def turn():
+        if len(runtime.calls) != 1:
+            return
+        close_if_empty = agent.inputs.close_if_empty
+        def race():
+            agent.accept_input({'id': 101, 'content': 'Arrived at finalization'})
+            return close_if_empty()
+        monkeypatch.setattr(agent.inputs, 'close_if_empty', race)
+    runtime.host['during_turn'] = turn
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert result['completed'] and len(runtime.calls) == 2
+        assert 'Arrived at finalization' in runtime.calls[-1]['prompt']
+    finally:
+        agent.close()
+
+
+def test_litellm_corrections_share_model_call_limit(native_cli_runtime):
+    runtime = native_cli_runtime
+    agent = runtime.create('tool-loop')
+    agent.context.spec['max_iterations'] = 2
+    def turn():
+        assert agent.before_model()
+        assert agent.accept_input({'id': len(runtime.calls), 'content': 'Another correction'})
+        if len(runtime.calls) == 2:
+            assert not agent.before_model() and agent.model_limit_reached
+            runtime.stream.result.stop_reason = 'runtime_error'
+    runtime.host['during_turn'] = turn
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert not result['completed'] and len(runtime.calls) == agent.model_calls == 2
+        assert json.dumps(runtime.store.history()).count('Another correction') == 2
+    finally:
+        agent.close()
+
+
+def test_litellm_corrections_share_original_deadline(native_cli_runtime, monkeypatch):
+    import asyncio
+    runtime = native_cli_runtime
+    agent = runtime.create('tool-loop')
+    agent.context.spec['timeout'] = .15
+    async def stream(self):
+        await asyncio.sleep(.09)
+        if len(runtime.calls) <= 2:
+            agent.accept_input({'id': len(runtime.calls), 'content': 'Another correction'})
+        raise StopAsyncIteration
+    monkeypatch.setattr(runtime.stream, '__anext__', stream)
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert not result['completed'] and result['failed']
+        assert len(runtime.calls) == 2 and 'deadline elapsed' in result['final_response']
+        assert not agent.accept_input({'id': 103, 'content': 'Too late'})
+    finally:
+        agent.close()
+
+
+def test_litellm_context_recovery_consumes_saved_corrections_once(native_cli_runtime):
+    runtime = native_cli_runtime
+    agent = runtime.create('tool-loop')
+    old_inputs = []
+    def turn():
+        assert agent.before_model()
+        if len(runtime.calls) == 1:
+            assert agent.accept_input({'id': 101, 'content': 'Saved correction'})
+            old_inputs.append(agent.inputs)
+            agent.context.relay.context_required = {'input_tokens': 50000, 'input_budget': 20000}
+            runtime.stream.result.stop_reason = 'runtime_error'
+        elif len(runtime.calls) == 2:
+            assert agent.inputs is not old_inputs[0] and not agent.inputs.pending
+            assert runtime.calls[-1]['prompt'].count('Saved correction') == 1
+            assert agent.accept_input({'id': 102, 'content': 'Later correction'})
+            runtime.stream.result.stop_reason = 'done'
+    def compact(previous, entries, **kwargs):
+        assert old_inputs[0].closed
+        assert not agent.accept_input({'id': 102, 'content': 'Later correction'})
+        assert 'Saved correction' in json.dumps(entries)
+        return 'Preserved original task and Saved correction'
+    runtime.host['during_turn'] = turn
+    agent.context.relay.compact = compact
+    try:
+        result = agent.run_conversation('Finish the edit.', conversation_history=[], system_message='Rules')
+        assert result['completed'] and len(runtime.calls) == 3
+        assert runtime.calls[0]['session'] is not runtime.calls[1]['session']
+        assert runtime.calls[1]['session'] is runtime.calls[2]['session']
+        assert 'Later correction' in runtime.calls[2]['prompt'] and 'Saved correction' not in runtime.calls[2]['prompt']
+        assert json.dumps(result['messages']).count('Saved correction') == 1
+    finally:
+        agent.close()
 
 
 def test_native_cli_cold_resume_uses_saved_runtime_and_fresh_capability(native_cli_runtime, monkeypatch):

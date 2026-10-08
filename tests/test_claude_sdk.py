@@ -106,7 +106,7 @@ def test_sdk_tool_receipts_and_completion(monkeypatch, tmp_path, stop):
         async def __aexit__(self, *args): pass
         async def query(self, prompt):
             assert 'CURRENT REQUEST:\nfollow up' in prompt
-        async def receive_response(self):
+        async def receive_messages(self):
             yield AssistantMessage(content=[TextBlock('Checking the file.'), ThinkingBlock('private reasoning', 'sig')], model=OPUS)
             event = {'tool_name': 'Read', 'tool_input': {'file_path': '/workspace/proof.py'}, 'tool_use_id': 'read1'}
             await agent.tool_hook({**event, 'hook_event_name': 'PreToolUse'}, 'read1', {})
@@ -144,6 +144,75 @@ def test_checkpoint_waits_for_all_parallel_tool_receipts(monkeypatch, tmp_path):
     assert not agent.before_model()
 
 
+@pytest.mark.parametrize('delivery', ['merged', 'next-turn', 'write-error', 'missing-echo', 'subagent-echo', 'echo-before-write'])
+def test_active_input_waits_for_its_native_echo_and_preserves_failed_input(monkeypatch, tmp_path, delivery):
+    import asyncio
+    from claude_agent_sdk import ResultMessage, UserMessage
+    agent, _ = make_agent(monkeypatch, tmp_path)
+    sent = []
+
+    class Client:
+        def __init__(self, *, options):
+            assert options.extra_args['replay-user-messages'] is None
+            self.ready = asyncio.Event()
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def query(self, prompt):
+            if isinstance(prompt, str):
+                assert agent.before_model()
+                return
+            async for envelope in prompt:
+                sent.append(envelope)
+            self.ready.set()
+            if delivery == 'write-error':
+                raise RuntimeError('private native transport error')
+            if delivery == 'echo-before-write':
+                await asyncio.sleep(.05)
+                sent[0]['write_complete'] = True
+        async def receive_messages(self):
+            assert agent.accept_input({'id': 17, 'content': 'Keep the original task and change the color.'})
+            await asyncio.wait_for(self.ready.wait(), 1)
+            if delivery == 'write-error':
+                await asyncio.sleep(2)
+                return
+            def result(text):
+                return ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1,
+                    is_error=False, num_turns=1, session_id='sdk-session', result=text)
+            if delivery == 'next-turn':
+                yield result('The first response finished while input was in flight.')
+            # Other native user/tool messages cannot settle this correction.
+            yield UserMessage(content='unrelated', uuid='unrelated')
+            if delivery != 'missing-echo':
+                yield UserMessage(content=sent[0]['message']['content'], uuid=sent[0]['uuid'],
+                                  parent_tool_use_id='subagent' if delivery == 'subagent-echo' else None)
+            assert agent.before_model()
+            yield result('The original task now uses the requested color.')
+
+    monkeypatch.setattr('claude_agent_sdk.ClaudeSDKClient', Client)
+    result = agent.run_conversation('Complete the original task.', conversation_history=[], system_message='stable')
+    assert result['completed'] == (delivery in {'merged', 'next-turn', 'echo-before-write'})
+    assert result['failed'] == (delivery in {'write-error', 'missing-echo', 'subagent-echo'})
+    if result['completed']:
+        assert result['final_response'] == 'The original task now uses the requested color.'
+    assert len(sent) == 1 and sent[0]['origin'] == {'kind': 'human'}
+    if delivery == 'echo-before-write':
+        assert sent[0].get('write_complete'), 'Finalization must join the native input write before closing it'
+    assert sum('change the color' in str(message.get('content')) for message in result['messages']) == 1
+    assert not agent.accept_input({'id': 18, 'content': 'Too late for this SDK invocation.'})
+    assert 'private native' not in json.dumps(result)
+    agent.close()
+
+
+def test_claude_model_cap_counts_all_queries_in_one_invocation(monkeypatch, tmp_path):
+    agent, _ = make_agent(monkeypatch, tmp_path)
+    agent.context.spec['max_iterations'] = 2
+    agent.journal = TurnJournal([], 'task')
+    assert agent.before_model() and agent.before_model()
+    assert not agent.before_model()
+    assert agent.model_calls == 2 and agent.boundary_failed
+    assert agent.boundary_reason == 'model call limit reached'
+
+
 @pytest.mark.parametrize('mirror', ['complete', 'dropped', 'missing'])
 def test_incomplete_native_mirror_never_becomes_a_new_checkpoint(monkeypatch, tmp_path, mirror):
     from uuid import uuid4
@@ -166,7 +235,7 @@ def test_incomplete_native_mirror_never_becomes_a_new_checkpoint(monkeypatch, tm
         async def __aexit__(self, *args): pass
         async def query(self, prompt):
             assert prompt == 'new question'
-        async def receive_response(self):
+        async def receive_messages(self):
             if mirror != 'missing':
                 await self.options.session_store.append(key, [{'type': 'user', 'uuid': 'new',
                     'message': {'role': 'user', 'content': 'new question'}}])
@@ -202,7 +271,7 @@ def test_claude_failure_metadata_replaces_private_result_and_stderr(monkeypatch,
             if source == 'cleanup':
                 raise ProcessError('private-process-body', exit_code=2, stderr='private-stderr')
         async def query(self, prompt): pass
-        async def receive_response(self):
+        async def receive_messages(self):
             if source == 'exception':
                 raise ProcessError('private-process-body', exit_code=2, stderr='private-stderr')
             yield ResultMessage(subtype='error_during_execution' if source == 'result' else 'success',

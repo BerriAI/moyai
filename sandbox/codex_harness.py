@@ -8,12 +8,12 @@ import threading
 from uuid import uuid4
 
 try:
-    from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from .harness_dependencies import prepare_codex
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
 except ImportError:
-    from harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from harness_dependencies import prepare_codex
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
@@ -36,6 +36,7 @@ class CodexAgent(HarnessAgent):
         self.stopped = threading.Event()
         self.receipts = threading.Condition(threading.RLock())
         self.journal = None
+        self.inputs = None
         self.calls = {}
         self.completed = set()
         self.observed_outputs = set()
@@ -191,7 +192,7 @@ class CodexAgent(HarnessAgent):
 
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
-        from openai_codex.errors import TransportClosedError
+        from openai_codex.errors import InvalidRequestError, TransportClosedError
         # Each fresh SDK invocation has its own local ceiling. The gateway and
         # shared recovery loop retain the whole task's request cap and deadline.
         self.model_calls = 0
@@ -199,10 +200,14 @@ class CodexAgent(HarnessAgent):
         self.completed.clear()
         self.observed_outputs.clear()
         self.journal.call_namespace = uuid4().hex
+        self.inputs = HarnessInputs(self.journal)
         message_items = {}
         finished, answer = False, ''
         failure = {}
         settlement_turn = None
+        late_inputs = []
+        steered = False
+        notification = None
         # Native transcripts are private, disposable state. Only Moyai's public
         # journal crosses requester/model changes and filesystem checkpoints.
         try:
@@ -221,7 +226,26 @@ class CodexAgent(HarnessAgent):
                             'experimentalRawEvents': True})
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
-                            event = await client.next_turn_notification(turn.turn.id)
+                            notification = asyncio.create_task(client.next_turn_notification(turn.turn.id))
+                            while True:
+                                corrections = self.inputs.take()
+                                if corrections:
+                                    try:
+                                        await client.turn_steer(thread.thread.id, turn.turn.id, '\n\n'.join(corrections))
+                                        steered = True
+                                    except InvalidRequestError as exc:
+                                        # The native turn can finish before its notification
+                                        # is read. Only a definite non-delivery permits a
+                                        # new turn on this same live thread; other faults
+                                        # keep the task incomplete with journaled input.
+                                        if exc.message != 'no active turn to steer':
+                                            raise
+                                        late_inputs.extend(corrections)
+                                done, _ = await asyncio.wait({notification}, timeout=0.05)
+                                if done:
+                                    break
+                            event = await notification
+                            notification = None
                             if settlement_turn:
                                 # Background commands retain their original turn
                                 # ID. The completed queue drains without waiting;
@@ -247,7 +271,11 @@ class CodexAgent(HarnessAgent):
                                         self.receipts.notify_all()
                             elif event.method in {'item/started', 'item/completed'}:
                                 item = payload['item']
-                                if item['type'] == 'agentMessage' and event.method == 'item/completed':
+                                if item['type'] == 'userMessage':
+                                    # Native incorporation, rather than arrival time,
+                                    # fences final candidates from before a correction.
+                                    message_items.clear()
+                                elif item['type'] == 'agentMessage' and event.method == 'item/completed':
                                     if item['id'] in message_items:
                                         continue
                                     message_items[item['id']] = item
@@ -278,11 +306,35 @@ class CodexAgent(HarnessAgent):
                                         'wait for finite work, or deliberately stop preview servers you no longer need. '
                                         'Collect their actual results; do not restart or replay actions. '
                                         'Then provide the final answer based on the confirmed results.')
+                                    steered = False
                                     continue
+                                if finished and not self.stopped.is_set() and not self.boundary_failed and not self.journal.pending:
+                                    late_inputs.extend(self.inputs.take())
+                                    # Native completion can record a late accepted
+                                    # steer without sampling again. Its user item
+                                    # clears old candidates; continue from that
+                                    # history instead of resending accepted input.
+                                    awaiting_answer = steered and not message_items
+                                    # Admission and finalization share the inbox lock.
+                                    # A racing accepted message stays in this SDK session.
+                                    if late_inputs or awaiting_answer or not self.inputs.close_if_empty():
+                                        late_inputs.extend(self.inputs.take())
+                                        message_items.clear()
+                                        turn = await client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
+                                            'Continue from the latest user correction already in this conversation. '
+                                            'Preserve completed work and answer the updated request.')
+                                        steered = False
+                                        late_inputs.clear()
+                                        continue
                                 break
         except Exception as exc:
             finished = False
             failure.update(exception_details(exc))
+        finally:
+            self.inputs.close()
+            if notification is not None:
+                notification.cancel()
+                await asyncio.gather(notification, return_exceptions=True)
         interrupted = self.stopped.is_set()
         completed = finished and not interrupted and not self.boundary_failed and not self.journal.pending
         if completed:
@@ -302,5 +354,7 @@ class CodexAgent(HarnessAgent):
                     'Codex stopped before completing the response. Saved tool receipts are preserved.')}
 
     def close(self):
+        if self.inputs is not None:
+            self.inputs.close()
         self.context.relay.before_model = None
         self.context.relay.context_recovery = False

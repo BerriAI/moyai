@@ -480,3 +480,167 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         store.close()
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize('during', ['generation', 'tool', 'completion'])
+def test_send_now_reaches_live_native_session_before_work_finishes(tmp_path, monkeypatch, during):
+    proof = native_steering_case(tmp_path, monkeypatch, during)
+    assert proof['completed'] and proof['root_turn_unchanged'], proof
+    assert proof['accepted_before_release'] == 2
+    assert proof['corrections_reached_model'] == 2
+    assert proof['tool_executions'] == proof['completed_receipts'] == int(during == 'tool')
+    if during == 'completion':
+        assert proof['steer_results'] and set(proof['steer_results']) == {'no active turn to steer'}
+
+
+def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text: None):
+    """Pinned native SDK + actual control HTTP/SQLite, with held local inference/tool."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+    from app.db import Store
+    from app.message_queue import MessageQueue
+    from sandbox.broker_relay import BrokerRelay
+    from sandbox.broker_transport import unseal
+    from sandbox.continuation import ActiveTurnSteering, AgentSteer
+    from sandbox.harness_registry import resolve
+    from openai_codex.async_client import AsyncCodexClient
+    from openai_codex.errors import InvalidRequestError
+    import asyncio
+
+    store = Store(tmp_path / 'app')
+    run = store.create_run('Finish the local task', '', 'modal', [], chat_enabled=True,
+        user_id='fixture-user', model='openai/gpt-6-astra', harness='codex')
+    run_id = run['id']
+    root = store.claim_message(run_id)['id']
+    store.update_run(run_id, status='running')
+    queue = MessageQueue(store)
+    entered, release = threading.Event(), threading.Event()
+    requests, controls, calls, latencies = [], [], [], []
+    steer_results = []
+    capability = 'local-steering-fixture'
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
+
+    if during == 'completion':
+        class CompletionClient(AsyncCodexClient):
+            async def next_turn_notification(self, turn_id):
+                event = await super().next_turn_notification(turn_id)
+                if event.method == 'turn/completed' and not entered.is_set():
+                    # Hold an actual native completion in the adapter's pending
+                    # notification task while new input targets that same turn.
+                    entered.set()
+                    assert await asyncio.to_thread(release.wait, 15)
+                return event
+
+            async def turn_steer(self, *args, **kwargs):
+                try:
+                    result = await super().turn_steer(*args, **kwargs)
+                except InvalidRequestError as exc:
+                    steer_results.append(exc.message)
+                    raise
+                steer_results.append('accepted')
+                return result
+
+        monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', CompletionClient)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+
+        def reply(self, value):
+            raw = json.dumps(value).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def do_GET(self):
+            self.reply({'input_budget': 200000} if self.path == '/context/window' else [
+                {'name': 'slow_echo', 'description': 'Wait for a local fixture signal.',
+                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
+
+        def do_POST(self):
+            body = json.loads(unseal(capability, self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path == '/control':
+                controls.append(body)
+                control = (queue.live_control(run_id, root, body.get('applied', []))
+                    if body.get('version') == 2 else {'steer_message_id': queue.accept_steer(run_id, root)})
+                return self.reply({**control, 'receipt_only_supported': True})
+            if self.path == '/context/maintenance':
+                return self.reply({})
+            if self.path == '/tools/call':
+                calls.append(body)
+                progress('Real MCP tool is running; completed effects must not be replayed.')
+                entered.set()
+                assert release.wait(15)
+                return self.reply({'text': 'tool-receipt-once'})
+            assert self.path == '/v1/responses'
+            requests.append(body)
+            sequence = len(requests)
+            if sequence == 1 and during == 'tool':
+                output = {'type': 'custom_tool_call', 'id': 'exec_fixture', 'call_id': 'exec_fixture',
+                    'name': 'exec', 'namespace': 'functions', 'input': 'text(await tools.mcp__moyai__slow_echo({}));'}
+            else:
+                if sequence == 1 and during == 'generation':
+                    progress('Native Codex inference is running; the response is held open.')
+                    entered.set()
+                    assert release.wait(15)
+                output = {'type': 'message', 'id': 'answer-' + str(sequence), 'role': 'assistant',
+                    'phase': 'final_answer', 'status': 'completed',
+                    'content': [{'type': 'output_text', 'text': 'Local task finished with saved corrections.'}]}
+            send_response(self, output, sequence)
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', capability).start()
+    definition = resolve('codex')
+    steering = ActiveTurnSteering(relay) if definition.live_steering else AgentSteer(relay)
+    relay.steering = steering
+    agent = CodexAgent(spec={'model': 'openai/gpt-6-astra', 'max_iterations': 6, 'timeout': 30},
+        relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
+        activity=SimpleNamespace(start=lambda *a: None, complete=lambda *a: None, commentary=lambda *a: None),
+        step=lambda: steering.step(agent), cwd=str(tmp_path), definition=definition)
+    steering.listen(agent)
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(agent.run_conversation, 'Finish the local task.',
+            conversation_history=[], system_message='Local steering verification.')
+        assert entered.wait(12), 'Native runtime did not reach the local fixture'
+        previous = len(controls)
+        for index in range(2):
+            marker = f'correction-marker-{index}'
+            progress(f'Send now: {marker}')
+            start = time.monotonic()
+            message, _ = store.enqueue_message(run_id, marker, marker, user_id='fixture-user',
+                model='openai/gpt-6-astra', send_now=True)
+            while time.monotonic() - start < 4:
+                row = next(m for m in store.messages(run_id) if m['id'] == message['id'])
+                if row['status'] == 'injected':
+                    break
+                time.sleep(.01)
+            assert row['status'] == 'injected', 'Send now stayed queued while native work was active'
+            elapsed = round((time.monotonic() - start) * 1000)
+            latencies.append(elapsed)
+            progress(f'Runtime accepted and saved the correction in {elapsed} ms; work is still active.')
+        assert not future.done()
+        release.set()
+        result = future.result(timeout=20)
+        proof = {'during': during, 'completed': result['completed'], 'accepted_before_release': len(latencies),
+            'acceptance_ms': latencies, 'control_polls_during_work': len(controls) - previous,
+            'root_turn_unchanged': store.run(run_id)['active_message_id'] == root,
+            'corrections_reached_model': sum(any(f'correction-marker-{i}' in json.dumps(body)
+                for body in requests) for i in range(2)), 'tool_executions': len(calls),
+            'completed_receipts': sum(m['role'] == 'tool' for m in result['messages']),
+            'steer_results': steer_results}
+        progress('Verified: ' + json.dumps(proof))
+        return proof
+    finally:
+        release.set()
+        executor.shutdown(wait=True)
+        steering.close()
+        agent.close()
+        relay.close()
+        server.shutdown()
+        server.server_close()

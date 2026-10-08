@@ -41,7 +41,7 @@ def sdk_event(method, body):
 
 
 def install_codex_client(monkeypatch, agent, stream, late_items=()):
-    observed = SimpleNamespace(homes=[], prompts=[], thread_options=[])
+    observed = SimpleNamespace(homes=[], prompts=[], thread_options=[], steers=[], steer_error=None)
 
     class Client:
         def __init__(self, config):
@@ -67,6 +67,12 @@ def install_codex_client(monkeypatch, agent, stream, late_items=()):
             self.turn_count += 1
             return SimpleNamespace(turn=SimpleNamespace(id=f'fresh-turn-{self.turn_count}'))
 
+        async def turn_steer(self, thread_id, expected_turn_id, input_items):
+            observed.steers.append((thread_id, expected_turn_id, input_items))
+            if observed.steer_error:
+                raise observed.steer_error
+            return SimpleNamespace(turn_id=expected_turn_id)
+
         async def next_turn_notification(self, turn_id):
             if turn_id != f'fresh-turn-{self.turn_count}':
                 from openai_codex.errors import TransportClosedError
@@ -79,6 +85,80 @@ def install_codex_client(monkeypatch, agent, stream, late_items=()):
     monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
     monkeypatch.setattr(agent, 'validate', lambda: None)
     return observed
+
+
+@pytest.mark.parametrize('delivery', ['active', 'ended', 'accepted-at-finish', 'unknown-error'])
+@pytest.mark.parametrize('phase', ['final_answer', None])
+def test_live_input_uses_current_native_turn_and_preserves_journal(codex_agent, monkeypatch, delivery, phase):
+    from openai_codex.errors import InvalidRequestError, TransportClosedError
+    agent, events, store = codex_agent
+
+    async def stream():
+        assert agent.accept_input({'id': 73, 'content': 'Also verify the correction.'})
+        for _ in range(40):
+            if observed.steers:
+                break
+            await asyncio.sleep(0.01)
+        assert observed.steers, 'Live input must reach the native SDK before its result'
+        yield sdk_event('item/completed', {'item': {'id': 'commentary', 'type': 'agentMessage',
+            'phase': 'commentary', 'text': 'Earlier progress.'}})
+        yield sdk_event('item/completed', {'item': {'id': 'original', 'type': 'agentMessage',
+            'phase': 'final_answer', 'text': 'Old answer.'}})
+        if delivery == 'ended':
+            yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+        yield sdk_event('item/completed', {'item': {'id': 'guidance', 'type': 'userMessage'}})
+        if delivery == 'accepted-at-finish':
+            # Native completion drains a late accepted input into history even
+            # when the final pending-input check has already ended sampling.
+            yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+            assert len(observed.prompts) == 2
+        yield sdk_event('item/completed', {'item': {'id': 'corrected', 'type': 'agentMessage',
+            'phase': phase, 'text': 'Corrected answer.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    if delivery == 'ended':
+        observed.steer_error = InvalidRequestError(-32600, 'no active turn to steer')
+    elif delivery == 'unknown-error':
+        observed.steer_error = TransportClosedError('Connection lost after write')
+    result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
+    assert observed.steers == [('fresh-thread', 'fresh-turn-1',
+                               '[User correction to the current task]\nAlso verify the correction.')]
+    assert len(observed.prompts) == (2 if delivery in {'ended', 'accepted-at-finish'} else 1)
+    if delivery == 'accepted-at-finish':
+        assert 'Also verify the correction.' not in observed.prompts[1]
+    assert result['completed'] is (delivery != 'unknown-error')
+    if result['completed']:
+        assert result['final_response'] == 'Corrected answer.'
+    assert len([message for message in agent.journal.messages
+                if message.get('content') == observed.steers[0][2]]) == 1
+    assert not agent.accept_input({'id': 74, 'content': 'Too late'})
+    assert not agent.stopped.is_set()
+
+
+def test_correction_racing_finalization_continues_same_sdk_session(codex_agent, monkeypatch):
+    agent, events, store = codex_agent
+
+    async def stream():
+        close = agent.inputs.close_if_empty
+        def racing_close():
+            agent.inputs.close_if_empty = close
+            assert agent.accept_input({'id': 81, 'content': 'Check the final race.'})
+            return close()
+        agent.inputs.close_if_empty = racing_close
+        yield sdk_event('item/completed', {'item': {'id': 'old', 'type': 'agentMessage',
+            'phase': 'final_answer', 'text': 'Premature answer.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+        assert len(observed.prompts) == 2
+        yield sdk_event('item/completed', {'item': {'id': 'new', 'type': 'agentMessage',
+            'phase': 'final_answer', 'text': 'Final race incorporated.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
+    assert result['completed'] and result['final_response'] == 'Final race incorporated.'
+    assert len(observed.homes) == 1 and not observed.steers
+    assert observed.prompts[1].endswith('Check the final race.')
 
 
 def assistant_prose(messages):

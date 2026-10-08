@@ -144,7 +144,7 @@ class AgentSteer(RotationDeadline):
 
 
 class ActiveTurnSteering(AgentSteer):
-    """Deliver acknowledged user corrections through Hermes' native redirect API."""
+    """Deliver acknowledged corrections into the running harness' owned inbox."""
     def __init__(self, relay, prepare=lambda item: None, on_input=lambda item: None):
         super().__init__(relay)
         self.prepare = prepare
@@ -198,14 +198,21 @@ class ActiveTurnSteering(AgentSteer):
             item = self.pending_input
             if self.closed or self.requested or item is None:
                 return False
-            text = '[User correction to the current task]\n' + item['content']
-            accepted = agent.steer(text) if boundary else agent.redirect(text)
+            accept_input = getattr(agent, 'accept_input', None)
+            accepted = accept_input(item) if accept_input is not None else None
+            native_redirect = accepted is None
+            if native_redirect:
+                text = '[User correction to the current task]\n' + item['content']
+                accepted = agent.steer(text) if boundary else agent.redirect(text)
             if accepted:
                 self.on_input(item)
                 self.applied.add(item['id'])
                 self.latest_input_id = item['id']
                 self.pending_input = None
-                self.generation += 1
+                # Journaled input leaves in-flight SDK inference alone. Hermes'
+                # redirect cancels generation and suppresses its obsolete reply.
+                if native_redirect:
+                    self.generation += 1
                 self.notify()
             return accepted
 

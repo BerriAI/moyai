@@ -36,14 +36,14 @@ class HarnessDefinition:
 HARNESSES = {
     'hermes': HarnessDefinition('hermes', 'Hermes', 'hermes_harness', 'HermesAgent', live_steering=True),
     'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Agent SDK',
-        'claude_harness', 'ClaudeAgent', durable_context=True),
-    'codex': HarnessDefinition('codex', 'Codex', 'codex_harness', 'CodexAgent', durable_context=True),
+        'claude_harness', 'ClaudeAgent', live_steering=True, durable_context=True),
+    'codex': HarnessDefinition('codex', 'Codex', 'codex_harness', 'CodexAgent', live_steering=True, durable_context=True),
     'opencode': HarnessDefinition('opencode', 'OpenCode', 'litellm_harness', 'LiteLLMAgent',
-        litellm_harness='OPENCODE', runtime_binding='opencode', durable_context=True),
+        live_steering=True, litellm_harness='OPENCODE', runtime_binding='opencode', durable_context=True),
     'deepagents': HarnessDefinition('deepagents', 'Deep Agents', 'litellm_harness', 'LiteLLMAgent',
-        litellm_harness='DEEPAGENTS', runtime_binding='deepagents', durable_context=True),
+        live_steering=True, litellm_harness='DEEPAGENTS', runtime_binding='deepagents', durable_context=True),
     'tool-loop': HarnessDefinition('tool-loop', 'Tool Loop', 'litellm_harness', 'LiteLLMAgent',
-        litellm_harness='TOOL_LOOP', runtime_binding='tool-loop', durable_context=True),
+        live_steering=True, litellm_harness='TOOL_LOOP', runtime_binding='tool-loop', durable_context=True),
 }
 
 

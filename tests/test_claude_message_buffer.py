@@ -200,7 +200,7 @@ def test_buffer_failure_is_actionable_without_publishing_payloads(tmp_path, monk
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def query(self, prompt): pass
-        async def receive_response(self):
+        async def receive_messages(self):
             raise error
             yield
     monkeypatch.setattr('claude_agent_sdk.ClaudeSDKClient', Client)

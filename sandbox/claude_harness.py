@@ -8,12 +8,12 @@ import threading
 from uuid import UUID, uuid4
 
 try:
-    from .harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .native_session import NativeSession, MAX_BYTES
     from .sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
 except ImportError:
-    from harness_agent import HarnessAgent, HarnessContext, TurnJournal
+    from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from native_session import NativeSession, MAX_BYTES
     from sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
@@ -89,6 +89,11 @@ class ClaudeAgent(HarnessAgent):
         self.compaction_window = None
         self.native = None
         self.transcript = None
+        self.inputs = None
+        self.model_calls = 0
+        self.model_lock = threading.RLock()
+        self.boundary_failed = False
+        self.boundary_reason = ''
         relay.before_model = self.before_model
         relay.context_recovery = True
 
@@ -109,11 +114,22 @@ class ClaudeAgent(HarnessAgent):
         self.stopped.set()
 
     def before_model(self, request=None):
-        if self.journal and not self.journal.pending:
-            self.context.step()
-            if not self.stopped.is_set():
-                maintain_context(self)
-        return not self.stopped.is_set()
+        with self.model_lock:
+            if self.journal and not self.journal.pending:
+                self.context.step()
+                if not self.stopped.is_set():
+                    maintain_context(self)
+            if self.stopped.is_set() or self.boundary_failed:
+                return False
+            # Native max_turns restarts for another streamed user query. The
+            # enclosing Moyai invocation keeps one shared inference ceiling.
+            limit = self.context.spec.get('max_iterations')
+            if limit and self.model_calls >= limit:
+                self.boundary_failed = True
+                self.boundary_reason = 'model call limit reached'
+                return False
+            self.model_calls += 1
+            return True
 
     async def tool_hook(self, event, call_id, context):
         call_id = call_id or event['tool_use_id']
@@ -166,6 +182,7 @@ class ClaudeAgent(HarnessAgent):
             permission_mode='dontAsk', setting_sources=[], strict_mcp_config=True,
             mcp_servers={'moyai': ctx.config['mcp_servers']['workspace']}, env=env,
             max_turns=ctx.spec.get('max_iterations') or None,
+            extra_args={'replay-user-messages': None},
             **({'session_store': self.transcript,
                 'resume': self.transcript.session_id if self.native.resumed else None,
                 'session_id': None if self.native.resumed else self.transcript.session_id}
@@ -193,9 +210,32 @@ class ClaudeAgent(HarnessAgent):
                 lambda current: asyncio.run(self._run(current, system_message)))
 
     async def _run(self, prompt, system_message):
-        from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage, SystemMessage
+        from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage, SystemMessage, UserMessage
         result = None
         failure = {}
+        finished = False
+        self.model_calls = 0
+        self.boundary_failed = False
+        self.boundary_reason = ''
+        self.inputs = HarnessInputs(self.journal)
+        submitted = set()
+        query_lock = asyncio.Lock()
+
+        async def send_inputs(client):
+            while True:
+                async with query_lock:
+                    corrections = self.inputs.take()
+                    if corrections:
+                        identity = str(uuid4())
+                        submitted.add(identity)
+
+                        async def envelope():
+                            yield {'type': 'user', 'uuid': identity, 'parent_tool_use_id': None,
+                                   'origin': {'kind': 'human'},
+                                   'message': {'role': 'user', 'content': '\n\n'.join(corrections)}}
+
+                        await client.query(envelope())
+                await asyncio.sleep(.02)
         # A confirmed context rejection retires the prior transcript before
         # run_with_context_recovery starts a fresh SDK with public receipts.
         if self.native is not None and not self.native.resumed:
@@ -204,20 +244,51 @@ class ClaudeAgent(HarnessAgent):
             async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
                 async with ClaudeSDKClient(options=self.options(system_message)) as client:
                     await client.query(prompt)
-                    async for message in client.receive_response():
-                        if isinstance(message, AssistantMessage):
-                            self.pending_text.extend(block.text for block in message.content if isinstance(block, TextBlock))
-                        elif isinstance(message, SystemMessage) and message.subtype == 'compact_boundary':
-                            self.native_compactions += 1
-                            self.pending_text.clear()
-                            # Native summaries may contain requester-private
-                            # context. Persist only public tool receipts.
-                            self.context.activity.commentary('The agent compacted its context and is continuing. Completed tool receipts remain saved.')
-                        elif isinstance(message, SystemMessage) and message.subtype == 'mirror_error':
-                            if self.transcript is not None:
-                                self.transcript.valid = False
-                        elif isinstance(message, ResultMessage):
-                            result = message
+                    try:
+                        async with asyncio.TaskGroup() as tasks:
+                            sender = tasks.create_task(send_inputs(client))
+                            try:
+                                async for message in client.receive_messages():
+                                    if isinstance(message, UserMessage):
+                                        if message.parent_tool_use_id is None:
+                                            submitted.discard(message.uuid)
+                                    elif isinstance(message, AssistantMessage):
+                                        self.pending_text.extend(block.text for block in message.content if isinstance(block, TextBlock))
+                                    elif isinstance(message, SystemMessage) and message.subtype == 'compact_boundary':
+                                        self.native_compactions += 1
+                                        self.pending_text.clear()
+                                        # Native summaries may contain requester-private
+                                        # context. Persist only public tool receipts.
+                                        self.context.activity.commentary('The agent compacted its context and is continuing. Completed tool receipts remain saved.')
+                                    elif isinstance(message, SystemMessage) and message.subtype == 'mirror_error':
+                                        if self.transcript is not None:
+                                            self.transcript.valid = False
+                                    elif isinstance(message, ResultMessage):
+                                        result = message
+                                        if result.subtype != 'success' or result.is_error or self.stopped.is_set():
+                                            break
+                                        # During tools, Claude can merge a correction into
+                                        # this turn; during a final response it starts a new
+                                        # one. UUID echoes, not result counts, prove delivery.
+                                        # An echo can race the coroutine writing its
+                                        # envelope. Join that write before closing input.
+                                        async with query_lock:
+                                            if not submitted and self.inputs.close_if_empty():
+                                                finished = True
+                                                break
+                                        text = result.result or ''.join(self.pending_text)
+                                        if text:
+                                            self.journal.finish(text)
+                                            self.context.activity.commentary(text)
+                                        self.pending_text.clear()
+                            finally:
+                                sender.cancel()
+                    except ExceptionGroup as exc:
+                        # Preserve the SDK's body-free diagnostic type when a
+                        # single receive/write failure exits the task group.
+                        if len(exc.exceptions) == 1:
+                            raise exc.exceptions[0]
+                        raise
         except Exception as exc:
             failure.update(exception_details(exc))
             # Match only the SDK's fixed limit error, never publish JSON lines
@@ -226,9 +297,12 @@ class ClaudeAgent(HarnessAgent):
             if (isinstance(exc, CLIJSONDecodeError)
                     and exc.line == f'JSON message exceeded maximum buffer size of {SDK_MAX_BUFFER_SIZE} bytes'):
                 failure.update(code='sdk_message_buffer_exceeded', buffer_limit_bytes=SDK_MAX_BUFFER_SIZE)
+        finally:
+            self.inputs.close()
         interrupted = self.stopped.is_set()
         completed = bool(result and result.subtype == 'success' and not result.is_error
-                         and not interrupted and not failure and not self.journal.pending)
+                         and finished and not interrupted and not failure and not self.journal.pending
+                         and not self.boundary_failed)
         answer = result.result if completed else ''
         if completed:
             answer = answer or ''.join(self.pending_text)

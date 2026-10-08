@@ -1,4 +1,5 @@
 """Control handoff latency and lifecycle tests with no provider calls."""
+import json
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,8 +9,129 @@ import pytest
 
 from app.security import digest
 from sandbox.continuation import ActiveTurnSteering
+from sandbox.context_store import ContextStore
+from sandbox.harness_agent import HarnessAgent, HarnessInputs, TurnJournal
+from sandbox.harness_registry import resolve
 from test_message_queue import queue, change  # noqa: F401
 from test_workspace import workspace  # noqa: F401
+
+
+def test_owned_inputs_persist_once_preserve_order_and_close(tmp_path):
+    store = ContextStore(tmp_path / 'context.sqlite3', 'input-test')
+    journal = TurnJournal([], 'Original request', store)
+    inputs = HarnessInputs(journal)
+    try:
+        assert not inputs.accept({'id': True, 'content': 'Invalid identity'})
+        assert not inputs.accept({'id': 0, 'content': 'Invalid identity'})
+        assert inputs.accept({'id': 2, 'content': 'First'})
+        assert inputs.accept({'id': 2, 'content': 'Duplicate'})
+        assert inputs.accept({'id': 1, 'content': 'Second'})
+        assert inputs.pending and not inputs.close_if_empty()
+        expected = ['[User correction to the current task]\nFirst',
+                    '[User correction to the current task]\nSecond']
+        assert inputs.take() == expected
+        assert not inputs.pending and inputs.take() == []
+        assert inputs.close_if_empty()
+        assert not inputs.accept({'id': 3, 'content': 'Too late'})
+        assert [item['content'] for item in journal.messages] == ['Original request', *expected]
+        restored = ContextStore(store.path, 'input-test')
+        try:
+            assert [json.loads(row[0]) for row in restored.db.execute(
+                'SELECT message FROM journal ORDER BY seq')] == journal.messages
+        finally:
+            restored.close()
+    finally:
+        store.close()
+
+
+def test_input_acceptance_and_completion_are_one_atomic_decision(monkeypatch):
+    journal = TurnJournal([], 'Original request')
+    inputs = HarnessInputs(journal)
+    entered, release, closing = threading.Event(), threading.Event(), threading.Event()
+    append = journal.append
+    def blocked_append(message):
+        entered.set()
+        assert release.wait(2)
+        append(message)
+    monkeypatch.setattr(journal, 'append', blocked_append)
+    def finish():
+        closing.set()
+        return inputs.close_if_empty()
+    with ThreadPoolExecutor() as pool:
+        accepted = pool.submit(inputs.accept, {'id': 1, 'content': 'Correction'})
+        try:
+            assert entered.wait(1)
+            completed = pool.submit(finish)
+            assert closing.wait(1)
+            assert not completed.done()
+        finally:
+            release.set()
+        assert accepted.result(timeout=1)
+        assert not completed.result(timeout=1)
+    inputs.close()
+    assert not inputs.accept({'id': 2, 'content': 'Too late'})
+    assert inputs.take() == ['[User correction to the current task]\nCorrection']
+    assert inputs.close_if_empty()
+
+
+def test_failed_input_journal_never_acknowledges_delivery(monkeypatch):
+    journal = TurnJournal([], 'Original request')
+    inputs = HarnessInputs(journal)
+    calls = []
+    def control(body):
+        calls.append(body)
+        return {'input': {'id': 1, 'content': 'Correction'}, 'receipt_only_supported': True}
+    def failed_append(message):
+        raise OSError('Local journal unavailable')
+    append = journal.append
+    monkeypatch.setattr(journal, 'append', failed_append)
+    steering = ActiveTurnSteering(SimpleNamespace(control=control))
+    agent = SimpleNamespace(accept_input=inputs.accept)
+    steering._poll(agent, boundary=False)
+    assert not inputs.pending and steering.receipts() == []
+    assert not any(body.get('receipt_only') for body in calls)
+    assert journal.messages == [{'role': 'user', 'content': 'Original request'}]
+    monkeypatch.setattr(journal, 'append', append)
+    steering._poll(agent, boundary=False)
+    assert inputs.pending and steering.receipts() == [1]
+    assert calls[-1] == {'version': 2, 'applied': [1], 'receipt_only': True}
+
+
+@pytest.mark.parametrize('harness', ['codex', 'claude-agent-sdk'])
+def test_native_input_admission_rejects_startup_and_closed_inbox(harness):
+    definition = resolve(harness)
+    assert definition.live_steering
+    agent = definition.create(spec={}, relay=SimpleNamespace(), config={}, activity=None,
+                              step=lambda: None, cwd='/workspace')
+    item = {'id': 1, 'content': 'Correction'}
+    steering = ActiveTurnSteering(SimpleNamespace(control=lambda body: {'input': item}))
+    try:
+        steering._poll(agent, boundary=False)
+        assert steering.receipts() == []
+        agent.journal = TurnJournal([], 'Original request')
+        agent.inputs = HarnessInputs(agent.journal)
+        agent.inputs.close()
+        steering._poll(agent, boundary=True)
+        assert steering.receipts() == []
+        assert agent.journal.messages == [{'role': 'user', 'content': 'Original request'}]
+    finally:
+        steering.close()
+        agent.close()
+
+
+@pytest.mark.parametrize('owned_inbox', [False, True])
+def test_only_native_redirect_supersedes_inflight_model_response(owned_inbox):
+    journal = TurnJournal([], 'Original request')
+    agent = SimpleNamespace(redirect=lambda text: True)
+    agent.accept_input = lambda item: HarnessAgent.accept_input(agent, item)
+    if owned_inbox:
+        agent.inputs = HarnessInputs(journal)
+    steering = ActiveTurnSteering(SimpleNamespace(control=lambda body: {
+        'input': {'id': 1, 'content': 'Correction'}}))
+    with steering.model_wait() as generation:
+        steering._poll(agent, boundary=False)
+        assert steering.receipts() == [1]
+        assert steering.cancelled(generation) is not owned_inbox
 
 
 @pytest.mark.parametrize('stage', ['control', 'attachments'])
@@ -126,7 +248,8 @@ def test_receipt_only_does_not_claim_next_input(queue):
     assert app.state.store.messages(run_id)[1]['status'] == 'injected'
 
 
-def test_native_monitor_delivers_and_clears_actual_queue_promptly(queue):
+@pytest.mark.parametrize('owned_inbox', [False, True])
+def test_native_monitor_delivers_and_clears_actual_queue_promptly(queue, owned_inbox):
     app, client, run_id, first, target, user = queue
     headers = setup_control(app, run_id)
     first_poll, acknowledged = threading.Event(), threading.Event()
@@ -140,6 +263,9 @@ def test_native_monitor_delivers_and_clears_actual_queue_promptly(queue):
     delivered = []
     steering = ActiveTurnSteering(SimpleNamespace(control=control))
     agent = SimpleNamespace(redirect=lambda text: delivered.append(text) or True)
+    if owned_inbox:
+        agent.inputs = HarnessInputs(TurnJournal([], 'Original request'))
+        agent.accept_input = agent.inputs.accept
     steering.listen(agent)
     try:
         assert first_poll.wait(2)
@@ -148,7 +274,10 @@ def test_native_monitor_delivers_and_clears_actual_queue_promptly(queue):
         assert acknowledged.wait(0.8)
         elapsed = time.monotonic() - started
         assert app.state.store.messages(run_id)[1]['status'] == 'injected'
-        assert len(delivered) == 1
+        if owned_inbox:
+            assert agent.inputs.take() == ['[User correction to the current task]\nQueued request']
+        else:
+            assert len(delivered) == 1
         print(f'Send now through runtime callback and durable receipt: {elapsed:.3f}s')
     finally:
         steering.close()

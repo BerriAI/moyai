@@ -26,6 +26,10 @@ EDGE_ERROR = ('Moyai could not reach the model because the cloud connection reje
               'resending the same message will not fix it.')
 
 
+class InputPending(Exception):
+    """This model request reached an adapter-owned live input boundary."""
+
+
 class BrokerRelay:
     def __init__(self, remote, token, notify=None, report_error=None):
         self.last_error = ''
@@ -105,8 +109,13 @@ class BrokerRelay:
                             return self.error(409, 'The failed model request is saved. Waiting for durable recovery.', 'broker_recovery_required')
                         if relay.context_recovery and relay.context_required:
                             return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
-                        if relay.before_model and not relay.before_model(raw):
-                            return self.error(409, 'Saving at a complete tool boundary.')
+                        try:
+                            if relay.before_model and not relay.before_model(raw):
+                                return self.error(409, 'Saving at a complete tool boundary.')
+                        except InputPending:
+                            # This request's outcome cannot be overwritten by
+                            # another model call or a replacement SDK stream.
+                            return self.error(400, 'A queued input is ready at this model boundary.', 'moyai_input_pending')
                     if credential_route:
                         try:
                             raw = json.dumps({'request_id':credential_route[1],'method':method,'path':credential_route[2],

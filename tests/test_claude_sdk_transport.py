@@ -183,13 +183,24 @@ def test_real_sdk_recovers_broker_failure_from_cold_tool_receipts(tmp_path, monk
     broker_recovery_case(tmp_path, monkeypatch)
 
 
-@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending', 'native', 'native-pressure', 'native-corrupt'],
-                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool', 'native-resume', 'native-pressure', 'native-corrupt'])
+@pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending', 'native', 'native-pressure', 'native-corrupt',
+                                   'steer-generation', 'steer-tool'],
+                         ids=['new-session', 'large-checkpoint', 'durable-checkpoint', 'context-pressure', 'interrupted-tool', 'native-resume', 'native-pressure', 'native-corrupt',
+                              'steer-generation', 'steer-tool'])
 @pytest.mark.parametrize('model', ['anthropic/claude-sonnet-4-5', 'openai/gpt-6-astra', 'fireworks_ai/glm-5p3'])
 def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resumed, model, request):
     calls, requests, events = [], [], []
     rejected = []
     native_case = resumed in {'native', 'native-pressure', 'native-corrupt'}
+    steering_case = resumed in {'steer-generation', 'steer-tool'}
+    steering_sent = threading.Event()
+    accepted_inputs = []
+
+    def steer():
+        accepted_inputs.append(agent.accept_input({'id': 17, 'content': 'Retain the original task. Use steering-marker.'}))
+        assert accepted_inputs == [True]
+        assert steering_sent.wait(3), 'The active SDK must accept input before the blocked work completes'
+
     pressure_case = resumed in {'pressure', 'native-pressure'}
     durable_case = resumed in {'durable', 'pressure', 'pending'} or native_case
     class Handler(BaseHTTPRequestHandler):
@@ -211,10 +222,14 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         def do_POST(self):
             data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             if self.path == '/tools/call':
+                if resumed == 'steer-tool':
+                    steer()
                 calls.append(data)
                 return self.reply({'text': data['arguments']['text']})
             assert self.path.startswith('/v1/messages')
             requests.append(data)
+            if resumed == 'steer-generation' and len(requests) == 1:
+                steer()
             if pressure_case and calls and not rejected:
                 rejected.append(True)
                 relay.context_required = {'input_tokens': 50000, 'input_budget': 20000}
@@ -296,7 +311,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             assert response.status_code == 200, response.text
             return response.json()
         relay.native = native
-        original_query, original_receive = ClaudeSDKClient.query, ClaudeSDKClient.receive_response
+        original_query, original_receive = ClaudeSDKClient.query, ClaudeSDKClient.receive_messages
         async def query(client, prompt, *args, **kwargs):
             native_prompts.append(prompt)
             return await original_query(client, prompt, *args, **kwargs)
@@ -306,7 +321,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     native_sessions.append(message.session_id)
                 yield message
         monkeypatch.setattr(ClaudeSDKClient, 'query', query)
-        monkeypatch.setattr(ClaudeSDKClient, 'receive_response', receive)
+        monkeypatch.setattr(ClaudeSDKClient, 'receive_messages', receive)
     workspace, session = tmp_path / 'workspace', tmp_path / 'session'
     workspace.mkdir()
     session.mkdir()
@@ -320,6 +335,16 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             complete=lambda *a: events.append(('complete', a)), commentary=lambda text: None),
         step=lambda: None, cwd=str(workspace), definition=None, context_store=context_store)
     agent = create_agent()
+    if steering_case:
+        from claude_agent_sdk import ClaudeSDKClient
+        original_query = ClaudeSDKClient.query
+
+        async def query(client, prompt, *args, **kwargs):
+            await original_query(client, prompt, *args, **kwargs)
+            if not isinstance(prompt, str):
+                steering_sent.set()
+
+        monkeypatch.setattr(ClaudeSDKClient, 'query', query)
     history = ([{'role': 'user', 'content': 'Continue the searchable dropdown task; do not repeat completed writes.'},
                 {'role': 'assistant', 'tool_calls': [{'id': 'read1', 'type': 'function', 'function': {
                     'name': 'Read', 'arguments': '{"file_path":"build.log"}'}}]},
@@ -346,6 +371,11 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         result = agent.run_conversation('Call the echo tool.', conversation_history=history, system_message='Transport fixture.')
         assert result['completed'], result['final_response']
         assert result['final_response'] == 'sdk-transport-ok'
+        if steering_case:
+            assert accepted_inputs == [True] and steering_sent.is_set()
+            assert 'steering-marker' in json.dumps(requests[-1]['messages'])
+            assert sum('steering-marker' in str(message.get('content')) for message in result['messages']) == 1
+            assert not agent.accept_input({'id': 18, 'content': 'This input belongs to the next invocation.'})
         assert calls == [{'name': 'echo', 'arguments': {'text': 'sdk-transport-ok'}}]
         expected = (['Read'] if resumed is True or resumed == 'pending' else []) + ['ToolSearch', 'mcp__moyai__echo']
         assert [args[1] for kind, args in events if kind == 'start'] == expected

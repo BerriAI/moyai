@@ -249,7 +249,7 @@ def test_native_context_handoff_reports_only_terminal_failure(tmp_path, monkeypa
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def query(self, prompt): pass
-        async def receive_response(self):
+        async def receive_messages(self):
             failed = begin()
             yield ResultMessage(subtype='error_during_execution' if failed else 'success',
                 duration_ms=1, duration_api_ms=1, is_error=failed, num_turns=1,
