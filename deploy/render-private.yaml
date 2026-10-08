@@ -1,0 +1,112 @@
+# Separate staged replacement. Review docs/cloudflare-access.md before applying.
+# Import the current service secrets privately; this creates a NEW empty disk.
+services:
+  - type: pserv
+    name: moyai-private
+    runtime: docker
+    region: oregon
+    plan: 1c-2g
+    numInstances: 1
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    preDeployCommand: /app/.venv/bin/python /app/build_workspace_image.py
+    autoDeployTrigger: "off"
+    disk:
+      name: moyai-private-state
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: DATA_DIR
+        value: /var/data/moyai
+      - key: LITELLM_TRACE_ENDPOINT
+        sync: false
+      - key: LITELLM_TRACE_API_KEY
+        sync: false
+      - key: RAINDROP_WRITE_KEY
+        sync: false
+      - key: RAINDROP_PROJECT_ID
+        sync: false
+      - key: LANGFUSE_BASE_URL
+        value: https://us.cloud.langfuse.com
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_TRACING_ENVIRONMENT
+        value: production
+      - key: TRACE_ENVIRONMENT
+        value: production
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_PROJECT
+        value: moyai
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_WORKSPACE_ID
+        sync: false
+      - key: BRAINTRUST_API_URL
+        value: https://api.braintrust.dev
+      - key: BRAINTRUST_PARENT
+        sync: false
+      - key: BRAINTRUST_API_KEY
+        sync: false
+      - key: RENDER_MIGRATION_STAGE
+        value: "true"
+      - key: BOOTSTRAP_MODAL_VOLUME
+        value: ""
+      - key: AGENT_HARNESS
+        value: claude-agent-sdk
+      - key: RUN_TIMEOUT_SECONDS
+        value: "0"
+      - key: MAX_CONCURRENT_RUNS
+        value: "100"
+      - key: MAX_PARALLEL_AGENTS
+        value: "100"
+      - key: MAX_CONCURRENT_MODEL_REQUESTS
+        value: "32"
+      - key: MAX_AGENT_ITERATIONS
+        value: "0"
+      - key: SANDBOX_ROTATION_SECONDS
+        value: "82800"
+      - key: SANDBOX_IDLE_SECONDS
+        value: "300"
+      # Production namespace credentials are installed and cutover is verified.
+      # The Temporal worker shares this service's disk; keep numInstances: 1.
+      - key: TEMPORAL_ENABLED
+        value: "true"
+      - key: TEMPORAL_TLS
+        value: "true"
+      - key: TEMPORAL_TASK_QUEUE
+        value: moyai-sessions-v1
+      - key: TEMPORAL_CHECKPOINT_SECONDS
+        value: "600"
+      # Import existing secrets privately in the Render dashboard. Never regenerate
+      # ENCRYPTION_KEY or saved organization connections cannot be decrypted.
+      - key: MOYAI_PUBLIC_URL
+        sync: false
+      - key: CLOUDFLARE_ACCESS_TEAM_DOMAIN
+        sync: false
+      - key: CLOUDFLARE_ACCESS_AUDIENCE
+        sync: false
+      - key: CLOUDFLARE_ACCESS_BROKER_AUDIENCE
+        sync: false
+      - key: CLOUDFLARE_ACCESS_CLIENT_ID
+        sync: false
+      - key: CLOUDFLARE_ACCESS_CLIENT_SECRET
+        sync: false
+
+  - type: worker
+    name: moyai-tunnel
+    runtime: image
+    region: oregon
+    plan: 0.5c-512mb
+    numInstances: 1
+    autoDeployTrigger: "off"
+    image:
+      url: docker.io/cloudflare/cloudflared:2026.10.0
+    dockerCommand: /usr/local/bin/cloudflared tunnel --no-autoupdate run
+    envVars:
+      - key: TUNNEL_TOKEN
+        sync: false

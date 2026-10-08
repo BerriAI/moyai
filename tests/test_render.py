@@ -5,7 +5,19 @@ from types import SimpleNamespace
 import pytest
 
 from app.db import Store
+from app.config import Settings
 from render_start import configure_environment, import_checkpoint, maintenance
+
+
+@pytest.fixture(autouse=True)
+def restore_render_environment(monkeypatch):
+    # configure_environment writes these process-wide values. Register them with
+    # monkeypatch so startup tests do not change later tests' Settings defaults.
+    import os
+    for key in ('PUBLIC_URL', 'TRUST_MODAL_PROXY', 'CHECKPOINT_DIR', 'MODAL_VOLUME_NAME', 'DATA_DIR'):
+        monkeypatch.setenv(key, os.environ.get(key, ''))
+        if not os.environ[key]:
+            os.environ.pop(key)
 
 
 class Volume:
@@ -85,3 +97,29 @@ def test_staging_cannot_accept_work_or_slack_events():
         assert client.get("/health").json()["mode"] == "migration_staging"
         assert client.post("/hooks/slack/events", json={"type":"event_callback"}).status_code == 503
         assert client.post("/api/runs", json={"prompt":"Do work"}).status_code == 503
+
+
+@pytest.mark.parametrize('render_origin', ['', 'https://old.onrender.com'])
+def test_explicit_custom_origin_supports_private_render_service(monkeypatch, render_origin):
+    import os
+    from docker_start import server_command
+    from docker_healthcheck import health_request
+    monkeypatch.setenv('RENDER_SERVICE_ID', 'srv-test')
+    monkeypatch.setenv('RENDER_EXTERNAL_URL', render_origin)
+    monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example/')
+    monkeypatch.delenv('PORT', raising=False)
+    assert Settings(_env_file=None).public_url == 'https://moyai.example/'
+    configure_environment()
+    assert os.environ['PUBLIC_URL'] == 'https://moyai.example'
+    assert server_command()[-1].endswith('render_start.py')
+    request = health_request()
+    assert request.full_url == 'http://127.0.0.1:10000/health'
+    assert request.get_header('Host') == 'moyai.example'
+
+
+@pytest.mark.parametrize('url', ['http://moyai.example', 'https://user:pass@moyai.example',
+                                  'https://moyai.example/path', 'https://moyai.example?bad=1'])
+def test_invalid_custom_origins_never_start(monkeypatch, url):
+    monkeypatch.setenv('MOYAI_PUBLIC_URL', url)
+    with pytest.raises(RuntimeError):
+        configure_environment()

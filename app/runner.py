@@ -452,9 +452,11 @@ class RunManager:
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
         process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",
-                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1)
+                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1,
+                                         env=self.settings.broker_environment(token))
         result = None
-        secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret]
+        secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret,
+                           self.settings.cloudflare_access_client_id, self.settings.cloudflare_access_client_secret]
 
         def scrub(value):
             for secret_value in secrets_to_hide:

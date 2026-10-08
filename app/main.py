@@ -27,6 +27,7 @@ from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
+from .cloudflare_access import CloudflareAccess, CloudflareAccessMiddleware
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
@@ -297,6 +298,8 @@ def create_app(settings: Settings | None = None):
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     app.add_middleware(BrokerDiagnosticsMiddleware)
+    app.state.cloudflare_access = CloudflareAccess(settings)
+    app.add_middleware(CloudflareAccessMiddleware, access=app.state.cloudflare_access)
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
         setattr(app.state, key, value)
 

@@ -14,10 +14,12 @@ from contextlib import nullcontext
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+    from .access_transport import broker_headers, open_broker
     from .broker_failure import MODEL_ROUTES, failure
     from .startup import StartupUnavailable, read_with_reconnect
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
+    from access_transport import broker_headers, open_broker
     from broker_failure import MODEL_ROUTES, failure
     from startup import StartupUnavailable, read_with_reconnect
 
@@ -134,12 +136,12 @@ class BrokerRelay:
                             relay.startup_failure = None
                         request_id = uuid4().hex
                         request = urllib.request.Request(remote.rstrip('/') + self.path,
-                            headers={'Authorization': 'Bearer ' + token, 'X-Moyai-Request-ID': request_id}, method='GET')
+                            headers={**broker_headers(remote, token), 'X-Moyai-Request-ID': request_id}, method='GET')
                         try:
                             status, content_type, body = read_with_reconnect(request,
                                 lambda response: (response.status, response.headers.get('Content-Type', 'application/json'),
                                                   response.read(MAX_BODY + 1)),
-                                stage='workspace_tools', notify=notify)
+                                stage='workspace_tools', notify=notify, opener=open_broker)
                         except StartupUnavailable as exc:
                             if self.path == '/tools':
                                 relay.startup_failure = exc
@@ -168,11 +170,11 @@ class BrokerRelay:
                             request_id = uuid4().hex
                             request_started = time.monotonic()
                             request = urllib.request.Request(remote.rstrip('/') + route, data=data,
-                                headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE,
+                                headers={**broker_headers(remote, token), 'Content-Type': CONTENT_TYPE,
                                          'X-Moyai-Request-ID': request_id,
                                          **{k: self.headers[k] for k in ('anthropic-version', 'anthropic-beta') if k in self.headers}}, method=method)
                             try:
-                                response = urllib.request.urlopen(request, timeout=940)
+                                response = open_broker(request, timeout=940)
                                 break
                             except urllib.error.HTTPError as exc:
                                 if (route not in {'/v1/chat/completions', '/v1/messages', '/v1/responses'} or exc.code != 429
@@ -283,10 +285,10 @@ class BrokerRelay:
     def control(self, body=None):
         request = urllib.request.Request(self.remote.rstrip('/') + '/control',
             data=seal(self.token, '/control', json.dumps(body or {}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with open_broker(request, timeout=5) as response:
                 value = json.load(response)
                 return value if isinstance(value, dict) else {}
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, ValueError):
@@ -295,8 +297,8 @@ class BrokerRelay:
 
     def context_window(self):
         request = urllib.request.Request(self.remote.rstrip('/') + '/context/window',
-            headers={'Authorization': 'Bearer ' + self.token, 'X-Moyai-Request-ID': uuid4().hex})
-        with urllib.request.urlopen(request, timeout=30) as response:
+            headers={**broker_headers(self.remote, self.token), 'X-Moyai-Request-ID': uuid4().hex})
+        with open_broker(request, timeout=30) as response:
             value = json.loads(response.read(8192))
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
             raise ValueError('The broker did not return a usable compaction window.')
@@ -306,9 +308,9 @@ class BrokerRelay:
         route = '/context/native'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps(body).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with open_broker(request, timeout=3) as response:
             raw = response.read(2_001_025)
             if len(raw) > 2_001_024:
                 raise ValueError('Native state response exceeded its limit.')
@@ -318,10 +320,10 @@ class BrokerRelay:
         route = '/context/maintenance'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps({'snapshot': snapshot, 'ack': ack}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         # This waits for durable job admission, never for summary inference.
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with open_broker(request, timeout=2) as response:
             raw = response.read(64_001)
             if len(raw) > 64_000:
                 raise ValueError('Context maintenance response exceeded its limit.')
@@ -342,10 +344,10 @@ class BrokerRelay:
         while True:
             request = urllib.request.Request(self.remote.rstrip('/') + route,
                 data=seal(self.token, route, body),
-                headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+                headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                          'X-Moyai-Request-ID': uuid4().hex}, method='POST')
             try:
-                response = urllib.request.urlopen(request, timeout=max(1, deadline - time.monotonic()))
+                response = open_broker(request, timeout=max(1, deadline - time.monotonic()))
                 break
             except urllib.error.HTTPError as exc:
                 if (exc.code != 429 or exc.headers.get('X-Moyai-Model-Queue') != '1'

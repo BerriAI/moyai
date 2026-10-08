@@ -2,8 +2,9 @@ from pathlib import Path
 from typing import Literal
 import base64
 import re
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
 
@@ -38,7 +39,50 @@ class Settings(BaseSettings):
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
-    public_url: str = "http://127.0.0.1:8787"
+    # Maintenance commands also need the private service's origin; they don't
+    # inherit the environment updates performed inside the server process.
+    public_url: str = Field(default='http://127.0.0.1:8787',
+                            validation_alias=AliasChoices('MOYAI_PUBLIC_URL', 'PUBLIC_URL', 'public_url'))
+    cloudflare_access_team_domain: str = ''
+    cloudflare_access_audience: str = ''
+    cloudflare_access_broker_audience: str = ''
+    cloudflare_access_client_id: str = Field(default='', repr=False)
+    cloudflare_access_client_secret: str = Field(default='', repr=False)
+    cloudflare_access_webhook_paths: list[str] = Field(default_factory=list)
+
+    @model_validator(mode='after')
+    def validate_cloudflare_access(self):
+        values = (self.cloudflare_access_team_domain, self.cloudflare_access_audience,
+                  self.cloudflare_access_broker_audience)
+        if any(values) and not all(values):
+            raise ValueError('Configure the Cloudflare team domain and both application audiences together.')
+        if self.cloudflare_access_team_domain:
+            if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.cloudflareaccess\.com', values[0]):
+                raise ValueError('Use the Cloudflare team hostname without a scheme or path.')
+            if values[1] == values[2]:
+                raise ValueError('Employee and broker Access applications must have different audiences.')
+            origin = urlsplit(self.public_url)
+            if (origin.scheme != 'https' or not origin.hostname or origin.username or origin.password
+                    or origin.path not in {'', '/'} or origin.query or origin.fragment
+                    or any(char in self.public_url for char in '\r\n')):
+                raise ValueError('Cloudflare Access requires an HTTPS PUBLIC_URL origin without a path or credentials.')
+        credentials = (self.cloudflare_access_client_id, self.cloudflare_access_client_secret)
+        if any(credentials) and (not all(credentials) or not all(values)):
+            raise ValueError('Configure both broker service credentials and Cloudflare Access.')
+        if any('\r' in value or '\n' in value for value in (*values, *credentials)):
+            raise ValueError('Cloudflare configuration cannot contain line breaks.')
+        if any(not re.fullmatch(r'/hooks/automations/[0-9a-f]{32}(?:/[a-z][a-z0-9_-]*)?', path)
+               for path in self.cloudflare_access_webhook_paths):
+            raise ValueError('Only exact automation webhook paths can be exempted from Access.')
+        return self
+
+    def broker_environment(self, token: str) -> dict[str, str]:
+        # Explicit empty values remove stale credentials on reused sandboxes.
+        return {'WORKSPACE_RUN_TOKEN': token,
+                'WORKSPACE_ACCESS_ORIGIN': self.public_url.rstrip('/') if self.cloudflare_access_client_id else '',
+                'WORKSPACE_ACCESS_CLIENT_ID': self.cloudflare_access_client_id,
+                'WORKSPACE_ACCESS_CLIENT_SECRET': self.cloudflare_access_client_secret}
+
     workspace_password: str = ""
     workspace_member_password: str = ""
     password_login_enabled: bool = True

@@ -208,7 +208,7 @@ class FakeSandbox:
         assert raise_on_termination is False
         return 0
 
-    async def execute(self, *command, timeout=None, bufsize=-1):
+    async def execute(self, *command, timeout=None, bufsize=-1, env=None):
         assert command[0] == "/opt/hermes-env/bin/python"
         async def wait():
             return 0 if self.completed else 1

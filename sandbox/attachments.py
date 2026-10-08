@@ -7,13 +7,15 @@ import urllib.request
 
 try:
     from .startup import read_with_reconnect
+    from .access_transport import broker_headers, open_broker
 except ImportError:
     from startup import read_with_reconnect
+    from access_transport import broker_headers, open_broker
 
 MAX_FILE = 10 * 1024 * 1024
 
 
-def prepare_attachments(spec, token, *, root=Path('/workspace/.moyai-attachments'), opener=urllib.request.urlopen, notify=None):
+def prepare_attachments(spec, token, *, root=Path('/workspace/.moyai-attachments'), opener=open_broker, notify=None):
     files = spec.get('attachments', [])
     if not files:
         return
@@ -35,7 +37,7 @@ def prepare_attachments(spec, token, *, root=Path('/workspace/.moyai-attachments
         if path.is_file() and path.stat().st_size == item['size'] and hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256']:
             continue
         request = urllib.request.Request(spec['broker_url'].rstrip('/') + '/attachments/' + attachment_id,
-                                         headers={'Authorization': 'Bearer ' + token})
+                                         headers=broker_headers(spec['broker_url'], token))
         raw = read_with_reconnect(request, lambda response: response.read(MAX_FILE + 1),
                                   stage='attachments', opener=opener, notify=notify)
         if len(raw) != item['size'] or hashlib.sha256(raw).hexdigest() != item['sha256']:

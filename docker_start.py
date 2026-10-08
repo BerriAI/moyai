@@ -21,7 +21,7 @@ def prepare_data_directory(directory: Path, uid: int, gid: int) -> None:
 
 
 def server_command() -> list[str]:
-    if os.environ.get("RENDER_EXTERNAL_URL"):
+    if os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get('RENDER_SERVICE_ID'):
         return [sys.executable, str(Path(__file__).with_name("render_start.py"))]
     return [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0",
             "--port", os.environ.get("PORT", "8787"), "--workers", "1",

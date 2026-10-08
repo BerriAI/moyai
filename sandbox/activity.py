@@ -1,5 +1,6 @@
 """Public work updates. Never forward arbitrary tool arguments or result bodies."""
 import json
+import os
 import re
 import threading
 import time
@@ -8,6 +9,10 @@ import uuid
 
 def public_text(value, limit=2000):
     text = str(value or '')
+    for name in ('WORKSPACE_ACCESS_CLIENT_ID', 'WORKSPACE_ACCESS_CLIENT_SECRET'):
+        secret = os.environ.get(name, '')
+        if secret:
+            text = text.replace(secret, '[redacted]')
     text = re.sub(r'<(think|thinking|reasoning)\b[^>]*>.*?(?:</\1>|$)', '', text, flags=re.I | re.S)
     text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|$)', '[redacted]', text, flags=re.S)
     text = re.sub(r'(?i)\b(?:sk-[\w-]{8,}|xox[baprs]-[\w-]+|gh[pousr]_[\w]+|github_pat_[\w]+)', '[redacted]', text)
