@@ -83,6 +83,11 @@ def demonstrate() -> str:
                 'request_id': first['request_id'], 'revision': 2, 'failure': 'invalid'})
             assert lookup['status'] == 'lookup_required' and pending() == 0
             lines.append('3. Report organization-key rejection → 1PASSWORD LOOKUP REQUIRED. Forms: 0.')
+            retry = call('credentials_http_request', {
+                'request_id': first['request_id'], 'method': 'GET', 'path': '/models'})
+            assert retry['status_code'] == 401 and retry['response']['status'] == 'lookup_required'
+            assert 'form' not in retry['response']['error']['message'].lower() and pending() == 0
+            lines.append('   Retry inactive key → ' + retry['response']['error']['message'])
             source = call('credentials_request', {
                 'provider': 'generic', 'name': '1password-shared', 'secret_id': source_id,
                 'reason': 'Inspect Shared before asking for another key', 'request_key': 'shared',

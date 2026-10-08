@@ -219,6 +219,48 @@ async def test_provider_rejection_selects_alternative_without_replaying_http(wor
     assert len(calls) == 1 and 'moyai_wait_credential' not in response
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('inactive', ['invalid', 'expired'])
+@pytest.mark.parametrize('recovery', ['saved', 'source', 'prompt'])
+async def test_inactive_key_invoke_follows_available_recovery(workspace, monkeypatch, inactive, recovery):
+    app, client = workspace
+    sign_in(app, client)
+    saved = save(client, provider='openai').json()['id']
+    if recovery == 'saved':
+        alternative = save(client, 'organization', provider='openai', suffix='org').json()['id']
+    elif recovery == 'source':
+        shared(client)
+    vault, run = app.state.credentials, active(app)
+    request = vault.request(run, provider_request())
+    if inactive == 'expired':
+        vault.store.execute('UPDATE provider_secrets SET expires_at=? WHERE id=?',
+                            ('2000-01-01T00:00:00+00:00', saved))
+    else:
+        vault.store.execute("UPDATE provider_secrets SET invalid_reason='invalid' WHERE id=?", (saved,))
+
+    def unexpected_provider_call(**kwargs):
+        pytest.fail('An inactive key must return recovery without making a provider request.')
+
+    monkeypatch.setattr(httpx, 'AsyncClient', unexpected_provider_call)
+    # Source recovery leaves the handle provided. Repeating the original call
+    # must still direct the agent to Shared instead of a nonexistent form.
+    for _ in range(2 if recovery == 'source' else 1):
+        status, response = await vault.invoke(run, Invoke(
+            request_id=request['request_id'], method='GET', path='/models'))
+        assert status == 401
+        assert response['status'] == {'saved': 'provided', 'source': 'lookup_required', 'prompt': 'pending'}[recovery]
+        assert 'form' not in response['error']['message'].lower()
+        if recovery == 'saved':
+            assert response['retry_required'] and vault.row(request['request_id'])['secret_id'] == alternative
+        elif recovery == 'source':
+            assert response['credential_sources'] and 'credentials_run' in response['instructions']
+        if recovery == 'prompt':
+            assert response['moyai_wait_credential'] == request['request_id']
+        else:
+            assert 'moyai_wait_credential' not in response
+            assert not client.get('/api/runs/' + run['id']).json()['credential_requests']
+
+
 def test_declined_access_is_not_reopened_when_source_is_connected(workspace, monkeypatch):
     app, client = workspace
     sign_in(app, client)
