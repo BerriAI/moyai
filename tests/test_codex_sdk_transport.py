@@ -31,10 +31,14 @@ def send_response(handler, output, sequence, input_tokens=500):
     handler.wfile.write(raw)
 
 
-@pytest.mark.parametrize('outcome', ['complete', 'interrupt', 'provider-error', 'compaction'])
+@pytest.mark.parametrize('outcome', [
+    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
 def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, outcome):
     requests, attempts, calls, events, faults = [], [], [], [], []
     samples, summaries = [], []
+    boundaries, recovered = [], []
+    successful = outcome in {'complete', 'compaction', 'context-recovery-limit'}
+    max_iterations = {'context-recovery-limit': 4, 'iteration-limit': 2}.get(outcome, 12)
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     # A selected workspace must not install its own runtime tools or inject a
@@ -82,7 +86,14 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
                 faults.append('Unexpected POST ' + self.path)
                 return self.reply({'error': {'message': 'Unknown route'}}, 404)
             attempts.append(data)
-            if not relay.before_model(raw):
+            if getattr(relay, 'context_required', None):
+                return self.reply({'error': {'message': 'Waiting for the saved-context handoff',
+                    'type': 'context_length_exceeded', 'code': 'context_length_exceeded'}}, 400)
+            allowed = relay.before_model(raw)
+            boundaries.append({'namespace': agent.journal.call_namespace, 'allowed': allowed,
+                'model_calls': agent.model_calls, 'completed_tools': agent.journal.completed_tools,
+                'pending': bool(agent.journal.pending)})
+            if not allowed:
                 return self.reply({'error': {'message': 'Stopped at saved tool boundary'}}, 409)
             requests.append(data)
             if 'You are performing a CONTEXT CHECKPOINT COMPACTION.' in json.dumps(data):
@@ -95,6 +106,10 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             if outcome == 'provider-error' and len(requests) == 2:
                 return self.reply({'error': {'message': 'provider-private-error-marker'}}, 503)
             sequence = len(samples)
+            if outcome == 'context-recovery-limit' and sequence == 4:
+                relay.context_required = {'input_tokens': 50000, 'input_budget': 20000}
+                return self.reply({'error': {'message': 'Context handoff requested',
+                    'type': 'context_length_exceeded', 'code': 'context_length_exceeded'}}, 400)
             scripts = [
                 'text(await tools.exec_command(' + json.dumps({
                     'cmd': 'test -z "$OPENAI_API_KEY" && printf codex-shell-ok', 'login': False}) + '));',
@@ -121,13 +136,22 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
     store = ContextStore(tmp_path / 'context.sqlite3', 'codex-transport')
     store.initialize([])
 
+    def compact(previous, entries, **kwargs):
+        recovered.append(entries)
+        source = previous + json.dumps(entries)
+        return {'summary': 'Completed receipts: ' + ', '.join(marker for marker in (
+            'codex-shell-ok', 'codex-file-ok', 'codex-mcp-ok') if marker in source),
+            'through_seq': entries[-1]['seq']}
+
+    relay.compact = compact
+
     def step():
         if outcome == 'interrupt' and agent.journal.completed_tools:
             assert not agent.journal.pending
             agent.interrupt()
 
     def create_agent():
-        return CodexAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': 12},
+        return CodexAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': max_iterations},
             relay=relay, config={'mcp_servers': {'workspace': {
                 'command': sys.executable,
                 'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
@@ -156,37 +180,67 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert not any(tool.get('name') == 'collaboration' for tool in catalog)
         started = [args for kind, args in events if kind == 'start']
         completed = [args for kind, args in events if kind == 'complete']
-        assert len(started) == len(completed) == (3 if outcome in {'complete', 'compaction'} else 1)
+        expected_tools = 3 if successful else 2 if outcome == 'iteration-limit' else 1
+        assert len(started) == len(completed) == expected_tools
         assert [args[0] for args in started] == [args[0] for args in completed]
         assert all(args[0] not in {'call_1', 'call_2', 'call_3'} for args in completed)
         assert not agent.journal.pending and not store.pending
         assert 'codex-shell-ok' in json.dumps(result['messages'])
         assert 'provider-private-error-marker' not in json.dumps(result)
-        if outcome not in {'complete', 'compaction'}:
+        if not successful:
             assert not result['completed']
             assert result['interrupted'] is (outcome == 'interrupt')
-            assert result['failed'] is (outcome == 'provider-error')
+            assert result['failed'] is (outcome != 'interrupt')
             assert len(requests) == (1 if outcome == 'interrupt' else 2)
-            assert len(attempts) == 2
+            assert len(attempts) == (3 if outcome == 'iteration-limit' else 2)
             assert not calls
             if outcome == 'provider-error':
                 assert result['sdk_failure']['http_status'] == 503
+            if outcome == 'iteration-limit':
+                assert [boundary['allowed'] for boundary in boundaries] == [True, True, False]
+                assert [boundary['model_calls'] for boundary in boundaries] == [1, 2, 2]
+                assert len({boundary['namespace'] for boundary in boundaries}) == 1
+                assert boundaries[-1]['completed_tools'] == 2 and not boundaries[-1]['pending']
+                assert not recovered
+                assert (workspace / 'receipt.txt').read_text() == 'codex-file-ok\n'
+                assert sum(json.loads(row[0]).get('role') == 'tool'
+                           for row in store.db.execute('SELECT message FROM journal')) == 2
+                print(f'Native iteration limit: {len(requests)} admitted requests, '
+                      f'{len(completed)} settled tools; request {len(attempts)} blocked; '
+                      f'{len(recovered)} recovery attempts.')
             return
-        assert result['completed'] and result['final_response'] == 'codex-transport-ok'
+        assert result['completed'], {'result': result['final_response'], 'boundaries': boundaries,
+                                     'recovered': len(recovered)}
+        assert result['final_response'] == 'codex-transport-ok'
         assert (workspace / 'receipt.txt').read_text() == 'codex-file-ok\n'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'codex-mcp-ok'}}]
         assert [args[1] for args in completed] == ['terminal', 'apply_patch', 'mcp__moyai__echo']
         if outcome == 'compaction':
             assert len(summaries) >= 2
             assert 'native-private-summary-marker' in json.dumps(samples[-1])
+        if outcome == 'context-recovery-limit':
+            assert len(recovered) == 1 and store.state()['cursor'] == 7
+            assert len(samples) == len(requests) == 5
+            assert all(boundary['allowed'] and not boundary['pending'] for boundary in boundaries)
+            assert [boundary['model_calls'] for boundary in boundaries] == [1, 2, 3, 4, 1]
+            assert len({boundary['namespace'] for boundary in boundaries[:4]}) == 1
+            assert boundaries[4]['namespace'] != boundaries[3]['namespace']
+            assert 'This is a context handoff, not a new request.' in json.dumps(samples[-1])
+            assert all(marker in json.dumps(samples[-1]) for marker in (
+                'codex-shell-ok', 'codex-file-ok', 'codex-mcp-ok'))
+            print(f'Native context recovery at cap {max_iterations}: '
+                  f'{len(completed)} settled tools, {len(recovered)} public-context compaction, '
+                  f'new invocation admitted at count {boundaries[-1]["model_calls"]}; '
+                  f'final response: {result["final_response"]}.')
         agent.close()
         store.close()
         store = ContextStore(tmp_path / 'context.sqlite3', 'codex-transport')
         agent = create_agent()
         result = agent.run_conversation('Continue using the saved receipts.', conversation_history=[],
                                         system_message='requester-private-second-marker')
-        assert result['completed'] and len(samples) == 5 and len(calls) == 1
-        assert len(requests) == 5 + len(summaries)
+        expected_samples = 6 if outcome == 'context-recovery-limit' else 5
+        assert result['completed'] and len(samples) == expected_samples and len(calls) == 1
+        assert len(requests) == expected_samples + len(summaries)
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])
         assert 'codex-mcp-ok' in json.dumps(requests[-1])
@@ -196,6 +250,14 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert 'native-private-summary-marker' not in saved
         assert 'native-private-summary-marker' not in json.dumps(requests[-1])
         assert not store.pending
+        if outcome == 'context-recovery-limit':
+            rows = (json.loads(row[0]) for row in store.db.execute('SELECT message FROM journal'))
+            receipts = [message for message in rows if message.get('role') == 'tool']
+            assert len(receipts) == 3
+            assert len({receipt['tool_call_id'] for receipt in receipts}) == 3
+            assert all(marker in json.dumps(receipts) for marker in (
+                'codex-shell-ok', 'codex-file-ok', 'codex-mcp-ok'))
+            assert sum(kind == 'start' for kind, _ in events) == 3
     finally:
         agent.close()
         store.close()

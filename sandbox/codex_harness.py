@@ -181,7 +181,6 @@ class CodexAgent(HarnessAgent):
         self.stopped.clear()
         self.boundary_failed = False
         self.boundary_reason = ''
-        self.model_calls = 0
         conversation_history = prepare_context(self, conversation_history)
         self.journal = TurnJournal(conversation_history, prompt, self.context_store)
         return run_with_context_recovery(self, prompt, conversation_history,
@@ -189,6 +188,9 @@ class CodexAgent(HarnessAgent):
 
     async def _run(self, prompt, system_message):
         from openai_codex.async_client import AsyncCodexClient
+        # Each fresh SDK invocation has its own local ceiling. The gateway and
+        # shared recovery loop retain the whole task's request cap and deadline.
+        self.model_calls = 0
         self.calls.clear()
         self.completed.clear()
         self.journal.call_namespace = uuid4().hex
