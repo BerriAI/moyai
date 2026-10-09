@@ -342,3 +342,80 @@ def test_unknown_native_fields_and_messages_do_not_enter_diagnostics():
     error.__cause__ = cause
     assert exception_details(error) == {'source': 'exception', 'exception_type': 'RuntimeError',
                                         'cause_type': 'ConnectionResetError'}
+
+
+@pytest.mark.parametrize('failure', ['native', 'mcp'])
+async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_progress(tmp_path, failure):
+    from pathlib import Path
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+    from sandbox.claude_harness import ClaudeAgent
+    from sandbox.harness_agent import TurnJournal
+
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to exercise the production activity renderer')
+    store = Store(tmp_path)
+    run = store.create_run('Save my preference', '', 'demo', [],
+                           chat_enabled=True, harness='claude-agent-sdk')
+    turn = store.claim_message(run['id'])
+    store.update_run(run['id'], status='running')
+    emitted = []
+
+    def emit(kind, text, data):
+        data = {**data, 'activity_id': str(len(emitted)), 'input_id': turn['id']}
+        emitted.append((kind, text, data))
+        store.event(run['id'], kind, text, data)
+
+    agent = ClaudeAgent(spec={}, relay=SimpleNamespace(), config={},
+                        activity=ActivityReporter(emit), step=lambda: None,
+                        cwd=str(tmp_path), definition=None)
+    agent.journal = TurnJournal([], 'Save my preference')
+    tool = {'tool_name': 'mcp__moyai__memory_save',
+            'tool_input': {'content': 'private-preference-marker'}}
+    agent.pending_text.append('<status>Saving your preference</status>I will save that preference once.')
+    await agent.tool_hook({**tool, 'hook_event_name': 'PreToolUse'}, 'rejected', {})
+    error = ({'hook_event_name': 'PostToolUseFailure', 'error': 'temporary-unavailable-marker'}
+             if failure == 'native' else {'hook_event_name': 'PostToolUse', 'tool_response': {
+                 'isError': True, 'content': [{'type': 'text', 'text': 'temporary-unavailable-marker'}]}})
+    await agent.tool_hook({**tool, **error}, 'rejected', {})
+    # Journal re-delivery retains source identity; it cannot repeat the opening.
+    for kind, text, data in emitted[:2]:
+        store.event(run['id'], kind, 'Replayed acknowledgement' if kind == 'message' else text, data)
+    agent.pending_text.append('<status>Verifying the saved preference</status>')
+    await agent.tool_hook({**tool, 'hook_event_name': 'PreToolUse'}, 'saved', {})
+    await agent.tool_hook({**tool, 'hook_event_name': 'PostToolUse',
+                          'tool_response': {'saved': True, 'content': 'private-preference-marker'}}, 'saved', {})
+    assert not agent.journal.pending
+    assert 'temporary-unavailable-marker' in json.dumps(agent.journal.messages)
+    events = store.events(run['id'])
+    assert [event['data']['phase'] for event in events if event['kind'] == 'tool'] == [
+        'started', 'error', 'started', 'completed']
+    assert 'private-preference-marker' not in json.dumps(events)
+    assert [event['message'] for event in events if event['kind'] == 'message'] == [
+        'I will save that preference once.']
+
+    def projection():
+        snapshot = {**store.run(run['id']), 'messages': store.messages(run['id']),
+                    'events': store.events(run['id'])}
+        result = subprocess.run([node, '-e',
+            "const fs=require('node:fs'),ui=require(process.argv[1]),run=JSON.parse(fs.readFileSync(0,'utf8'));"
+            "const turn=ui.current(run);process.stdout.write(JSON.stringify({"
+            "rows:turn.rows.filter(r=>r.kind==='tool').map(r=>r.state),headline:turn.headline,"
+            "html:ui.html(turn),collapsed:[...ui.completedHistory(run).keys()]}));",
+            str(Path(__file__).resolve().parents[1] / 'app/static/activity.js')],
+            input=json.dumps(snapshot), text=True, capture_output=True, check=True)
+        return json.loads(result.stdout)
+
+    active = projection()
+    assert active['rows'] == ['completed']
+    assert active['headline'] == 'Verifying the saved preference'
+    assert active['collapsed'] == []
+    assert 'temporary-unavailable-marker' not in active['html']
+    store.finish_message(run['id'], turn['id'], 'Saved to your personal preferences.')
+    store.update_run(run['id'], status='idle')
+    finished = projection()
+    assert finished['collapsed'] == [str(turn['id'])]
+    assert finished['rows'] == ['completed']
+    assert store.messages(run['id'])[-1]['content'] == 'Saved to your personal preferences.'

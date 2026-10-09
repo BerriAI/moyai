@@ -12,11 +12,15 @@ try:
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .native_session import NativeSession, MAX_BYTES
     from .sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
+    from .transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
+    from .broker_relay import InputPending
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from native_session import NativeSession, MAX_BYTES
     from sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
+    from transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
+    from broker_relay import InputPending
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']
@@ -94,7 +98,11 @@ class ClaudeAgent(HarnessAgent):
         self.model_lock = threading.RLock()
         self.boundary_failed = False
         self.boundary_reason = ''
+        self.transport_attempt = spec.get('transport_attempt', 0)
+        self.recovery_input = None
+        self.recovery_rejections = set()
         relay.before_model = self.before_model
+        relay.on_model_blocked = self.model_blocked
         relay.context_recovery = True
 
     def validate(self):
@@ -113,8 +121,20 @@ class ClaudeAgent(HarnessAgent):
     def interrupt(self):
         self.stopped.set()
 
+    def model_blocked(self):
+        with self.model_lock:
+            receipt = uuid4().hex
+            self.recovery_rejections.add(receipt)
+            return InputPending(receipt)
+
     def before_model(self, request=None):
         with self.model_lock:
+            # A finished background command can wake Claude before its queued
+            # continuation is ingested. Admit only a request carrying that input.
+            if self.recovery_input:
+                if self.recovery_input.encode() not in (request or b''):
+                    raise self.model_blocked()
+                self.recovery_input = None
             if self.journal and not self.journal.pending:
                 self.context.step()
                 if not self.stopped.is_set():
@@ -210,6 +230,79 @@ class ClaudeAgent(HarnessAgent):
             return run_with_context_recovery(self, prompt, conversation_history,
                 lambda current: asyncio.run(self._run(current, system_message)))
 
+    async def recover_model(self, client, observed_failure):
+        """Continue the existing SDK session; never replay a failed HTTP POST.
+
+        The receive loop stays active while readiness is checked, so SDK hooks
+        and late tool receipts cannot be blocked by its bounded event queue.
+        The surrounding task timeout includes this recovery window.
+        """
+        relay = self.context.relay
+
+        def can_continue():
+            limit = self.context.spec.get('max_iterations')
+            return (retryable_failure(observed_failure, live=True)
+                    and not self.stopped.is_set() and not self.boundary_failed and not relay.uncertain_tool
+                    and relay.last_failure is observed_failure and not relay.context_required
+                    and not (limit and self.model_calls >= limit))
+
+        if self.transport_attempt >= MAX_TRANSPORT_ATTEMPTS or not can_continue():
+            return False
+        self.transport_attempt += 1
+        self.context.activity.emit('status', 'Reconnecting to continue with the existing tools and saved results.',
+                                   {'activity_version': 1, 'phase': 'reconnecting', 'stage': 'model_transport'})
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.context.spec.get('transport_recovery_seconds', 600)
+        retry_at = loop.time() + 2 ** self.transport_attempt
+        probe = None
+        try:
+            while True:
+                if not can_continue():
+                    return False
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    self.boundary_failed = True
+                    self.boundary_reason = 'model connection recovery timed out'
+                    return False
+                if probe is None and loop.time() >= retry_at:
+                    probe = asyncio.create_task(asyncio.to_thread(relay.model_ready, timeout=min(1, remaining)))
+                if probe is not None and probe.done():
+                    try:
+                        ready = probe.result()
+                    except Exception:
+                        self.boundary_failed = True
+                        self.boundary_reason = 'broker readiness could not be verified'
+                        return False
+                    probe = None
+                    if ready:
+                        break
+                    retry_at = loop.time() + 1
+                await asyncio.sleep(min(.05, remaining))
+        finally:
+            if probe is not None:
+                probe.cancel()
+                await asyncio.gather(probe, return_exceptions=True)
+        self.pending_text.clear()  # Native error text is not a public update.
+        continuation = ('Continue the unfinished task in this same session after the connection recovered. '
+                        'Inspect the existing tool results and running commands; do not repeat completed actions '
+                        'or start duplicate commands. Apply any user corrections already received. '
+                        'Continue working without repeating the acknowledgement or opening plan.')
+        corrections = self.inputs.take() if self.inputs is not None else []
+        if corrections:
+            continuation += '\n\nLatest user corrections:\n' + '\n\n'.join(corrections)
+        with self.model_lock:
+            if not can_continue():
+                return False
+            self.recovery_input = str(uuid4())
+            continuation += '\nRecovery input: ' + self.recovery_input
+            if not relay.resume_model(observed_failure, live=True):
+                self.recovery_input = None
+                return False
+        await client.query(continuation)
+        self.context.activity.emit('status', 'Connection restored. Continuing the task.',
+                                   {'activity_version': 1, 'phase': 'recovered', 'stage': 'model_transport'})
+        return True
+
     async def _run(self, prompt, system_message):
         from claude_agent_sdk import ClaudeSDKClient, AssistantMessage, TextBlock, ResultMessage, SystemMessage, UserMessage
         result = None
@@ -218,14 +311,17 @@ class ClaudeAgent(HarnessAgent):
         self.model_calls = 0
         self.boundary_failed = False
         self.boundary_reason = ''
+        self.recovery_input = None
+        self.recovery_rejections = set()
         self.inputs = HarnessInputs(self.journal)
         submitted = set()
         query_lock = asyncio.Lock()
+        recovering = False
 
         async def send_inputs(client):
             while True:
                 async with query_lock:
-                    corrections = self.inputs.take()
+                    corrections = [] if recovering else self.inputs.take()
                     if corrections:
                         identity = str(uuid4())
                         submitted.add(identity)
@@ -248,13 +344,48 @@ class ClaudeAgent(HarnessAgent):
                     try:
                         async with asyncio.TaskGroup() as tasks:
                             sender = tasks.create_task(send_inputs(client))
+                            stream = client.receive_messages().__aiter__()
+                            incoming = asyncio.create_task(anext(stream))
+                            recovery = None
+                            recovery_failure = None
+                            deferred = None
+                            recovery_failed = False
+
+                            async def resume(observed_failure):
+                                async with query_lock:
+                                    return await self.recover_model(client, observed_failure)
+
                             try:
-                                async for message in client.receive_messages():
+                                while not recovery_failed:
+                                    ready, _ = await asyncio.wait(
+                                        [incoming, *([recovery] if recovery is not None else [])],
+                                        return_when=asyncio.FIRST_COMPLETED)
+                                    if recovery is not None and recovery in ready:
+                                        recovered = await recovery
+                                        recovery = None
+                                        recovering = False
+                                        if deferred is not None:
+                                            result, recovery_failure = deferred
+                                            deferred = None
+                                            recovering = True
+                                            recovery = asyncio.create_task(resume(recovery_failure))
+                                        else:
+                                            recovery_failed = not recovered
+                                            if recovered:
+                                                result = None
+                                    if incoming not in ready:
+                                        continue
+                                    try:
+                                        message = incoming.result()
+                                    except StopAsyncIteration:
+                                        break
+                                    incoming = asyncio.create_task(anext(stream))
                                     if isinstance(message, UserMessage):
                                         if message.parent_tool_use_id is None:
                                             submitted.discard(message.uuid)
                                     elif isinstance(message, AssistantMessage):
-                                        self.pending_text.extend(block.text for block in message.content if isinstance(block, TextBlock))
+                                        if not message.error and message.parent_tool_use_id is None:
+                                            self.pending_text.extend(block.text for block in message.content if isinstance(block, TextBlock))
                                     elif isinstance(message, SystemMessage) and message.subtype == 'compact_boundary':
                                         self.native_compactions += 1
                                         self.pending_text.clear()
@@ -265,9 +396,54 @@ class ClaudeAgent(HarnessAgent):
                                         if self.transcript is not None:
                                             self.transcript.valid = False
                                     elif isinstance(message, ResultMessage):
+                                        # Match an issued local rejection, not a generic HTTP
+                                        # status or count. A later stop/limit remains terminal.
+                                        with self.model_lock:
+                                            if (not self.stopped.is_set() and not self.boundary_failed
+                                                    and message.is_error and getattr(message, 'api_error_status', None) == 400):
+                                                receipt = next((value for value in self.recovery_rejections
+                                                                if message.result == 'API Error: 400 ' + InputPending(value).message()), None)
+                                                if receipt is not None:
+                                                    self.recovery_rejections.remove(receipt)
+                                                    continue
+                                        if message.subtype != 'success' or message.is_error or self.stopped.is_set():
+                                            result = message
+                                            if self.stopped.is_set() or self.boundary_failed:
+                                                break
+                                            observed_failure = getattr(self.context.relay, 'last_failure', None)
+                                            status = getattr(result, 'api_error_status', None)
+                                            # Network faults without an upstream HTTP status
+                                            # are returned as 502 by the relay. Stream EOF can
+                                            # instead end natively without an API status.
+                                            model_error = isinstance(observed_failure, dict) and (
+                                                status == (observed_failure.get('http_status') or 502)
+                                                or (status is None and observed_failure.get('response_started')
+                                                    and observed_failure.get('transport_interrupted')))
+                                            if (result.subtype not in {'success', 'error_during_execution'}
+                                                    or not model_error):
+                                                self.boundary_failed = True
+                                                self.boundary_reason = 'native model turn failed'
+                                                break
+                                            if recovery is not None:
+                                                # A new forwarded request can fail before query()
+                                                # returns. Retain that failure until the write ends;
+                                                # unrelated native errors must terminate immediately.
+                                                if (observed_failure is recovery_failure
+                                                        or not retryable_failure(observed_failure, live=True)):
+                                                    self.boundary_failed = True
+                                                    self.boundary_reason = 'native model turn failed during recovery'
+                                                    break
+                                                deferred = (result, observed_failure)
+                                                continue
+                                            recovery_failure = observed_failure
+                                            recovering = True
+                                            recovery_failed = False
+                                            recovery = asyncio.create_task(resume(recovery_failure))
+                                            continue
+                                        if (recovery_failed or deferred is not None or self.recovery_input
+                                                or (recovering and self.context.relay.model_failed)):
+                                            continue
                                         result = message
-                                        if result.subtype != 'success' or result.is_error or self.stopped.is_set():
-                                            break
                                         # During tools, Claude can merge a correction into
                                         # this turn; during a final response it starts a new
                                         # one. UUID echoes, not result counts, prove delivery.
@@ -284,6 +460,10 @@ class ClaudeAgent(HarnessAgent):
                                         self.pending_text.clear()
                             finally:
                                 sender.cancel()
+                                pending = [incoming, *([recovery] if recovery is not None else [])]
+                                for task in pending:
+                                    task.cancel()
+                                await asyncio.gather(*pending, return_exceptions=True)
                     except ExceptionGroup as exc:
                         # Preserve the SDK's body-free diagnostic type when a
                         # single receive/write failure exits the task group.
@@ -322,6 +502,7 @@ class ClaudeAgent(HarnessAgent):
 
     def close(self):
         self.context.relay.before_model = None
+        self.context.relay.on_model_blocked = None
         self.context.relay.context_recovery = False
         if self.native is not None:
             self.native.close()

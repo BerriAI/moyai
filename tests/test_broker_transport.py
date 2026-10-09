@@ -42,6 +42,23 @@ def diagnostic_relay(handler, *, remote=None):
         relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
 
 
+@pytest.mark.parametrize('receipt', [None, 'a' * 32, 'private-invalid-receipt'])
+def test_local_input_rejection_preserves_only_a_safe_receipt(receipt):
+    from sandbox.broker_relay import InputPending
+    with diagnostic_relay(BaseHTTPRequestHandler) as (relay, client, diagnostics):
+        def reject(request):
+            raise InputPending(receipt)
+        relay.before_model = reject
+        response = client.post('/v1/messages', json={'messages': ['private-prompt']})
+        assert response.status_code == 400
+        error = response.json()['error']
+        assert error['code'] == 'moyai_input_pending'
+        assert error['message'] == ('A queued input is ready at this model boundary.'
+                                    + (' Receipt: ' + receipt if receipt == 'a' * 32 else ''))
+        assert 'private' not in response.text
+        assert not diagnostics and relay.last_failure is None and not relay.model_failed
+
+
 def test_refused_connection_preserves_cause_type_and_errno_without_endpoint():
     # Reserve a port until the test servers have bound their own ports, then
     # close it so the relay encounters a real refused connection.
@@ -61,7 +78,9 @@ def test_refused_connection_preserves_cause_type_and_errno_without_endpoint():
             assert 'private' not in json.dumps(saved) and '127.0.0.1' not in json.dumps(saved)
 
 
-def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
+@pytest.mark.parametrize('native_receipt', [False, True])
+def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend(native_receipt):
+    from sandbox.broker_relay import InputPending
     calls = []
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -95,7 +114,15 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend():
         assert client.get('/tools').status_code == 200
         assert relay.last_failure == saved and relay.last_error
         # The SDK may automatically retry 502; it must not resubmit inference.
-        assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 409
+        if native_receipt:
+            def blocked_receipt() -> InputPending:
+                return InputPending('a' * 32)
+            relay.on_model_blocked = blocked_receipt
+        blocked = client.post('/v1/messages', json={'messages': ['private-prompt']})
+        assert blocked.status_code == (400 if native_receipt else 409)
+        if native_receipt:
+            assert blocked.json()['error']['message'] == InputPending('a' * 32).message()
+        assert relay.last_failure is saved and relay.model_failed
         assert len(calls) == 1 and len(diagnostics) == 1
         # A live native continuation must explicitly consume this exact failure.
         assert not relay.resume_model(dict(saved))

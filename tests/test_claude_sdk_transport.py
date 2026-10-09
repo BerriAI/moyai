@@ -32,6 +32,8 @@ def test_claude_background_compaction_keeps_running_sdk_and_new_tail(tmp_path, m
 
 def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
     """Real SDK/MCP recovery proof, also callable by the local recording demo."""
+    from claude_agent_sdk import ClaudeSDKClient, ResultMessage
+    from sandbox.activity import ActivityReporter
     from sandbox.broker_relay import BrokerRelay
     from sandbox.broker_transport import unseal
     from sandbox.transport_recovery import recovery_marker, validate_recovery
@@ -40,8 +42,24 @@ def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
     request_id = 'render-recovery-request-502'
     receipt = 'publication-receipt-001'
     effects = tmp_path / 'publications.txt'
-    calls, requests, failures, native_actions, diagnostics = [], [], [], [], []
+    calls, requests, failures, native_actions, diagnostics, native_exits = [], [], [], [], [], []
     restored = False
+    receive_messages = ClaudeSDKClient.receive_messages
+
+    async def receive_until_native_exit(client):
+        async for message in receive_messages(client):
+            if not restored and isinstance(message, ResultMessage) and message.is_error:
+                # A vanished native process cannot perform live continuation.
+                # Kill the real child before the adapter sees its error result;
+                # the already-saved publication receipt authorizes cold recovery.
+                process = client._transport._process
+                process.kill()
+                native_exits.append(await process.wait())
+                progress('Native process exited before delivering its error result.')
+                return
+            yield message
+
+    monkeypatch.setattr(ClaudeSDKClient, 'receive_messages', receive_until_native_exit)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -136,7 +154,7 @@ def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
             relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
                 'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
-            activity=SimpleNamespace(start=lambda *args: None, complete=lambda *args: None, commentary=lambda text: None),
+            activity=ActivityReporter(lambda *args: None),
             step=lambda: None, cwd=str(workspace), definition=None, context_store=store)
         return relay, agent
 
@@ -145,6 +163,8 @@ def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
         result = agent.run_conversation('Publish the fixture. Do not publish twice.', conversation_history=[],
                                         system_message='Transport recovery fixture.')
         assert result['failed'] and not result['completed']
+        assert len(native_exits) == 1 and native_exits[0] != 0
+        assert agent.transport_attempt == 0, 'Cold recovery starts only after the native owner has exited.'
         assert effects.read_text().splitlines() == [receipt]
         assert not agent.journal.pending and not store.pending
         assert failures == [True], 'The SDK or relay must not resubmit the failed model request.'
@@ -490,3 +510,174 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             store.close()
         server.shutdown()
         server.server_close()
+
+
+def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=print, on_outage=lambda: None, on_status=None, delay_continuation=False, late_blocked_result=False):
+    from dataclasses import replace
+    import asyncio
+    from claude_agent_sdk import ClaudeSDKClient, ResultMessage
+    import shlex
+    import time
+    from sandbox.activity import ActivityReporter
+    from sandbox.broker_relay import BrokerRelay, InputPending
+    from sandbox.broker_transport import unseal
+    from test_claude_native_compaction import send_message
+
+    capability = 'claude-recovery-test'
+    correction = 'Preserve the original task. Inspect the recovered command before any new action.'
+    requests, diagnostics, events, pids = [], [], [], []
+    state = {'failed_at': None, 'probes': 0, 'outage_elapsed': 0, 'blocked': 0, 'late_result': False}
+    effects, ready, completed = [tmp_path / name for name in ('executions.txt', 'ready', 'completed')]
+    command = ('import os,time; from pathlib import Path; '
+               f'Path({str(effects)!r}).open("a").write(str(os.getpid())+"\\n"); '
+               f'print("original-command-running",flush=True); '
+               f'\nwhile not Path({str(ready)!r}).exists(): time.sleep(.05)\n'
+               f'Path({str(completed)!r}).write_text("original-command-completed"); print("original-command-completed")')
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def reply(self, value, status=200):
+            raw = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        def do_GET(self):
+            if self.path == '/context/window':
+                return self.reply({'input_budget': 200000})
+            assert self.path == '/v1/models', self.path
+            state['probes'] += 1
+            if state['probes'] == 1:
+                assert agent.accept_input({'id': 42, 'content': correction})
+                if late_blocked_result:
+                    ready.touch()  # Finish while the relay's failed-model gate is still closed.
+            if time.monotonic() - state['failed_at'] < outage_seconds:
+                return self.reply({'error': 'broker restarting'}, 503)
+            state['outage_elapsed'] = time.monotonic() - state['failed_at']
+            ready.touch()
+            progress('Broker restored; original command is allowed to finish.')
+            return self.reply({'object': 'list', 'data': []})
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers['Content-Length']))
+            data = json.loads(unseal(capability, self.path, body))
+            if self.path == '/context/maintenance':
+                return self.reply({})
+            if self.path == '/context/native':
+                return self.reply({'lease': data['lease'], 'state': None, 'reason': 'fresh'})
+            assert self.path == '/v1/messages', self.path
+            requests.append(data)
+            if len(requests) == 1:
+                progress('Model request 1 admitted; starting the original command.')
+                block = {'type': 'tool_use', 'id': 'original_command', 'name': 'Bash', 'input': {
+                    'command': shlex.join([sys.executable, '-u', '-c', command]), 'timeout': 1000,
+                    'description': 'Run the original finite command'}}
+            elif state['failed_at'] is None:
+                assert effects.exists(), 'The real command must start before the outage'
+                pids.extend(effects.read_text().splitlines())
+                state['failed_at'] = time.monotonic()
+                on_outage()
+                progress('Injected HTTP 502 while the original command is running.')
+                return self.reply({'error': {'type': 'api_error', 'message': 'broker restarting'}}, 502)
+            else:
+                assert correction in json.dumps(data['messages']), 'First resumed inference must receive the correction'
+                if not any('original-command-completed' in str(m.get('content')) for m in data['messages'] if m['role'] == 'user'):
+                    block = {'type': 'tool_use', 'id': 'inspect_original', 'name': 'Bash', 'input': {
+                        'command': 'while [ ! -f ' + shlex.quote(str(completed)) + ' ]; do sleep 0.1; done; cat ' + shlex.quote(str(completed)),
+                        'timeout': 5000, 'description': 'Inspect the original command receipt'}}
+                else:
+                    block = {'type': 'text', 'text': 'Original command completed once. Recovery verified.'}
+            send_message(self, data, block, {'input_tokens': 100, 'output_tokens': 20})
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'sdk-config'))
+    store = ContextStore(tmp_path / 'context.sqlite3', 'claude-live-recovery')
+    store.initialize([])
+    def report(kind, message, data):
+        events.append({'kind': kind, 'message': message, 'data': data})
+        if on_status:
+            on_status(kind, message, data)
+    reporter = ActivityReporter(report)
+    relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', capability, report_error=diagnostics.append).start()
+    agent = ClaudeAgent(spec={'model': 'fireworks_ai/glm-5p3', 'timeout': outage_seconds + 40,
+                             'max_iterations': 8, 'transport_recovery_seconds': outage_seconds + 10},
+        relay=relay, config={'mcp_servers': {'workspace': {}}}, activity=reporter,
+        step=lambda: None, cwd=str(tmp_path), definition=None, context_store=store)
+    if delay_continuation or late_blocked_result:
+        query, receive, before_model = ClaudeSDKClient.query, ClaudeSDKClient.receive_messages, relay.before_model
+        continued = asyncio.Event()
+        async def delayed_query(client, prompt, **kwargs):
+            continuation = isinstance(prompt, str) and 'Recovery input:' in prompt
+            if continuation and delay_continuation:
+                await asyncio.sleep(1)
+            result = await query(client, prompt, **kwargs)
+            if continuation:
+                continued.set()
+            return result
+        async def delayed_receive(client):
+            async for message in receive(client):
+                if (late_blocked_result and isinstance(message, ResultMessage) and message.is_error
+                        and message.api_error_status in {400, 409}):
+                    assert relay.model_failed and not continued.is_set()
+                    progress('Command finished during the outage; holding its rejected-turn reply.')
+                    await continued.wait()
+                    await asyncio.sleep(.05)  # Deliver after the recovery coroutine has returned.
+                    state['late_result'] = True
+                    progress('Delivering the earlier rejection after reconnection.')
+                yield message
+        def admission(request):
+            try:
+                return before_model(request)
+            except InputPending:
+                state['blocked'] += 1
+                raise
+        monkeypatch.setattr(ClaudeSDKClient, 'query', delayed_query)
+        monkeypatch.setattr(ClaudeSDKClient, 'receive_messages', delayed_receive)
+        relay.before_model = admission
+    options = agent.options
+    native_sessions = []
+    def native_options(system):
+        configured = replace(options(system), tools=['Bash'], allowed_tools=['Bash'], mcp_servers={})
+        native_sessions.append(configured.session_id)
+        return configured
+    agent.options = native_options
+    try:
+        result = agent.run_conversation('Run the original command exactly once and inspect its result.',
+            conversation_history=[], system_message='Local recovery verification. Do not duplicate a command.')
+        progress(json.dumps({'completed': result['completed'], 'pending': sorted(agent.journal.pending),
+            'sessions': native_sessions, 'attempts': getattr(agent, 'transport_attempt', 0), 'answer': result['final_response']}))
+        assert result['completed'], result
+        assert effects.read_text().splitlines() == pids and len(pids) == 1
+        assert completed.read_text() == 'original-command-completed'
+        assert len(native_sessions) == 1, 'Recovery must keep the native process/session alive'
+        assert agent.transport_attempt == 1
+        if delay_continuation:
+            assert state['blocked'] > 0, 'The stale automatic turn must be rejected before inference'
+        if late_blocked_result:
+            assert state['late_result'], 'The outage-time rejection must arrive after recovery has finished'
+        assert len(diagnostics) == 1 and diagnostics[0]['http_status'] == 502
+        assert not agent.journal.pending and not store.pending
+        assert sum(m.get('content') == '[User correction to the current task]\n' + correction for m in agent.journal.messages) == 1
+        assert [e['data']['phase'] for e in events if e['data'].get('stage') == 'model_transport'] == ['reconnecting', 'recovered']
+        assert len([m for m in agent.journal.messages if m.get('tool_calls') and m['tool_calls'][0]['id'] == 'original_command']) == 1
+        return {'completed': True, 'native_sessions': len(native_sessions), 'original_command_executions': len(pids),
+                'recovery_attempts': agent.transport_attempt, 'readiness_probes': state['probes'],
+                'outage_elapsed': state['outage_elapsed'], 'original_pids': pids,
+                'pending_tools': len(agent.journal.pending), 'answer': result['final_response'], 'events': events}
+    finally:
+        ready.touch()
+        agent.close()
+        relay.close()
+        store.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('race', ['normal', 'background-completion', 'late-blocked-result'])
+def test_real_claude_session_survives_broker_outage(tmp_path, monkeypatch, race):
+    live_recovery_case(tmp_path, monkeypatch, delay_continuation=race == 'background-completion',
+                       late_blocked_result=race == 'late-blocked-result')

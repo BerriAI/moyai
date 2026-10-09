@@ -33,6 +33,15 @@ EDGE_ERROR = ('Moyai could not reach the model because the cloud connection reje
 
 class InputPending(Exception):
     """This model request reached an adapter-owned live input boundary."""
+    def __init__(self, receipt=None):
+        super().__init__()
+        self.receipt = receipt
+
+    def message(self):
+        text = 'A queued input is ready at this model boundary.'
+        if isinstance(self.receipt, str) and re.fullmatch(r'[0-9a-f]{32}', self.receipt):
+            text += ' Receipt: ' + self.receipt
+        return text
 
 
 class BrokerRelay:
@@ -53,6 +62,7 @@ class BrokerRelay:
         self.repository_startup = False
         self.steering = None
         self.before_model = None
+        self.on_model_blocked = None
         self.on_context_ready = None
         self.context_required = None
         self.context_recovery = False
@@ -160,19 +170,23 @@ class BrokerRelay:
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
                     if route in MODEL_ROUTES:
-                        if relay.model_failed:
-                            return self.error(409, 'The failed model request is saved. Waiting for durable recovery.', 'broker_recovery_required')
-                        if (relay.context_recovery and relay.context_required
-                                and not (relay.native_compacting and route == '/v1/responses')):
-                            return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
-                        relay.model_response = None
                         try:
+                            if relay.model_failed:
+                                # The native owner must recognize this rejected
+                                # request even if its result arrives after resume.
+                                if relay.on_model_blocked:
+                                    raise relay.on_model_blocked()
+                                return self.error(409, 'The failed model request is saved. Waiting for durable recovery.', 'broker_recovery_required')
+                            if (relay.context_recovery and relay.context_required
+                                    and not (relay.native_compacting and route == '/v1/responses')):
+                                return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
+                            relay.model_response = None
                             if relay.before_model and not relay.before_model(raw):
                                 return self.error(409, 'Saving at a complete tool boundary.')
-                        except InputPending:
+                        except InputPending as exc:
                             # This request's outcome cannot be overwritten by
                             # another model call or a replacement SDK stream.
-                            return self.error(400, 'A queued input is ready at this model boundary.', 'moyai_input_pending')
+                            return self.error(400, exc.message(), 'moyai_input_pending')
                     if credential_route:
                         try:
                             raw = json.dumps({'request_id':credential_route[1],'method':method,'path':credential_route[2],
