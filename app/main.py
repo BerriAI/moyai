@@ -967,7 +967,13 @@ def create_app(settings: Settings | None = None):
             try:
                 result = await asyncio.to_thread(skills.call, run, body.name, body.arguments)
             except ValidationError:
-                return {'error': 'Invalid skill arguments. Check the tool schema, text limits and relative file paths.'}
+                result = {'error': 'Invalid skill arguments. Check the tool schema, text limits and relative file paths.', 'status_code': 422}
+            except HTTPException as exc:
+                if exc.status_code not in {403, 404, 409, 413, 422}:
+                    raise
+                # Definite skill rejections are recoverable tool receipts.
+                # A missing skill or revision conflict must not abort a sync.
+                result = {'error': exc.detail, 'status_code': exc.status_code}
             await checkpoints.flush()
             return result
         if body.name in CREDENTIAL_TOOLS:

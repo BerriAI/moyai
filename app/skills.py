@@ -76,7 +76,7 @@ def requested_skills(content, available):
         # scoped choices still report revoked/archived skills to the requester.
         if name != 'goal' and (':' in name or name in names):
             references.append(name)
-    return list(dict.fromkeys(references))[:10]
+    return list(dict.fromkeys(references))
 
 
 class Skills:
@@ -283,8 +283,6 @@ class Skills:
                     raise HTTPException(403,'The requester changed. Start a new message to load this skill.')
                 return {'loaded':True,'name':skill['name'],'scope':skill['scope'],'revision':prior['revision'],
                         'files':self.files(skill['id'],prior['revision'])}
-            if conn.execute('SELECT COUNT(*) FROM skill_uses WHERE run_id=? AND message_id=?',params).fetchone()[0]>=5:
-                raise HTTPException(409,'Use at most five skills in one turn.')
             conn.execute('INSERT INTO skill_uses VALUES(?,?,?,?,?,?,?)',
                          (*params,run['active_user_id'],skill['id'],skill['revision'],skill['encrypted'],now()))
         self.store.event(run['id'],'skill','Using '+skill['scope']+' skill: '+skill['name'],{'revision':skill['revision']})

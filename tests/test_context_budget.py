@@ -115,11 +115,13 @@ def test_all_routes_check_injected_input_before_admission(workspace, monkeypatch
         assert payload[output_field] == 8000
         assert payload['model'] == 'openai/gpt-6-astra'
         assert 'injected-private-memory' in json.dumps(payload)
+        assert 'injected-private-skills' in json.dumps(payload)
         assert 'tool-schema' in json.dumps(payload)
         return 9000, 'fixture'
     monkeypatch.setattr(app.state.context_budget, 'limits', small_limits)
     monkeypatch.setattr(app.state.context_budget, 'count', count)
     monkeypatch.setattr('app.memory.Memory.context', lambda *a: 'injected-private-memory')
+    monkeypatch.setattr('app.skills.Skills.context', lambda *a: 'injected-private-skills')
     monkeypatch.setattr('app.context_budget.httpx.AsyncClient', lambda **kw: pytest.fail('Inference admitted'))
     run = app.state.store.create_run('context check', '', 'modal', [], model='openai/gpt-6-astra')
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
@@ -131,6 +133,7 @@ def test_all_routes_check_injected_input_before_admission(workspace, monkeypatch
     assert app.state.store.run(run['id'])['model_calls'] == 0
     assert not app.state.store.rows('SELECT * FROM model_requests')
     assert 'injected-private-memory' not in json.dumps(app.state.store.events(run['id']))
+    assert 'injected-private-skills' not in json.dumps(app.state.store.events(run['id']))
 
 
 def test_compaction_splits_to_fit_and_advances_only_returned_prefix(workspace, monkeypatch, tmp_path):
