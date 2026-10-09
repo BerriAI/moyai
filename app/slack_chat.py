@@ -1,4 +1,5 @@
 """Durable Slack thread routing and a bounded, non-replaying reply outbox."""
+from .private_sinks import private_run
 import asyncio
 import html
 import json
@@ -97,6 +98,8 @@ class SlackChat:
         return f"<{self.settings.public_url.rstrip('/')}/#run={run_id}|Open session>"
 
     def mirroring(self, run_id):
+        if private_run(self.store, run_id):
+            return None
         rows = self.store.rows('SELECT paused,team_id FROM slack_threads WHERE run_id=?', (run_id,))
         if not rows or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
             return None
@@ -105,6 +108,8 @@ class SlackChat:
         return 'paused' if rows[0]['paused'] else 'active'
 
     def queue(self, conn, run_id, key, kind, text, metadata=None):
+        if private_run(self.store, run_id, conn):
+            return
         conn.execute('INSERT OR IGNORE INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata) VALUES(?,?,?,?,?,?)',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {})))
 
@@ -119,6 +124,8 @@ class SlackChat:
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+            if private_run(self.store, run_id, conn):
+                binding = None
             if binding:
                 allowed = enabled and binding['team_id'] == team
                 # Preserve chronology when the previous answer has been saved
@@ -379,6 +386,8 @@ class SlackChat:
         return frozenset(found - {self.owner.connectors.slack_installation().get('user_id')})
 
     def collect_progress_in(self, conn, binding, allowed):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         turn_id = active_turn(conn, run_id)
         # Completed-turn progress is obsolete; its final answer is authoritative.
@@ -396,6 +405,8 @@ class SlackChat:
                 conn.execute("UPDATE slack_outbox SET status='skipped' WHERE dedupe_key=? AND status='pending'", (key,))
 
     def collect_answers_in(self, conn, binding, allowed):
+        if private_run(self.store, binding['run_id'], conn):
+            return
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
         for message in messages:
@@ -449,6 +460,9 @@ class SlackChat:
             conn.execute('BEGIN IMMEDIATE')
             for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
                 run_id = binding['run_id']
+                if private_run(self.store, run_id, conn):
+                    conn.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE run_id=? AND status='pending'", (run_id,))
+                    continue
                 allowed = enabled and binding['team_id'] == team and not binding['deleted_at']
                 if not allowed:
                     conn.execute("UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND status='pending'", (run_id,))
@@ -467,6 +481,9 @@ class SlackChat:
 
     async def deliver_one(self):
         for row in self.store.rows("SELECT o.*,t.team_id,t.channel,t.thread_ts,t.paused FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id WHERE o.status='pending' ORDER BY o.id LIMIT 100"):
+            if private_run(self.store, row['run_id']):
+                self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
+                continue
             if self.skip_stale_progress(row):
                 continue
             if self.last_post.get(row['channel'], 0) > time.monotonic() - 1.1:
@@ -483,6 +500,9 @@ class SlackChat:
                 # Persist before external side effects. Ambiguous sends are
                 # marked uncertain and never replayed automatically.
                 await self.owner.checkpoints.flush()
+                if private_run(self.store, row['run_id']):
+                    self.store.execute("UPDATE slack_outbox SET status='skipped',text='',metadata='{}' WHERE id=?", (row['id'],))
+                    continue
                 if self.skip_stale_progress(row):
                     continue
                 if row['kind'] == 'reaction':

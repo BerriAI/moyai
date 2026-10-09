@@ -44,6 +44,7 @@ from .skills import Skills, TOOL_NAMES as SKILL_TOOLS
 from .memory import Memory, TOOL_NAMES as MEMORY_TOOLS
 from .session_folders import SessionFolders
 from .session_lifecycle import SessionLifecycle
+from .session_privacy import SessionPrivacy
 from .session_metadata import is_session_id_request
 from .session_pull_requests import SessionPullRequests
 from sandbox.memory_history import scrub_memory_history
@@ -71,6 +72,7 @@ class NewRun(BaseModel):
     mode: Literal["demo", "modal"] = "demo"
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
+    private_session: bool = Field(default=False, strict=True)
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
@@ -161,6 +163,8 @@ def create_app(settings: Settings | None = None):
                   max_pending_runs=settings.max_pending_runs, object_storage=ObjectStorage(settings))
     user_roles = UserRoles(store, settings)
     security = Security(settings, user_roles)
+    privacy = SessionPrivacy(store, security)
+    store.session_privacy = security.session_privacy = privacy
     from .sandbox_settings import SandboxSettings
     sandbox_settings = SandboxSettings(store, settings, security)
     connectors = Connectors(store, security, settings)
@@ -203,6 +207,7 @@ def create_app(settings: Settings | None = None):
     from .message_queue import MessageQueue
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints, credentials.same_requester)
+    personal_slack = connectors.personal_slack
     connectors.slack_identities = identities
     slack.identities = identities
     manager.prepare_context = slack.prepare
@@ -264,6 +269,11 @@ def create_app(settings: Settings | None = None):
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
                   dependencies=[Depends(session_lifecycle.require_live_api)])
+    if personal_slack is not None:
+        app.state.personal_slack = personal_slack
+        personal_slack.same_requester = credentials.same_requester
+        personal_slack.routes(app, checkpoints=checkpoints)
+    app.state.session_privacy = privacy
     app.state.session_lifecycle = session_lifecycle
     app.state.session_pull_requests = session_pull_requests
     app.include_router(session_lifecycle.routes())
@@ -497,7 +507,7 @@ def create_app(settings: Settings | None = None):
         memberships = session_folders.memberships(owner)
         pins = session_folders.pins(owner)
         selected = store.run(focus) if re.fullmatch(r'[0-9a-f]{32}', focus) else None
-        parent_id = store.root_id(selected['id']) if selected else ''
+        parent_id = store.root_id(selected['id']) if privacy.can_access(selected, owner) else ''
         search = search.strip().lower()
         ids = store.sidebar_run_ids(owner if scope == 'mine' else None, [*memberships, *pins, parent_id],
                                     archive_owner=owner, archived=archived, pin_owner=owner,
@@ -516,7 +526,7 @@ def create_app(settings: Settings | None = None):
                            'pr_summary': pr_summaries[run_id], 'folder_id': memberships.get(run_id), 'children': []}
         nodes = dict(runs)
         for child in store.subtrees(list(runs)):
-            if child['id'] not in runs and not child['deleted_at']:
+            if child['id'] not in runs and not child['deleted_at'] and privacy.can_access(child, owner):
                 nodes[child['id']] = {**public_run({key: child[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id', 'pending_result')}),
                                      'archived': runs[child['ancestor_id']]['archived'], 'can_delete': False, 'children': []}
         for child in nodes.values():
@@ -529,12 +539,17 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         security.require(request, mutation=True)
+        private_owner_id = privacy.individual_owner(request) if body.private_session else ''
+        if body.private_session and (body.side_chat_of or not body.chat_enabled):
+            raise HTTPException(422, 'Private sessions require a direct chat without derivation.')
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
                             and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
             parent = store.run(body.side_chat_of)
             if not parent or parent['deleted_at']:
                 raise HTTPException(404, 'Original session not found.')
+            privacy.require_request(request, parent)
+            privacy.require_no_export(parent)
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
@@ -562,7 +577,7 @@ def create_app(settings: Settings | None = None):
         user_id = store.identity(security.session_info(request))
         try:
             run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request, private_owner_id=private_owner_id)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
@@ -578,8 +593,8 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, 'Session not found.')
         actor = store.identity(security.session_info(request))
         archives = session_lifecycle.archives(actor)
-        rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at,active_message_id,pending_result FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
-        return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
+        rows = store.rows("SELECT id,owner_id,private_owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at,active_message_id,pending_result FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
+        return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows if privacy.can_access(row, actor)]
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request):
@@ -606,7 +621,7 @@ def create_app(settings: Settings | None = None):
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store, actor=actor)), "slack_source": store.slack_source(run_id)}
 
     from .github_write_access import WriteDecision
 
@@ -826,6 +841,8 @@ def create_app(settings: Settings | None = None):
         if (not run or run['deleted_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
+        if privacy.is_private(run) and run['active_user_id'] != run['private_owner_id']:
+            raise HTTPException(403, 'Private session requester changed.')
         return run
 
     async def broker_body(request, route):
@@ -867,8 +884,9 @@ def create_app(settings: Settings | None = None):
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
-                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
+        listed = media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name, run)]
+        return [tool for tool in listed if privacy.allow_tool(run, tool["name"], TOOLS.get(tool["name"], (None, False))[1])]
 
     @app.post("/broker/{run_id}/tools/call")
     async def tool_call(run_id: str, request: Request):
@@ -877,6 +895,8 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if not privacy.allow_tool(run, body.name, TOOLS.get(body.name, (None, False))[1]):
+            privacy.require_no_export(run)
         if body.name in MEDIA_TOOLS:
             try:
                 result = await asyncio.to_thread(media_shares.call, run, body.name, body.arguments)
@@ -958,7 +978,11 @@ def create_app(settings: Settings | None = None):
             arguments = schema.model_validate(body.arguments).model_dump()
         except ValidationError:
             raise HTTPException(422, "Invalid tool arguments.")
-        if not connectors.allowed(body.name):
+        if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
+            if body.name in {'slack_search', 'slack_thread'}:
+                owner = personal_slack.selected_owner(run)
+                if personal_slack.configured(owner):
+                    personal_slack.eligible(run, owner)
             raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
         if provider == 'github':
             try:
@@ -969,13 +993,12 @@ def create_app(settings: Settings | None = None):
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
-        if not connectors.allowed(body.name):
+        if not connectors.allowed(body.name, run, **({'as_bot': True} if provider == 'slack' and arguments.get('as_bot') else {})):
             return {"error": "The organization connection changed. No action was sent."}
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
                       else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
-                      else await connectors.call(body.name, arguments, run=run) if body.name in {'slack_send', 'slack_me'}
-                      else await connectors.call(body.name, arguments))
+                      else await connectors.call(body.name, arguments, run=run))
             store.event(run_id, "tool", f"{body.name} completed")
             if body.name == 'github_request_pull_request_write_access':
                 await checkpoints.flush()
@@ -988,6 +1011,7 @@ def create_app(settings: Settings | None = None):
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
         run = require_run(run_id, request)
+        privacy.require_no_export(run)
         if not credentials.tools(run):
             raise HTTPException(403, 'Credential access requires a durable chat session.')
         try:
@@ -1170,7 +1194,7 @@ def create_app(settings: Settings | None = None):
                     if not capture.done:
                         raise HTTPException(502, 'Model gateway returned an invalid completion.')
                     status = 'completed'
-                    trace_response = json.loads(raw_response)
+                    trace_response = {} if privacy.is_private(run) else json.loads(raw_response)
             except httpx.HTTPError as exc:
                 raise HTTPException(502, 'Model gateway could not be reached.',
                                     headers=upstream_headers(request_id, error=exc)) from None
@@ -1183,8 +1207,9 @@ def create_app(settings: Settings | None = None):
                 spend.finish(request_id, capture, status)
                 if status == 'completed':
                     context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
-                tracing.model(run, request_id, trace_started, body['messages'],
-                              {**trace_response, **capture.response}, status, gateway_id=gateway_id)
+                if not privacy.is_private(run):
+                    tracing.model(run, request_id, trace_started, body['messages'],
+                                  {**trace_response, **capture.response}, status, gateway_id=gateway_id)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:

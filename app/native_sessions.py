@@ -37,6 +37,9 @@ class NativeSessions:
         self.checkpoints, self.require_run, self.read_body = checkpoints, require_run, read_body
 
     def scope(self, run):
+        private_owner = dict(run).get('private_owner_id', '')
+        if private_owner and private_owner != run['active_user_id']:
+            raise HTTPException(404, 'Session not found.')
         settings = self.settings
         policy = {'base': settings.litellm_api_base.rstrip('/'),
             'credential': hashlib.sha256(settings.litellm_api_key.encode()).hexdigest(),
@@ -47,6 +50,7 @@ class NativeSessions:
         except ValueError:
             raise HTTPException(409, 'The selected model is no longer available.') from None
         return {'run': run['id'], 'actor': run['active_user_id'], 'model': model,
+            **({'private_owner_id': private_owner} if private_owner else {}),
             'harness': run['harness'], 'gateway': hashlib.sha256(encoded(policy).encode()).hexdigest()}
 
     def observe_scope(self, run):

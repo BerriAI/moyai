@@ -1,4 +1,5 @@
 """Best-effort session names, independent of chat execution and read endpoints."""
+from .private_sinks import private_run, require_request_owner
 import asyncio
 import logging
 import re
@@ -85,6 +86,7 @@ class SessionTitles:
         @router.put('/api/runs/{run_id}/title')
         async def rename(run_id: str, body: SessionTitleEdit, request: Request) -> dict[str, str]:
             security.require(request, mutation=True)
+            require_request_owner(self.store, security, request, run_id)
             with self.store.connect() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 run = conn.execute('SELECT parent_run_id FROM runs WHERE id=?', (run_id,)).fetchone()
@@ -139,6 +141,8 @@ class SessionTitles:
             log.warning('Session title startup unavailable')
 
     def schedule(self, run_id):
+        if private_run(self.store, run_id):
+            return
         if not self.running or run_id in self.pending or self.queue.full():
             return
         self.pending.add(run_id)
@@ -158,6 +162,8 @@ class SessionTitles:
                 self.queue.task_done()
 
     async def _generate(self, run_id):
+        if private_run(self.store, run_id):
+            return
         with self.store.connect() as conn:
             claimed = conn.execute(f'UPDATE runs SET title_attempted_at=? WHERE id=? AND {ELIGIBLE}',
                                    (now(), run_id)).rowcount

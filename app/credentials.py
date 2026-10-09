@@ -580,6 +580,8 @@ class Credentials:
         return dict(conn.execute('SELECT * FROM credential_requests WHERE id=?', (row['id'],)).fetchone())
 
     def request(self, run, args):
+        from .private_sinks import deny_export
+        deny_export(self.store, run['id'])
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             actor = run['active_user_id']
@@ -717,6 +719,8 @@ class Credentials:
         return {**self.ready(row), 'generation': row['generation']}
 
     def pending(self, run, user_id, admin):
+        from .private_sinks import require_owner
+        require_owner(self.store, run['id'], user_id)
         with self.store.connect() as conn:
             rows = self.pending_rows(conn, run['id'])
         return [{**{key: row[key] for key in ('id', 'provider', 'reason', 'status', 'name', 'format', 'env_var', 'generation', 'failure', 'preferred_scope', 'scope_revision')},

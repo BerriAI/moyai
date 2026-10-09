@@ -136,6 +136,9 @@ class SessionPullRequests:
                 ORDER BY p.created_at,p.id''', batch))
         parsed = []
         for row in rows:
+            from .private_sinks import private_run
+            if private_run(self.store, row['id']) or private_run(self.store, row['ancestor_id']):
+                continue
             try:
                 receipt = Receipt.model_validate_json(row['result'])
             except ValidationError:

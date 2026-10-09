@@ -5,6 +5,7 @@ keeps our existing webhook and rotating OAuth credentials; no app-level token is
 needed. AgentChat owns normalized dispatch, conversation locks and reply routing.
 SQLite receipts, sessions and the outbox remain the authoritative durable state.
 """
+from .private_sinks import deny_export, private_run
 import asyncio
 import hashlib
 from collections.abc import Sequence
@@ -56,7 +57,7 @@ class SessionState:
         bindings = self.store.rows("""SELECT run_id FROM slack_threads t JOIN runs r ON r.id=t.run_id
                                    WHERE team_id=? AND channel=? AND thread_ts=? AND r.deleted_at=''""",
                                    (team, channel, thread))
-        if not bindings:
+        if not bindings or private_run(self.store, bindings[0]['run_id']):
             return ()
         rows = self.store.messages(bindings[0]['run_id'])
         if limit is not None:
@@ -96,6 +97,7 @@ class SlackWebhookChannel:
         await self._receiver(self, message)
 
     def source_for_run(self, run_id, delivery=None):
+        deny_export(self.owner.store, run_id)
         binding = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (run_id,))[0]
         conversation = f"slack:{binding['team_id']}:{binding['channel']}:{binding['thread_ts']}"
         return Message(id='moyai:' + run_id, conversation_id=conversation, channel=self.name,
@@ -103,6 +105,7 @@ class SlackWebhookChannel:
                        metadata=MappingProxyType({'run_id': run_id, 'delivery': delivery or {}}))
 
     def destination(self, source, identity, *, files=False):
+        deny_export(self.owner.store, source.metadata['run_id'])
         rows = self.owner.store.rows('SELECT * FROM slack_threads WHERE run_id=?', (source.metadata['run_id'],))
         installation = self.owner.connectors.slack_installation()
         delivery = source.metadata.get('delivery', {})
@@ -253,6 +256,7 @@ class SlackWebhookChannel:
 
     async def acknowledge(self, run_id, message_ts):
         """React only to an accepted message in the immutable session binding."""
+        deny_export(self.owner.store, run_id)
         rows = self.owner.store.rows('SELECT t.team_id,t.channel FROM slack_threads t JOIN slack_receipts r '
             'ON r.run_id=t.run_id AND r.team_id=t.team_id AND r.channel=t.channel '
             'WHERE t.run_id=? AND r.message_ts=? AND r.message_id IS NOT NULL', (run_id, message_ts))

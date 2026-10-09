@@ -149,6 +149,8 @@ def saved_result(skills, conn, operation, actor, admin, fingerprint):
 
 
 def save_skill(skills, run, args):
+    from .private_sinks import deny_export
+    deny_export(skills.store, run["id"])
     from .skills import SkillForm
     actor, admin = writing_actor(skills, run)
     if args.scope is None:

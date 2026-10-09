@@ -3,6 +3,7 @@
 Content is encrypted at rest. Search returns references; selected notes are
 resolved afresh at the model broker, never copied into sandbox tool results.
 """
+from .private_sinks import deny_export
 import hashlib
 import json
 import re
@@ -167,6 +168,7 @@ class Memory:
 
     def active(self, run, turn_id=None):
         # Refresh so stale capabilities cannot write for a new requester.
+        deny_export(self.store, run['id'])
         run = self.store.run(run['id'])
         if not run or not run['chat_enabled'] or not run['active_message_id']:
             raise HTTPException(403, 'Memory requires an authenticated chat turn.')
@@ -220,6 +222,10 @@ class Memory:
 
     def save_in(self, conn, owner, body, *, source=None, run=None, note_id=''):
         """Shared storage checks; caller owns the transaction and authorization."""
+        if run:
+            deny_export(self.store, run['id'], conn)
+        if source and source.get('run_id'):
+            deny_export(self.store, source['run_id'], conn)
         payload = {k: getattr(body, k) for k in ('key', 'title', 'content', 'kind', 'repo_url')}
         check_content(json.dumps(payload) + json.dumps(source or {}))
         payload['source'] = source or {'type': 'manual'}

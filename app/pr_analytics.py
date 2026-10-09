@@ -74,6 +74,10 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
             WHERE roots.root_id IN (SELECT root_id FROM run_roots WHERE run_id IN (SELECT run_id FROM github_publications))''')]
 
 
+    # Global analytics must not reveal private session titles or receipts.
+    from .private_sinks import private_run
+    publications = [row for row in publications
+                    if not private_run(store, row['run_id']) and not private_run(store, row['root_id'])]
     parsed: list[tuple[dict[str, object], Receipt]] = []
     receipt_ids: dict[str, set[int]] = defaultdict(set)
     for row in publications:

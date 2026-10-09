@@ -78,6 +78,8 @@ class AutomationTools:
         if (not run or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}):
             raise HTTPException(403, 'Automation controls require an authenticated chat turn.')
+        if run.get('private_owner_id'):
+            raise HTTPException(403, 'Automations cannot export a private chat. Start a shared chat to manage schedules.')
         if run.get('parent_run_id') or self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)):
             raise HTTPException(403, 'Manage schedules from a direct user chat, not a delegated or automated run.')
         if turn_id is not None and turn_id != run['active_message_id']:
