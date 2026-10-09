@@ -17,3 +17,17 @@ RUN /opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py \
     && python /opt/workspace-runner/install_access_tools.py \
     && python /opt/workspace-runner/hermes_compat.py \
     && cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; import claude_agent_sdk'
+
+# Lambda snapshots only this idle HTTP service. No agent/model connection is
+# opened during the image build; command and TLS clients start in each new VM.
+FROM workspace AS lambda-workspace
+COPY sandbox /opt/moyai-lambda
+# Discard download/build caches before recording the immutable image. Installed
+# packages remain in their environments; caches created by sessions are still
+# included in every checkpoint. Cold reads of these archives cost minutes.
+RUN rm -rf /root/.cache/pip /root/.npm/_cacache /tmp/hermes-home/cache/uv \
+    && python /opt/moyai-lambda/lambda_guest.py baseline
+CMD ["python", "/opt/moyai-lambda/lambda_guest.py"]
+
+# Preserve the Substrate image as the default build target.
+FROM workspace AS default

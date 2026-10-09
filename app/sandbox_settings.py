@@ -13,6 +13,8 @@ from .sandboxes import provider
 from .modal_clients import ModalClients
 
 FIELDS = {
+    'lambda': ('lambda_region', 'lambda_image', 'lambda_image_version', 'lambda_checkpoint_bucket',
+               'lambda_checkpoint_prefix', 'lambda_execution_role_arn', 'lambda_egress_connector', 'lambda_profile'),
     'modal': ('modal_token_id', 'modal_token_secret', 'modal_app_name', 'modal_vm_runtime'),
     'substrate': ('substrate_api_url', 'substrate_router_url', 'substrate_api_token', 'substrate_ca_cert',
                   'substrate_atespace', 'substrate_template', 'substrate_egress_hosts'),
@@ -22,7 +24,7 @@ SECRETS = {'modal_token_id', 'modal_token_secret', 'substrate_api_token'}
 
 class Connection(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    provider: Literal['modal', 'substrate']
+    provider: Literal['modal', 'substrate', 'lambda']
     revision: int = Field(ge=0)
     values: dict = Field(default_factory=dict, max_length=10)
 
@@ -89,6 +91,11 @@ class SandboxSettings:
                 "SELECT 1 FROM runs WHERE sandbox_provider='substrate' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1") or self.store.rows(
                 "SELECT 1 FROM environment_builds WHERE sandbox_provider='substrate' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1")):
             raise HTTPException(409, 'Existing Substrate sessions belong to this cluster. Use a separate Moyai installation for another cluster.')
+        if any(getattr(candidate, key) != getattr(self.settings, key) for key in
+               ('lambda_region', 'lambda_checkpoint_bucket', 'lambda_checkpoint_prefix', 'lambda_profile')) and (
+                self.store.rows("SELECT 1 FROM runs WHERE sandbox_provider='lambda' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1") or
+                self.store.rows("SELECT 1 FROM environment_builds WHERE sandbox_provider='lambda' AND (snapshot_id!='' OR sandbox_id!='') LIMIT 1")):
+            raise HTTPException(409, 'Existing AWS sessions belong to this region and checkpoint store. Use a separate Moyai installation to move them.')
         return candidate
 
     def routes(self):
@@ -110,7 +117,7 @@ class SandboxSettings:
                     async with asyncio.timeout(180):
                         message = await provider(candidate, modal_clients=self.modal_clients).check()
                 except Exception:
-                    raise HTTPException(502, 'Connection test failed. Check credentials, endpoints, worker capacity, and the Moyai actor template. Your saved connection was not changed.') from None
+                    raise HTTPException(502, 'Connection test failed. Check credentials, endpoints, capacity, and the selected runtime image or template. Your saved connection was not changed.') from None
                 for key in FIELDS[body.provider]:
                     setattr(self.settings, key, getattr(candidate, key))
                 if body.provider == 'substrate':

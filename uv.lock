@@ -763,7 +763,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agentchat", git = "https://github.com/BerriAI/agentchat.git?rev=8876e361c4071b4906916452ff3e6c35b1a9c78b" },
-    { name = "boto3", specifier = ">=1.40,<2" },
+    { name = "boto3", specifier = ">=1.43.109,<2" },
     { name = "cryptography", specifier = ">=44" },
     { name = "fastapi", specifier = ">=0.115,<1" },
     { name = "grpclib", specifier = ">=0.4.9,<1" },

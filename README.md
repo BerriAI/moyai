@@ -57,7 +57,7 @@ Read the full story in the launch post: [Moyai is now open source](https://docs.
 
 ## Getting started
 
-Choose **Modal or [Substrate](docs/substrate.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. If you already run Substrate, follow the linked setup to connect your cluster.
+Choose **Modal, [Substrate](docs/substrate.md), or [AWS Lambda MicroVMs](docs/aws-lambda-microvms.md)** for agent sandboxes in **Settings → Runtime**. Modal is the default. Follow the provider's setup guide to connect your own infrastructure.
 
 This setup runs Moyai on **Modal**, using **GPT-6 Astra + the Claude Agent SDK harness** through LiteLLM. You can [choose another model or harness](docs/getting-started.md#choose-a-harness).
 

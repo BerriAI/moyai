@@ -4,6 +4,7 @@ Only Modal provisioning/snapshot RPCs and model inference are fixture boundaries
 """
 import asyncio
 import json
+from pathlib import Path
 import sys
 import time
 
@@ -22,6 +23,9 @@ NATIVE_PROCESS = '''
 import json, sys, time
 from pathlib import Path
 from pytest import MonkeyPatch
+# A fresh Python process does not inherit pytest's test-module import paths.
+tests = Path(sys.argv[2])
+sys.path[:0] = [str(tests), str(tests.parent)]
 from test_codex_sdk_transport import native_yield_case
 root = Path(sys.argv[1])
 def emit(kind, message, **data):
@@ -57,12 +61,24 @@ async def test_native_preview_recovers_after_real_temporal_worker_replacement(du
             await command(machine, action, directory, value, **kwargs)
             if directory not in executions:
                 executions[directory] = asyncio.create_task(asyncio.to_thread(
-                    supervise, operation, [sys.executable, '-c', NATIVE_PROCESS, str(native)]))
+                    supervise, operation, [sys.executable, '-c', NATIVE_PROCESS, str(native),
+                                           str(Path(__file__).resolve().parent)]))
             return ''
         assert action == 'read'
         return json.dumps(await asyncio.to_thread(status, operation, int(value)))
 
     manager.command = native_command
+    def outage_ready():
+        if (native / 'outage-until').exists():
+            return True
+        for directory, execution in executions.items():
+            if execution.done():
+                execution.result()
+                operation = tmp_path / 'executions' / directory.rsplit('/', 1)[-1]
+                diagnostic = (operation / 'stderr.log').read_text()
+                raise AssertionError('Native fixture exited before the broker outage:\n' + diagnostic)
+        return False
+
     async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
         async def connect():
             return env.client
@@ -71,7 +87,7 @@ async def test_native_preview_recovers_after_real_temporal_worker_replacement(du
         handle = env.client.get_workflow_handle('moyai-session-' + run_id)
         try:
             await manager.recover()
-            await eventually(lambda: (native / 'outage-until').exists(), seconds=30)
+            await eventually(outage_ready, seconds=30)
             original = manager.state(run_id)
             token_hash = manager.store.run(run_id)['token_hash']
             assert original['phase'] == 'monitor'

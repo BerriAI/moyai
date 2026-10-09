@@ -214,6 +214,8 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     store.execute('DROP TABLE session_archives')
     reopened = Store(app.state.settings.data_dir)
     assert reopened.run(item['id'])['deleted_at'] == ''
+    # App startup initializes GitHub access after the Store schema upgrade.
+    app.state.connectors.github.init_write_access()
     checkpoints = app.state.session_folders.checkpoints
     checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
     async def commit():

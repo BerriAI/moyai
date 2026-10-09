@@ -6,12 +6,17 @@ async function renderSandboxConnection(version) {
   try {
     let saved = await api('/api/settings/sandboxes');
     if (version !== state.pageVersion) return;
+    const names = {modal: 'Modal', substrate: 'Substrate', lambda: 'AWS Lambda MicroVMs'};
     const admin = state.role === 'admin';
     if (!admin) {
-      host.innerHTML = `<h2>Sandbox provider</h2><p>${saved.provider === 'substrate' ? 'Substrate' : 'Modal'} supplies new sandboxes. An administrator manages this connection.</p>`;
+      host.innerHTML = `<h2>Sandbox provider</h2><p>${names[saved.provider]} supplies new sandboxes. An administrator manages this connection.</p>`;
       return;
     }
     const fields = {
+      lambda: [['lambda_region','AWS region','text'], ['lambda_image','MicroVM image ARN','text'],
+        ['lambda_image_version','Image version','text'], ['lambda_checkpoint_bucket','Checkpoint S3 bucket','text'],
+        ['lambda_checkpoint_prefix','Checkpoint prefix','text'], ['lambda_execution_role_arn','Execution role ARN (optional)','text'],
+        ['lambda_egress_connector','Egress connector ARN (optional)','text'], ['lambda_profile','Server AWS profile (optional)','text']],
       modal: [['modal_token_id','Token ID','password'], ['modal_token_secret','Token secret','password'], ['modal_app_name','App name','text']],
       substrate: [['substrate_api_url','Control API URL','url'], ['substrate_router_url','Router URL','url'],
         ['substrate_api_token','API token','password'], ['substrate_atespace','Atespace','text'],
@@ -21,7 +26,7 @@ async function renderSandboxConnection(version) {
     const drafts = Object.fromEntries(Object.entries(saved.providers).map(([name, value]) => [name, {...value.values}]));
     let selected = saved.provider;
     host.innerHTML = `<h2>Sandbox provider</h2><p class="subtext">Choose where new sessions run. Existing sessions keep their original provider.</p>
-      <form id="sandbox-connection-form"><div class="field"><label for="sandbox-provider">Provider</label><select id="sandbox-provider"><option value="modal">Modal</option><option value="substrate">Substrate</option></select></div>
+      <form id="sandbox-connection-form"><div class="field"><label for="sandbox-provider">Provider</label><select id="sandbox-provider"><option value="modal">Modal</option><option value="substrate">Substrate</option><option value="lambda">AWS Lambda MicroVMs</option></select></div>
       <div id="sandbox-connection-fields"></div><p id="sandbox-connection-status" role="status"></p>
       <div class="credential-actions"><button type="submit" class="primary">Connect and use</button><span class="subtext">Tests the connection before saving.</span></div></form>`;
     const picker = host.querySelector('#sandbox-provider');
@@ -31,7 +36,7 @@ async function renderSandboxConnection(version) {
         const value = drafts[selected][key] || '';
         const attributes = `id="${key}" name="${key}" autocomplete="${type === 'password' ? 'new-password' : 'off'}"`;
         return `<div class="field ${type === 'textarea' ? 'sandbox-field-wide' : ''}"><label for="${key}">${label}</label>${type === 'textarea' ? `<textarea ${attributes} rows="3">${esc(value)}</textarea>` : `<input ${attributes} type="${type}" value="${esc(value)}" placeholder="${type === 'password' && saved.providers[selected].secrets?.[key] ? 'Saved · leave blank to keep' : ''}">`}</div>`;
-      }).join('') + (selected === 'substrate' ? `<details><summary>Set up the Moyai actor template</summary><p>Install the Moyai sandbox image and template on your cluster using the <a href="https://github.com/BerriAI/moyai/blob/main/docs/substrate.md" target="_blank" rel="noopener">Substrate setup guide</a>. Use this public key in the template:</p><pre class="sandbox-public-key">${esc(saved.public_key)}</pre><p>The connection test starts a small sandbox, runs a command, and deletes it.</p></details>` : '');
+      }).join('') + (selected === 'substrate' ? `<details><summary>Set up the Moyai actor template</summary><p>Install the Moyai sandbox image and template on your cluster using the <a href="https://github.com/BerriAI/moyai/blob/main/docs/substrate.md" target="_blank" rel="noopener">Substrate setup guide</a>. Use this public key in the template:</p><pre class="sandbox-public-key">${esc(saved.public_key)}</pre><p>The connection test starts a small sandbox, runs a command, and deletes it.</p></details>` : selected === 'lambda' ? `<p class="subtext sandbox-field-wide">Uses the Moyai server’s AWS credentials. Follow the <a href="https://github.com/BerriAI/moyai/blob/main/docs/aws-lambda-microvms.md" target="_blank" rel="noopener">AWS setup guide</a> to prepare the image and private checkpoint bucket. The connection test starts a VM, runs a command, and confirms termination.</p>` : '');
     };
     const collect = () => {
       fields[selected].forEach(([key]) => { drafts[selected][key] = host.querySelector('#' + key).value.trim(); });
@@ -51,7 +56,7 @@ async function renderSandboxConnection(version) {
         state.config = await api('/api/config');
         if (version !== state.pageVersion) return;
         draw();
-        status.textContent = saved.message + ' New sessions will use ' + (selected === 'substrate' ? 'Substrate.' : 'Modal.');
+        status.textContent = saved.message + ' New sessions will use ' + names[selected] + '.';
         const badge = $('#runtime-readiness');
         if (badge) badge.textContent = state.config.cloud_ready ? 'Cloud ready' : 'Setup needed';
       } catch (error) {

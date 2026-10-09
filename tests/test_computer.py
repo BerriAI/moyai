@@ -561,6 +561,36 @@ async def test_restored_display_removes_stale_files_but_preserves_live_server(mo
 
 
 @pytest.mark.asyncio
+async def test_display_waits_for_cold_start_and_rechecks_an_existing_process(monkeypatch, tmp_path):
+    monkeypatch.setattr(computer, 'DISPLAY_SOCKET', tmp_path / 'X99')
+    monkeypatch.setattr(computer, 'DISPLAY_LOCK', tmp_path / '.X99-lock')
+    elapsed = 0
+    launches = []
+    async def sleep(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+    def launch(*args, **kwargs):
+        launches.append(args)
+        return SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(computer.asyncio, 'sleep', sleep)
+    monkeypatch.setattr(computer.subprocess, 'Popen', launch)
+    monkeypatch.setattr(computer, 'display_alive', lambda: elapsed >= 6)
+    c = computer.Computer()
+    await c.ensure_display()
+    assert elapsed >= 6 and len(launches) == 1
+    # A previous request can time out while Xvfb remains alive but not ready.
+    elapsed = 0
+    monkeypatch.setattr(computer, 'display_alive', lambda: False)
+    with pytest.raises(RuntimeError, match='still starting'):
+        await c.ensure_display()
+    assert elapsed >= 29 and len(launches) == 1
+    elapsed = 0
+    monkeypatch.setattr(computer, 'display_alive', lambda: elapsed >= 1)
+    await c.ensure_display()
+    assert elapsed >= 1 and len(launches) == 1
+
+
+@pytest.mark.asyncio
 async def test_desktop_batches_validate_before_execution_and_preserve_native_order(monkeypatch, tmp_path):
     monkeypatch.setattr(computer, 'CAPTURES', tmp_path)
     c = computer.Computer()

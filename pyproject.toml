@@ -22,7 +22,7 @@ dependencies = [
   "pillow>=11.3,<13",
   "opentelemetry-sdk>=1.39,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
-  "boto3>=1.40,<2",
+  "boto3>=1.43.109,<2",
 ]
 
 [dependency-groups]
