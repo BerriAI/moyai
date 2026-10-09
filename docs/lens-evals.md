@@ -11,6 +11,8 @@ lens.evals.run("moyai-coding-regressions").assert_passed()
 
 The repository's [test](../evals/test_moyai.py) reads credentials from the environment and checks deployment readiness first. One test runs the complete dataset saved in Lens; there is no Python task adapter or dataset fixture to maintain.
 
+The SDK runs inside your GitHub runner and calls both Lens and Moyai over HTTP. Moyai's own workers and configured sandboxes execute the agent, including its model and tool calls. Traces go directly from Moyai to Lens; the SDK uploads the completed output and retrieves the verdict. The Action then calls GitHub's API to publish the result.
+
 This integration requires the named-eval server changes in [Lens PR #30](https://github.com/BerriAI/lens/pull/30). The SDK and Action are pinned to preview source commit `45b11ae53b740e77c0f8cea804bb4aa9bbc8f760`; older release wheels do not support this API. The Render URL is a configurable target, not a claim that its deployment is ready or includes that change.
 
 ## 1. Prepare the two services

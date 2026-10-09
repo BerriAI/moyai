@@ -69,6 +69,138 @@ def test_otlp_build_and_environment_metadata_comes_from_server_settings(tmp_path
     assert b'trace-secret' not in payload
 
 
+@pytest.mark.parametrize('emit_before_restart', [False, True])
+@pytest.mark.parametrize('original_build', ['', 'a1' * 20])
+def test_turn_deployment_survives_restart_before_completion_and_late_replay(tmp_path, emit_before_restart, original_build):
+    store, tracing, processor, run, message = setup(tmp_path, build_sha=original_build, environment='lens-eval')
+    identity = tracing.identity(run, message['id'])
+    assert len(identity) == 5
+    stamp = time.time_ns()
+    event = {'tool': 'read_file', 'call_id': 'before-restart', 'start_ns': stamp, 'end_ns': stamp,
+             'input': 'file.txt', 'output': 'saved answer'}
+    if emit_before_restart:
+        tracing.tool(run['id'], event)
+    else:
+        assert not processor.spans
+
+    # Recovery can finish a saved answer before the new process emits a tool
+    # or model span. Admission, rather than first export, owns its deployment.
+    reopened = Store(tmp_path)
+    resumed = reopened.tracing = AgentTracing(reopened, tracing.settings.model_copy(
+        update={'moyai_build_sha': 'b2' * 20, 'trace_environment': 'production'}), processor)
+    reopened.finish_message(run['id'], message['id'], 'saved answer')
+    resumed.tool(run['id'], event)
+    assert resumed.identity(run, message['id']) == identity
+    assert any(span.parent is None for span in processor.spans)
+    for span in processor.spans:
+        assert span.attributes['session.id'] == run['id']
+        assert span.attributes['agent.name'] == 'moyai'
+        assert span.context.trace_id == identity[0]
+        assert span.attributes['moyai.environment'] == 'lens-eval'
+        for attributes in (span.attributes, span.resource.attributes):
+            assert attributes['deployment.environment'] == 'lens-eval'
+            assert attributes.get('agent.version') == (original_build or None)
+        assert span.resource.attributes['deployment.environment.name'] == 'lens-eval'
+
+    reopened.enqueue_message(run['id'], 'A new task after deployment', 'next-turn')
+    next_message = reopened.claim_message(run['id'])
+    reopened.finish_message(run['id'], next_message['id'], 'new answer')
+    next_span = processor.spans[-1]
+    assert next_span.context.trace_id != identity[0]
+    for attributes in (next_span.attributes, next_span.resource.attributes):
+        assert attributes['agent.version'] == 'b2' * 20
+        assert attributes['deployment.environment'] == 'production'
+    assert encode_spans(processor.spans).SerializeToString()
+
+
+def test_queued_turn_uses_build_that_claims_it_not_build_that_created_session(tmp_path):
+    store, tracing, processor, run, message = setup(tmp_path, build_sha='a1' * 20, environment='lens-eval')
+    store.finish_message(run['id'], message['id'], 'first answer')
+    queued, _ = store.enqueue_message(run['id'], 'Run after deployment', 'queued-turn')
+    assert not store.rows('SELECT 1 FROM trace_contexts WHERE run_id=? AND message_id=?', (run['id'], queued['id']))
+
+    reopened = Store(tmp_path)
+    reopened.tracing = AgentTracing(reopened, tracing.settings.model_copy(update={'moyai_build_sha': 'b2' * 20}), processor)
+    next_message = reopened.claim_message(run['id'])
+    reopened.finish_message(run['id'], next_message['id'], 'new answer')
+    for attributes in (processor.spans[-1].attributes, processor.spans[-1].resource.attributes):
+        assert attributes['agent.version'] == 'b2' * 20
+
+
+async def test_non_chat_turn_captures_deployment_at_execution_and_keeps_it_on_completion(tmp_path, monkeypatch):
+    from app.runner import RunManager
+    store = Store(tmp_path)
+    settings = Settings(_env_file=None, litellm_trace_endpoint='https://lens.example/v1/traces',
+                        litellm_trace_api_key='trace-secret', moyai_build_sha='a1' * 20, trace_environment='lens-eval')
+    processor = Processor()
+    store.tracing = AgentTracing(store, settings, processor)
+    run = store.create_run('A non-chat cloud task', '', 'modal', [])
+    assert not store.rows('SELECT * FROM trace_contexts')
+    deployed = settings.model_copy(update={'moyai_build_sha': 'b2' * 20})
+    reopened = Store(tmp_path)
+    reopened.tracing = AgentTracing(reopened, deployed, processor)
+    manager = RunManager(reopened, deployed)
+
+    async def cloud(turn):
+        assert reopened.rows('SELECT agent_version FROM trace_contexts')[0]['agent_version'] == 'b2' * 20
+        stamp = time.time_ns()
+        reopened.tracing.tool(turn['id'], {'tool': 'read_file', 'call_id': 'non-chat-tool',
+                                         'start_ns': stamp, 'end_ns': stamp, 'output': 'hello'})
+        reopened.tracing = AgentTracing(reopened, deployed.model_copy(
+            update={'moyai_build_sha': 'c3' * 20, 'trace_environment': 'production'}), processor)
+        reopened.update_run(turn['id'], status='completed', summary='hello')
+        return False
+
+    monkeypatch.setattr(manager, 'cloud', cloud)
+    await manager.execute(reopened.run(run['id']))
+    assert {span.name for span in processor.spans} == {'read_file', 'moyai'}
+    for span in processor.spans:
+        for attributes in (span.attributes, span.resource.attributes):
+            assert attributes['agent.version'] == 'b2' * 20
+            assert attributes['deployment.environment'] == 'lens-eval'
+
+
+@pytest.mark.parametrize('legacy_context', [False, True])
+@pytest.mark.parametrize('chat_enabled', [False, True])
+def test_recovered_turn_without_admission_metadata_never_acquires_current_deployment(tmp_path, legacy_context, chat_enabled):
+    store = Store(tmp_path)
+    run = store.create_run('Task from the old deployment', '', 'modal', [], chat_enabled=chat_enabled)
+    message_id = store.claim_message(run['id'])['id'] if chat_enabled else 0
+    if legacy_context:
+        with store.connect() as conn:
+            conn.execute('''CREATE TABLE trace_contexts (
+                run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+                trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
+                session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
+                PRIMARY KEY(run_id,message_id))''')
+            conn.execute('INSERT INTO trace_contexts VALUES(?,?,?,?,?,?,?)',
+                         (run['id'], message_id, 'a' * 32, 'b' * 16, None, run['id'], 'moyai'))
+    settings = Settings(_env_file=None, litellm_trace_endpoint='https://lens.example/v1/traces',
+                        litellm_trace_api_key='trace-secret', moyai_build_sha='c3' * 20, trace_environment='lens-eval')
+    processor = Processor()
+    reopened = Store(tmp_path)
+    tracing = reopened.tracing = AgentTracing(reopened, settings, processor)
+    identity = tracing.identity(run, message_id)
+    if legacy_context:
+        assert identity == (int('a' * 32, 16), int('b' * 16, 16), None, run['id'], 'moyai')
+    # Retrying admission must not upgrade an existing unknown context.
+    with reopened.connect() as conn:
+        tracing.start_turn(run['id'], message_id, connection=conn)
+    if chat_enabled:
+        reopened.finish_message(run['id'], message_id, 'recovered answer')
+    else:
+        tracing.finish_turn(run['id'], None, 'recovered answer', 'completed')
+    stamp = time.time_ns()
+    tracing.emit(run, message_id, 'late replay', 'late-tool', stamp, stamp,
+                 {'agent.version': 'request-controlled', 'deployment.environment': 'production',
+                  'deployment.environment.name': 'production', 'moyai.environment': 'production'})
+    for span in processor.spans:
+        assert span.context.trace_id == identity[0]
+        for attributes in (span.attributes, span.resource.attributes):
+            for field in ('agent.version', 'deployment.environment', 'deployment.environment.name', 'moyai.environment'):
+                assert field not in attributes
+
+
 def test_trace_tree_contains_task_model_tool_and_answer_with_stable_turn_ids(tmp_path):
     store, tracing, processor, run, message = setup(tmp_path)
     events = []
@@ -192,7 +324,7 @@ def test_slack_turn_root_span_links_its_thread_for_lens(tmp_path):
     assert not any(key.startswith('agent.source.') for key in web_root.attributes)
 
 
-def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
+def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path, monkeypatch):
     store, tracing, processor, run, message = setup(tmp_path)
     def broken(span):
         raise RuntimeError('Exporter unavailable')
@@ -203,6 +335,16 @@ def test_disabled_and_broken_capture_cannot_break_agent_work(tmp_path):
     disabled = AgentTracing(store, Settings(_env_file=None))
     disabled.finish_turn('does-not-exist', 0, '', 'failed')
     assert disabled.processor is None and disabled.outboxes == []
+    store.tracing = disabled
+    queued, _ = store.enqueue_message(run['id'], 'Tracing is disabled', 'disabled-turn')
+    assert store.claim_message(run['id'])['id'] == queued['id']
+    assert not store.rows('SELECT 1 FROM trace_contexts WHERE run_id=? AND message_id=?', (run['id'], queued['id']))
+    store.finish_message(run['id'], queued['id'], 'Still works')
+    store.tracing = tracing
+    monkeypatch.setattr(tracing, 'identity', broken)
+    queued, _ = store.enqueue_message(run['id'], 'Admission tracing fails', 'broken-turn')
+    assert store.claim_message(run['id'])['id'] == queued['id']
+    assert store.rows('SELECT status FROM messages WHERE id=?', (queued['id'],))[0]['status'] == 'running'
 
 
 @pytest.mark.parametrize('endpoint', ['http://example.com/v1/traces', 'https://key@example.com/v1/traces',

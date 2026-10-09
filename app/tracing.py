@@ -45,10 +45,6 @@ class AgentTracing:
         self.preferences = preferences or UserPreferences(store, None, None)
         destinations = settings.trace_destinations()
         self.enabled = bool(destinations)
-        self.resource = Resource({'service.name': 'moyai',
-                                  'deployment.environment.name': settings.trace_environment,
-                                  'deployment.environment': settings.trace_environment,
-                                  **({'agent.version': settings.moyai_build_sha} if settings.moyai_build_sha else {})})
         self.processor = processor
         with store.connect() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
@@ -56,6 +52,12 @@ class AgentTracing:
                 trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
                 session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
                 PRIMARY KEY(run_id,message_id))''')
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(trace_contexts)')}
+            for name in ('agent_version', 'trace_environment'):
+                if name not in columns:
+                    # Existing turns predate admission capture. Their original
+                    # deployment is unknown, even when this process has a build.
+                    conn.execute(f"ALTER TABLE trace_contexts ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         self.outboxes = [TraceOutbox(store, *destination) for destination in destinations] if processor is None else []
         raindrop = next((d for d in destinations if d[0] == 'trace_outbox_raindrop'), None)
         self.events = (RaindropEventOutbox(store, raindrop[1].removesuffix('/traces') + '/events/track', raindrop[2])
@@ -87,10 +89,24 @@ class AgentTracing:
         name = ' '.join(self.content(run.get('agent_label') or 'moyai').split())[:160] or 'moyai'
         # Freeze attribution before a group finishes or a label changes. A late
         # journal replay must keep the original trace, parent and agent name.
-        connection.execute('INSERT INTO trace_contexts VALUES(?,?,?,?,?,?,?)',
+        connection.execute('''INSERT INTO trace_contexts
+            (run_id,message_id,trace_id,span_id,parent_id,session_id,agent_name) VALUES(?,?,?,?,?,?,?)''',
             (run['id'], message_id or 0, format(trace_id, '032x'), format(span_id, '016x'),
              format(parent, '016x') if parent else None, session, name))
         return trace_id, span_id, parent, session, name
+
+    @best_effort
+    def start_turn(self, run_id, message_id, *, connection):
+        """Freeze deployment metadata in the transaction that admits execution."""
+        run = self.store.run(run_id, connection=connection)
+        if not run or run['mode'] != 'modal' or connection.execute(
+                'SELECT 1 FROM trace_contexts WHERE run_id=? AND message_id=?',
+                (run_id, message_id or 0)).fetchone():
+            return
+        self.identity(run, message_id, connection)
+        connection.execute('''UPDATE trace_contexts SET agent_version=?,trace_environment=?
+            WHERE run_id=? AND message_id=?''',
+            (self.settings.moyai_build_sha, self.settings.trace_environment, run_id, message_id or 0))
 
     def content(self, value):
         return trace_content(value, secrets=(self.settings.litellm_api_key, self.settings.litellm_trace_api_key,
@@ -149,19 +165,27 @@ class AgentTracing:
 
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False, connection=None):
         trace_id, agent_id, parent_id, session, agent_name = self.identity(run, message_id, connection)
+        deployment = self.store.rows('''SELECT agent_version,trace_environment FROM trace_contexts
+            WHERE run_id=? AND message_id=?''', (run['id'], message_id or 0), connection=connection)[0]
+        version, environment = deployment['agent_version'], deployment['trace_environment']
+        resource = Resource({'service.name': 'moyai',
+                             **({'deployment.environment': environment,
+                                 'deployment.environment.name': environment} if environment else {}),
+                             **({'agent.version': version} if version else {})})
         parent_id = parent_id if root else agent_id
         attributes = {'session.id': session, 'agent.name': agent_name, 'gen_ai.agent.name': agent_name,
                       'moyai.run_id': run['id'],
                       'moyai.turn_id': str(message_id or 0),
-                      'moyai.environment': self.settings.trace_environment,
                       'moyai.session_url': self.settings.public_url.rstrip('/') + '/#run=' + run['id'],
                       # Raindrop groups spans into conversations and turns by these keys.
                       'traceloop.association.properties.convo_id': session,
                       'traceloop.association.properties.event_id': format(trace_id, '032x'), **attrs}
-        attributes['deployment.environment'] = self.settings.trace_environment
-        attributes.pop('agent.version', None)
-        if self.settings.moyai_build_sha:
-            attributes['agent.version'] = self.settings.moyai_build_sha
+        for key in ('agent.version', 'deployment.environment', 'deployment.environment.name', 'moyai.environment'):
+            attributes.pop(key, None)
+        if environment:
+            attributes.update({'deployment.environment': environment, 'moyai.environment': environment})
+        if version:
+            attributes['agent.version'] = version
         user = self.user_identity(run, message_id, connection)
         if user:
             attributes['user.id'] = user
@@ -199,13 +223,13 @@ class AgentTracing:
         if self.settings.langsmith_api_key:
             attributes.update({
                 'langsmith.span.kind': {'AGENT': 'chain', 'LLM': 'llm', 'TOOL': 'tool'}.get(kind, 'chain'),
-                'langsmith.span.tags': 'moyai,' + self.settings.trace_environment,
+                'langsmith.span.tags': 'moyai' + (',' + environment if environment else ''),
                 'langsmith.metadata.thread_id': session,
                 'langsmith.metadata.session_id': session,
                 'langsmith.metadata.run_id': run['id'],
                 'langsmith.metadata.turn_id': str(message_id or 0),
                 'langsmith.metadata.session_url': attributes['moyai.session_url'],
-                'langsmith.metadata.environment': self.settings.trace_environment,
+                **({'langsmith.metadata.environment': environment} if environment else {}),
             })
         if self.settings.braintrust_api_key:
             attributes.update({
@@ -214,14 +238,14 @@ class AgentTracing:
                 'braintrust.metadata.run_id': run['id'],
                 'braintrust.metadata.turn_id': str(message_id or 0),
                 'braintrust.metadata.session_url': attributes['moyai.session_url'],
-                'braintrust.metadata.environment': self.settings.trace_environment,
-                'braintrust.tags': ['moyai', self.settings.trace_environment],
+                **({'braintrust.metadata.environment': environment} if environment else {}),
+                'braintrust.tags': ['moyai', *([environment] if environment else [])],
             })
         error = self.content(attrs.get('output.value') or attrs.get('moyai.status') or 'Operation failed') if failed else None
         span = ReadableSpan(
             name=agent_name if root else name, context=context(trace_id, agent_id if root else identifier(span_id, 8)),
             parent=context(trace_id, parent_id) if parent_id else None,
-            resource=self.resource, attributes=attributes, kind=SpanKind.INTERNAL,
+            resource=resource, attributes=attributes, kind=SpanKind.INTERNAL,
             start_time=int(start), end_time=max(int(start), int(end)),
             status=Status(StatusCode.ERROR, error) if failed else Status(StatusCode.OK),
             # LangSmith maps exception events to errors; status alone is lost.
