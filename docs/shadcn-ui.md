@@ -25,6 +25,10 @@ and long names. Type `/team` in the new-session composer, or open
 `?fixture=skill-picker#run=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` to check the reply
 composer. Both use the production picker against synthetic data.
 
+`?fixture=agent-sidebar` provides main agents, subagents and a grandchild with
+unread, running, approval and failure indicators. Expand the first session and
+its Explore agent to inspect disclosure, title and status alignment.
+
 The production bundle lives in `app/static/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.

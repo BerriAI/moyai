@@ -198,21 +198,24 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .sessions-label #task-count { margin-left: 0; color: #a0a0a0; font-size: 12px; }
 .sessions-label .folder-add { margin-left: auto; color: #666; }
 .session-list { padding-bottom: 8px; scrollbar-color: #e0e0e0 transparent; }
-.parent-session { border-radius: 8px; }
+/* Reserve the action column at every depth so status indicators share one edge. */
+.parent-session { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: start; border-radius: 8px; }
 .parent-session:hover { background: #f0f0f0; }
 .parent-session:has(.selected), .parent-session:has(.selected):hover { background: #ebebeb; }
 .session-link, .session-link:hover, .session-link.selected { background: transparent; }
 .session-link-title { font-size: 14px; color: #1f1f1f; line-height: 20px; }
 .session-link small { font-size: 12.5px; color: #8a8a8a; margin-top: 1px; line-height: 18px; }
-.agent-disclosure, .agent-disclosure-space { width: 22px; flex-basis: 22px; margin-top: 8px; height: 20px; }
+.agent-disclosure, .agent-disclosure-space { display: grid; place-items: center; width: 24px; margin-top: 4px; height: 24px; }
 .agent-disclosure { color: #8a8a8a; font-size: 14px; }
-.agent-disclosure-space::after { content: '·'; color: #c4c4c4; font-size: 18px; line-height: 18px; }
+.agent-disclosure svg { display: block; width: 16px; height: 16px; }
+.agent-disclosure[aria-expanded="false"] svg { transform: rotate(-90deg); }
+.agent-disclosure-space::after { content: ''; width: 3px; height: 3px; border-radius: 50%; background: #c4c4c4; }
 .session-dot { width: 8px; height: 8px; flex: 0 0 8px; margin: 7px 4px 0 6px; box-shadow: none !important; }
 .session-dot.idle, .session-dot.completed, .session-dot.cancelled, .session-dot.interrupted { background: transparent; }
 .session-dot.running, .session-dot.queued, .session-dot.provisioning, .session-dot.saving, .session-dot.reconnecting, .session-dot.waiting_children { background: #4a7ef0; }
 .session-dot.waiting_credential, .session-dot.awaiting_approval { background: #e8883a; }
 .session-dot.failed { background: #d9605f; }
-.session-move { margin-top: 6px; width: 22px; min-width: 22px; color: #777; }
+.session-move { display: grid; place-items: center; margin-top: 4px; width: 24px; min-width: 24px; height: 24px; color: #777; }
 .child-sessions { margin-left: 24px; border-left-color: #e6e6e6; }
 .folder-toggle { font-size: 13px; color: #6b6b6b; }
 .unfiled-heading { font-size: 13px; color: #6b6b6b; margin: 8px 8px 4px; }

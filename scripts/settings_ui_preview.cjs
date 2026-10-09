@@ -7,6 +7,16 @@ const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
 const arg=(name,fallback)=>process.argv.includes(name)?process.argv[process.argv.indexOf(name)+1]:fallback;
 const root=path.resolve(arg('--root',path.join(__dirname,'../app/static'))),port=Number(arg('--port','8840'));
 const stamp='2026-10-07T15:00:00Z';
+const agentSession=(number,prompt,status='idle',children=[])=>({id:number.toString(16).padStart(32,'0'),prompt,status,children,updated_at:stamp,created_at:stamp});
+const agentSessions=[
+ agentSession(1,'Adjust UI alignment across the workspace','idle',[
+  agentSession(2,'Explore','idle',[agentSession(3,'Inspect shared components')]),
+  agentSession(4,'Reproduction','running'),
+ ]),
+ agentSession(5,'Calculate 2+2 and reply with the result'),
+ agentSession(6,'Review a very long session title that must stay within the sidebar','awaiting_approval'),
+ agentSession(7,'Verify integration tests','failed'),
+];
 const model='openai/gpt-6-astra';
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
 let fixture='populated';
@@ -124,7 +134,7 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
  if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
- if(p==='/api/runs')return json(res,200,['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
+ if(p==='/api/runs')return json(res,200,fixture==='agent-sidebar'?agentSessions:['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
  if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:fixture==='skill-picker',mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);

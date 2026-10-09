@@ -79,6 +79,78 @@ for (const width of [1440, 768, 320]) for (const composer of ['new', 'reply']) t
   assert.equal(await popup.isVisible(), false);
 });
 
+for (const width of [1440, 768, 320]) test(`agent rows align titles, disclosures and status at every depth at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'agent-sidebar', width);
+  if (width < 850) await page.locator('#open-sidebar').click();
+  const parent = page.locator('[data-toggle-agents="00000000000000000000000000000001"]');
+  const child = page.locator('[data-toggle-agents="00000000000000000000000000000002"]');
+  await parent.press('Enter');
+  await child.press('Enter');
+  const checkGeometry = async () => {
+    const rows = await page.locator('.parent-session').evaluateAll(elements => elements.map(el => {
+      const rect = node => node?.getBoundingClientRect().toJSON();
+      const title = el.querySelector('.session-link-title');
+      return {
+        box: rect(el), title: rect(title), font: getComputedStyle(title).fontSize,
+        line: parseFloat(getComputedStyle(title).lineHeight), meta: rect(el.querySelector('.session-link-meta')),
+        indicator: rect(el.querySelector('.session-indicator')),
+        disclosure: rect(el.querySelector('.agent-disclosure,.agent-disclosure-space')),
+        action: rect(el.querySelector('.session-move')), icon: rect(el.querySelector('.agent-disclosure svg')),
+        toggle: !!el.querySelector('.agent-disclosure'),
+      };
+    }));
+    assert.equal(rows.length, 7, 'Main agents, subagents and a grandchild are visible');
+    const center = rect => rect.top + rect.height / 2;
+    for (const row of rows) {
+      assert.ok(Math.abs(row.indicator.left - rows[0].indicator.left) <= 1, 'All status indicators share a column, including rows without actions');
+      assert.ok(Math.abs(center(row.indicator) - row.title.top - row.line / 2) <= 1, 'Status aligns with the first title line, including wrapped keyboard focus');
+      assert.ok(Math.abs(center(row.disclosure) - center(row.indicator)) <= 1, 'Disclosures and leaf markers align with the title');
+      assert.ok(row.disclosure.right <= row.title.left && row.title.right + 7 <= row.indicator.left, 'Leading controls, titles and status cannot overlap');
+      assert.ok(Math.abs(row.meta.left - row.title.left) <= 1, 'Metadata uses the title leading edge');
+      assert.equal(row.font, rows[0].font, 'Agent labels use the same readable size at every depth');
+      assert.ok(row.box.left >= 0 && row.box.right <= width, 'Rows stay inside the viewport');
+      if (row.toggle) {
+        assert.ok(row.icon, 'Disclosures use the shared SVG icon');
+        assert.ok(Math.abs(center(row.icon) - center(row.indicator)) <= 1, 'Chevron shares the title center');
+      }
+      if (row.action) {
+        assert.ok(row.indicator.right <= row.action.left, 'Status stays separate from the action');
+        assert.ok(Math.abs(center(row.action) - center(row.indicator)) <= 1, 'Action shares the title center');
+      }
+    }
+    assert.ok(rows[0].title.left < rows[1].title.left && rows[1].title.left < rows[2].title.left, 'Indentation preserves the parent, child and grandchild hierarchy');
+    assert.equal(rows[1].title.left, rows[3].title.left, 'Sibling titles share a leading edge');
+  };
+  await checkGeometry();
+  const longTitle = page.locator('[data-run="00000000000000000000000000000006"]');
+  assert.equal(await longTitle.locator('.session-link-title').evaluate(el => el.scrollWidth > el.clientWidth), true);
+  await longTitle.focus();
+  await checkGeometry();
+  await parent.press('Enter');
+  assert.equal(await child.count(), 0, 'Collapsing removes nested rows');
+  assert.equal(await parent.evaluate(el => el === document.activeElement), true, 'Keyboard focus survives the toggle');
+  await parent.press('Enter');
+  await checkGeometry();
+  await page.locator('[data-session-actions="00000000000000000000000000000005"]').click();
+  await page.locator('#session-actions').getByRole('button', { name: 'Rename', exact: true }).waitFor();
+  await page.keyboard.press('Escape');
+  await checkGeometry();
+  await page.locator('[data-run="00000000000000000000000000000004"]').click();
+  if (width < 850) await page.locator('#open-sidebar').click();
+  await page.locator('.child-session.selected').waitFor();
+  await checkGeometry();
+  const folderId = 'alignment-folder';
+  await page.route('**/api/session-folders', route => route.fulfill({ json: { folders: [{ id: folderId, name: 'Agent alignment', revision: 1 }] } }));
+  await page.route(/\/api\/runs(?:\?|$)/, async route => {
+    const response = await route.fetch(), runs = await response.json();
+    runs[0].folder_id = folderId;
+    await route.fulfill({ json: runs });
+  });
+  await page.evaluate(() => refreshRuns());
+  await page.locator('.session-folder .child-session').first().waitFor();
+  await checkGeometry();
+});
+
 for (const width of [1440, 768, 320]) test(`folder headings keep their leading alignment at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'populated', width);
   const folders = ['hello', 'A very long folder name that must truncate within the sidebar'].map((name, i) => ({ id: String(i + 1).repeat(32), name, revision: 1 }));
@@ -153,6 +225,16 @@ for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'membe
   assert.ok(Math.abs(optionSize - labelSize) <= 2, 'The open menu and trigger have consistent typography');
   await option.click();
   assert.match(await trigger.innerText(), /All sessions/);
+  await page.locator('#task-count').evaluate(el => { el.textContent = '100'; });
+  const allSessions = await trigger.evaluate(el => {
+    const rect = node => node.getBoundingClientRect().toJSON(), row = el.closest('.sessions-label');
+    const label = el.querySelector('span');
+    return { field: rect(el), label: rect(label), count: rect(row.querySelector('#task-count')), add: rect(row.querySelector('#new-folder')), clipped: label.scrollWidth > label.clientWidth };
+  });
+  assert.equal(allSessions.clipped, false, 'All sessions remains fully visible beside a three-digit count');
+  assert.ok(allSessions.field.right + 4 <= allSessions.count.left && allSessions.count.right + 4 <= allSessions.add.left, 'All sessions, 100 and Add folder retain visible spacing');
+  const centers = ['label', 'count', 'add'].map(key => allSessions[key].top + allSessions[key].height / 2);
+  assert.ok(Math.max(...centers) - Math.min(...centers) <= 1, 'The scope label, count and add icon share a vertical center');
   await trigger.press('Enter');
   await page.keyboard.press('Escape');
   await page.getByRole('listbox').waitFor({ state: 'hidden' });

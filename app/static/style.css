@@ -75,7 +75,7 @@
 .session-link-meta{display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px;margin-top:2px;font-size:11px;line-height:16px;color:#6e6878;font-weight:400}
 .session-title-row{display:flex;align-items:flex-start;gap:8px}
 .session-title-row .session-link-title{flex:1;min-width:0}
-.session-indicator{display:flex;align-items:center;justify-content:center;flex:0 0 12px;width:12px;height:18px;color:var(--purple)}
+.session-indicator{display:flex;align-items:center;justify-content:center;flex:0 0 12px;width:12px;height:20px;color:var(--purple)}
 .session-completion{width:7px;height:7px;border-radius:50%;background:currentColor}
 .session-completion.is-read{animation:session-read-fade .35s ease-out forwards}
 .session-attention{font-size:12px;font-weight:600;color:#ad7929}
@@ -90,7 +90,6 @@
 /* Keyboard users can read the full title and supporting context in place. */
 .session-list .session-link:focus-visible .session-link-title,.session-link:focus-visible .session-link-context{white-space:normal;overflow-wrap:anywhere}
 .session-list .child-sessions{margin-bottom:4px;border-left-color:#dcd6e4}
-.session-list .child-session .session-link-title{font-size:12px}
 .session-state .session-dot.failed,.session-state .session-dot.interrupted{background:#b35b65}
 .session-state .session-dot.waiting_credential,.session-state .session-dot.awaiting_approval{background:#b08439}
 .session-state .session-dot.cancelled,.session-state .session-dot.unknown{background:#928a9a}
