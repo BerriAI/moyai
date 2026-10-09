@@ -34,6 +34,7 @@ from .user_preferences import UserPreferences
 from .model_preferences import preferred_model, save_model
 from .access_logging import configure_access_logging
 from .broker_diagnostics import BrokerDiagnosticsMiddleware, upstream_headers
+from .workspace_diagnostics import DIAGNOSTIC_TOOL, DiagnosticArgs, inspect_workspace
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
 from .identities import SlackIdentities
@@ -885,11 +886,13 @@ def create_app(settings: Settings | None = None):
             await checkpoints.flush()
         return {'steer_message_id': target}
 
+    def workspace_catalog(run):
+        return [DIAGNOSTIC_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
+
     @app.get("/broker/{run_id}/tools")
     async def tool_list(run_id: str, request: Request):
-        run = require_run(run_id, request)
-        return media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
-                for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
+        return workspace_catalog(require_run(run_id, request))
 
     @app.post("/broker/{run_id}/tools/call")
     async def tool_call(run_id: str, request: Request):
@@ -898,6 +901,12 @@ def create_app(settings: Settings | None = None):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'workspace_diagnostics':
+            try:
+                DiagnosticArgs.model_validate(body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Workspace diagnostics takes no arguments and only reads the current session.') from None
+            return inspect_workspace(store, connectors, run, workspace_catalog(run))
         if body.name in MEDIA_TOOLS:
             try:
                 result = await asyncio.to_thread(media_shares.call, run, body.name, body.arguments)

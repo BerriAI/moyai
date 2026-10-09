@@ -23,6 +23,23 @@ to a model or tool error.
 
 ## Cloud request failures and recovery
 
+`workspace_diagnostics` is a read-only tool available through the active run's
+broker capability. It takes no arguments and cannot inspect a different run.
+It returns the active harness/model, current broker tool names, connection scope
+and policy flags, and the latest 20 sanitized broker/SDK failures for this session.
+Records include allowlisted status codes, counters and correlation IDs; message
+text, tool payloads, credentials and raw host logs are excluded. The stdio MCP
+bridge adds the tool names from its last `tools/list` response. This distinguishes
+broker registration from what the bridge advertised; neither proves that every
+tool reached a particular model request. No recorded failure is not proof that
+no failure occurred.
+
+Source access already uses `github_repositories` and `github_checkout` when
+`BerriAI/moyai` is authorized. Diagnostics report `RENDER_GIT_COMMIT` when supplied
+as a full commit SHA so source can be compared with the deployed version. General
+Render/Modal logs still require an operator or an explicitly scoped log-reader
+integration. Do not give agent sandboxes account administrator keys to obtain them.
+
 The sandbox emits an `error` event with `data.phase=broker_failure`. Its structured
 fields preserve HTTP status, original upstream status, client request ID,
 allowlisted response IDs (including Render and model ledger IDs), exception and

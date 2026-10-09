@@ -35,6 +35,22 @@ memory, bundled skill instructions and automatic project instructions are disabl
 Project runtime configuration is untrusted. Only Moyai's configured MCP server is
 added, and inherited provider credentials and runtime switches are removed.
 
+The Moyai MCP server is required, with a 60-second startup timeout. The pinned
+runtime waits for its actual tool catalog before sending the first model request;
+failed or timed-out MCP discovery ends the turn without inference. Optional MCP
+startup previously let Codex begin with native tools only and add connected tools
+mid-turn. This could produce false missing-access answers and failed early calls.
+Codex uses direct `mcp__moyai__` tools (or `ALL_TOOLS` inside code mode), Claude
+uses native `ToolSearch`, and Hermes uses `tool_search`/`tool_describe`/`tool_call`.
+Shared instructions select the correct discovery path for the active harness.
+
+To reproduce the startup boundary using real Codex and MCP with local inference:
+
+```sh
+uv run pytest -q tests/test_codex_tool_readiness.py tests/test_workspace_diagnostics.py
+uv run python scripts/tool_readiness_demo.py --output /tmp/moyai-tool-readiness
+```
+
 The SDK receives the run capability and sends Responses requests to Moyai's local
 relay using a custom provider. The broker still pins the selected model, authorizes
 each request, enforces limits and records spend through LiteLLM Gateway. Native

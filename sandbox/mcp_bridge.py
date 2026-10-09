@@ -86,6 +86,10 @@ def serve():
                         data = github_tools.call(name, args, broker, GIT_BROKER, TOKEN)
                     else:
                         data = browser_tool(name, args) if name.startswith("browser_") else broker("/tools/call", {"name": name, "arguments": args})
+                    if name == 'workspace_diagnostics' and isinstance(data, dict) and not data.get('error'):
+                        names = sorted(tool['name'] for tool in tools) if tools is not None else None
+                        data['mcp_catalog'] = {'names': names, 'count': len(names) if names is not None else None,
+                            'scope': 'Last tools/list response from this MCP process; not the model request catalog.'}
                     result = {"content": [{"type": "text", "text": json.dumps(data)}], "isError": bool(isinstance(data, dict) and data.get("error"))}
                 except github_tools.GitHubToolError as exc:
                     result = {"content": [{"type": "text", "text": str(exc)}], "isError": True}

@@ -22,6 +22,7 @@ except ImportError:
 
 
 RECEIPT_TIMEOUT_SECONDS = 10
+MCP_STARTUP_TIMEOUT_SECONDS = 60
 
 
 def toml_value(value):
@@ -115,7 +116,10 @@ class CodexAgent(HarnessAgent):
                 'name': 'Moyai', 'base_url': ctx.relay.url + '/v1', 'wire_api': 'responses',
                 'env_key': 'WORKSPACE_RUN_TOKEN', 'requires_openai_auth': False,
                 'supports_websockets': False, 'request_max_retries': 0, 'stream_max_retries': 0}},
-            'mcp_servers': {'moyai': ctx.config['mcp_servers']['workspace']},
+            # Optional MCP servers connect asynchronously in Codex. Without
+            # required=True, inference can start with only the native tools.
+            'mcp_servers': {'moyai': {**ctx.config['mcp_servers']['workspace'],
+                'required': True, 'startup_timeout_sec': MCP_STARTUP_TIMEOUT_SECONDS}},
             'projects': {str(Path(ctx.cwd).resolve()): {'trust_level': 'untrusted'}},
             'project_doc_max_bytes': 0, 'web_search': 'disabled',
             # Moyai owns plugins; native marketplace sync outlives SDK shutdown.
