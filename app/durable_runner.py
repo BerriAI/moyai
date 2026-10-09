@@ -16,6 +16,7 @@ from .environments import EnvironmentPending
 
 from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files
 from .security import digest
+from .sandboxes import ProvisioningTerminated
 from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
 
@@ -386,6 +387,10 @@ class DurableRunner(RunManager):
             raise LostExecution()
         return sandbox
 
+    def provision_name(self, run_id, state):
+        suffix = f"-provision-{state['provision_attempt']}" if state.get('provision_attempt') else ''
+        return f"moyai-{run_id}-{state['message_id']}-{state['segment']}{suffix}"
+
     async def provision(self, run_id, state):
         project = await self.environments.prepare(run_id) if self.environments else {}
         if self.store.run(run_id)['status'] == 'stopping':
@@ -399,16 +404,33 @@ class DurableRunner(RunManager):
                 state['phase'] = 'provision'
                 self.save(run_id, state)
         backend = self.provider(self.store.run(run_id))
-        name = f"moyai-{run_id}-{state['message_id']}-{state['segment']}"
+        name = self.provision_name(run_id, state)
         token = '' if state.get('computer_only') else self.token(run_id, state['message_id'])
         try:
-            sandbox = await backend.find(name, initialize=True, token=token)
-        except modal.exception.NotFoundError:
             try:
-                sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
-                                               token=token)
-            except modal.exception.AlreadyExistsError:
                 sandbox = await backend.find(name, initialize=True, token=token)
+            except modal.exception.NotFoundError:
+                try:
+                    sandbox = await backend.create(name=name, snapshot_id=state['snapshot_id'] or project.get('snapshot_id') or '',
+                                                   token=token)
+                except modal.exception.AlreadyExistsError:
+                    sandbox = await backend.find(name, initialize=True, token=token)
+        except ProvisioningTerminated:
+            # Provisioning has not crossed the agent launch boundary. A new
+            # durable name is safe only after the provider confirms the old VM
+            # cannot run, and must survive worker restarts without duplication.
+            attempt = state.get('provision_attempt', 0)
+            if attempt >= 2:
+                if state.get('computer_only'):
+                    raise HTTPException(503, 'Computer startup failed repeatedly.')
+                self.fail(run_id, state, 'Workspace startup failed repeatedly. The last checkpoint is preserved; '
+                          'no agent work was replayed. Try again when workspace services recover.')
+            else:
+                state['provision_attempt'] = attempt + 1
+                self.save(run_id, state)
+                self.store.event(run_id, 'status', 'Startup VM stopped. Retrying from the saved workspace.',
+                                 {'phase': 'provision', 'attempt': attempt + 1})
+            return True
         state.update(sandbox_id=sandbox.object_id, machine_started=getattr(sandbox, 'started_at', time.time()), phase='install')
         self.save(run_id, state)
         self.store.update_run(run_id, sandbox_id=sandbox.object_id)
@@ -844,7 +866,7 @@ class DurableRunner(RunManager):
             # Recover a create whose acknowledgement was lost before Stop.
             try:
                 sandbox = await self.provider(self.store.run(run_id)).find(
-                    f"moyai-{run_id}-{state['message_id']}-{state['segment']}")
+                    self.provision_name(run_id, state))
                 state['sandbox_id'] = sandbox.object_id
                 self.save(run_id, state)
             except modal.exception.NotFoundError:
