@@ -27,6 +27,10 @@ MAX_LIFETIME = 28800
 MAX_ARCHIVE = 4 * 1024 ** 3  # A bounded single S3 PUT; oversized saves fail closed.
 
 
+class TransientEndpointError(RuntimeError):
+    """AWS could not deliver an endpoint response; execution is ambiguous."""
+
+
 class LambdaProvider:
     name = 'lambda'
 
@@ -228,10 +232,10 @@ class Sandbox:
                 not url.hostname.endswith('.lambda-microvm.' + self.provider.settings.lambda_region + '.on.aws')
                 or url.path not in {'', '/'} or url.query or url.fragment):
             raise ValueError('Unexpected AWS MicroVM endpoint')
-        # Observations can be retried at the same cursor/job ID. Execution,
+        # Observations and releasing the same checkpoint can be retried. Execution,
         # checkpoint submission and Computer input may have taken effect even
         # when AWS loses the reply, so they always get exactly one attempt.
-        attempts = 3 if path in {'/health', '/job', '/read', '/file/read', '/file/stat'} else 1
+        attempts = 3 if path in {'/health', '/job', '/read', '/file/read', '/file/stat', '/checkpoint/finish'} else 1
         async with httpx.AsyncClient(timeout=530 if path == '/computer' else 60, follow_redirects=False) as client:
             for attempt in range(attempts):
                 if attempt:
@@ -239,8 +243,10 @@ class Sandbox:
                 try:
                     async with client.stream('POST', 'https://' + url.netloc + path,
                             json=data, headers={'X-aws-proxy-auth': self.auth, 'X-aws-proxy-port': '80'}) as response:
-                        if response.status_code in {429, 500, 502, 503, 504} and attempt + 1 < attempts:
-                            continue
+                        if response.status_code in {429, 500, 502, 503, 504}:
+                            if attempt + 1 < attempts:
+                                continue
+                            raise TransientEndpointError(f'AWS sandbox returned HTTP {response.status_code}')
                         if response.status_code == 404:
                             raise FileNotFoundError('AWS sandbox file or execution not found')
                         if response.status_code != 200:
@@ -259,14 +265,23 @@ class Sandbox:
         # The guest journals before executing. An uncertain POST can be polled
         # by ID, but is never silently sent again by this client.
         async with asyncio.timeout(timeout):
-            await self._request(path, body)
+            try:
+                await self._request(path, body)
+            except (TransientEndpointError, httpx.TransportError):
+                pass  # Resolve a lost acknowledgement only by observing its ID.
             while True:
-                result = await self._request('/job', {'id': body['id']})
+                try:
+                    result = await self._request('/job', {'id': body['id']})
+                except (TransientEndpointError, httpx.TransportError):
+                    # Cold image IO can coincide with sustained gateway errors.
+                    # Keep observing the original job within its existing budget.
+                    await asyncio.sleep(2)
+                    continue
                 if result['state'] == 'failed':
                     raise RuntimeError('AWS guest operation failed: ' + result.get('error', 'unknown'))
                 if result['state'] == 'done':
                     return result['result']
-                await asyncio.sleep(.25)
+                await asyncio.sleep(1)
 
     async def computer_request(self, body):
         return await self.request('/computer', body)

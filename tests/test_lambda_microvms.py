@@ -16,7 +16,7 @@ import pytest
 
 from app.config import Settings
 from app.sandboxes import provider, provider_for_id
-from app.sandboxes.lambda_microvm import LambdaProvider, Sandbox, MAX_ARCHIVE
+from app.sandboxes.lambda_microvm import LambdaProvider, Sandbox, MAX_ARCHIVE, TransientEndpointError
 from sandbox import lambda_checkpoint as checkpoint
 from sandbox.continuation import RotationDeadline
 
@@ -134,7 +134,7 @@ async def test_uncertain_mutation_is_not_retried(settings, monkeypatch, path, fa
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize('path', ['/health', '/job', '/read', '/file/read', '/file/stat'])
+@pytest.mark.parametrize('path', ['/health', '/job', '/read', '/file/read', '/file/stat', '/checkpoint/finish'])
 async def test_transient_gateway_failure_retries_only_the_same_observation(settings, monkeypatch, path):
     backend = LambdaProvider(settings)
     sandbox = Sandbox(backend, vm())
@@ -147,6 +147,37 @@ async def test_transient_gateway_failure_retries_only_the_same_observation(setti
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: client(transport=httpx.MockTransport(response), **kw))
     assert await sandbox.request(path, {'id': 'existing-job', 'stdout': 128}) == {'state': 'done'}
     assert calls == [calls[0], calls[0]]
+
+
+@pytest.mark.parametrize('path', ['/initialize', '/checkpoint', '/upload'])
+@pytest.mark.parametrize('failure', [TransientEndpointError('HTTP 502'), httpx.ReadError('lost reply')])
+async def test_job_recovers_lost_ack_and_sustained_poll_failures_without_reposting(settings, monkeypatch, path, failure):
+    sandbox = Sandbox(LambdaProvider(settings), vm())
+    sandbox._request = AsyncMock(side_effect=[failure, *([failure] * 5),
+        {'state': 'running'}, {'state': 'done', 'result': {'saved': True}}])
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+    body = {'id': 'original-job', 'command': 'external-action'}
+    assert await sandbox.job(path, body, timeout=10) == {'saved': True}
+    calls = sandbox._request.await_args_list
+    assert calls[0].args == (path, body)
+    assert all(call.args == ('/job', {'id': 'original-job'}) for call in calls[1:])
+
+
+@pytest.mark.parametrize('failure', [FileNotFoundError('unconfirmed job'), RuntimeError('HTTP 409')])
+async def test_unknown_or_rejected_job_fails_without_replaying(settings, failure):
+    sandbox = Sandbox(LambdaProvider(settings), vm())
+    sandbox._request = AsyncMock(side_effect=[TransientEndpointError('lost ack'), failure])
+    with pytest.raises(type(failure)):
+        await sandbox.job('/checkpoint', {'id': 'original-job'}, timeout=10)
+    assert [call.args[0] for call in sandbox._request.await_args_list] == ['/checkpoint', '/job']
+
+
+async def test_unavailable_job_observation_respects_original_deadline(settings):
+    sandbox = Sandbox(LambdaProvider(settings), vm())
+    sandbox._request = AsyncMock(side_effect=TransientEndpointError('HTTP 502'))
+    with pytest.raises(TimeoutError):
+        await sandbox.job('/checkpoint', {'id': 'original-job'}, timeout=.01)
+    assert [call.args[0] for call in sandbox._request.await_args_list] == ['/checkpoint', '/job']
 
 
 @pytest.mark.parametrize('endpoint', ['https://evil.test', 'http://mvm-test.lambda-microvm.us-east-1.on.aws',
