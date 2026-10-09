@@ -113,10 +113,10 @@ function settingsIcon(view) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[view] || ''}</svg>`;
 }
 
-async function renderSettings() {
+async function renderSettings(recent=false) {
   const version = state.pageVersion;
   MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading settings…</p>');
-  const session = await api('/api/session');
+  const session = await api('/api/session',{recent});
   if (version !== state.pageVersion) return;
   applyUserSession(session);
   if (!session.authenticated) { await boot(); return; }
@@ -181,7 +181,7 @@ async function renderSettings() {
     };
   }
   try{
-    const saved=await api('/api/settings/session-titles');if(version!==state.pageVersion)return;
+    const saved=await api('/api/settings/session-titles',{recent});if(version!==state.pageVersion)return;
     $('#title-model').value=saved.model;
     $('#title-model-status').textContent=!saved.enabled?'Title generation is disabled by the server.':!saved.gateway_configured?'Gateway access must be configured on the server.':admin?'Enter the exact model ID enabled on your gateway.':'Only administrators can change the workspace title model.';
     $('#title-model-form').onsubmit=async event=>{

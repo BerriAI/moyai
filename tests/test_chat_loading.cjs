@@ -94,6 +94,30 @@ test('a slow conversation response cannot replace a newer selection or its loadi
   assert.equal(f.context.location.hash,'#run='+otherId);
 });
 
+test('a recent conversation renders before the network settles and refreshes without remounting',async()=>{
+  const f=loadingFixture();f.state.runs=[{id:runId}];
+  f.state.navigationCache={get:()=>({id:runId,chat_enabled:true,messages:['saved']})};
+  const updates=[];f.context.updateChat=run=>updates.push(run);
+  const opening=f.context.openRun(runId);
+  assert.deepEqual(f.rendered,[runId],'cached content is visible synchronously');
+  assert.doesNotMatch(f.node('#content').innerHTML,/Loading conversation/);
+  f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true,messages:['new']});
+  await opening;assert.deepEqual(f.rendered,[runId],'the composer is not remounted');
+  assert.deepEqual(updates[0].messages,['new']);
+});
+
+test('a cached conversation refresh cannot overwrite a newer stream refresh or route',async()=>{
+  for(const supersede of ['stream','route']){
+    const f=loadingFixture();f.state.runs=[{id:runId}];
+    f.state.navigationCache={get:()=>({id:runId,chat_enabled:true})};
+    const updates=[];f.context.updateChat=run=>updates.push(run);
+    const opening=f.context.openRun(runId);
+    if(supersede==='stream')f.state.chatRefresh++;else f.state.pageVersion++;
+    f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true});await opening;
+    assert.equal(updates.length,0);
+  }
+});
+
 test('an initial linked-chat failure keeps its route Retry and retries only the conversation',async()=>{
   const f=loadingFixture(),boot=f.context.boot();
   f.request('/api/session').resolve({authenticated:true,local:true});await flush();

@@ -36,7 +36,7 @@ test('an already-open users page loses admin controls after a demotion', async (
   const paths=[];
   context.api=async path=>{paths.push(path);return {authenticated:true,role:'member',identity:{email:'alex@example.test'},csrf:'new'};};
   await context.renderUsers();
-  assert.deepEqual(paths,['/api/session']);
+  assert.deepEqual(paths,['/api/admin/users','/api/session']);
   assert.equal(context.state.role,'member');
   assert.equal(context.state.authenticated,true);
   assert.equal(context.state.csrf,'new');

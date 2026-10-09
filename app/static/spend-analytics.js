@@ -54,7 +54,7 @@ function spendExport(data,activity=null){
   if(tab==='infrastructure')return [['Provider','Cost USD','Estimated USD','Covered days','Missing days'],...data.infrastructure.providers.map(p=>[p.name,p.spend,p.estimated,p.covered_days,p.missing_days])];
   return [['Date (UTC)','Active sessions','Active users','LLM requests','Tokens','LLM spend USD','Pending costs','Missing costs'],...(data.daily||[]).map(d=>[d.date,d.sessions,d.active_users,d.requests,d.total_tokens,d.spend,d.pending_costs,d.missing_costs])];
 }
-async function renderAdminSpend(data,identityStatus,activity=null,refresh=false){
+async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,recent=false){
   clearTimeout(spendPRState.timer);
   prepareSpendPRReport(data);
   const version=state.pageVersion,spendVersion=spendState.version,request=++spendAnalyticsState.request;
@@ -62,11 +62,11 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false)
   if(!data.users.some(u=>u.id===spendState.user))spendState.user='';
   if(!data.models.some(m=>m.model===spendAnalyticsState.model))spendAnalyticsState.model='';
   const tabs=[['overall','Overall'],['users','Users'],['history','Usage history'],['prs','Pull requests'],['leaderboard','Leaderboard'],['infrastructure','Infrastructure']],tab=spendAnalyticsState.tab;
-  const identityPanel=()=>renderSlackIdentities(data.identities.filter(u=>u.kind==='slack'),data.identities.filter(u=>['google','cloudflare'].includes(u.kind)),identityStatus);
-  const panel=isSpendPRTab(tab)?spendPRPanel(tab):tab==='users'?`<div id="spend-activity"><p class="subtext" role="status">Loading team activity…</p></div>${spendUsersPanel(data)}<div id="spend-activity-details"></div>`:tab==='history'?spendHistoryPanel(data):tab==='infrastructure'?renderCostSummary(data)+renderInfrastructure(data)+identityPanel():spendOverview(data);
+  const identityPanel=()=>identityStatus?renderSlackIdentities(data.identities.filter(u=>u.kind==='slack'),data.identities.filter(u=>['google','cloudflare'].includes(u.kind)),identityStatus):'<p class="subtext" role="status">Loading account links…</p>';
+  const panel=isSpendPRTab(tab)?spendPRPanel(tab):tab==='users'?`<div id="spend-activity"><p class="subtext" role="status">Loading team activity…</p></div>${spendUsersPanel(data)}<div id="spend-activity-details"></div>`:tab==='history'?spendHistoryPanel(data):tab==='infrastructure'?renderCostSummary(data)+renderInfrastructure(data)+`<div id="spend-identities">${identityPanel()}</div>`:spendOverview(data);
   MoyaiUI.render($('#content'), `<div class="analytics-page"><div class="page-heading"><div><h1>Spend & usage</h1><p class="subtext">Your team's costs and activity, at a glance.</p></div><div class="analytics-actions">${analyticsRange('spend',data.start,data.end)}<button id="sync-spend">Refresh</button></div></div><div class="analytics-toolbar"><div class="analytics-tabs" role="group" aria-label="Spend and usage report view">${tabs.map(([key,label])=>`<button id="spend-tab-${key}" data-spend-tab="${key}" aria-pressed="${tab===key}">${label}</button>`).join('')}</div><button class="analytics-export" id="spend-export" ${tab==='users'||(isSpendPRTab(tab)&&(!spendPRState.data||spendPRState.promise||spendPRState.error))?'disabled':''}>Export CSV</button></div><div id="spend-refresh-status" role="status"></div><div id="spend-panel">${panel}</div><details class="analytics-methodology" id="spend-methodology"><summary>About this data</summary><p>LLM costs are saved from Moyai’s inference responses across gateway key rotations. Calls using separate credential-proxy keys and usage outside Moyai are excluded. Failed or interrupted requests may have no returned cost. Infrastructure uses provider reports and monthly bills; estimates and missing coverage are marked.</p>${data.tracked_since?`<p>Per-user tracking began ${esc(new Date(data.tracked_since).toLocaleString())}.</p>`:''}</details></div>`);
   bindSpendFilters();
-  const redraw=focus=>{const rendered=renderAdminSpend(data,identityStatus,activity);if(focus)$('#'+focus)?.focus();return rendered;};
+  const redraw=focus=>{const rendered=renderAdminSpend(data,identityStatus,activity,false,true);if(focus)$('#'+focus)?.focus();return rendered;};
   document.querySelectorAll('[data-spend-tab]').forEach(button=>button.onclick=()=>{spendAnalyticsState.tab=button.dataset.spendTab;return redraw(button.id).catch(showError);});
   $('#spend-export').onclick=()=>{if(!$('#spend-export').disabled)downloadAnalyticsCSV(`moyai-${tab}-${data.start}-${data.end}.csv`,spendExport(data));};
   if(isSpendPRTab(tab))loadSpendPRReport(data,tab,request,refresh);
@@ -76,11 +76,22 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false)
     document.querySelectorAll('[data-spend-sort]').forEach(button=>button.onclick=()=>{const key=button.dataset.spendSort;spendAnalyticsState.direction=spendAnalyticsState.sort===key?-spendAnalyticsState.direction:-1;spendAnalyticsState.sort=key;redraw().catch(showError);document.querySelector(`[data-spend-sort="${key}"]`)?.focus();});
   }
   if(tab==='history')$('#spend-model').onchange=()=>{spendAnalyticsState.model=$('#spend-model').value;redraw('spend-model').catch(showError);};
-  if(tab==='infrastructure'){bindInfrastructure(data);bindSpendIdentities();}
+  if(tab==='infrastructure'){
+    bindInfrastructure(data);
+    try{
+      if(!identityStatus)identityStatus=await api('/api/admin/identities/status',{recent});
+      if(!current())return false;
+      MoyaiUI.render($('#spend-identities'),identityPanel());bindSpendIdentities();
+    }catch(error){
+      if(!current())return false;
+      MoyaiUI.render($('#spend-identities'),`<p role="alert">Could not load account links. ${esc(error.message)}</p><button id="spend-identities-retry">Retry</button>`);
+      $('#spend-identities-retry').onclick=()=>renderAdminSpend(data,null,activity).catch(showError);
+    }
+  }
   if(tab==='users'){
     const query=new URLSearchParams({start:data.start,end:data.end});
     try{
-      if(!activity)activity=await api('/api/admin/adoption?'+query);
+      if(!activity)activity=await api('/api/admin/adoption?'+query,{recent});
       if(!current())return false;
       MoyaiUI.render($('#spend-activity'), adoptionDashboard(activity));
       MoyaiUI.render($('#spend-activity-details'), adoptionDetails(activity));
@@ -91,7 +102,7 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false)
       MoyaiUI.render($('#spend-activity'), `<div class="error-banner" role="alert">Unable to load team activity. ${esc(error.message)} Spend by user is still available below.</div><button id="activity-retry">Try again</button>`);
       $('#spend-export').disabled=false;
       $('#spend-export').textContent='Export spend CSV';
-      $('#activity-retry').onclick=()=>redraw('spend-tab-users').catch(showError);
+      $('#activity-retry').onclick=()=>renderAdminSpend(data,identityStatus,null).catch(showError);
     }
   }
   return true;

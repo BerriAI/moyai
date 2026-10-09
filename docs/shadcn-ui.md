@@ -42,6 +42,49 @@ SESSION_UI_URL=http://127.0.0.1:8830 node --test tests/browser/session_ui.cjs
 
 Install the test browser once with `npx playwright install chromium`.
 
+Navigation reads reuse a bounded, in-memory cache in `navigation-cache.js`:
+40 responses, an 8 MiB serialized-data budget, and a 15-second reuse window.
+Conversation snapshots may paint for up to 60 seconds while a fresh request and
+the event stream update them without remounting the composer. Responses are
+copied before controllers mutate them. Nothing is persisted in browser storage.
+Writes invalidate at both request boundaries; account/role changes and access
+errors clear the cache. Explicit Refresh and background polls still fetch fresh
+data. Secrets and credential forms are excluded from the allowlist.
+
+Hover intent (80 ms) and keyboard focus preload the chosen page, analytics tab,
+conversation, or a PR linked to the current session. Speculative reads stop when
+three cacheable requests are in flight and are disabled in hidden tabs or with
+the browser's Save-Data preference. PR diffs share the same cache; Refresh always
+revalidates. Spend charts do not wait for Infrastructure's account-link settings.
+
+For a populated navigation demo with controlled transport latency:
+
+```sh
+node scripts/settings_ui_preview.cjs --port 8840 --delay-ms 300
+node --test tests/browser/navigation_loading.cjs
+```
+
+The browser test starts its own fixture server. The preview URL is localhost only
+and uses synthetic API responses. `--root /path/to/baseline/app/static` serves
+the same data and latency with another frontend. In one 1440px Chromium comparison
+against `cb077b4`, click-to-next-frame timings were: Users return 608 → 14 ms,
+Leaderboard return 916 → 16 ms, first Spend 618 → 317 ms, and a preloaded PR report
+319 → 37 ms. These are local samples, not production percentiles or a cold-load
+guarantee; expired/oversized entries and missing preloads still require a request.
+
+With the chat and PR demo servers below running, also run:
+
+```sh
+CHAT_LOADING_URL=http://127.0.0.1:8877 PR_LOADING_URL=http://localhost:8880 \
+  node --test tests/browser/navigation_sessions.cjs
+```
+
+This verifies a usable cached conversation while revalidation is held, draft and
+composer retention, shared hover/click PR reads, reopening a diff, and explicit
+Refresh. With real local APIs and synthetic GitHub reads, a 40-file PR reopened
+in 25 ms versus 576 ms; a conversation returned in 15 ms versus 298 ms. These
+samples used the demo's 250 ms delays, not production GitHub or SSO.
+
 To reproduce loading and sidebar behavior with real local session APIs:
 
 ```sh

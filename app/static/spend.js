@@ -52,7 +52,7 @@ function spendRefreshNotice(message='',error=false){
   if(notice){notice.className=error?'error-banner':'subtext';notice.textContent=message==='Updating…'?'':message;}
   const button=$('#sync-spend');if(button){button.disabled=false;button.textContent=message==='Updating…'?'Refreshing…':'Refresh';}
 }
-async function renderSpend(background = false){
+async function renderSpend(background = false,recent=false){
   clearTimeout(spendState.timer);
   if(state.view!=='spend')return;
   if(background && (document.hidden||settingsInteractionActive())){
@@ -70,11 +70,12 @@ async function renderSpend(background = false){
   const query=new URLSearchParams();if(spendState.start)query.set('start',spendState.start);if(spendState.end)query.set('end',spendState.end);
   let data,identityStatus;
   try{
-    data=await api('/api/spend?'+query);
+    data=await api('/api/spend?'+query,{recent});
     if(!current())return;
     if(retained&&data.scope!==spendState.scope){spendState.displayed='';MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading spend…</p>');}
     if(data.scope!=='organization'){clearTimeout(spendPRState.timer);spendPRState.key='';spendPRState.data=null;spendPRState.promise=null;}
-    identityStatus=data.scope==='organization'?await api('/api/admin/identities/status'):null;
+    // Account-link controls belong to Infrastructure, not the report's critical path.
+    identityStatus=null;
   }catch(error){
     if(!current())return;
     if(retained&&spendState.displayed===context&&error.status!==401&&error.status!==403){
@@ -98,8 +99,9 @@ async function renderSpend(background = false){
   const admin=data.scope==='organization';spendState.scope=data.scope;
   spendState.pending=!!(data.total.pending_costs||admin&&data.infrastructure.pending);
   spendState.start=data.start;spendState.end=data.end;
+  state.navigationCache?.put('/api/spend?'+new URLSearchParams({start:data.start,end:data.end}),data);
   if(admin){
-    const rendered=renderAdminSpend(data,identityStatus,null,true);
+    const rendered=renderAdminSpend(data,identityStatus,null,!recent,recent);
     spendState.displayed=spendContext(data.start,data.end);restore();
     await rendered;if(!current())return;
     if(data.infrastructure.pending||data.total.pending_costs)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);

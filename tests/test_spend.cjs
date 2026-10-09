@@ -88,7 +88,7 @@ test('admin Spend retains organization, infrastructure, user filters and identit
   const {context, elements, calls} = setup('organization');
   context.state.role = 'member';
   await context.renderSpend();
-  assert.deepEqual(calls, ['/api/spend?', '/api/admin/identities/status']);
+  assert.deepEqual(calls, ['/api/spend?'],'unrelated account settings do not block the overview');
   const html = elements.get('#content').innerHTML;
   for (const text of ['Spend &amp;', 'Organization totals', 'Usage history']) {
     assert.ok(html.includes(text) || html.includes(text.replace('&amp;', '&')), text);
@@ -100,7 +100,7 @@ test('admin Spend retains organization, infrastructure, user filters and identit
   vm.runInContext("spendAnalyticsState.tab='infrastructure'", context);
   await context.renderSpend();
   assert.match(elements.get('#content').innerHTML, /Infrastructure costs/);
-  assert.match(elements.get('#content').innerHTML, /Slack identities/);
+  assert.match(elements.get('#spend-identities').innerHTML, /Slack identities/);
   assert.equal(typeof elements.get('#refresh-identities').onclick, 'function');
 });
 
@@ -527,7 +527,7 @@ for(const background of [false,true])test(`same-range ${background?'automatic':'
   assert.match(e.get('#spend-panel').innerHTML,/Pull requests · Maya/);
 });
 
-for(const endpoint of ['spend','identities','pull-requests'])test(`${endpoint} refresh failure retains data and retry recovers`,async()=>{
+for(const endpoint of ['spend','pull-requests'])test(`${endpoint} refresh failure retains data and retry recovers`,async()=>{
   const {context:c,elements:e}=setup('organization');
   await c.renderSpend();selectTab(e,'leaderboard');await settle();
   const mounted=e.get('#content').innerHTML;
@@ -542,6 +542,22 @@ for(const endpoint of ['spend','identities','pull-requests'])test(`${endpoint} r
   c.api=original;await c.renderSpend();await settle();
   assert.match(e.get('#spend-panel').innerHTML,/Maya/);
   assert.equal(e.get('#spend-export').disabled,false);
+});
+
+test('slow or failed account settings never block spend charts and remain independently retryable',async()=>{
+  const {context:c,elements:e}=setup('organization');const original=c.api;
+  let reject;const waiting=new Promise((_,fail)=>{reject=fail;});
+  c.api=url=>url==='/api/admin/identities/status'?waiting:original(url);
+  await c.renderSpend();
+  assert.match(e.get('#content').innerHTML,/Organization totals/);
+  vm.runInContext("spendAnalyticsState.tab='infrastructure'",c);
+  const rendering=c.renderSpend();await settle();
+  assert.match(e.get('#content').innerHTML,/Infrastructure costs/);
+  assert.match(e.get('#content').innerHTML,/Loading account links/);
+  reject(Error('Temporarily unavailable'));await rendering;
+  assert.match(e.get('#spend-identities').innerHTML,/Could not load account links/);
+  c.api=original;await e.get('#spend-identities-retry').onclick();
+  assert.match(e.get('#spend-identities').innerHTML,/Slack identities/);
 });
 
 for(const status of [401,403])test(`authorization ${status} clears retained report`,async()=>{

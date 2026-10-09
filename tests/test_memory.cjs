@@ -52,7 +52,7 @@ test('late personal-memory response never replaces a different page',async()=>{
 test('changing capture mode preserves pause state and sends the current revision',async()=>{
   const calls=[];
   const prefs={enabled:true,auto_save:true,revision:7};
-  const f=fixture(async(url,options)=>{if(options)calls.push({url,body:JSON.parse(options.body)});return {memories:[],preferences:prefs,limit:200};});
+  const f=fixture(async(url,options)=>{if(options?.method)calls.push({url,body:JSON.parse(options.body)});return {memories:[],preferences:prefs,limit:200};});
   await f.context.renderMemory();
   await f.nodes.get('#memory-learning').onchange({target:{value:'manual'}});
   assert.deepEqual(calls,[{url:'/api/memory/preferences',body:{enabled:true,auto_save:false,revision:7}}]);
