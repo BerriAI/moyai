@@ -266,10 +266,12 @@ def linked_sender(sender):
     return sender
 
 
+@pytest.mark.parametrize('person_kind', ['google', 'cloudflare'])
 @pytest.mark.parametrize('actor,method', [('google:alice', 'email'), ('google:alice', 'manual'),
                                         ('slack:T12345678:U12345678', 'email')])
-def test_requester_lookup_and_dm_share_verified_identity(linked_sender, actor, method):
+def test_requester_lookup_and_dm_share_verified_identity(linked_sender, actor, method, person_kind):
     app, client, run_id, headers, requests = linked_sender
+    app.state.store.execute("UPDATE users SET kind=? WHERE id='google:alice'", (person_kind,))
     app.state.store.execute('UPDATE users SET link_method=?,link_status=? WHERE kind=?',
                             (method, 'linked' if method == 'email' else 'manual', 'slack'))
     app.state.store.execute('UPDATE runs SET owner_id=?,active_user_id=? WHERE id=?',

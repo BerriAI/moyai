@@ -98,6 +98,9 @@ class GoogleSignIn:
         @router.post("/api/auth/google/start")
         async def start(body: SignInStart, request: Request):
             self.security.check_origin(request)
+            if self.settings.cloudflare_access_login:
+                self.security.require(request)
+                return JSONResponse({'url': '/#tasks'})
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             now = time.monotonic()
@@ -124,6 +127,11 @@ class GoogleSignIn:
 
         @router.get("/auth/google/callback")
         async def callback(request: Request, state: str = "", code: str = "", error: str = ""):
+            if self.settings.cloudflare_access_login:
+                self.security.require(request)
+                response = RedirectResponse('/#tasks', status_code=303)
+                response.delete_cookie(COOKIE, path='/auth/google')
+                return response
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
             if len(state) > 200 or len(code) > 4096:

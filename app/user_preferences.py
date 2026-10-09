@@ -32,7 +32,7 @@ class UserPreferences:
         actor = messages[0]['user_id'] if messages else run.get('active_user_id') or run.get('owner_id')
         # Linked Slack turns use the preference saved by the same Google account.
         linked = self.store.rows('''SELECT linked.id FROM users u JOIN users linked
-            ON linked.id=u.linked_user_id AND linked.kind='google' WHERE u.id=? AND u.kind='slack' ''', (actor,))
+            ON linked.id=u.linked_user_id AND linked.kind IN ('google','cloudflare') WHERE u.id=? AND u.kind='slack' ''', (actor,))
         return self.get(linked[0]['id'] if linked else actor)
 
     def routes(self):

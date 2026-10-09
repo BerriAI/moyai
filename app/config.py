@@ -2,8 +2,9 @@ from pathlib import Path
 from typing import Literal
 import base64
 import re
+from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
 
@@ -40,7 +41,57 @@ class Settings(BaseSettings):
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
-    public_url: str = "http://127.0.0.1:8787"
+    # Maintenance commands also need the private service's origin; they don't
+    # inherit the environment updates performed inside the server process.
+    public_url: str = Field(default='http://127.0.0.1:8787',
+                            validation_alias=AliasChoices('MOYAI_PUBLIC_URL', 'PUBLIC_URL', 'public_url'))
+    cloudflare_access_team_domain: str = ''
+    cloudflare_access_audience: str = ''
+    cloudflare_access_broker_audience: str = ''
+    cloudflare_access_client_id: str = Field(default='', repr=False)
+    cloudflare_access_client_secret: str = Field(default='', repr=False)
+    cloudflare_access_webhook_paths: list[str] = Field(default_factory=list)
+    cloudflare_access_login: bool = False
+
+    @model_validator(mode='after')
+    def validate_cloudflare_access(self):
+        values = (self.cloudflare_access_team_domain, self.cloudflare_access_audience,
+                  self.cloudflare_access_broker_audience)
+        if any(values) and not all(values):
+            raise ValueError('Configure the Cloudflare team domain and both application audiences together.')
+        if self.cloudflare_access_login and (not all(values) or not self.google_domains() or not self.google_admins()
+                or any(email.rpartition('@')[2] not in self.google_domains() for email in self.google_admins())):
+            raise ValueError('Access sign-in requires Cloudflare Access, allowed work domains and administrator emails.')
+        if self.cloudflare_access_team_domain:
+            if not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.cloudflareaccess\.com', values[0]):
+                raise ValueError('Use the Cloudflare team hostname without a scheme or path.')
+            if values[1] == values[2]:
+                raise ValueError('Employee and broker Access applications must have different audiences.')
+            origin = urlsplit(self.public_url)
+            if (origin.scheme != 'https' or not origin.hostname or origin.username or origin.password
+                    or origin.path not in {'', '/'} or origin.query or origin.fragment
+                    or any(char in self.public_url for char in '\r\n')):
+                raise ValueError('Cloudflare Access requires an HTTPS PUBLIC_URL origin without a path or credentials.')
+        credentials = (self.cloudflare_access_client_id, self.cloudflare_access_client_secret)
+        if any(credentials) and (not all(credentials) or not all(values)):
+            raise ValueError('Configure both broker service credentials and Cloudflare Access.')
+        if any('\r' in value or '\n' in value for value in (*values, *credentials)):
+            raise ValueError('Cloudflare configuration cannot contain line breaks.')
+        if any(not re.fullmatch(r'/hooks/automations/[0-9a-f]{32}(?:/[a-z][a-z0-9_-]*)?', path)
+               for path in self.cloudflare_access_webhook_paths):
+            raise ValueError('Only exact automation webhook paths can be exempted from Access.')
+        return self
+
+    def broker_environment(self, token: str) -> dict[str, str]:
+        # Explicit empty values remove stale credentials on reused sandboxes.
+        return {'WORKSPACE_RUN_TOKEN': token,
+                'WORKSPACE_ACCESS_ORIGIN': self.public_url.rstrip('/') if self.cloudflare_access_client_id else '',
+                'WORKSPACE_ACCESS_CLIENT_ID': self.cloudflare_access_client_id,
+                'WORKSPACE_ACCESS_CLIENT_SECRET': self.cloudflare_access_client_secret}
+
+    def person_login_enabled(self) -> bool:
+        return self.google_enabled() or self.cloudflare_access_login
+
     workspace_password: str = ""
     workspace_member_password: str = ""
     password_login_enabled: bool = True
@@ -134,6 +185,7 @@ class Settings(BaseSettings):
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
     temporal_enabled: bool = False
+    maintenance_drain: bool = False
     temporal_address: str = "localhost:7233"
     temporal_namespace: str = "default"
     temporal_api_key: str = ""
@@ -157,6 +209,12 @@ class Settings(BaseSettings):
     slack_session_users: str = ""
     notion_client_id: str = ""
     notion_client_secret: str = ""
+
+    @model_validator(mode='after')
+    def maintenance_requires_durability(self):
+        if self.maintenance_drain and not self.temporal_enabled:
+            raise ValueError('Maintenance draining requires Temporal to preserve queued work.')
+        return self
 
     @model_validator(mode='after')
     def object_storage_credentials(self):

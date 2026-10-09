@@ -312,7 +312,7 @@ class Credentials:
         # Accounting links are not authentication. Require a fresh, eligible
         # Slack profile matching an independently verified Google identity.
         rows = self.store.rows('SELECT * FROM users WHERE id IN (?,?)', (owner_id, actor_id))
-        owner = next((u for u in rows if u['id'] == owner_id and u['kind'] == 'google'), None)
+        owner = next((u for u in rows if u['id'] == owner_id and u['kind'] in {'google', 'cloudflare'}), None)
         actor = next((u for u in rows if u['id'] == actor_id and u['kind'] == 'slack'), None)
         if not owner or not actor or not actor['profile_eligible'] or actor['profile_conflict'] or not actor['email']:
             return False
@@ -401,7 +401,7 @@ class Credentials:
     def insert_secret(self, conn, body, user_id, admin, root_id=''):
         if body.scope == 'organization' and not admin:
             raise HTTPException(403, 'Only an administrator can save organization credentials.')
-        if body.scope != 'organization' and not user_id.startswith('google:') and not self.security.local_preview():
+        if body.scope != 'organization' and not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
             raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
         root_id = root_id or body.root_id if body.lifetime == 'session' else ''
         if body.lifetime == 'session' and not root_id:
@@ -970,7 +970,7 @@ class Credentials:
                 # An administrator can make a shared credential personal only to themselves.
                 values['owner_id'] = user_id
                 values['client_id'] = 'ownership-' + secret_id
-                if not user_id.startswith('google:') and not self.security.local_preview():
+                if not user_id.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
                     raise HTTPException(403, 'Use Google sign-in to save personal credentials.')
             if values['lifetime'] == 'session':
                 root = self.store.run(values['root_id']) if values['root_id'] else None

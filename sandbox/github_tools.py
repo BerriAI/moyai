@@ -9,8 +9,10 @@ import subprocess
 ROOT = Path('/workspace')
 try:
     from .github_limits import MAX_FILE, MAX_TOTAL
+    from .access_transport import git_environment
 except ImportError:
     from github_limits import MAX_FILE, MAX_TOTAL
+    from access_transport import git_environment
 
 
 class GitHubToolError(ValueError):
@@ -97,9 +99,7 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
         base = git(target, 'rev-parse', '--verify', 'refs/remotes/origin/' + repo['default_branch']).decode().strip()
     else:
         # Capability is sent in a temporary environment, never in argv, URL or Git config.
-        env = dict(os.environ)
-        env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraHeader',
-                   GIT_CONFIG_VALUE_0='Authorization: Bearer ' + token)
+        env = git_environment(remote, token)
         if number is not None:
             target.mkdir()
             git(target, 'init')
@@ -236,9 +236,7 @@ def sync_publication(target, result, remote, token):
     data = metadata(target)
     if not re.fullmatch(r'[0-9a-f]{40}', result.get('commit', '')) or not result.get('repository_id') or (data.get('repository_id') and result['repository_id'] != data['repository_id']):
         raise GitHubToolError('Invalid publication receipt.')
-    env = dict(os.environ)
-    env.update(GIT_TERMINAL_PROMPT='0', GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraHeader',
-               GIT_CONFIG_VALUE_0='Authorization: Bearer ' + token)
+    env = git_environment(remote, token)
     git(target, 'fetch', '--no-tags', '--', remote.rstrip('/') + f"/github/repositories/{result['repository_id']}.git",
         result['commit'], env=env)
     data.update(base_sha=result['commit'], number=result['number'], repository_id=result['repository_id'], repository=result['repository'])

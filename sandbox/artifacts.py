@@ -46,7 +46,11 @@ def collect_archive(workspace, artifacts, token):
             if len(data) > FILE_LIMIT or total + len(data) > TOTAL_LIMIT:
                 omitted.append(name + " (size limit)")
                 return
-            archive.writestr(name, data.replace(token, b"[redacted]") if token else data)
+            for secret in (token, os.environ.get('WORKSPACE_ACCESS_CLIENT_ID', '').encode(),
+                           os.environ.get('WORKSPACE_ACCESS_CLIENT_SECRET', '').encode()):
+                if secret:
+                    data = data.replace(secret, b"[redacted]")
+            archive.writestr(name, data)
             total += len(data)
 
         def add_file(path, name, root):

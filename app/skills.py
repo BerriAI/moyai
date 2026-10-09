@@ -171,7 +171,7 @@ class Skills:
                      (skill_id,actor,action,now()))
 
     def save(self, body, actor, admin, skill_id='', *, conn=None):
-        if not actor.startswith('google:') and not self.security.local_preview():
+        if not actor.startswith(('google:', 'cloudflare:')) and not self.security.local_preview():
             raise HTTPException(403,'Use Google sign-in to manage skills.')
         if body.scope == 'organization' and not admin:
             raise HTTPException(403,'Only an administrator can publish organization skills.')

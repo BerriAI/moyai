@@ -155,6 +155,48 @@ def transport_failure_report():
                         'transient': True, 'response_started': False, 'request_id': 'request-fixture'}}}}
 
 
+async def test_maintenance_drain_preserves_inbox_and_resumes_after_worker_replacement(durable):
+    manager, cloud, run_id = durable
+    manager.settings.maintenance_drain = True
+    assert await manager.advance(run_id) == {'retry_seconds': 15}
+    assert not cloud.launches and not cloud.machines
+    assert manager.store.messages(run_id)[0]['status'] == 'queued'
+    manager.settings.maintenance_drain = False
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await drive(replacement, run_id)
+    assert len(cloud.launches) == 1
+    assert replacement.store.messages(run_id)[0]['status'] == 'completed'
+
+
+async def test_maintenance_drain_saves_active_checkpoint_before_holding_continuation(durable):
+    manager, cloud, run_id = durable
+    cloud.continue_once = True
+    await drive(manager, run_id, phase='monitor')
+    manager.settings.maintenance_drain = True
+    await drive(manager, run_id, phase='install')
+    assert cloud.snapshots == 1 and len(cloud.launches) == 1
+    state = manager.state(run_id)
+    assert await manager.advance(run_id) == {'retry_seconds': 15}
+    assert manager.state(run_id) == state
+    manager.settings.maintenance_drain = False
+    manager.settings.public_url = 'https://moyai-private.example'
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await drive(replacement, run_id)
+    assert len(cloud.launches) == 2 and len(set(cloud.launches)) == 2
+    assert cloud.machines[0].spec['broker_url'] == f'https://moyai-private.example/broker/{run_id}'
+    assert replacement.store.messages(run_id)[0]['status'] == 'completed'
+
+
+async def test_maintenance_drain_still_honors_cancellation(durable):
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='install')
+    manager.settings.maintenance_drain = True
+    await manager.cancel(run_id)
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'cancelled'
+    assert not cloud.launches and cloud.terminations
+
+
 async def test_live_transport_window_reaches_launched_agent(durable: tuple[TemporalRunManager, Cloud, str]) -> None:
     manager, cloud, run_id = durable
     manager.settings.transport_recovery_seconds = 90

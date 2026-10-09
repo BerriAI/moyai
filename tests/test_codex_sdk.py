@@ -1039,10 +1039,10 @@ def test_native_tool_receipts_are_paired_once_and_keep_failure(codex_agent, kind
     assert [event['phase'] for event in tool_events] == ['started', 'error' if failed else 'completed']
 
 
-def test_private_mcp_tool_names_preserve_existing_redaction(codex_agent):
+@pytest.mark.parametrize('omit', [False, True])
+def test_private_mcp_tool_names_preserve_existing_redaction(codex_agent, omit):
     agent, events, store = codex_agent
-    # Private trace payloads are configurable; this case exercises omission.
-    agent.context.activity.omit_private_tool_payloads = True
+    agent.context.activity.omit_private_tool_payloads = omit
     item = {'id': 'memory-call', 'type': 'mcpToolCall', 'server': 'moyai', 'tool': 'memory_save',
             'arguments': {'content': 'requester-private-marker'}, 'status': 'inProgress'}
     agent.record_item(item, completed=False)
@@ -1050,8 +1050,12 @@ def test_private_mcp_tool_names_preserve_existing_redaction(codex_agent):
         'content': [{'type': 'text', 'text': '{"saved":true}'}]}}, completed=True)
     saved = ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
     assert 'requester-private-marker' not in saved
-    assert 'requester-private-marker' not in json.dumps(events)
-    assert next(event for event in events if event[0] == 'trace')[2]['input'] == '[private tool payload omitted]'
+    public = [event for event in events if event[0] != 'trace']
+    traces = [event for event in events if event[0] == 'trace']
+    assert 'requester-private-marker' not in json.dumps(public)
+    assert ('requester-private-marker' in json.dumps(traces)) is (not omit)
+    if omit:
+        assert traces[0][2]['input'] == '[private tool payload omitted]'
     assert not store.pending
 
 

@@ -3,7 +3,7 @@
 
 def account_id(conn, user_id):
     linked = conn.execute("""SELECT linked.id FROM users u JOIN users linked
-        ON linked.id=u.linked_user_id AND linked.kind='google'
+        ON linked.id=u.linked_user_id AND linked.kind IN ('google','cloudflare')
         WHERE u.id=? AND u.kind='slack'""", (user_id,)).fetchone()
     return linked['id'] if linked else user_id
 
@@ -17,7 +17,7 @@ def preferred_model(conn, settings, user_id):
         # must see that choice until the person saves a canonical preference.
         row = conn.execute("""SELECT p.model FROM user_model_preferences p
             JOIN users u ON u.id=p.user_id
-            JOIN users target ON target.id=u.linked_user_id AND target.kind='google'
+            JOIN users target ON target.id=u.linked_user_id AND target.kind IN ('google','cloudflare')
             WHERE u.kind='slack' AND target.id=?
             ORDER BY u.id LIMIT 1""", (canonical_id,)).fetchone()
     if row:

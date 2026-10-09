@@ -27,6 +27,7 @@ from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
+from .cloudflare_access import CloudflareAccess, CloudflareAccessMiddleware
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
@@ -311,6 +312,8 @@ def create_app(settings: Settings | None = None):
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     app.add_middleware(BrokerDiagnosticsMiddleware)
+    app.state.cloudflare_access = CloudflareAccess(settings)
+    app.add_middleware(CloudflareAccessMiddleware, access=app.state.cloudflare_access, security=security)
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
         setattr(app.state, key, value)
 
@@ -410,7 +413,7 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/logout")
     async def logout(request: Request):
         security.require(request, mutation=True)
-        response = JSONResponse({"ok": True})
+        response = JSONResponse({"ok": True, **({'logout_url': '/cdn-cgi/access/logout'} if settings.cloudflare_access_login else {})})
         response.delete_cookie("workspace_session", path="/")
         return response
 
@@ -459,7 +462,7 @@ def create_app(settings: Settings | None = None):
                 "execution_engine": "Temporal" if settings.temporal_enabled else "Local worker",
                 "execution_connected": manager.ready.is_set() if settings.temporal_enabled else True,
                 "checkpoint_interval_seconds": settings.temporal_checkpoint_seconds if settings.temporal_enabled else None,
-                "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
+                "hermes_revision": settings.hermes_revision, "auth": "Cloudflare Access" if settings.cloudflare_access_login else "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
 
     @app.get('/api/admin/pull-requests')
     async def pull_request_analytics(request: Request, start: date | None = None, end: date | None = None):
@@ -471,7 +474,7 @@ def create_app(settings: Settings | None = None):
     async def organization(request: Request):
         security.require(request)
         return {"name": store.rows("SELECT name FROM organization WHERE id=1")[0]["name"],
-                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password) or settings.google_enabled(),
+                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password) or settings.person_login_enabled(),
                 "google_signin": settings.google_enabled(),
                 "slack_sessions": slack.status(),
                 "activity": store.rows("SELECT provider,action,actor,created_at FROM connection_audit ORDER BY id DESC LIMIT 15")}

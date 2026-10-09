@@ -192,6 +192,15 @@ class DurableRunner(RunManager):
             if not row or row['deleted_at']:
                 return False
             state = self.state(run_id)
+            # Stop only at boundaries before a process is launched. Active
+            # execution, checkpoint saving and cleanup keep running. The saved
+            # state and inbox are resumed by the replacement worker.
+            if (self.settings.maintenance_drain and row['status'] != 'stopping'
+                    and state.get('phase', 'idle') in {
+                        'idle', 'warm', 'prepare', 'provision', 'waiting_environment',
+                        'install', 'startup_wait', 'transport_wait',
+                        'waiting_children', 'waiting_credential'}):
+                return {'retry_seconds': 15}
             if state.get('computer_only') and state.get('phase') not in {'idle', 'warm'}:
                 return await self.advance_computer(run_id, state)
             if state.get('phase') in {'warm', 'warm_cleanup'}:
@@ -457,7 +466,7 @@ class DurableRunner(RunManager):
         # task spec, command argument or Temporal payload. Reused machines have
         # an older creation-time environment, so every launch overrides it.
         process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args,
-                                         timeout=30, env={'WORKSPACE_RUN_TOKEN': token} if token else {})
+                                         timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:
             raise RuntimeError('Sandbox supervisor command failed')
@@ -572,7 +581,8 @@ class DurableRunner(RunManager):
                 if self.store.run(run_id)['status'] == 'stopping':
                     return True
                 output = await self.command(sandbox, 'read', self.directory(state), str(state['cursor']))
-                for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret):
+                for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret,
+                              self.settings.cloudflare_access_client_id, self.settings.cloudflare_access_client_secret):
                     if value:
                         output = output.replace(value, '[redacted]')
                 report = json.loads(output)

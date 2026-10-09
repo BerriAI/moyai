@@ -61,12 +61,12 @@ class UserRoles:
             people = {email: {'email': email, 'name': '', 'has_signed_in': False, 'last_seen': None}
                       for email in set(self.settings.google_admins()) | assignments.keys() if self.eligible(email)}
             # Slack profiles may appear before Google sign-in. They do not grant authentication.
-            for row in conn.execute("SELECT email,name,kind,updated_at FROM users WHERE kind='google' OR (kind='slack' AND profile_eligible=1) ORDER BY updated_at"):
+            for row in conn.execute("SELECT email,name,kind,updated_at FROM users WHERE kind IN ('google','cloudflare') OR (kind='slack' AND profile_eligible=1) ORDER BY updated_at"):
                 email = row['email'].strip().lower()
                 if not self.eligible(email):
                     continue
                 person = people.setdefault(email, {'email': email, 'name': '', 'has_signed_in': False, 'last_seen': None})
-                if row['kind'] == 'google':
+                if row['kind'] in {'google', 'cloudflare'}:
                     person.update(name=row['name'], has_signed_in=True, last_seen=row['updated_at'])
                 elif not person['name']:
                     person['name'] = row['name']
@@ -86,7 +86,7 @@ class UserRoles:
             # Serialize authorization, the last-admin check, and the write. Two
             # concurrent demotions must never remove both remaining admins.
             conn.execute('BEGIN IMMEDIATE')
-            if actor.get('method') == 'google':
+            if actor.get('method') in {'google', 'cloudflare'}:
                 actor_email = actor['identity']['email'].strip().lower()
                 if not self.eligible(actor_email) or self.role_in(conn, actor_email) != 'admin':
                     raise HTTPException(403, 'An organization administrator must perform this action.')

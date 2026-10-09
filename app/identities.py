@@ -47,7 +47,7 @@ class SlackIdentities:
         if not actor and run and not run.get('chat_enabled'):
             actor = run.get('owner_id')
         rows = self.store.rows('SELECT * FROM users WHERE id=?', (actor,)) if isinstance(actor, str) and actor else []
-        if not rows or rows[0]['kind'] not in {'google', 'slack'} or not run:
+        if not rows or rows[0]['kind'] not in {'google', 'cloudflare', 'slack'} or not run:
             raise ConnectorError('Slack identity requires an identified requester. Sign in with Google or message the bot in Slack.')
         user = rows[0]
         installation = self.connectors.slack_installation()
@@ -97,7 +97,7 @@ class SlackIdentities:
             await self.checkpoints.flush()
         self.check_requester(run, installation)
         # Re-read after provider awaits; historical/manual spend links alone never select a recipient.
-        google = self.store.rows("SELECT id FROM users WHERE kind='google' AND email=?", (email,))
+        google = self.store.rows("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,))
         matches = candidates()
         if len(google) != 1 or google[0]['id'] != actor or len(matches) != 1:
             raise ConnectorError('Your Slack identity is ambiguous. Review the linked accounts before sending a DM.')
