@@ -15,6 +15,27 @@ function slashSkillQuery(value, start, end = start) {
   return {start: match.index + match[1].length, end: tokenEnd, query};
 }
 
+// The composer and saved messages share token boundaries, artwork and escaping.
+globalThis.MoyaiSkillText = (() => {
+  const escape = value => String(value ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+  function render(text, skills = []) {
+    const value = String(text ?? '');
+    const catalog = new Map(skills.map(skill => [skill.reference, skill]));
+    let html = '', last = 0;
+    for (const match of value.matchAll(/\/(?:personal|org):[a-z0-9]+(?:-[a-z0-9]+)*/g)) {
+      const end = match.index + match[0].length, range = slashSkillQuery(value, end);
+      const skill = catalog.get(match[0].slice(1));
+      if (!skill || !range || range.start !== match.index || range.end !== end) continue;
+      const title = `${skill.scope === 'personal' ? 'Personal' : 'Organization'} skill: ${skill.name}`;
+      html += escape(value.slice(last, match.index)) + `<span class="composer-skill" contenteditable="false" data-skill-reference="${escape(skill.reference)}" title="${escape(title)}" aria-label="${escape(title)}">${skillIcon(skill)}${escape(skill.name)}</span>`;
+      last = end;
+    }
+    return html + escape(value.slice(last));
+  }
+  return {render, message: message => render(message.display_content ?? message.content, message.skill_mentions)};
+})();
+
 function matchingSkills(skills, query) {
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   return skills.filter(skill => !skill.archived && terms.every(term =>

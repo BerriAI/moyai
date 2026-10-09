@@ -12,13 +12,13 @@
     return {queued:pending.filter(message=>message!==next&&!message.send_immediately),transcript:messages.filter(message=>(message.status!=='queued'||message===next||message.send_immediately)&&!(message.role==='assistant'&&message.status==='steered'))};
   }
   const queued=run=>presentation(run).queued;
-  function card(message,run,user,role,editing,busy,attachments){
+  function card(message,run,user,role,editing,busy,attachments,renderMessage=message=>esc(message.display_content??message.content)){
     const allowed=canEdit(message,user,role),requested=message.id===run.steer_message_id;
     const status=message.queue_locked?'Picking up…':requested?'Send requested':'Queued';
     const controls=allowed?`<div class="queued-controls"><button type="button" data-queue-action="steer" data-queue-id="${message.id}" title="Send now (Ctrl or ⌘ Enter)" ${busy||requested?'disabled':''}>↳ Send now</button><button type="button" data-queue-action="edit" data-queue-id="${message.id}" aria-label="Edit queued message" ${busy?'disabled':''}>Edit</button><button type="button" data-queue-action="delete" data-queue-id="${message.id}" aria-label="Delete queued message" title="Delete queued message" ${busy?'disabled':''}>×</button></div>`:'';
-    return `<article class="queued-message" data-queued-row="${message.id}" tabindex="0" aria-label="${status} message"><div class="queued-heading"><span class="queued-mark" aria-hidden="true">↳</span><span>${status}</span><small>${message.user_id===user?'You':esc(message.user_name||'Teammate')}</small>${controls}</div>${editing?'':`<p class="queued-content">${esc(message.display_content??message.content)}</p>`}${attachments(message.attachments)}</article>`;
+    return `<article class="queued-message" data-queued-row="${message.id}" tabindex="0" aria-label="${status} message"><div class="queued-heading"><span class="queued-mark" aria-hidden="true">↳</span><span>${status}</span><small>${message.user_id===user?'You':esc(message.user_name||'Teammate')}</small>${controls}</div>${editing?'':`<p class="queued-content">${renderMessage(message)}</p>`}${attachments(message.attachments)}</article>`;
   }
-  function create({element,runId,user,role,api,refresh,toast,sendImmediately=()=>false,attachments=()=>'',preview=()=>{},useDraft=()=>{},focusComposer=()=>{},drafts=new Map()}){
+  function create({element,runId,user,role,api,refresh,toast,sendImmediately=()=>false,attachments=()=>'',renderMessage=message=>esc(message.display_content??message.content),preview=()=>{},useDraft=()=>{},focusComposer=()=>{},drafts=new Map()}){
     let run={messages:[]},busy=false,deleting=false,signature='';
     function render(next=run){
       run=next;deleting=deleting||run.status==='deleting';element.inert=deleting;
@@ -28,7 +28,7 @@
       const focused=element.ownerDocument?.activeElement;
       const editingId=focused?.dataset?.queueEdit,selection=editingId?[focused.selectionStart,focused.selectionEnd]:null;
       element.hidden=!messages.length&&!drafts.size;
-      MoyaiUI.render(element, `<div class="queue-heading"><span role="status">${messages.length} queued</span><small>${sendImmediately()?'New messages send immediately':'Enter to queue · Ctrl/⌘ Enter to send now'}</small></div><div class="queued-list">${messages.map(message=>card(message,run,user,role,drafts.has(message.id),locked,attachments)).join('')}${[...drafts].map(([id,draft])=>{
+      MoyaiUI.render(element, `<div class="queue-heading"><span role="status">${messages.length} queued</span><small>${sendImmediately()?'New messages send immediately':'Enter to queue · Ctrl/⌘ Enter to send now'}</small></div><div class="queued-list">${messages.map(message=>card(message,run,user,role,drafts.has(message.id),locked,attachments,renderMessage)).join('')}${[...drafts].map(([id,draft])=>{
         const message=messages.find(message=>message.id===id),available=message&&canEdit(message,user,role);
         return `<form class="queue-editor" data-queue-editor="${id}"><label for="queue-edit-${id}">${available?'Edit queued message':'Unsent edit'}</label>${!available?'<p class="queue-edit-warning">This message has moved into the conversation. Your edit is still here; you can use it as a follow-up.</p>':message.revision!==draft.revision?'<p class="queue-edit-warning">The saved message changed. Your unsaved edit is preserved.</p>':''}<textarea id="queue-edit-${id}" data-queue-edit="${id}" maxlength="16000" required rows="3" ${locked?'disabled':''}>${esc(draft.content)}</textarea><div class="queue-edit-actions"><small>${available?'The model and attachments stay with this message.':'Your composer draft will be preserved.'}</small><button type="button" data-queue-action="discard" data-queue-id="${id}" ${locked?'disabled':''}>${available?'Cancel':'Discard edit'}</button><button type="${available?'submit':'button'}" ${available?'':`data-queue-action="followup" data-queue-id="${id}"`} ${locked?'disabled':''}>${available?'Save edit':'Use as follow-up'}</button></div></form>`;
       }).join('')}</div>`);

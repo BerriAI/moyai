@@ -160,6 +160,25 @@ class Skills:
         return [row for row in self.store.rows('SELECT * FROM skills ORDER BY scope,name')
                 if (archived or not row['archived']) and self.visible(row,actor)]
 
+    def message_mentions(self, messages: list[dict[str, object]], actor: str) -> list[dict[str, object]]:
+        """Display metadata only; never load instructions or change saved text."""
+        references = {
+            message['id']: set(re.findall(r'/((?:personal|org):[a-z0-9]+(?:-[a-z0-9]+)*)',
+                                         str(message.get('display_content', message['content']))))
+            for message in messages if message['role'] == 'user'
+        }
+        if not any(references.values()):
+            return messages
+        # Both the viewer and the author must be eligible for a personal skill.
+        # Archived skills remain recognizable in history without becoming usable.
+        catalog = [(row, {key: value for key, value in self.metadata(row).items()
+                          if key in {'reference', 'name', 'scope', 'icon'}})
+                   for row in self.rows_for(actor, archived=True)]
+        return [{**message, 'skill_mentions': [metadata for row, metadata in catalog
+                 if metadata['reference'] in references[message['id']]
+                 and self.visible(row, message.get('user_id', ''))]}
+                if references.get(message['id']) else message for message in messages]
+
     def get(self, skill_id, actor):
         rows = self.store.rows('SELECT * FROM skills WHERE id=?',(skill_id,))
         if not rows or not self.visible(rows[0],actor):

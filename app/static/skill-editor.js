@@ -58,29 +58,10 @@ function bindSkillEditor(textarea, form) {
     const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
   };
   function render(value, caret = null) {
-    const fragment = document.createDocumentFragment();
-    let last = 0;
-    for (const match of value.matchAll(/\/(?:personal|org):[a-z0-9]+(?:-[a-z0-9]+)*/g)) {
-      const end = match.index + match[0].length;
-      const range = slashSkillQuery(value, end);
-      const skill = catalog.get(match[0].slice(1));
-      if (!skill || !range || range.start !== match.index || range.end !== end) continue;
-      fragment.append(document.createTextNode(value.slice(last, match.index)));
-      const chip = document.createElement('span');
-      chip.className = 'composer-skill'; chip.contentEditable = 'false';
-      chip.dataset.skillReference = skill.reference;
-      const scope = skill.scope === 'personal' ? 'Personal' : 'Organization';
-      chip.title = `${scope} skill: ${skill.name}`;
-      chip.setAttribute('aria-label', chip.title);
-      chip.innerHTML = skillIcon(skill);
-      chip.append(document.createTextNode(skill.name));
-      fragment.append(chip); last = end;
-    }
-    fragment.append(document.createTextNode(value.slice(last)));
+    input.innerHTML = MoyaiSkillText.render(value, [...catalog.values()]);
     if (value.endsWith('\n')) {
-      const tail = document.createElement('br'); tail.dataset.editorTail = 'true'; fragment.append(tail);
+      const tail = document.createElement('br'); tail.dataset.editorTail = 'true'; input.append(tail);
     }
-    input.replaceChildren(fragment);
     input.dataset.empty = String(!value);
     if (caret) input.setSelectionRange(...caret);
   }

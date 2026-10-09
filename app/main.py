@@ -606,6 +606,7 @@ def create_app(settings: Settings | None = None):
         project = environments.context(run)
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
+        messages = skills.message_mentions(messages, actor)
         sidebar_id = store.root_id(run_id)
         run['workflow_root_id'] = sidebar_id
         pr_summary = session_pull_requests.summaries([run_id])[run_id]
