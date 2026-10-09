@@ -123,7 +123,14 @@ class LambdaProvider:
             if sandbox.vm['state'] in {'TERMINATING', 'TERMINATED'}:
                 await sandbox.wait.aio()
                 raise ProvisioningTerminated()
-            await self.initialize(sandbox, record)
+            try:
+                await self.initialize(sandbox, record)
+            except BaseException:
+                # A worker can restart after recording the VM but before
+                # initialization completes. Apply launch's cleanup contract to
+                # that recovered startup too, so a later retry can replace it.
+                await asyncio.shield(sandbox.terminate.aio())
+                raise
         return sandbox
 
     async def create(self, *, name=None, snapshot_id='', token='', timeout=86400, memory=4096, apt_packages=()):

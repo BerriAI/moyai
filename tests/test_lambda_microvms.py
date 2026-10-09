@@ -298,6 +298,27 @@ async def test_failed_initialization_confirms_termination(settings, monkeypatch)
     terminated.assert_awaited_once()
 
 
+@pytest.mark.parametrize('failure', [TimeoutError('bootstrap readiness'), ValueError('bad archive'), asyncio.CancelledError()])
+async def test_reattached_startup_failure_terminates_before_replacement(settings, monkeypatch, failure):
+    backend = LambdaProvider(settings)
+    sandbox = Sandbox(backend, vm())
+    backend.read = AsyncMock(return_value={'vm_id': sandbox.vm_id})
+    backend.get = AsyncMock(return_value=sandbox)
+    backend.initialize = AsyncMock(side_effect=failure)
+    backend.aws = AsyncMock(side_effect=[{}, vm('TERMINATING'), vm('TERMINATED')])
+    monkeypatch.setattr(asyncio, 'sleep', AsyncMock())
+    with pytest.raises(type(failure)):
+        await backend.find('interrupted-startup', initialize=True)
+    assert [call.args[1] for call in backend.aws.await_args_list] == [
+        'terminate_microvm', 'get_microvm', 'get_microvm']
+    # A later activity can replace this VM only after observing it is gone.
+    backend.get.return_value = Sandbox(backend, vm('TERMINATED'))
+    backend.aws.side_effect = [vm('TERMINATED')]
+    with pytest.raises(ProvisioningTerminated):
+        await backend.find('interrupted-startup', initialize=True)
+    assert backend.initialize.await_count == 1
+
+
 @pytest.mark.parametrize('state', ['TERMINATING', 'TERMINATED', 'ABSENT'])
 async def test_named_dead_startup_is_reported_only_after_confirmed_termination(settings, monkeypatch, state):
     backend = LambdaProvider(settings)
