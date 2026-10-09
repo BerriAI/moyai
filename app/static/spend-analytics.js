@@ -1,5 +1,6 @@
 /* Organization analytics; called only after /api/spend confirms organization scope. */
 const spendAnalyticsState={tab:'overall',model:'',sort:'spend',direction:-1,request:0};
+const spendIdentityPanels=new WeakMap();
 function isSpendPRTab(tab){return tab==='prs'||tab==='leaderboard';}
 function spendDailyBreakdown(data){
   return `<details class="analytics-breakdown" id="spend-daily-breakdown"><summary>Daily breakdown</summary><div class="spend-table-wrap" role="region" aria-label="Daily usage breakdown" tabindex="0"><table class="spend-table"><thead><tr><th>Date (UTC)</th><th>Active sessions</th><th>Active users</th><th>LLM requests</th><th>Tokens</th><th>Unpriced requests</th><th>LLM spend</th></tr></thead><tbody>${(data.daily||[]).map(d=>`<tr><td>${esc(d.date)}</td><td>${spendCount(d.sessions)}</td><td>${spendCount(d.active_users)}</td><td>${spendCount(d.requests)}</td><td>${spendCount(d.total_tokens)}</td><td>${spendCount(d.pending_costs+d.missing_costs)}</td><td>${dollars(d.spend)}</td></tr>`).join('')}</tbody></table></div></details>`;
@@ -54,7 +55,7 @@ function spendExport(data,activity=null){
   if(tab==='infrastructure')return [['Provider','Cost USD','Estimated USD','Covered days','Missing days'],...data.infrastructure.providers.map(p=>[p.name,p.spend,p.estimated,p.covered_days,p.missing_days])];
   return [['Date (UTC)','Active sessions','Active users','LLM requests','Tokens','LLM spend USD','Pending costs','Missing costs'],...(data.daily||[]).map(d=>[d.date,d.sessions,d.active_users,d.requests,d.total_tokens,d.spend,d.pending_costs,d.missing_costs])];
 }
-async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,recent=false){
+async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,recent=false,background=false){
   clearTimeout(spendPRState.timer);
   prepareSpendPRReport(data);
   const version=state.pageVersion,spendVersion=spendState.version,request=++spendAnalyticsState.request;
@@ -62,9 +63,15 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,
   if(!data.users.some(u=>u.id===spendState.user))spendState.user='';
   if(!data.models.some(m=>m.model===spendAnalyticsState.model))spendAnalyticsState.model='';
   const tabs=[['overall','Overall'],['users','Users'],['history','Usage history'],['prs','Pull requests'],['leaderboard','Leaderboard'],['infrastructure','Infrastructure']],tab=spendAnalyticsState.tab;
+  const identityContext=[spendContext(data.start,data.end),state.userId,data.scope].join('/');
+  const previousIdentities=tab==='infrastructure'?$('#spend-identities'):null;
+  const previousIdentityPanel=previousIdentities&&spendIdentityPanels.get(previousIdentities);
+  const retainedIdentities=previousIdentityPanel?.context===identityContext&&previousIdentityPanel.html?previousIdentities:null;
   const identityPanel=()=>identityStatus?renderSlackIdentities(data.identities.filter(u=>u.kind==='slack'),data.identities.filter(u=>['google','cloudflare'].includes(u.kind)),identityStatus):'<p class="subtext" role="status">Loading account links…</p>';
-  const panel=isSpendPRTab(tab)?spendPRPanel(tab):tab==='users'?`<div id="spend-activity"><p class="subtext" role="status">Loading team activity…</p></div>${spendUsersPanel(data)}<div id="spend-activity-details"></div>`:tab==='history'?spendHistoryPanel(data):tab==='infrastructure'?renderCostSummary(data)+renderInfrastructure(data)+`<div id="spend-identities">${identityPanel()}</div>`:spendOverview(data);
-  MoyaiUI.render($('#content'), `<div class="analytics-page"><div class="page-heading"><div><h1>Spend & usage</h1><p class="subtext">Your team's costs and activity, at a glance.</p></div><div class="analytics-actions">${analyticsRange('spend',data.start,data.end)}<button id="sync-spend">Refresh</button></div></div><div class="analytics-toolbar"><div class="analytics-tabs" role="group" aria-label="Spend and usage report view">${tabs.map(([key,label])=>`<button id="spend-tab-${key}" data-spend-tab="${key}" aria-pressed="${tab===key}">${label}</button>`).join('')}</div><button class="analytics-export" id="spend-export" ${tab==='users'||(isSpendPRTab(tab)&&(!spendPRState.data||spendPRState.promise||spendPRState.error))?'disabled':''}>Export CSV</button></div><div id="spend-refresh-status" role="status"></div><div id="spend-panel">${panel}</div><details class="analytics-methodology" id="spend-methodology"><summary>About this data</summary><p>LLM costs are saved from Moyai’s inference responses across gateway key rotations. Calls using separate credential-proxy keys and usage outside Moyai are excluded. Failed or interrupted requests may have no returned cost. Infrastructure uses provider reports and monthly bills; estimates and missing coverage are marked.</p>${data.tracked_since?`<p>Per-user tracking began ${esc(new Date(data.tracked_since).toLocaleString())}.</p>`:''}</details></div>`);
+  const panel=isSpendPRTab(tab)?spendPRPanel(tab):tab==='users'?`<div id="spend-activity"><p class="subtext" role="status">Loading team activity…</p></div>${spendUsersPanel(data)}<div id="spend-activity-details"></div>`:tab==='history'?spendHistoryPanel(data):tab==='infrastructure'?renderCostSummary(data)+renderInfrastructure(data)+`<div id="spend-identities">${retainedIdentities?'':identityPanel()}</div><div id="spend-identities-notice"></div>`:spendOverview(data);
+  MoyaiUI.render($('#content'), `<div class="analytics-page"><div class="page-heading"><div><h1>Spend & usage</h1><p class="subtext">Your team's costs and activity, at a glance.</p></div><div class="analytics-actions">${analyticsRange('spend',data.start,data.end)}<button id="sync-spend">Refresh</button></div></div><div class="analytics-toolbar"><div class="analytics-tabs" role="group" aria-label="Spend and usage report view">${tabs.map(([key,label])=>`<button id="spend-tab-${key}" data-spend-tab="${key}" aria-pressed="${tab===key}">${label}</button>`).join('')}</div><button class="analytics-export" id="spend-export" ${tab==='users'||(isSpendPRTab(tab)&&(!spendPRState.data||spendPRState.promise||spendPRState.error))?'disabled':''}>Export CSV</button></div><div id="spend-refresh-status" role="status"></div><div id="spend-panel">${panel}</div><details class="analytics-methodology" id="spend-methodology"><summary>About this data</summary><p>LLM costs are saved from Moyai’s inference responses across gateway key rotations. Calls using separate credential-proxy keys and usage outside Moyai are excluded. Failed or interrupted requests may have no returned cost. Infrastructure uses provider reports and monthly bills; estimates and missing coverage are marked.</p>${data.tracked_since?`<p>Per-user tracking began ${esc(new Date(data.tracked_since).toLocaleString())}.</p>`:''}</details></div>`,{preserve:retainedIdentities?[retainedIdentities]:[]});
+  // Reattach the independently mounted account controls before the browser paints.
+  if(retainedIdentities)$('#spend-identities').replaceWith(retainedIdentities);
   bindSpendFilters();
   const redraw=focus=>{const rendered=renderAdminSpend(data,identityStatus,activity,false,true);if(focus)$('#'+focus)?.focus();return rendered;};
   document.querySelectorAll('[data-spend-tab]').forEach(button=>button.onclick=()=>{spendAnalyticsState.tab=button.dataset.spendTab;return redraw(button.id).catch(showError);});
@@ -78,13 +85,22 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,
   if(tab==='history')$('#spend-model').onchange=()=>{spendAnalyticsState.model=$('#spend-model').value;redraw('spend-model').catch(showError);};
   if(tab==='infrastructure'){
     bindInfrastructure(data);
+    const host=$('#spend-identities'),panel=retainedIdentities?spendIdentityPanels.get(host):{context:identityContext,html:null};
+    spendIdentityPanels.set(host,panel);
     try{
       if(!identityStatus)identityStatus=await api('/api/admin/identities/status',{recent});
       if(!current())return false;
-      MoyaiUI.render($('#spend-identities'),identityPanel());bindSpendIdentities();
+      const html=identityPanel();
+      if(panel.html!==html||refresh&&!background){
+        if(retainedIdentities&&background&&(document.hidden||settingsInteractionActive()))return true;
+        const restore=retainedIdentities?preserveSpendView():()=>{};
+        MoyaiUI.render(host,html);bindSpendIdentities();restore();panel.html=html;
+      }
     }catch(error){
       if(!current())return false;
-      MoyaiUI.render($('#spend-identities'),`<p role="alert">Could not load account links. ${esc(error.message)}</p><button id="spend-identities-retry">Retry</button>`);
+      // Keep usable controls during a transient outage; access failures remove them.
+      if(!panel.html||error.status===401||error.status===403){MoyaiUI.render(host,'');panel.html=null;}
+      MoyaiUI.render($('#spend-identities-notice'),`<p role="alert">Could not load account links. ${esc(error.message)}</p><button id="spend-identities-retry">Retry</button>`);
       $('#spend-identities-retry').onclick=()=>renderAdminSpend(data,null,activity).catch(showError);
     }
   }

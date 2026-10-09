@@ -29,6 +29,14 @@ composer. Both use the production picker against synthetic data.
 unread, running, approval and failure indicators. Expand the first session and
 its Explore agent to inspect disclosure, title and status alignment.
 
+`?fixture=account-links#spend` provides synthetic Slack/Google accounts and pending
+costs. Open Infrastructure, expand Administrator overrides, choose an account,
+then click the top bar to leave the form idle. The five-second cost poll keeps the
+account-link controls mounted, retains the selection and disclosure, and fetches
+updated status independently. Transient lookup errors retain usable controls;
+authorization failures remove them. The navigation browser suite also covers
+changed account data, retries, an open Select and leaving the route mid-refresh.
+
 The production bundle lives in `app/static/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.

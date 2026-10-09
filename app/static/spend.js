@@ -34,6 +34,10 @@ function preserveSpendView(preserveValues=true){
   if(typeof document.querySelectorAll!=='function')return ()=>{};
   const nodes=[...document.querySelectorAll('#content [id]')].map(el=>({id:el.id,open:el.open,value:preserveValues&&el.matches?.('input,select,textarea')?el.value:undefined,top:el.scrollTop,left:el.scrollLeft}));
   const details=[...document.querySelectorAll('#content details')].map(el=>({label:el.querySelector('summary')?.textContent,open:el.open}));
+  const links=preserveValues?[...document.querySelectorAll('.spend-link-form')].flatMap(form=>{
+    const select=form.elements.google,saved=[...select.options].find(option=>option.defaultSelected)?.value||'';
+    return select.value===saved?[]:[{slack:form.dataset.slack,value:select.value}];
+  }):[];
   const scrollers=[...document.querySelectorAll('#content .spend-table-wrap')].map(el=>({label:el.getAttribute('aria-label'),left:el.scrollLeft,top:el.scrollTop}));
   const focus=active?.id,top=root.scrollTop;
   let selection;
@@ -42,6 +46,10 @@ function preserveSpendView(preserveValues=true){
   return ()=>{
     for(const saved of nodes){const el=document.getElementById?.(saved.id);if(!el)continue;if(saved.open!==undefined)el.open=saved.open;if(saved.value!==undefined)el.value=saved.value;el.scrollTop=saved.top;el.scrollLeft=saved.left;}
     for(const el of document.querySelectorAll('#content details')){const saved=details.find(s=>s.label===el.querySelector('summary')?.textContent);if(saved)el.open=saved.open;}
+    for(const form of document.querySelectorAll('.spend-link-form')){
+      const saved=links.find(link=>link.slack===form.dataset.slack),select=form.elements.google;
+      if(saved&&[...select.options].some(option=>option.value===saved.value))select.value=saved.value;
+    }
     for(const el of document.querySelectorAll('#content .spend-table-wrap')){const saved=scrollers.find(s=>s.label===el.getAttribute('aria-label'));if(saved){el.scrollTop=saved.top;el.scrollLeft=saved.left;}}
     const el=focus?document.getElementById?.(focus):null;el?.focus?.({preventScroll:true});if(selection?.[0]!=null&&spendSupportsSelection(el))try{el.setSelectionRange(...selection);}catch{}
     root.scrollTop=top;
@@ -101,7 +109,7 @@ async function renderSpend(background = false,recent=false){
   spendState.start=data.start;spendState.end=data.end;
   state.navigationCache?.put('/api/spend?'+new URLSearchParams({start:data.start,end:data.end}),data);
   if(admin){
-    const rendered=renderAdminSpend(data,identityStatus,null,!recent,recent);
+    const rendered=renderAdminSpend(data,identityStatus,null,!recent,recent,background);
     spendState.displayed=spendContext(data.start,data.end);restore();
     await rendered;if(!current())return;
     if(data.infrastructure.pending||data.total.pending_costs)spendState.timer=setTimeout(()=>{if(current())renderSpend(true).catch(showError);},5000);

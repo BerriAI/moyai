@@ -5,7 +5,7 @@ const vm = require('./helpers/ui-vm.cjs');
 
 function setup(scope = 'personal') {
   const elements = new Map(), calls = [];
-  const element=key=>{if(!elements.has(key))elements.set(key,{focus(){},setSelectionRange(){}});return elements.get(key);};
+  const element=key=>{if(!elements.has(key))elements.set(key,{focus(){},setSelectionRange(){},replaceWith(){}});return elements.get(key);};
   const total = {spend:'1.25', requests:2, sessions:1, pending_costs:0, missing_costs:0, total_tokens:120, prompt_tokens:100, completion_tokens:20};
   const user = {id:'google:maya', kind:'google', email:'maya@example.com', name:'Maya', ...total};
   const data = {scope, start:'2026-10-01', end:'2026-10-07', total, priced_requests:2,
@@ -555,7 +555,7 @@ test('slow or failed account settings never block spend charts and remain indepe
   assert.match(e.get('#content').innerHTML,/Infrastructure costs/);
   assert.match(e.get('#content').innerHTML,/Loading account links/);
   reject(Error('Temporarily unavailable'));await rendering;
-  assert.match(e.get('#spend-identities').innerHTML,/Could not load account links/);
+  assert.match(e.get('#spend-identities-notice').innerHTML,/Could not load account links/);
   c.api=original;await e.get('#spend-identities-retry').onclick();
   assert.match(e.get('#spend-identities').innerHTML,/Slack identities/);
 });

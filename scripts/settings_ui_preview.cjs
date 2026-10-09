@@ -170,6 +170,10 @@ const server=http.createServer(async(req,res)=>{
  }
  if(p==='/api/spend'){
   const data=spendFixture(url.searchParams,role!=='admin',empty);
+  if(data&&fixture==='account-links'&&role==='admin'){
+   data.identities=[...spendUsers.slice(0,2),{id:'slack:alex',kind:'slack',name:'Alex Morgan',email:'alex@example.com',link_status:'review'}];
+   data.total.pending_costs=1;
+  }
   return json(res,data?200:422,data||{detail:'Choose a date range of up to 93 days, with start before end.'});
  }
  if(p==='/api/admin/identities/status')return json(res,200,{enabled:true,ready:true,missing_scopes:[]});
