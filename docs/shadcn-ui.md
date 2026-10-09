@@ -106,6 +106,10 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   shadcn Dialog; Radix provides the portal, focus trap, Escape, outside dismissal
   and return focus. The host remains queryable while closed, and sensitive forms
   keep their existing close/cancel cleanup.
+  Dialogs use their own portal mount. Set `host.dataset.dialogScope = 'settings'`
+  for Settings editors; workspace dialogs are the default. Reused hosts must set
+  their scope for each flow before opening. Route styles stay on the sidebar and
+  workspace containers, so global dialogs never inherit Settings form styles.
 - Single-choice dropdowns use shadcn Select with an anchored, viewport-aware
   menu, not the operating system popup. `FormSelect` retains an invisible native
   select for controller queries, sizing, validation, reset, and `FormData`.

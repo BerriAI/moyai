@@ -46,6 +46,7 @@ function settingsLoadError(title, error, retry) {
 function confirmSettingsAction(title, description, action) {
   return new Promise(resolve => {
     const dialog = MoyaiUI.createDialog();
+    dialog.dataset.dialogScope = 'settings';
     dialog.setAttribute('aria-label', title);
     MoyaiUI.render(dialog, `<h2>${esc(title)}</h2><p>${esc(description)}</p><div class="credential-actions"><button class="quiet" data-cancel>Cancel</button><button class="danger" data-confirm>${esc(action)}</button></div>`);
     document.body.append(dialog);
