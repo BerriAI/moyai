@@ -241,6 +241,43 @@ test('identity linking disables its submit action, not the new dropdown trigger'
 });
 
 for (const width of [1440, 1024, 768, 320]) {
+  test(`list searches fill their toolbar with compact trailing controls at ${width}px`, async t => {
+    const page = await pageFor(t, 'users', 'populated', width);
+    for (const [route, selector, searchSelector] of [
+      ['users', '.users-toolbar', '.users-search'],
+      ['environments', '.settings-toolbar', '#environment-search'],
+      ['secrets', '.settings-toolbar', '#secret-search'],
+      ['skills', '.skills-filters', '#skill-search'],
+      ['memory', '.memory-filter', '#memory-search'],
+      ['automations', '.automation-toolbar', '#automation-search'],
+      ['spend', '.analytics-pr-filters', 'label:first-child'],
+    ]) {
+      await page.evaluate(view => navigate(view), route);
+      if (route === 'spend') await page.locator('#spend-tab-prs').click();
+      const layout = await page.locator(selector).evaluate((toolbar, searchSelector) => {
+        const css = getComputedStyle(toolbar);
+        const box = el => el.getBoundingClientRect().toJSON();
+        const slot = toolbar.querySelector(searchSelector);
+        const search = slot.matches('input') ? slot : slot.querySelector('input');
+        const siblings = [...toolbar.children].filter(el => el !== slot && el.checkVisibility() && getComputedStyle(el).position !== 'absolute');
+        return { width: toolbar.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight),
+          gap: parseFloat(css.columnGap), slot: box(slot), search: box(search), siblings: siblings.map(box) };
+      }, searchSelector);
+      const stacked = width <= 650 || (route === 'automations' && width <= 768);
+      if (stacked) {
+        assert.ok(Math.abs(layout.search.width - layout.width) <= 1, `${route}: narrow search uses the full content width`);
+      } else {
+        const remaining = layout.width - layout.siblings.reduce((sum, rect) => sum + rect.width, 0) - layout.gap * layout.siblings.length;
+        assert.ok(Math.abs(layout.search.width - remaining) <= 1, `${route}: search fills all space left by compact controls: ${JSON.stringify(layout)}`);
+        for (const sibling of layout.siblings) {
+          const center = sibling.y + sibling.height / 2;
+          assert.ok(center >= layout.search.y && center <= layout.search.bottom + 1, `${route}: controls share the search row`);
+        }
+      }
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    }
+  });
+
   test(`analytics headings and metric summaries have clear spacing at ${width}px`, async t => {
     const page = await pageFor(t, 'spend', 'populated', width);
     for (const tab of ['leaderboard', 'users', 'overall']) {
