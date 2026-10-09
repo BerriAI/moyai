@@ -283,7 +283,7 @@ for(const method of ['openRun','refreshChat']){
 
 test('legacy task streams also close on the terminal deletion marker',async()=>{
   const {context:c,state,content}=availabilityHarness();
-  Object.assign(c,{document:{hidden:true,querySelector:()=>null},setView(){},sessionTitle:()=>'',esc:value=>value,
+  Object.assign(c,{MoyaiActivity:require('../app/static/activity.js'),document:{hidden:true,querySelector:()=>null},setView(){},sessionTitle:()=>'',esc:value=>value,
     history:{replaceState(){}},terminal:new Set(['completed']),renderApprovals(){},renderPrWriteAccess(){},bindSessionHeaderActions(){},eventHTML:()=>'',statusLabel:value=>value,
     savedFiles:{reset(){},sync(){}},showError:error=>{throw error;},
     EventSource:class{constructor(){this.handlers={};}addEventListener(name,handler){this.handlers[name]=handler;}close(){this.closed=true;}},

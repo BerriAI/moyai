@@ -7,7 +7,7 @@ const MoyaiActivity=require('../app/static/activity.js');
 const {groups,current,timeline,updates,html,duration,syncWork,tick}=MoyaiActivity;
 const stamp=n=>new Date(Date.UTC(2026,8,30,12,0,n)).toISOString();
 const event=(id,kind,message,data={})=>({id,kind,message,data,created_at:stamp(id)});
-function run(){return {id:'chat',status:'running',active_message_id:1,messages:[{id:1,role:'user',status:'running'},{id:2,role:'user',status:'queued'}],events:[event(1,'chat','Response started',{message_id:1})]};}
+function run(){return {id:'chat',chat_enabled:1,status:'running',active_message_id:1,messages:[{id:1,role:'user',status:'running'},{id:2,role:'user',status:'queued'}],events:[event(1,'chat','Response started',{message_id:1})]};}
 const tool=(id,call,phase,extra={})=>event(id,'tool','Run command',{turn_id:1,activity_version:1,call_id:call,phase,category:'command',command:'pytest -q',...extra});
 const focus=(id,message,input=1,extra={})=>event(id,'status',message,{turn_id:1,input_id:input,activity_version:1,phase:'focus',live_status:true,activity_id:`focus-${id}`,...extra});
 
@@ -77,8 +77,8 @@ test('receipt-only answers keep a frozen work block and later failures remain vi
 
 test('parallel tools and journal replay pair once, even after rotation or reconnect',()=>{
   const data=run();data.events.push(tool(2,'segment1:a','started'),tool(3,'segment1:b','started'),tool(4,'segment1:b','completed'),tool(5,'segment1:a','error',{exit_code:1}),tool(6,'segment1:b','started'),tool(7,'segment2:a','started'),event(8,'message','Update',{activity_id:'same'}),event(9,'message','Update',{activity_id:'same'}));
-  const turn=groups(data).get('1');assert.equal(turn.count,3);assert.deepEqual(turn.rows.filter(row=>row.kind==='tool').map(row=>row.state),['error','completed','running']);
-  assert.equal(turn.rows.filter(row=>row.kind==='message').length,1);assert.match(html(turn),/Exit code 1/);
+  const turn=groups(data).get('1');assert.equal(turn.count,2);assert.deepEqual(turn.rows.filter(row=>row.kind==='tool').map(row=>row.state),['completed','running']);
+  assert.equal(turn.rows.filter(row=>row.kind==='message').length,1);assert.doesNotMatch(html(turn),/Exit code 1/);
 });
 
 test('interruption does not invent tool completion; disconnected and waiting work do not pulse',()=>{
@@ -348,6 +348,14 @@ test('the composer follows live SSE focus, reconnects and lifecycle state withou
   source.onmessage({data:JSON.stringify(event(9,'chat','Response received',{message_id:1,response_complete:true}))});
   assert.equal(node('#chat-working').textContent,'Saving workspace');assert.equal(node('#chat-working').classList.busy,false);
   source.handlers['run-status']({data:JSON.stringify({status:'idle'})});assert.equal(node('#chat-working').textContent,'');
+  data.error='Session processing stopped unexpectedly.';data.status='failed';
+  data.messages.unshift({id:0,role:'assistant',status:'failed',content:'Earlier turn failed'});
+  context.renderChatWorking(data);assert.equal(node('#chat-working').textContent,data.error);
+  data.messages.push({id:3,role:'assistant',status:'failed',content:data.error});
+  context.renderChatWorking(data);assert.match(node('#chat-working').textContent,/Details are shown above/);
+  data.summary=data.error;data.messages.push({id:4,role:'user',status:'interrupted',content:'Try again'});
+  data.status='interrupted';data.error='The workspace restarted before the next response.';data.checkpoint_error='Previous workspace save warning';
+  context.renderChatWorking(data);assert.equal(node('#chat-working').textContent,data.error);
   const controls=['#stop-response','#message-form .send-button','#message-form [data-send-now]','#chat-model'].map(node);
   node('#message-form').querySelectorAll=()=>controls;
   node('#followup').value='Unsent reply';let locked=false;state.attachments={lock:value=>locked=value};
@@ -373,7 +381,7 @@ test('side-chat polls replace focus while retaining expanded activity through st
     markdown:text=>text,esc:text=>text,toast(){}};
   vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncControls()'),script.indexOf('model.onchange='))+
     script.slice(script.indexOf('function drawChat(data)'),script.indexOf('async function poll()')),context);
-  const data=run();data.messages=[{...data.messages[0],content:'Explain the UI change'}];
+  const data=run();data.messages=[{...data.messages[0],content:'Explain the UI change'}];data.error='Old 422 validation error';
   context.drawChat(data);const slot=log.slots[0];slot.details.open=true;
   data.events.push(focus(2,'Auditing the side-chat changes'));context.drawChat(data);
   assert.equal(context.status.textContent,'Auditing the side-chat changes');assert.equal(slot.headline,context.status.textContent);
@@ -387,6 +395,12 @@ test('side-chat polls replace focus while retaining expanded activity through st
   data.messages.push({id:3,role:'assistant',status:'completed',content:'A useful finding'});context.drawChat(data);
   assert.equal(writes,2);assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);assert.equal(log.scrollTop,50);
   data.status='idle';context.drawChat(data);assert.equal(context.status.textContent,'');
+  data.status='failed';data.summary='Model call limit reached';
+  data.messages.push({id:4,role:'assistant',status:'failed',content:data.summary});context.drawChat(data);
+  assert.equal(context.status.textContent,'Model call limit reached');assert.equal(slot.details.open,true);
+  data.messages.push({id:5,role:'user',status:'interrupted',content:'Try again'});
+  data.status='interrupted';data.error='The workspace restarted before the next response.';data.checkpoint_error='Previous workspace save warning';context.drawChat(data);
+  assert.equal(context.status.textContent,data.error);
 });
 
 test('runtime compaction notices render as quiet disclosures while ordinary prose stays intact',()=>{
@@ -405,4 +419,80 @@ test('runtime compaction notices render as quiet disclosures while ordinary pros
   for(const content of ['I am compacting the context.', '> '+notices[0][0], 'toString']){
     assert.match(MoyaiActivity.updateHTML({id:1,content}),/assistant-update/);
   }
+});
+
+
+test('intermediate failures disappear during work and after success without deleting the log',()=>{
+  const data=run();data.events.push(tool(2,'rejected','started'));
+  assert.equal(groups(data).get('1').count,1);
+  data.events.push(tool(3,'rejected','error',{output:'Old 422 error'}),
+    event(4,'error','Cloud request failed',{phase:'broker_failure'}),tool(5,'retry','started'));
+  const before=JSON.stringify(data);
+  for(const status of ['running','reconnecting','waiting_children','waiting_credential','saving','idle']){
+    const snapshot={...data,status};
+    if(status==='idle')snapshot.messages=data.messages.map(m=>({...m,status:'completed'}));
+    const turn=groups(snapshot).get('1');
+    assert.equal(turn.count,1);assert.deepEqual(turn.rows.map(row=>row.id),['retry']);
+    assert.doesNotMatch(html(turn),/Old 422|Cloud request failed|1:rejected/);
+    assert(!timeline(snapshot).get('1').some(item=>item.block?.rows.some(row=>row.id==='rejected')));
+  }
+  assert.equal(JSON.stringify(data),before);
+  data.events.push(tool(6,'retry','completed'),tool(7,'rejected','started'));
+  assert.deepEqual(MoyaiActivity.visibleEvents(data.events).map(e=>e.id),[1,5,6]);
+  assert.deepEqual(groups(JSON.parse(JSON.stringify(data))),groups(data));
+  data.events.push(tool(8,'rejected','completed',{turn_id:2}));
+  assert.deepEqual(groups(data).get('2').rows.map(row=>row.state),['completed']);
+  assert.deepEqual(groups(data).get('1').rows.map(row=>row.id),['retry']);
+});
+
+test('stopped sessions show the terminal outcome without reviving intermediate failures',()=>{
+  const data=run();data.events.push(tool(2,'rejected','error',{output:'Old 422 error'}),
+    tool(3,'successful','completed'),event(4,'error','Old transport diagnostic'));
+  data.summary='Model call limit reached';data.error='Generic failure';
+  assert.equal(MoyaiActivity.terminalError(data),'');
+  data.status='failed';data.messages[0].status='failed';
+  data.messages.push({id:3,role:'assistant',status:'failed',content:data.summary});
+  assert.equal(MoyaiActivity.terminalError(data),'Model call limit reached');
+  assert.equal(MoyaiQueue.presentation(data).transcript.at(-1).content,data.summary);
+  const queued=data.messages.splice(1,1)[0];queued.status='cancelled';data.messages.push(queued);
+  assert.equal(MoyaiActivity.terminalError(data),'Model call limit reached','unstarted input is displayed after a newer saved answer');
+  assert.doesNotMatch(html(groups(data).get('1')),/Old 422|Old transport/);
+  assert.match(html(groups(data).get('1')),/Response failed/);
+  data.checkpoint_error='Workspace could not be saved';
+  assert.equal(MoyaiActivity.terminalError(data),data.checkpoint_error);
+});
+
+test('an unclaimed follow-up shows its stop reason instead of the previous answer',()=>{
+  for(const priorStatus of ['completed','failed']){
+    const data=run();data.summary='The previous answer';data.status='interrupted';
+    data.error='The workspace restarted. This task was not replayed.';
+    data.messages=[{id:1,role:'user',status:priorStatus},
+      {id:2,role:'assistant',status:priorStatus,content:data.summary},
+      {id:3,role:'user',status:'interrupted',content:'A follow-up'},
+      {id:-1,role:'assistant',status:'failed',content:'A provisional answer'}];
+    assert.equal(MoyaiActivity.terminalError(data),data.error);
+    data.status='failed';assert.equal(MoyaiActivity.terminalError(data),data.error);
+    data.error='';assert.equal(MoyaiActivity.terminalError(data),'This task stopped before completing.');
+  }
+  assert.equal(MoyaiActivity.terminalError({status:'failed',summary:'Runtime limit reached',error:'Generic failure',messages:[]}),
+    'Runtime limit reached');
+});
+
+
+test('legacy streaming removes failed starts while preserving other expanded activity',()=>{
+  const script=readFileSync('app/static/app.js','utf8'),context={MoyaiActivity,esc:value=>String(value)};
+  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncEventTimeline('),script.indexOf('function renderApprovals(')),context);
+  const nodes=new Map(),removedRegions=[],target={querySelectorAll:()=>[...nodes.values()],insertAdjacentHTML(position,markup){
+    const id=markup.match(/data-event-id="([^"]+)"/)[1];
+    const parentElement=id==='1'?{tagName:'MOYAI-REGION',parentElement:target,remove(){removedRegions.push(id);nodes.delete(id);}}:target;
+    nodes.set(id,{dataset:{eventId:id},parentElement,open:true,remove(){nodes.delete(id);}});
+  }};
+  const events=[focus(0,'Preparing the task'),tool(1,'failed','started'),tool(2,'retained','completed')];
+  context.syncEventTimeline(target,events);const retained=nodes.get('2');
+  events.push(tool(3,'failed','error'),event(4,'error','Temporary outage'));
+  context.syncEventTimeline(target,events);
+  assert.deepEqual(removedRegions,['1']);
+  assert.deepEqual([...nodes.keys()],['2']);assert.equal(nodes.get('2'),retained);assert.equal(retained.open,true);
+  events.push(tool(5,'retry','completed'));context.syncEventTimeline(target,events);
+  assert.deepEqual([...nodes.keys()],['2','5']);assert.equal(events.length,6);
 });

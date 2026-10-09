@@ -304,7 +304,7 @@
         MoyaiActivity.sync(log,data,{markdown,copy:async(text)=>{try{await navigator.clipboard.writeText(text);}catch{toast('Select the text to copy.');}}});MoyaiActivity.tick(log);if(bottom)log.scrollTop=log.scrollHeight;
         const working=!['idle','completed','failed','cancelled','interrupted'].includes(data.status)||data.active;
         const queued=data.messages.filter(m=>m.role==='user'&&m.status==='queued').length;
-        status.textContent=data.error||({queued:'Waiting to start…',provisioning:'Opening side-chat workspace…',running:MoyaiActivity.current(data).headline,saving:'Saving…',reconnecting:'Reconnecting…'}[data.status])||'';
+        status.textContent=MoyaiActivity.terminalError(data)||({queued:'Waiting to start…',provisioning:'Opening side-chat workspace…',running:MoyaiActivity.current(data).headline,saving:'Saving…',reconnecting:'Reconnecting…'}[data.status])||'';
         if(working&&queued)status.textContent+=(status.textContent?' · ':'')+queued+' queued';
         stop.hidden=!working;send.title=working?'Queue side message':'Send side message';link.hidden=false;link.href='/#run='+t.chatId;
         if(data.approvals?.some(a=>a.status==='pending')||data.credential_requests?.length)status.textContent='Action needed. Open this side chat as a full session to continue.';

@@ -2,10 +2,42 @@
 (function(root){
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const settled=new Set(['idle','completed','failed','cancelled','interrupted','steered']);
+  const failures=new Set(['failed','interrupted','save_failed']);
   const waiting=new Set(['reconnecting','awaiting_approval','waiting_children','waiting_credential','stopping','deleting']);
   const visible=new Set(['tool','message','status','error','plan','agents','credential','approval','artifact']);
   const labels={reconnecting:'Reconnecting to workspace',running:'Reviewing the task',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',deleting:'Deleting session',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
   const isFocus=event=>event.kind==='status'&&event.data?.phase==='focus';
+  function visibleEvents(events){
+    const phases=new Map(),seen=new Set();
+    const key=event=>JSON.stringify([event.data?.turn_id,event.data?.call_id]);
+    for(const event of events){
+      const data=event.data||{},source=data.activity_id||event.id;
+      if(source!=null&&seen.has(source))continue;if(source!=null)seen.add(source);
+      if(event.kind!=='tool'||data.activity_version!==1||!data.call_id)continue;
+      if(phases.has(key(event))&&data.phase==='started')continue;
+      phases.set(key(event),data.phase);
+    }
+    // Intermediate diagnostics stay in durable events/traces. The saved final
+    // response owns failure presentation; another error must not replace it.
+    return events.filter(event=>event.kind!=='error'&&!(event.kind==='tool'&&
+      (event.data?.phase==='error'||phases.get(key(event))==='error')));
+  }
+  function terminalAnswer(run){
+    // The transcript moves unstarted inputs after answers. Persisted IDs retain
+    // append order; negative IDs are provisional answers, not saved outcomes.
+    const message=(run.messages||[]).reduce((latest,item)=>Number(item.id)>Number(latest?.id||0)?item:latest,null);
+    return message?.role==='assistant'&&failures.has(message.status)?message:null;
+  }
+  function terminalError(run){
+    if(!failures.has(run.status))return '';
+    // A queued follow-up retains the previous summary until it is claimed.
+    // Only a final failed answer can own a chat's detailed failure text.
+    const answer=terminalAnswer(run);
+    // Workspace warnings also survive turns; they cannot replace a new stop.
+    if(run.chat_enabled&&!answer&&run.error)return run.error;
+    return run.checkpoint_error||answer?.content||(!run.chat_enabled?run.summary:'')||
+      run.error||'This task stopped before completing.';
+  }
   function duration(start,end=Date.now()){
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;
     return seconds<60?`${seconds}s`:seconds<3600?`${Math.floor(seconds/60)}m ${seconds%60}s`:`${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`;
@@ -13,7 +45,7 @@
   function groups(run){
     const turns=new Map((run.messages||[]).filter(m=>m.role==='user'&&!m.steering_parent_id).map(m=>[String(m.id),{id:String(m.id),message:m,events:[],start:0,end:0}]));
     let current=null;const seen=new Set();
-    for(const event of run.events||[]){
+    for(const event of visibleEvents(run.events||[])){
       const data=event.data||{},key=data.activity_id||event.id;
       if(key!=null&&seen.has(key))continue;if(key!=null)seen.add(key);
       if(event.kind==='chat'){
@@ -229,6 +261,6 @@
     container.querySelectorAll('[data-activity-slot]').forEach(slot=>syncItems(slot,byInput.get(slot.dataset.activitySlot)||[],options));
     if(nearBottom)container.scrollTop=container.scrollHeight;
   }
-  const api={groups,current,isFocus,timeline,updates,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
+  const api={groups,current,isFocus,visibleEvents,terminalAnswer,terminalError,timeline,updates,updateHTML,html,duration,tick,sync,syncWork};root.MoyaiActivity=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);

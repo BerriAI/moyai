@@ -10,7 +10,7 @@ function browser(chatId='side'){
   const tab={id:'chat:side',chatId,uid:'side',draft:'Keep my unsent draft',element:node('tab')};
   const context={models:[],run:{id:'parent',model:'model-a'},esc:x=>x,markdown:x=>x,good:t=>!disposed&&t===tab,save(){},draw(){},syncTitles(){},sideChats:[],crypto:{randomUUID:()=> 'submission-id'},
     api:(path,options)=>new Promise((resolve,reject)=>requests.push({path,options,resolve,reject})),
-    MoyaiQueue:{presentation:data=>({transcript:data.messages})},MoyaiActivity:{sync(){},tick(){},current:()=>({headline:'Working'})},
+    MoyaiQueue:{presentation:data=>({transcript:data.messages})},MoyaiActivity:{...require('../app/static/activity.js'),sync(){},tick(){},current:()=>({headline:'Working'})},
     document:{hidden:false,addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name)},
     setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id),
     navigate(){throw Error('Side chat must not navigate the parent');},stopStream(){throw Error('Side chat must not stop the parent');},
