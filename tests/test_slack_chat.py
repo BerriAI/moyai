@@ -1234,3 +1234,62 @@ def test_answer_delivers_native_table_in_thread_with_session_link(slack_app):
     assert posted['blocks'][-1]['type'] == 'context'
     assert f'/#run={run_id}' in posted['text']
     assert 'ASGI entry' in posted['text']
+
+
+@pytest.mark.parametrize('direct', [False, True])
+def test_forwarded_only_messages_and_followups_keep_quoted_body(slack_app, monkeypatch, direct):
+    from test_slack import forwarded_attachment
+    from sandbox.agent import conversation_prompt
+    app, client, submitted, sent = slack_app
+    kwargs = {'type': 'message', 'channel_type': 'im', 'channel': 'D12345678'} if direct else {}
+    payload = event(text='' if direct else '<@U99999999>', **kwargs,
+                    attachments=[forwarded_attachment('first forwarded question')])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    run_id = submitted[0]['id']
+    assert 'first forwarded question' in app.state.store.messages(run_id)[0]['content']
+    finish(app, run_id, 'Ready')
+    followup = event('EvForward2', type='message', channel_type='im' if direct else 'channel',
+                     channel='D12345678' if direct else 'C12345678', ts='1790719002.123456',
+                     thread_ts=ROOT, text='', attachments=[forwarded_attachment('stop\n<@U33333333>')])
+    assert client.post('/hooks/slack/events', **signed(followup)).status_code == 200
+    assert client.post('/hooks/slack/events', **signed(followup)).status_code == 200
+    messages = [m for m in app.state.store.messages(run_id) if m['role'] == 'user']
+    assert len(messages) == 2
+    assert 'stop' in conversation_prompt({'prompt': messages[-1]['content']}, has_history=True)
+    receipt = app.state.store.rows("SELECT command FROM slack_receipts WHERE event_id='EvForward2'")[0]
+    assert receipt['command'] == ''
+    with app.state.store.connect() as conn:
+        assert 'U33333333' not in app.state.slack.chat.mentionable_in(conn, run_id)
+    assert not app.state.store.rows("SELECT * FROM slack_message_mentions WHERE user_id='U33333333'")
+    if direct:
+        wait_for(lambda: bool(sent))
+        async def no_history(*args, **kwargs):
+            raise AssertionError('DM history must not be fetched')
+        monkeypatch.setattr(app.state.connectors, 'request', no_history)
+        asyncio.run(app.state.slack.prepare(run_id))
+        source = app.state.store.slack_source(run_id)
+        assert source['kind'] == 'dm' and 'first forwarded question' in source['messages'][0]['text']
+
+
+def test_forwarded_mentions_do_not_start_unaddressed_channel_sessions(slack_app):
+    from test_slack import forwarded_attachment
+    app, client, submitted, _ = slack_app
+    payload = event(type='message', text='', attachments=[forwarded_attachment('<@U99999999> help')])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert submitted == []
+
+
+def test_authored_control_still_works_with_forward(slack_app):
+    from test_slack import forwarded_attachment
+    app, client, run_id = start(slack_app)
+    send(client, 2, 'stop', attachments=[forwarded_attachment('model unrecognized')])
+    assert app.state.store.rows("SELECT command FROM slack_receipts WHERE event_id='EvChat2'")[0]['command'] == 'stop'
+
+
+def test_legacy_channel_sessions_preserve_forwarded_body(slack_app):
+    from test_slack import forwarded_attachment
+    app, client, submitted, _ = slack_app
+    app.state.settings.slack_thread_chat_enabled = False
+    payload = event(text='<@U99999999> explain', attachments=[forwarded_attachment('legacy body')])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert 'legacy body' in submitted[0]['prompt']

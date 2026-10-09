@@ -180,7 +180,7 @@ class SlackChat:
         # belong to their session's original provider, even after a switch.
         return [key for key in missing if not key.startswith(('MODAL_', 'SUBSTRATE_'))] + self.settings.missing_sandbox(provider)
 
-    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=()):
+    def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=(), reference=''):
         """Reserve the physical Slack message and queue its turn atomically."""
         original_prompt, selected_model, model_error = prompt, None, ''
         selected_harness, harness_error = None, ''
@@ -207,8 +207,10 @@ class SlackChat:
                 command = 'model'
         # Directives and attachments carry additional intent; only an otherwise
         # standalone question is answered by the control plane.
-        if not directive and not harness_directive and not file_ids and is_session_id_request(prompt):
+        if not directive and not harness_directive and not file_ids and not reference and is_session_id_request(prompt):
             command = 'session-id'
+        # Only authored text participates in command/model/harness parsing.
+        prompt += reference
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if conn.execute('SELECT 1 FROM slack_receipts WHERE event_id=? OR (team_id=? AND channel=? AND message_ts=?)',
