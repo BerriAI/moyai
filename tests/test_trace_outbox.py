@@ -190,6 +190,8 @@ async def test_shutdown_during_request_leaves_payload_for_restart(tmp_path):
 
 async def test_answer_and_root_span_rollback_together(tmp_path, monkeypatch):
     store, tracing, run, message = setup(tmp_path)
+    admitted_contexts = store.rows('SELECT * FROM trace_contexts')
+    assert len(admitted_contexts) == 1
     original = store.connect
     @contextmanager
     def interrupted_commit():
@@ -201,7 +203,7 @@ async def test_answer_and_root_span_rollback_together(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match='before commit'):
             store.finish_message(run['id'], message['id'], 'hello')
     assert not store.rows('SELECT * FROM trace_outbox')
-    assert not store.rows('SELECT * FROM trace_contexts')
+    assert store.rows('SELECT * FROM trace_contexts') == admitted_contexts
     assert not [m for m in store.messages(run['id']) if m['role'] == 'assistant']
     store.finish_message(run['id'], message['id'], 'hello')
     assert len(store.rows('SELECT * FROM trace_outbox')) == 1

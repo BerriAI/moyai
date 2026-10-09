@@ -314,6 +314,9 @@ class RunManager:
             async with self.slots:
                 if self.stopped(run_id):
                     return
+                if not run.get('chat_enabled') and self.store.tracing:
+                    with self.store.connect() as conn:
+                        self.store.tracing.start_turn(run_id, None, connection=conn)
                 deadline = self.settings.run_timeout_seconds + self.settings.snapshot_timeout_seconds + 180 if self.settings.run_timeout_seconds else None
                 async with asyncio.timeout(deadline):
                     if run["mode"] == "demo":

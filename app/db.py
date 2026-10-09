@@ -649,6 +649,8 @@ class Store:
             if row['id'] == run['steer_message_id']:
                 conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=?', (run_id,))
             conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',pending_result='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))
+            if self.tracing:
+                self.tracing.start_turn(run_id, row['id'], connection=conn)
         self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)
 
