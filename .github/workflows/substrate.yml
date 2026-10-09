@@ -49,18 +49,23 @@ jobs:
       - name: Create disposable Kubernetes cluster
         working-directory: .substrate
         run: hack/create-kind-cluster.sh
-      - name: Use the official mirror for the pinned Substrate Rust builder
+      - name: Use verified mirrors for the pinned Substrate image stages
         run: |
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path('.substrate/cmd/dataplane/envoy/Dockerfile')
-          original = 'FROM rust:bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder'
+          mirrors = {
+              'rust:bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e': 'public.ecr.aws/docker/library/',
+              'envoyproxy/envoy:v1.39.1@sha256:57e14a549d7bd43c8d3f6d03e8cfa653e037d4b38e133acd9b54f38c524401b4': 'mirror.gcr.io/',
+          }
           source = path.read_text()
-          if source.count(original) != 1:
-              raise SystemExit('The pinned Substrate Rust builder changed; revalidate the official mirror.')
-          mirrored = original.replace('FROM rust:', 'FROM public.ecr.aws/docker/library/rust:', 1)
-          path.write_text(source.replace(original, mirrored, 1))
+          stages = [line.split()[1] for line in source.splitlines() if line.startswith('FROM ')]
+          if sorted(stages) != sorted(mirrors):
+              raise SystemExit('The pinned Substrate image stages changed; revalidate their mirrors.')
+          for image, registry in mirrors.items():
+              source = source.replace(f'FROM {image}', f'FROM {registry}{image}', 1)
+          path.write_text(source)
           PY
       - name: Install real Substrate and two sandbox workers
         working-directory: .substrate
