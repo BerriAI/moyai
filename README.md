@@ -1,11 +1,5 @@
 # Moyai
 
-Press **Cmd+K** (Windows/Linux: **Ctrl+K**) to search session titles and saved
-messages, jump to settings, or act on the open session: copy its link, rename it,
-pin it, or move it to a folder. The sidebar search button opens the same palette.
-Use ↑/↓ and Enter to select, or Escape to close. **Cmd+Shift+O**
-(**Ctrl+Shift+O**) opens a new session. Search follows the selected My/All sessions scope.
-
 <p align="center">
   <img src="docs/assets/moyai-hero.png" alt="Moyai, an open source cloud agent" width="100%">
 </p>

@@ -140,7 +140,6 @@ async function openCredentialDialog(request=null,secret=null,preset=null){
   if(dialog.open)dialog.close();
   const data=await api('/api/credentials'+(request?'?run_id='+encodeURIComponent(state.selected):''));
   if(generation!==credentialDialogGeneration||page!==state.pageVersion||runId!==state.selected)return;
-  dialog.dataset.dialogScope=request?'workspace':'settings';
   // Refresh manager metadata so an already open page cannot overwrite a newer revision.
   if(secret){secret=data.secrets.find(s=>s.id===secret.id);if(!secret?.can_manage)throw new Error('This credential is no longer available to edit.');}
   const rootId=request?(data.root_id||request.root_id||state.selected):(secret?.root_id||'');

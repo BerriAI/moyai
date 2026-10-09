@@ -1,6 +1,5 @@
 /* Settings primitives. The workspace palette and native controls are shared with chat.
-   .settings-view belongs to the page/rail and explicitly owned dialog mounts,
-   never body: workspace overlays and the composer have their own density. */
+   Keep these rules scoped: session chrome and the composer have their own density. */
 .settings-view {
   --settings-text: var(--text);
   --settings-muted: var(--ui-muted, #68636f);

@@ -24,7 +24,7 @@ function applyUserSession(session) {
   state.preferences = {send_immediately: session.preferences?.send_immediately === true,
     omit_private_tool_payloads: session.preferences?.omit_private_tool_payloads === true};
   restoreSessionScope();
-  if(changed){if(typeof commandPalette!=='undefined')commandPalette?.close();++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
+  if(changed){++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
   if (session.identity) $('.rail-foot small').title = state.role === 'admin' ? 'Organization admin' : 'Internal user';
 }
 

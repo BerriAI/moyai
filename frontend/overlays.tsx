@@ -57,8 +57,6 @@ export function createDialog(): DialogHost {
   Object.defineProperty(host, "open", { get: () => open })
   host.showModal = () => {
     if (open) return
-    // Dialog styling follows its owner, independently of the current route.
-    mount.classList.toggle("settings-view", host.dataset.dialogScope === "settings")
     trigger = document.activeElement as HTMLElement
     open = true
     host.returnValue = ""
@@ -94,7 +92,6 @@ export function createDialog(): DialogHost {
     const label = host.getAttribute("aria-label") || host.querySelector("h1,h2,h3,strong")?.textContent || "Dialog"
     return <Dialog open={visible} onOpenChange={next => { if (!next) host.close() }}>
       {visible && <DialogContent
-        container={mount}
         className={host.className}
         data-dialog-id={host.id}
         showCloseButton={false}
