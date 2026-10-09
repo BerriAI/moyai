@@ -19,6 +19,9 @@
 .work-list{margin:0;padding:0;list-style:none}.work-action{margin:3px 0;color:#827a8b;min-width:0}
 .work-action-line,.work-action summary{display:flex;align-items:center;gap:9px;min-height:32px;padding:6px 9px;border-radius:7px;list-style:none;font-size:12px;min-width:0}
 .work-action summary{cursor:pointer}.work-action summary:hover{background:#f7f5f9}.work-action details[open]{background:#faf9fc;border:1px solid #eee9f2;border-radius:9px;margin:6px 0}
+.work-tool-chevron{display:inline-block;flex-shrink:0}.work-action details[open]>summary>.work-tool-chevron{transform:rotate(90deg)}
+.work-action summary:focus-visible{outline:2px solid var(--purple);outline-offset:2px}
+.work-image img,.work-image .saved-image-link img{display:block;max-width:100%;max-height:240px;aspect-ratio:auto;object-fit:contain}.work-image a[aria-disabled]{color:inherit}.work-action-detail>pre+span{display:block;margin-top:16px}
 .work-icon{flex:0 0 16px;color:#a498b1;text-align:center;font-size:14px}.work-action-title{min-width:0;flex:1;overflow-wrap:anywhere;line-height:1.5}
 .work-action-state{font-size:10px;color:#aaa1b1;white-space:nowrap}.work-action-time{font-size:10px;color:#afa7b5;white-space:nowrap;font-variant-numeric:tabular-nums}
 .work-action.running .work-action-state{color:#8f69b0}.work-action.running .work-icon{color:#9271af}.work-action.error .work-action-state{color:#b45861}.work-action.unconfirmed .work-action-state{color:#b28b57}

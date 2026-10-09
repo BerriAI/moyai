@@ -173,7 +173,12 @@
     const title=row.path?`${row.message} · ${row.path}`:row.command?`${row.message} · ${row.command.split('\n')[0].slice(0,110)}`:row.message;
     const timer=row.duration_ms!=null?duration(0,row.duration_ms):row.state==='running'?`<span data-work-timer="${Date.parse(row.start)}">${duration(Date.parse(row.start))}</span>`:'';
     const line=`<span class="work-icon" aria-hidden="true">${icon}</span><span class="work-action-title">${esc(title)}</span><span class="work-action-state">${esc(status)}</span><span class="work-action-time">${timer}</span>`;
-    return `<li class="work-action ${esc(row.state)}">${detail?`<details data-work-key="${esc(turn.id+':'+row.id)}"><summary>${line}</summary><div class="work-action-detail"><span>${row.command?'Command':'File'}</span><pre>${esc(detail)}</pre>${row.exit_code!=null?`<small>Exit code ${esc(row.exit_code)}</small>`:''}</div></details>`:`<div class="work-action-line">${line}</div>`}</li>`;
+    const payload=['input','output'].filter(key=>typeof row[key]==='string').map(key=>`<span>${key==='input'?'Input':'Result'}</span><pre>${esc(row[key])}</pre>`).join('');
+    const thumbnail=typeof row.image_preview==='string'&&row.image_preview.length<=66000&&/^data:image\/jpeg;base64,[A-Za-z0-9+/]+=*$/.test(row.image_preview)?`<img src="${esc(row.image_preview)}" alt="Viewed image" loading="lazy">`:'';
+    const preview=row.category==='image'&&typeof row.image_path==='string'?`<p class="work-image"><a data-file-ref="${esc(row.image_path)}" data-file-image="true" data-file-label="Viewed image" aria-disabled="true">${thumbnail||'Viewed image'}</a></p>`:'';
+    const content=`${detail?`<span>${row.command?'Command':'File'}</span><pre>${esc(detail)}</pre>`:''}${preview}${payload}${row.details_notice?`<small>${esc(row.details_notice)}</small>`:''}${row.image_notice?`<small>${esc(row.image_notice)}</small>`:''}${row.exit_code!=null?`<small>Exit code ${esc(row.exit_code)}</small>`:''}`;
+    const fallback=row.phase==='started'?'Waiting for tool results.':'Inputs and results were not recorded for this activity.';
+    return `<li class="work-action ${esc(row.state)}">${row.kind==='tool'||detail?`<details data-work-key="${esc(turn.id+':'+row.id)}"><summary>${line}<span class="work-tool-chevron" aria-hidden="true">›</span></summary><div class="work-action-detail">${content||`<small>${fallback}</small>`}</div></details>`:`<div class="work-action-line">${line}</div>`}</li>`;
   }
   function html(turn){
     if(!turn||(!turn.start&&!turn.rows.length))return '';

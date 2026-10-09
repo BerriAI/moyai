@@ -98,6 +98,24 @@ test('tool details are escaped; public commentary is excluded from expandable wo
   const markup=html(groups(data).get('1'));assert.match(markup,/Show 5 earlier updates/);assert.doesNotMatch(markup,/<script>|<img/);assert.match(markup,/&lt;script&gt;/);
 });
 
+test('every tool expands with escaped payloads, image references or an explicit missing-details message',()=>{
+  const data=run();
+  data.events.push(tool(2,'repo','completed',{category:'tool',command:null,input:'{"id":123}',output:'<script>bad()</script>'}),
+    tool(3,'image','completed',{category:'image',command:null,path:'/workspace/image.png',image_path:'/workspace/moyai-tool-images/snapshot.png',image_preview:'data:image/jpeg;base64,YWJj'}),
+    tool(4,'private','completed',{category:'tool',command:null,details_notice:'Credential payloads are private.'}),
+    event(5,'tool','Legacy tool'));
+  const markup=html(groups(data).get('1'));
+  assert.equal((markup.match(/<details data-work-key=/g)||[]).length,4);
+  assert.match(markup,/&lt;script&gt;bad\(\)&lt;\/script&gt;/);
+  assert.match(markup,/data-file-ref="\/workspace\/moyai-tool-images\/snapshot.png"/);
+  assert.match(markup,/<img src="data:image\/jpeg;base64,YWJj"/);
+  assert.match(markup,/Credential payloads are private/);
+  assert.match(markup,/Inputs and results were not recorded/);
+  assert.doesNotMatch(markup,/<script>|src="\/workspace/);
+  data.events[2].data.image_preview='https://untrusted.example/tracker';
+  assert.doesNotMatch(html(groups(data).get('1')),/untrusted.example/);
+});
+
 test('timers update only text and unchanged activity blocks keep their DOM',()=>{
   assert.equal(duration(0,65000),'1m 5s');assert.equal(duration(0,3601000),'1h 0m');assert.equal(duration(100,50),'0s');
   let writes=0;const slot={dataset:{workSlot:'1'},querySelectorAll:()=>[],contains:()=>false,set innerHTML(value){writes++;this.html=value;}};
