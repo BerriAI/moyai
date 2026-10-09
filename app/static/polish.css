@@ -278,6 +278,8 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .work-count, .turn-work:not(.is-live) .work-elapsed { display: none; }
 .work-elapsed { margin-left: 2px; font-size: 13px; color: #a0a0a0; }
 .work-body { margin-left: 6px; }
+.completed-work > .work-body { padding-top: 16px; }
+.completed-work .assistant-update { margin-bottom: 20px; }
 .chat-working { color: #737373; font-size: 12px; line-height: 18px; padding: 10px 8px; margin: 0 0 4px; border-top: 1px solid #f0f0f0; max-height: 76px; overflow-y: auto; }
 .chat-working[hidden] { display: none; }
 .chat-working.busy:before { background: #8a8a8a; width: 6px; height: 6px; }

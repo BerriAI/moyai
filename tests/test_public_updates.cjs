@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
-const {groups,updates,updateHTML,html,sync}=require('../app/static/activity.js');
+const {groups,updates,completedHistory,updateHTML,html,sync}=require('../app/static/activity.js');
 const stamp=n=>new Date(Date.UTC(2026,9,1,12,0,n)).toISOString();
 const event=(id,kind,message,data={})=>({id,kind,message,data,created_at:stamp(id)});
 function run(){return {status:'running',active_message_id:1,messages:[
@@ -14,7 +14,7 @@ function run(){return {status:'running',active_message_id:1,messages:[
   event(6,'message','The merged PR changes costs, but **daily accounting is still needed**.',{turn_id:1,activity_id:'reply-1',phase:'commentary'}),
   event(7,'status','Preparing the next step',{phase:'processing'})]};}
 
-test('updates follow delivery receipts and remain visible outside collapsed tool details',()=>{
+test('updates follow delivery receipts and remain separate from tool details',()=>{
   const data=run();for(let i=8;i<30;i++)data.events.push(event(i,'tool','Read file',{turn_id:1}));
   const buckets=updates(data),turn=groups(data).get('1');
   assert.equal(buckets.get('1').length,2);assert.equal(buckets.get('2').length,1);assert.equal(buckets.has('3'),false);
@@ -24,7 +24,21 @@ test('updates follow delivery receipts and remain visible outside collapsed tool
   assert.match(visible,/<article class="chat-message assistant assistant-update"/);assert.match(visible,/daily accounting/);
   assert.doesNotMatch(visible,/<details/);assert.match(visible,/Copy update/);
   data.messages[0].status='completed';data.status='idle';data.events.push(event(30,'chat','Response saved',{message_id:1}));
-  assert.deepEqual(updates(data),buckets,'completed work must keep its visible updates');
+  assert.deepEqual(updates(data),buckets,'completed work must retain every update in its history');
+});
+
+test('only successful closeouts collapse progress, with steering replies under their own input',()=>{
+  const data=run();
+  assert.equal(completedHistory(data).size,0);
+  for(const status of ['failed','cancelled','interrupted','steered','save_failed','saving','awaiting_approval','waiting_credential','waiting_children']){
+    data.status=status;data.messages[0].status=status;
+    assert.equal(completedHistory(data).size,0,status);
+  }
+  data.status='idle';data.messages[0].status='completed';
+  data.events.push(event(30,'chat','Response saved',{message_id:1}));
+  assert.deepEqual([...completedHistory(data)],[['1','Earlier activity'],['2','Worked for 29s']]);
+  assert.equal(completedHistory(data).has('3'),false,'a queued input has no completed history');
+  assert.deepEqual(completedHistory(structuredClone(data)),completedHistory(data),'reload reconstructs history');
 });
 
 test('multiple steering inputs, replay, and a later turn retain the correct update order',()=>{
@@ -63,7 +77,22 @@ test('only public messages become updates and their Markdown uses the same trust
 // layout are also verified in the browser using the production renderer.
 function dom(){
   let creations=0;const copied=[];
+  function container(dataset={}){
+    return {dataset,ownerDocument:document,children:[],
+      contains(node){return node===this||this.children.some(child=>child===node||child.contains?.(node));},
+      querySelector(selector){return selector===':scope > .completed-work'?this.children.find(child=>child.className==='turn-work completed-work'):null;},
+      querySelectorAll(){return this.children;},
+      append(...nodes){for(const node of nodes)this.insertBefore(node,null);},
+      insertBefore(node,before){if(node.parent)node.remove();const i=before?this.children.indexOf(before):this.children.length;this.children.splice(i,0,node);node.parent=this;},
+      remove(){if(this.parent)this.parent.children=this.parent.children.filter(child=>child!==this);}
+    };
+  }
   const document={createElement(tag){
+    if(tag==='details'){
+      const node=container(),body=container(),title={},summary={focus:()=>{document.activeElement=summary;}};
+      node.open=false;node.querySelector=selector=>({'.work-body':body,'.work-title':title,summary}[selector]);
+      return node;
+    }
     if(tag==='div')return {dataset:{},ownerDocument:document,contains:()=>false,querySelectorAll:()=>[],innerHTML:'',remove(){this.parent.children=this.parent.children.filter(child=>child!==this);}};
     return {content:{},set innerHTML(markup){
       creations++;
@@ -75,14 +104,29 @@ function dom(){
       this.content.firstElementChild=node;
     }};
   }};
-  const slots=['1','2','3'].map(id=>({dataset:{activitySlot:id},ownerDocument:document,children:[],
-    querySelectorAll(){return this.children;},insertBefore(node,before){
-      this.children=this.children.filter(child=>child!==node);
-      const i=before?this.children.indexOf(before):this.children.length;this.children.splice(i,0,node);node.parent=this;
-    }}));
-  const container={scrollTop:50,scrollHeight:1000,clientHeight:400,querySelectorAll:selector=>selector==='[data-activity-slot]'?slots:[]};
-  return {slots,container,copied,options:{copy:(text,button)=>copied.push(text)},get creations(){return creations;}};
+  const slots=['1','2','3'].map(id=>container({activitySlot:id}));
+  const view={scrollTop:50,scrollHeight:1000,clientHeight:400,querySelectorAll:selector=>selector==='[data-activity-slot]'?slots:[]};
+  return {slots,container:view,document,copied,options:{copy:(text,button)=>copied.push(text)},get creations(){return creations;}};
 }
+
+test('completion folds existing updates once; expansion, copy and focus survive polling',()=>{
+  const data=run(),view=dom();sync(view.container,data,view.options);
+  const update=view.slots[1].children[0];view.document.activeElement=update;
+  data.messages[0].status='completed';data.status='idle';data.events.push(event(30,'chat','Response saved',{message_id:1}));
+  sync(view.container,data,view.options);
+  const history=view.slots[1].children[0];
+  assert.equal(history.open,false);assert.equal(history.querySelector('.work-title').textContent,'Worked for 29s');
+  assert.equal(view.document.activeElement,history.querySelector('summary'),'focus leaves collapsed content');
+  assert.equal(history.querySelector('.work-body').children[0],update);
+  history.open=true;update.button.onclick();
+  assert.deepEqual(view.copied,[data.events[5].message]);
+  sync(view.container,structuredClone(data),view.options);
+  assert.equal(view.slots[1].children[0],history);assert.equal(history.open,true);
+  assert.equal(view.container.scrollTop,50);assert.equal(view.creations,3);
+  data.messages[0].status='save_failed';data.status='failed';
+  sync(view.container,data,view.options);
+  assert.equal(view.slots[1].children[0],update,'a later save failure exposes the same progress again');
+});
 
 test('new tools and replies preserve existing update nodes, reading position, and copy controls',()=>{
   const data=run(),view=dom();sync(view.container,data,view.options);
