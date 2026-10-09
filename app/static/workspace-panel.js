@@ -53,21 +53,19 @@
     q('.panel-resize').onpointerdown=event=>{event.preventDefault();const grip=event.currentTarget;grip.setPointerCapture(event.pointerId);grip.onpointermove=e=>{const rect=layout.getBoundingClientRect();resize((rect.right-e.clientX)/rect.width*100);};grip.onpointerup=grip.onpointercancel=()=>{grip.onpointermove=null;save();};};
     q('.panel-resize').onkeydown=e=>{if(['ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();resize(width+(e.key==='ArrowLeft'?3:-3));}};
     function draw(){
-      MoyaiUI.render(q('.panel-tabs'), [...tabs.values()].map(t=>`<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(t.title)}"><span class="panel-tab-icon">${ico(glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`).join(''));
-      for(const t of tabs.values())if(t.kind==='pr')drawPullRequestStatus(t);
-      q('.panel-tabs').querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
-      q('.panel-tabs').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
+      const host=q('.panel-tabs'),focused=host.contains(document.activeElement)?document.activeElement:null;
+      const focusKey=focused?.dataset.tab||focused?.dataset.close,focusAttribute=focused?.dataset.tab?'data-tab':'data-close',scrollLeft=host.scrollLeft;
+      MoyaiUI.render(host, [...tabs.values()].map(t=>{
+        const pr=t.kind==='pr'?MoyaiPullRequest.presentation(t.prStatus):null,label=pr?t.title+' · '+pr.label:t.title;
+        return `<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(label)}" aria-label="${esc(label)}"><span class="panel-tab-icon${pr?' panel-pr-'+pr.state:''}">${ico(pr?.icon||glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`;
+      }).join(''));
+      host.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
+      host.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
+      // A background PR status read must not move keyboard focus or scroll the tab strip.
+      if(focusKey)[...host.querySelectorAll(`[${focusAttribute}]`)].find(b=>b.getAttribute(focusAttribute)===focusKey)?.focus({preventScroll:true});
+      host.scrollLeft=scrollLeft;
       document.querySelector('#toggle-details')?.setAttribute('aria-expanded',String(visible&&tabs.get(active)?.kind==='activity'));
       const toggle=document.querySelector('#workspace-panel-toggle');if(toggle){toggle.setAttribute('aria-expanded',String(visible));toggle.setAttribute('aria-label',visible?'Hide workspace panel':'Show workspace panel');toggle.classList.toggle('is-active',visible);}
-    }
-    function drawPullRequestStatus(t){
-      const button=q('#tab-'+t.uid);if(!button)return;
-      const {state,label,icon}=MoyaiPullRequest.presentation(t.prStatus);
-      const host=button.querySelector('.panel-tab-icon');
-      host.className='panel-tab-icon panel-pr-'+state;
-      MoyaiUI.render(host,ico(icon,15));
-      button.title=t.title+' · '+label;
-      button.setAttribute('aria-label',button.title);
     }
     q('.panel-tabs').onkeydown=e=>{if(!e.target.matches('[role="tab"]'))return;const ids=[...tabs.values()].filter(t=>!t.closing).map(t=>t.id),idx=ids.indexOf(active);let next;if(e.key==='ArrowRight')next=ids[(idx+1)%ids.length];if(e.key==='ArrowLeft')next=ids[(idx+ids.length-1)%ids.length];if(e.key==='Home')next=ids[0];if(e.key==='End')next=ids.at(-1);if(next){e.preventDefault();select(next);q('[aria-selected="true"]')?.focus();}if(e.key==='Delete'){e.preventDefault();remove(active);}};
     function setVisible(value){
@@ -134,7 +132,11 @@
       if(t.kind==='agents'){renderAgents(t.element);return;}
       if(t.kind==='pr'){
         Object.assign(t,MoyaiPullRequest.mount({element:t.element,url:t.url,markdown,escape:esc,
-          onStatus:data=>{if(current()){t.prStatus=data;drawPullRequestStatus(t);}},
+          onStatus:data=>{
+            if(!current())return;
+            const previous=MoyaiPullRequest.presentation(t.prStatus).state;t.prStatus=data;
+            if(MoyaiPullRequest.presentation(data).state!==previous)draw();
+          },
           load:()=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`)}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}

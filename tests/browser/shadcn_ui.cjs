@@ -26,6 +26,61 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+for (const width of [1440, 768, 320]) test(`PR tab status refresh owns its tooltip and survives focused redraws and closure at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  const title = 'Review <PR> "safely"', url = 'https://github.com/example/workspace/pull/101';
+  await page.evaluate(({title,url}) => {
+    MoyaiUI.render(document.querySelector('#content'), '<div class="chat-layout"></div>');
+    const layout = document.querySelector('.chat-layout');
+    const receipt = {title,url,state:'open',number:101,repository:'example/workspace'};
+    window.prFixture = {...receipt,merged:false,draft:false,base:'main',files:[]};
+    window.prHold = false;
+    window.prPanel = MoyaiPanel.create({
+      run:{id:'status-regression',pull_requests:[receipt]},layout,user:'test',models:[],
+      escape:esc,markdown:renderMarkdown,size:String,computer:{},toast(){},
+      api:async path => {
+        if (!path.includes('/pull-request?')) return [];
+        if (window.prHold) await new Promise(resolve => window.prRelease = resolve);
+        return {...window.prFixture};
+      }
+    });
+    window.prPanel.open('pulls');
+    window.prPanel.openPullRequest(url);
+  }, {title,url});
+  const tabFor = state => page.getByRole('tab', {name:`${title} · ${state}`,exact:true});
+  await tabFor('Open').hover();
+  await page.getByRole('tooltip', {name:`${title} · Open`,exact:true}).waitFor();
+  assert.equal(await tabFor('Open').getAttribute('title'), null, 'Only the shared tooltip owns the hover label');
+  for (const [state, merged, label] of [['closed',true,'Merged'],['closed',false,'Closed'],['open',false,'Open']]) {
+    const previous = await page.locator('.panel-tabs [aria-selected=true]').getAttribute('aria-label');
+    await page.evaluate(({state,merged}) => {
+      Object.assign(window.prFixture,{state,merged});window.prHold=true;window.prRelease=null;
+    }, {state,merged});
+    await page.getByRole('button', {name:'Refresh pull request',exact:true}).click();
+    await page.waitForFunction(() => typeof window.prRelease === 'function');
+    await page.getByRole('tab', {name:previous,exact:true}).focus();
+    const scrollLeft = await page.locator('.panel-tabs').evaluate(el => el.scrollLeft);
+    await page.evaluate(() => {window.prHold=false;window.prRelease();});
+    await tabFor(label).waitFor();
+    assert.equal(await tabFor(label).evaluate(el => el === document.activeElement), true, 'Async status updates preserve tab focus');
+    assert.equal(await page.locator('.panel-tabs').evaluate(el => el.scrollLeft), scrollLeft, 'Async status updates preserve tab scroll');
+    assert.equal(await tabFor(label).getAttribute('title'), null);
+    await page.mouse.move(0, 0);
+    await page.getByRole('button', {name:'Refresh pull request',exact:true}).focus();
+    await tabFor(label).hover();
+    await page.getByRole('tooltip', {name:`${title} · ${label}`,exact:true}).waitFor();
+    await page.getByRole('tab', {name:'Pull requests',exact:true}).click();
+    await tabFor(label).click();
+    await page.getByRole('heading', {name:title,exact:true}).waitFor();
+  }
+  await page.getByRole('button', {name:`Close ${title} tab`,exact:true}).click();
+  assert.equal(await tabFor('Open').count(), 0);
+  await page.getByRole('link', {name:`${title} example/workspace #101`,exact:true}).click();
+  await tabFor('Open').waitFor();
+  await page.evaluate(() => window.prPanel.dispose());
+  assert.equal(await page.getByRole('tablist', {name:'Workspace tabs'}).count(), 0);
+});
+
 async function assertTableTextContained(page) {
   const overlaps = await page.locator('#content th:visible, #content td:visible').evaluateAll(cells => cells.flatMap(cell => {
     const bounds = cell.getBoundingClientRect();
