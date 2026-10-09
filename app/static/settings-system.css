@@ -43,6 +43,7 @@
 .settings-view #content > :is(.settings-page,.automations-page,.skills-page,.secrets-page,.memory-page,.users-page,.environments-page) { width: 100%; margin-block: 0; padding: 0; }
 .settings-view #content h1 { font-size: var(--settings-title); line-height: 1.25; font-weight: 600; letter-spacing: -.025em; margin: 0 0 8px; text-wrap: balance; }
 .settings-view #content h1:focus { outline: none; }
+.settings-view #content h1:focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 4px; }
 .settings-view #content h2 { font-size: var(--settings-heading); line-height: 1.4; font-weight: 550; letter-spacing: -.01em; }
 .settings-view #content h3 { font-size: var(--settings-body); line-height: 1.4; font-weight: 550; }
 .settings-view #content p { line-height: 1.6; text-wrap: pretty; }

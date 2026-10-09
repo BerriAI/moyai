@@ -250,6 +250,7 @@ function bindComposer(input,form){
 }
 async function navigate(view) {
   if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
+  const returningToWorkspace=view==='tasks'&&settingsViews.has(state.view);
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
   setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
@@ -270,6 +271,7 @@ async function navigate(view) {
     const heading=$('#content h1');
     if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
   }
+  if(version===state.pageVersion&&returningToWorkspace)$('#prompt')?.focus({preventScroll:true});
 }
 async function refreshRuns(){
   const refresh=++state.runsRefresh,search=state.sessionSearch||'',focus=state.selected||parseSessionLink(location.hash)?.runId||'';
