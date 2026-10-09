@@ -58,7 +58,7 @@ async def verify_environment_build(sandbox):
 
 async def verify_computer(sandbox):
     result = await execute(sandbox, r'''
-import sys, threading, json
+import asyncio, sys, threading, json, traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, '/opt/workspace-runner')
 import computer
@@ -74,6 +74,22 @@ server = ThreadingHTTPServer(('127.0.0.1', 0), Page)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 try:
     opened = computer.request({'action':'open','args':{'url':f'http://127.0.0.1:{server.server_port}'}})
+    if 'error' in opened:
+        # The public service deliberately hides browser internals. Diagnose
+        # this synthetic local page without weakening the original assertion.
+        async def diagnose():
+            probe = computer.Computer()
+            try:
+                await probe.command({'action':'open','args':{'url':f'http://127.0.0.1:{server.server_port}'}})
+                print('Direct Computer probe succeeded after service failure.', file=sys.stderr)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                if probe.browser:
+                    await probe.browser.close()
+                if probe.playwright:
+                    await probe.playwright.stop()
+        asyncio.run(diagnose())
     assert opened.get('title') == 'Moyai', opened
     clicked = computer.request({'action':'click','args':{'role':'button','name':'Test'}})
     assert 'Clicked' in clicked.get('text',''), clicked
