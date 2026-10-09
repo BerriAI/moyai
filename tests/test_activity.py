@@ -40,17 +40,62 @@ def test_only_explicit_result_status_marks_tool_errors(result, expected):
     assert result_status(result) == expected
 
 
+def test_connector_details_are_bounded_and_private_payloads_stay_omitted():
+    events = []
+    activity = ActivityReporter(lambda kind, message, data: events.append(data))
+    activity.start('repo', 'mcp__moyai__github_repository', {'repository_id': 123})
+    activity.complete('repo', 'mcp__moyai__github_repository', {}, {'name': 'moyai', 'token': 'hidden'})
+    assert '123' in events[0]['input'] and 'moyai' in events[1]['output']
+    assert 'hidden' not in events[1]['output']
+    for name in ('credentials_run', 'memory_search', 'skills_read_file'):
+        activity.start(name, 'mcp__moyai__' + name, {'value': 'private-marker'})
+        activity.complete(name, 'mcp__moyai__' + name, {}, {'value': 'private-marker'})
+        assert 'input' not in events[-2] and 'output' not in events[-1]
+        assert events[-1]['details_notice']
+    assert 'private-marker' not in json.dumps(events)
+    activity.start('fill', 'mcp__moyai__browser_fill', {'label': 'Sign in', 'value': 'secret-login'})
+    assert 'secret-login' not in events[-1]['input']
+
+
+def test_view_image_keeps_a_snapshot_and_rejects_outside_paths(tmp_path, monkeypatch):
+    from PIL import Image
+    from sandbox import tool_images
+    monkeypatch.setattr(tool_images, 'WORKSPACE', tmp_path)
+    source = tmp_path / 'image.png'
+    Image.new('RGB', (4, 4), 'red').save(source)
+    events = []
+    activity = ActivityReporter(lambda kind, message, data: events.append(data))
+    activity.start('image', 'view_image', {'path': str(source)})
+    from pathlib import Path
+    saved = Path(events[0]['image_path'])
+    assert events[0]['image_preview'].startswith('data:image/jpeg;base64,')
+    assert len(events[0]['image_preview']) <= 66000
+    before = saved.read_bytes()
+    Image.new('RGB', (4, 4), 'blue').save(source)
+    activity.complete('image', 'view_image', {}, 'Image viewed.')
+    assert saved.read_bytes() == before
+    assert events[-1]['image_path'] == str(saved)
+    assert events[-1]['path'] == str(source)
+    assert 'image_path' not in tool_images.snapshot('/etc/passwd')
+    linked = tmp_path / 'link.png'
+    linked.symlink_to(source)
+    assert 'image_path' not in tool_images.snapshot(str(linked))
+    assert 'image_path' not in tool_images.snapshot(None)
+
+
 def test_public_details_are_bounded_redacted_and_exclude_reasoning():
     events = []
     activity = ActivityReporter(lambda *args: events.append(args))
     activity.start('a', 'terminal', {'command': 'TOKEN="secret-marker" curl -H "Authorization: Bearer header-marker" https://example.org', 'env': {'KEY': 'hidden-env'}})
-    activity.complete('a', 'terminal', {}, {'output': 'private-result-marker', 'exit_code': 2})
-    activity.start('b', 'write_file', {'path': '/workspace/result.py', 'content': 'private-file-marker'})
+    activity.complete('a', 'terminal', {}, {'output': 'command-result-marker', 'exit_code': 2})
+    activity.start('b', 'write_file', {'path': '/workspace/result.py', 'content': 'file-content-marker'})
     activity.commentary('<think>private-reasoning-marker</think>I found the relevant file.')
     activity.commentary('<reasoning>unfinished private thought')
     text = json.dumps(events)
-    for secret in ('secret-marker', 'header-marker', 'hidden-env', 'private-result-marker', 'private-file-marker', 'private-reasoning-marker', 'private thought'):
+    for secret in ('secret-marker', 'header-marker', 'private-reasoning-marker', 'private thought'):
         assert secret not in text
+    assert 'command-result-marker' in text and 'file-content-marker' in text
+    assert 'hidden-env' not in text
     assert '/workspace/result.py' in text and 'I found the relevant file.' in text
     assert events[1][2]['phase'] == 'error' and events[1][2]['exit_code'] == 2
     assert len(public_text('a' * 5000)) == 2001

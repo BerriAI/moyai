@@ -1,4 +1,4 @@
-"""Public work updates. Never forward arbitrary tool arguments or result bodies."""
+"""Public work updates with bounded, redacted tool details."""
 import json
 import os
 import re
@@ -76,11 +76,27 @@ def tool_summary(name, arguments):
         path = args.get('path') or args.get('file_path') or args.get('target_file')
         if isinstance(path, str):
             data['path'] = public_text(path, 300)
+    elif tool == 'view_image':
+        data.update(category='image', label='View image', path=public_text(args.get('path'), 1000))
     else:
         # Connector requests can carry keys, personal skill definitions or page
         # bodies. The tool name is enough context; no arbitrary payload preview.
         data['label'] = public_text(tool.replace('__', ' ').replace('_', ' ').capitalize(), 120)
     return data
+
+
+def tool_details(name, value):
+    # Reuse the trace sanitizer, but always omit personal library/credential
+    # payloads from the shared conversation, independent of tracing settings.
+    try:
+        from .trace_content import private_tool, trace_content
+    except ImportError:
+        from trace_content import private_tool, trace_content
+    if private_tool(name):
+        return None
+    if name == 'browser_fill' and isinstance(value, dict):
+        value = {key: '[redacted]' if key == 'value' else item for key, item in value.items()}
+    return trace_content(value, limit=8000)
 
 
 class ActivityReporter:
@@ -95,6 +111,17 @@ class ActivityReporter:
 
     def start(self, call_id, name, args):
         data = tool_summary(name, args)
+        details = tool_details(data['tool'], args)
+        if details is None:
+            data['details_notice'] = 'Credential, memory and skill payloads are private.'
+        else:
+            data['input'] = details
+        if data['tool'] == 'view_image':
+            try:
+                from .tool_images import snapshot
+            except ImportError:
+                from tool_images import snapshot
+            data.update(snapshot(args.get('path')))
         with self.lock:
             self.starts[str(call_id)] = (time.monotonic(), data)
             if self.tracing:
@@ -107,6 +134,11 @@ class ActivityReporter:
             started, data = self.starts.pop(str(call_id), (None, tool_summary(name, args)))
         phase, code = result_status(result)
         data = {**data, 'activity_version': 1, 'call_id': self.prefix + ':' + str(call_id), 'phase': phase}
+        details = tool_details(data['tool'], result)
+        if details is not None:
+            data['output'] = details
+        else:
+            data['details_notice'] = 'Credential, memory and skill payloads are private.'
         if started is not None:
             data['duration_ms'] = round((time.monotonic() - started) * 1000)
         if code is not None:

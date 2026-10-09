@@ -1054,6 +1054,8 @@ def test_private_mcp_tool_names_preserve_existing_redaction(codex_agent, omit):
     traces = [event for event in events if event[0] == 'trace']
     assert 'requester-private-marker' not in json.dumps(public)
     assert ('requester-private-marker' in json.dumps(traces)) is (not omit)
+    if omit:
+        assert traces[0][2]['input'] == '[private tool payload omitted]'
     assert not store.pending
 
 

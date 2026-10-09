@@ -242,7 +242,7 @@ class Computer:
         if not self.desktop or self.desktop.poll() is not None:
             self.desktop = subprocess.Popen(['openbox', '--sm-disable'], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            subprocess.run(['xsetroot', '-solid', '#eeedf4'], env=env, check=True, timeout=5)
+            subprocess.run(['xsetroot', '-solid', '#eeedf4'], env=env, check=True, timeout=30)
         if not self.panel or self.panel.poll() is not None:
             self.panel = subprocess.Popen(['tint2'], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -394,14 +394,16 @@ class Computer:
                 DISPLAY_SOCKET.unlink(missing_ok=True)
                 self.display = subprocess.Popen(['Xvfb', ':99', '-screen', '0', f'{WIDTH}x{HEIGHT}x24', '-ac', '-nolisten', 'tcp'],
                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                for _ in range(50):
-                    if display_alive():
-                        break
-                    if self.display.poll() is not None:
-                        raise RuntimeError('The browser display could not start. Try a new response to restore the workspace.')
-                    await asyncio.sleep(.1)
-                else:
-                    raise RuntimeError('The browser display is still starting. Try again shortly.')
+        # Cold image pages can take longer than five seconds to reach Xvfb.
+        # An existing process may also still be starting after an earlier
+        # request timed out; always wait for the socket before using it.
+        for _ in range(300):
+            if display_alive():
+                return
+            if self.display and self.display.poll() is not None:
+                raise RuntimeError('The browser display could not start. Try a new response to restore the workspace.')
+            await asyncio.sleep(.1)
+        raise RuntimeError('The browser display is still starting. Try again shortly.')
 
     def new_page(self, page):
         self.page = page

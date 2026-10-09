@@ -36,7 +36,7 @@
   }
   function decorateReferences(container,files,{runId,onOpen}={}){
     if(!container)return;
-    container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code').forEach(node=>{
+    container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code,.work-image [data-file-ref]').forEach(node=>{
       if(node.closest('pre')||(!node.matches('[data-file-ref]')&&(node.closest('a')||node.children.length)))return;
       const ref=node.dataset.fileRef||node.textContent,file=resolve(ref,files);
       if(!file){

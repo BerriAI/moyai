@@ -135,7 +135,7 @@ class RunManager:
                     await self.computer.save_captures(sandbox, run_id, releasing=True)
             except Exception:
                 self.store.event(run_id, 'error', 'Some browser captures could not be saved. Continuing workspace shutdown.')
-        async with asyncio.timeout(30):
+        async with asyncio.timeout(150 if sandbox.object_id.startswith('lambda:') else 30):
             await sandbox.terminate.aio()
             # terminate() acknowledges the request before the machine exits.
             await sandbox.wait.aio(raise_on_termination=False)
@@ -428,7 +428,7 @@ class RunManager:
         snapshot_id = run.get("snapshot_id") or project.get("snapshot_id")
         provision = asyncio.create_task(backend.create(
             name='moyai-' + run_id + '-' + uuid4().hex[:8], snapshot_id=snapshot_id or '', token=token,
-            timeout=self.settings.sandbox_lifetime_seconds()))
+            timeout=self.settings.sandbox_lifetime_seconds(run.get('sandbox_provider'))))
         try:
             sandbox = await asyncio.shield(provision)
         except asyncio.CancelledError:
@@ -442,6 +442,8 @@ class RunManager:
         if self.stopped(run_id):
             return
         spec = self.spec(run)
+        if backend.name == 'lambda':
+            spec["rotation_at"] = sandbox.started_at + self.settings.sandbox_rotation_for('lambda')
         # Restored snapshots can contain an older adapter; refresh only our own
         # runner files, preserving all user workspace files and agent history.
         if snapshot_id:
@@ -504,7 +506,7 @@ class RunManager:
             await self.save_artifact(sandbox, run_id)
             if self.stopped(run_id):
                 return
-            if run.get("chat_enabled"):
+            if run.get("chat_enabled") or backend.name == 'lambda':
                 self.store.update_run(run_id, status="saving", token_hash="")
                 self.store.event(run_id, "status", "Saving conversation and workspace for your next message")
                 started = time.monotonic()

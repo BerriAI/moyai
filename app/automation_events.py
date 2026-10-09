@@ -9,6 +9,7 @@ import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -332,6 +333,32 @@ class AutomationEvents:
         if not valid:
             raise HTTPException(401, 'Webhook timestamp has expired.')
 
+    def configure(self, automation_id, body, owner_id, *, connection=None):
+        """One transactional owner for web and broker receiver configuration."""
+        with self.store.connect() if connection is None else nullcontext(connection) as conn:
+            if connection is None:
+                conn.execute('BEGIN IMMEDIATE')
+            row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
+            if not row or row['owner_id'] != owner_id:
+                raise HTTPException(404, 'Automation not found for the current requester.')
+            if row['revision'] != body.revision:
+                raise HTTPException(409, 'Automation changed. Refresh before configuring the webhook.')
+            provider = self.provider(row, body.provider)
+            if provider in {'slack', 'session'}:
+                raise HTTPException(409, 'This automation does not use a webhook secret.')
+            if provider in {'linear', 'pagerduty'} and not body.secret:
+                raise HTTPException(422, 'Enter the signing secret from your provider webhook settings.')
+            secret = body.secret or secrets.token_urlsafe(32)
+            if not 16 <= len(secret) <= 512:
+                raise HTTPException(422, 'Use a signing secret of 16 to 512 characters.')
+            encrypted = self.security.encrypt(secret)
+            conn.execute("UPDATE automations SET paused=1,revision=revision+1,updated_at=?,sync_error='' WHERE id=?",
+                         (now(), automation_id))
+            conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?) ON CONFLICT(automation_id,provider) DO UPDATE SET encrypted=excluded.encrypted',
+                         (automation_id, provider, encrypted))
+        self.automations.next_sync = 0
+        return secret, body.revision + 1
+
     def routes(self):
         router = APIRouter()
 
@@ -348,25 +375,9 @@ class AutomationEvents:
             self.security.require(request, mutation=True)
             row = self.automations.row(automation_id)
             self.automations.require_owner(row, request)
-            provider = self.provider(row, body.provider)
-            if provider in {'slack','session'}:
-                raise HTTPException(409, 'This automation does not use a webhook secret.')
-            if provider in {'linear','pagerduty'} and not body.secret:
-                raise HTTPException(422, 'Enter the signing secret from your provider webhook settings.')
-            secret = body.secret or secrets.token_urlsafe(32)
-            if len(secret) < 16:
-                raise HTTPException(422, 'Use a signing secret of at least 16 characters.')
-            with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
-                changed = conn.execute("UPDATE automations SET paused=1,revision=revision+1,updated_at=?,sync_error='' WHERE id=? AND revision=?",
-                                       (now(), automation_id, body.revision)).rowcount
-                if not changed:
-                    raise HTTPException(409, 'Automation changed. Refresh before configuring the webhook.')
-                conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?) ON CONFLICT(automation_id,provider) DO UPDATE SET encrypted=excluded.encrypted',
-                             (automation_id, provider, self.security.encrypt(secret)))
-            self.automations.next_sync = 0
+            secret, revision = self.configure(automation_id, body, row['owner_id'])
             await self.automations.checkpoints.flush()
-            return {'secret': secret if not body.secret else '', 'revision': body.revision + 1}
+            return {'secret': secret if not body.secret else '', 'revision': revision}
 
         @router.post('/api/automations/{automation_id}/test-event')
         async def test_event(automation_id: str, body: TestEvent, request: Request):

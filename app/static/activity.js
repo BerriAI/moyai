@@ -137,6 +137,14 @@
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
   function updateHTML(update,markdown=esc){
+    // Exact legacy runtime notices only; ordinary assistant prose (including
+    // quotations of these notices) must keep its normal Markdown rendering.
+    const compaction={
+      'Compacting saved context before continuing. Completed tool receipts are preserved.':'Context compaction',
+      'The agent compacted its context and is continuing. Completed tool receipts remain saved.':'Context compacted',
+    };
+    const label=Object.hasOwn(compaction,update.content)?compaction[update.content]:null;
+    if(label)return `<details class="context-compaction" data-update-id="${esc(update.id)}"><summary><span class="context-compaction-icon" aria-hidden="true">${root.MoyaiIcon?.('list',16)||'≡'}</span><span>${label}</span><span class="context-compaction-rule" aria-hidden="true"></span><span class="context-compaction-chevron" aria-hidden="true">›</span></summary><div class="context-compaction-detail"><p>Making room to continue the conversation. Saved progress and completed tool results stay available.</p><p class="context-compaction-source">${esc(update.content)}</p></div></details>`;
     return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">${root.MoyaiIcon?.('copy',16)||'Copy'}</button></article>`;
   }
   function syncItems(slot,items,{markdown,copy}){
@@ -161,7 +169,7 @@
         if(node)node.replaceWith(fresh);
         node=fresh;
         const button=node.querySelector('.copy-update');
-        button.onclick=()=>copy?.(update.content,button);
+        if(button)button.onclick=()=>copy?.(update.content,button);
         node.querySelectorAll('.copy-code').forEach(button=>button.onclick=()=>copy?.(button.closest('.code-block').querySelector('code').textContent,button));
       }
       if(slot.children[index]!==node)slot.insertBefore(node,slot.children[index]||null);
@@ -176,7 +184,12 @@
     const title=row.path?`${row.message} · ${row.path}`:row.command?`${row.message} · ${row.command.split('\n')[0].slice(0,110)}`:row.message;
     const timer=row.duration_ms!=null?duration(0,row.duration_ms):row.state==='running'?`<span data-work-timer="${Date.parse(row.start)}">${duration(Date.parse(row.start))}</span>`:'';
     const line=`<span class="work-icon" aria-hidden="true">${icon}</span><span class="work-action-title">${esc(title)}</span><span class="work-action-state">${esc(status)}</span><span class="work-action-time">${timer}</span>`;
-    return `<li class="work-action ${esc(row.state)}">${detail?`<details data-work-key="${esc(turn.id+':'+row.id)}"><summary>${line}</summary><div class="work-action-detail"><span>${row.command?'Command':'File'}</span><pre>${esc(detail)}</pre>${row.exit_code!=null?`<small>Exit code ${esc(row.exit_code)}</small>`:''}</div></details>`:`<div class="work-action-line">${line}</div>`}</li>`;
+    const payload=['input','output'].filter(key=>typeof row[key]==='string').map(key=>`<span>${key==='input'?'Input':'Result'}</span><pre>${esc(row[key])}</pre>`).join('');
+    const thumbnail=typeof row.image_preview==='string'&&row.image_preview.length<=66000&&/^data:image\/jpeg;base64,[A-Za-z0-9+/]+=*$/.test(row.image_preview)?`<img src="${esc(row.image_preview)}" alt="Viewed image" loading="lazy">`:'';
+    const preview=row.category==='image'&&typeof row.image_path==='string'?`<p class="work-image"><a data-file-ref="${esc(row.image_path)}" data-file-image="true" data-file-label="Viewed image" aria-disabled="true">${thumbnail||'Viewed image'}</a></p>`:'';
+    const content=`${detail?`<span>${row.command?'Command':'File'}</span><pre>${esc(detail)}</pre>`:''}${preview}${payload}${row.details_notice?`<small>${esc(row.details_notice)}</small>`:''}${row.image_notice?`<small>${esc(row.image_notice)}</small>`:''}${row.exit_code!=null?`<small>Exit code ${esc(row.exit_code)}</small>`:''}`;
+    const fallback=row.phase==='started'?'Waiting for tool results.':'Inputs and results were not recorded for this activity.';
+    return `<li class="work-action ${esc(row.state)}">${row.kind==='tool'||detail?`<details data-work-key="${esc(turn.id+':'+row.id)}"><summary>${line}<span class="work-tool-chevron" aria-hidden="true">›</span></summary><div class="work-action-detail">${content||`<small>${fallback}</small>`}</div></details>`:`<div class="work-action-line">${line}</div>`}</li>`;
   }
   function html(turn){
     if(!turn||(!turn.start&&!turn.rows.length))return '';

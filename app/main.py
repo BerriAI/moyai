@@ -208,7 +208,7 @@ def create_app(settings: Settings | None = None):
     manager.prepare_context = slack.prepare
     automations = Automations(store, settings, security, manager, connectors, environments, checkpoints)
     from .automation_tools import AutomationTools, TOOL_NAMES as AUTOMATION_TOOLS
-    automation_tools = AutomationTools(automations, credentials.same_requester)
+    automation_tools = AutomationTools(automations, credentials.same_requester, credentials)
     from .model_tools import ModelTools, TOOL_NAMES as MODEL_TOOLS
     model_tools = ModelTools(store, settings)
     manager.automations = automations

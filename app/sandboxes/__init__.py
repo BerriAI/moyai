@@ -9,8 +9,13 @@ def provider(settings, name=None, *, modal_clients=None):
     if name == 'substrate':
         from .substrate import SubstrateProvider
         return SubstrateProvider(settings)
+    if name == 'lambda':
+        from .lambda_microvm import LambdaProvider
+        return LambdaProvider(settings)
     raise ValueError('Unknown sandbox provider')
 
 
 def provider_for_id(identity):
+    if identity.startswith('lambda:'):
+        return 'lambda'
     return 'substrate' if identity.startswith('substrate:') else 'modal'

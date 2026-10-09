@@ -21,7 +21,7 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   t.after(async () => { await page.close(); assert.deepEqual(errors, [], 'No uncaught browser errors'); });
-  await page.goto(`${base}/?fixture=${fixture}#${route}`);
+  await page.goto(`${base}/?fixture=${fixture}#${route}`, { waitUntil: 'domcontentloaded' });
   await page.locator('#content h1').waitFor();
   return page;
 }
@@ -46,8 +46,12 @@ async function assertTableTextContained(page) {
 
 async function choose(page, source, value) {
   const label = await source.evaluate((select, value) => [...select.options].find(option => option.value === value).label, value);
-  await source.locator('..').getByRole('combobox').click();
+  const trigger = await source.locator('..').getByRole('combobox').elementHandle();
+  await trigger.click();
   await page.getByRole('option', { name: label, exact: true }).click();
+  await page.getByRole('listbox').waitFor({ state: 'detached' });
+  // Radix restores focus after unmount. Wait before typing into the next field.
+  await page.waitForFunction(el => !el.isConnected || el === document.activeElement, trigger);
 }
 
 async function inspectMenus(page, width) {
@@ -66,7 +70,11 @@ async function inspectMenus(page, width) {
     await page.waitForFunction(el => {
       const bounds = el.getBoundingClientRect();
       return bounds.left >= 0 && bounds.right <= innerWidth + 1 && bounds.top >= 0 && bounds.bottom <= innerHeight + 1;
-    }, await menu.elementHandle());
+    }, await menu.elementHandle()).catch(async error => {
+      throw new Error(`Dropdown outside viewport: ${JSON.stringify({
+        route: page.url(), field: await trigger.getAttribute('aria-label'), trigger: await trigger.boundingBox(), menu: await menu.boundingBox(),
+      })}`, { cause: error });
+    });
     const field = await trigger.boundingBox();
     const bounds = await menu.boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y >= 0 && bounds.y + bounds.height <= 1001, JSON.stringify(bounds));
@@ -769,6 +777,20 @@ test('incremental assistant updates render, preserve reading state and retain co
   assert.equal(await update.locator('.message-content').textContent(), 'Release checks are complete.\n');
   await update.locator('.copy-update').click();
   assert.equal(await page.evaluate(() => window.copiedUpdates.at(-1)), 'Release checks are complete.');
+  await page.evaluate(() => {
+    window.activityRun.events.push({
+      id: 5, kind: 'message', message: 'Compacting saved context before continuing. Completed tool receipts are preserved.',
+      data: { turn_id: 1 }, created_at: '2026-10-08T12:00:04Z',
+    });
+    window.syncActivityTest();
+  });
+  const compaction = page.locator('.context-compaction');
+  await compaction.locator('summary').click();
+  assert.equal(await compaction.evaluate(el => el.open), true);
+  assert.equal(await compaction.locator('.copy-update').count(), 0);
+  await page.evaluate(() => window.syncActivityTest());
+  assert.equal(await compaction.evaluate(el => el.open), true, 'Unchanged notices preserve their expanded state');
+  assert.match(await compaction.locator('.context-compaction-detail').textContent(), /Saved progress and completed tool results stay available/);
   await page.mouse.move(0, 0);
   await update.locator('.copy-update').hover();
   await page.getByRole('tooltip').waitFor();
@@ -776,6 +798,37 @@ test('incremental assistant updates render, preserve reading state and retain co
   assert.equal(await page.locator('[data-activity-slot] > *').count(), 0);
   await page.getByRole('tooltip').waitFor({ state: 'detached' });
   await page.evaluate(() => navigate('tasks'));
+});
+
+for (const width of [1440, 768, 320]) test(`runtime provider drafts remain editable across the merged Lambda picker at ${width}px`, async t => {
+  const page = await pageFor(t, 'runtime', 'populated', width);
+  await page.route('**/api/settings/sandboxes', route => route.request().method() === 'PUT'
+    ? route.fulfill({ status: 503, json: { detail: 'Synthetic runtime: save rejected' } }) : route.continue());
+  const provider = page.locator('#sandbox-provider');
+  await provider.waitFor({ state: 'attached' });
+  await page.locator('#modal_app_name').fill('moyai-preview');
+  await choose(page, provider, 'lambda');
+  assert.equal(await page.locator('#lambda_region').inputValue(), 'us-east-1');
+  await page.locator('#lambda_region').fill('us-west-2');
+  await page.locator('#lambda_image').fill('arn:aws:lambda:us-west-2:123456789012:synthetic-image');
+  await choose(page, provider, 'modal');
+  assert.equal(await page.locator('#modal_app_name').inputValue(), 'moyai-preview');
+  await choose(page, provider, 'lambda');
+  const region = page.locator('#lambda_region');
+  assert.equal(await region.inputValue(), 'us-west-2');
+  await region.press('ControlOrMeta+A');
+  await region.pressSequentially('eu-west-1');
+  await region.press('Tab');
+  assert.equal(await region.inputValue(), 'eu-west-1');
+  const request = page.waitForRequest(request => new URL(request.url()).pathname === '/api/settings/sandboxes' && request.method() === 'PUT');
+  await page.getByRole('button', { name: 'Connect and use', exact: true }).click();
+  assert.partialDeepStrictEqual((await request).postDataJSON(), {
+    provider: 'lambda', values: { lambda_region: 'eu-west-1', lambda_image: 'arn:aws:lambda:us-west-2:123456789012:synthetic-image' },
+  });
+  await page.getByText('Synthetic runtime: save rejected', { exact: true }).waitFor();
+  assert.equal(await region.inputValue(), 'eu-west-1');
+  assert.equal(await provider.inputValue(), 'lambda');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
 });
 
 test('session connection selections survive navigation and reach the submit payload', async t => {

@@ -808,6 +808,10 @@ def test_agentchat_dm_roots_are_independent_and_followups_keep_thread_context(sl
     assert app.state.store.run(run_id)['owner_id'] == messages[-1]['user_id']
     isolated = app.state.store.messages(fresh_id)
     assert len(isolated) == 1 and isolated[0]['content'] == 'A separate task'
+    # New threads inherit the person's saved model, without sharing history
+    # or rewriting messages that were accepted before the preference changed.
+    assert isolated[0]['model'] == 'anthropic/claude-opus-5-5'
+    assert messages[0]['model'] == app.state.settings.resolve_model()
     assert isolated[0]['id'] not in {message['id'] for message in messages}
     assert set(conversations) == {f'slack:T12345678:D12345678:{r}' for r in (root, fresh['event']['ts'])}
     # Reconstruct the adapter against the persisted bindings; no channel-wide fallback.
@@ -841,6 +845,7 @@ def test_dm_commands_only_control_their_thread(slack_app):
     assert app.state.store.run(second_id)['status'] == 'queued'
     client.post('/hooks/slack/events', **signed(dm_event(8, 'model opus')))
     client.post('/hooks/slack/events', **signed(dm_event(9, 'New default model task')))
+    assert submitted[-1]['model'] == 'anthropic/claude-opus-5-5'
     # A model command may set a preference for future sessions, but must not
     # rewrite either existing thread's model.
     assert all(app.state.store.run(r)['model'] == app.state.settings.resolve_model()

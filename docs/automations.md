@@ -218,3 +218,28 @@ as they do to interactive sessions. Automations do not gain extra connection
 permissions or the ability to approve or merge PRs. Shared-password users need a Google-linked identity for
 “my tickets.” Local previews can manually run simulations without Temporal or LLM
 use. Provider setup is manual; the code and local tests do not install live triggers.
+
+### Configuring receivers from chat
+
+`automation_webhook_info` reads an owned automation's callback URLs, receiver
+readiness, and recent deliveries. `automation_webhook_setup` configures or
+rotates a receiver through the same transaction used by the web editor.
+
+Supply a `credential_request_id`, never a plaintext signing secret. Obtain the
+handle with `credentials_request`, using `provider=generic`,
+`name=webhook-signing-secret`, `format=env`, and a masked `WEBHOOK_SECRET` input.
+The credential must be non-expiring and allow persistent reuse because setup copies it into durable
+automation configuration. Revoking the source credential does not rotate the
+receiver; configure a replacement to invalidate the old signature.
+
+Setup requires the current revision and a stable request key. It pauses the
+automation and returns the new revision. Identical retries recover the existing
+result without rotating again, including after a checkpoint response fails.
+The tools never return the secret or encrypted value.
+
+These tools configure **Moyai's receiver only**. Register the callback URL and
+same signing secret with GitHub or the other provider separately. Receiver
+readiness does not prove remote registration or delivery; the result labels
+provider registration as unverified. Enable the returned revision after provider
+setup, then check deliveries. A GitHub connection alone does not grant or perform
+repository webhook registration.

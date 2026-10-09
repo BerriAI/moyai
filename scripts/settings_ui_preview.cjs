@@ -79,6 +79,7 @@ const adoption={start:daily[0].date,end:daily.at(-1).date,total_requests:daily.r
 let titleModel='openai/gpt-4.1-nano';
 let chatPreferences={send_immediately:false,omit_private_tool_payloads:false};
 let sandboxConnection={provider:'modal',revision:0,public_key:'c3ludGhldGljLXByZXZpZXctcHVibGljLWtleS1vbmx5',providers:{
+ lambda:{configured:false,values:{lambda_region:'us-east-1',lambda_image:'',lambda_image_version:'',lambda_checkpoint_bucket:'',lambda_checkpoint_prefix:'moyai-lambda',lambda_execution_role_arn:'',lambda_egress_connector:'',lambda_profile:''},secrets:{}},
  modal:{configured:true,values:{modal_app_name:'moyai'},secrets:{modal_token_id:true,modal_token_secret:true}},
  substrate:{configured:false,values:{substrate_api_url:'',substrate_router_url:'',substrate_atespace:'moyai',substrate_template:'moyai',substrate_egress_hosts:'*'},secrets:{substrate_api_token:false}}
 }};
