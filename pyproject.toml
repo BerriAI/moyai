@@ -25,6 +25,12 @@ dependencies = [
   "boto3>=1.43.109,<2",
 ]
 
+[project.optional-dependencies]
+postgres-migration = [
+    "psycopg[binary]>=3.2,<4",
+    "sqlglot>=28,<29",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8,<10",
