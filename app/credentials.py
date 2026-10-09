@@ -915,8 +915,9 @@ class Credentials:
         if secret['provider'] == 'generic':
             raise HTTPException(422, 'Use credentials_run for this connection.')
         if self.status(secret) != 'active':
-            result = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure='expired' if self.status(secret) == 'expired' else 'invalid'))
-            return 401, {'error': {'message': 'Saved authentication is unavailable. Follow the returned access recovery instructions.', 'type': 'credential_expired'}, **result}
+            failure = 'expired' if self.status(secret) == 'expired' else 'invalid'
+            result = self.report_failure(run, ReportFailure(request_id=args.request_id, revision=request['revision'], failure=failure))
+            return 401, {'error': {'message': 'Saved authentication is unavailable. Follow the returned access recovery instructions.', 'type': 'credential_' + failure}, **result}
         provider = PROVIDERS[secret['provider']]
         paths = {'GET': {'/models'}, 'POST': {'/messages'} if secret['provider'] == 'anthropic' else {'/chat/completions', '/completions', '/embeddings'}}
         if args.path not in paths[args.method] or (args.method == 'GET' and args.body):
