@@ -29,7 +29,8 @@ async def verify_agent_image(sandbox):
     process = await sandbox.exec.aio('sh', '-ec',
         'ln -s /opt/workspace-runner /opt/validation/sandbox; '
         '/opt/hermes-env/bin/python -m pip install pytest; '
-        'PYTHONPATH=/opt/validation:/opt/hermes /opt/hermes-env/bin/python -m pytest -q '
+        # First use of the large SDK executable can fault cold AWS image pages.
+        'MOYAI_SDK_TEST_TIMEOUT=120 PYTHONPATH=/opt/validation:/opt/hermes /opt/hermes-env/bin/python -m pytest -q '
         '/opt/validation/tests/test_claude_sdk_transport.py -k "new-session or durable-checkpoint"', timeout=240)
     out, err = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
     assert await process.wait.aio() == 0, out + '\n' + err

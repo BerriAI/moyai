@@ -3,6 +3,7 @@
 No provider calls or generated shell commands. Tools read and echo synthetic data.
 """
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -338,7 +339,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
     workspace.mkdir()
     session.mkdir()
     def create_agent(context_store=None):
-        return ClaudeAgent(spec={'model': model, 'timeout': 30, 'max_iterations': 4,
+        return ClaudeAgent(spec={'model': model, 'timeout': int(os.environ.get('MOYAI_SDK_TEST_TIMEOUT', '30')), 'max_iterations': 4,
                              'history_reference_dir': str(session)},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
