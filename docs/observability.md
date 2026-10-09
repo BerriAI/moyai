@@ -46,30 +46,58 @@ recovery. This applies only to `github_checkout` and `github_repository` metadat
 inside repository preparation. Permanent HTTP rejections, later Git operations,
 tool writes and metadata calls after startup retain their existing failure policy.
 
-With Temporal enabled, a transient model failure before any response reaches the
-SDK can continue automatically after the SDK exits, current tool receipts settle,
-and the filesystem checkpoint succeeds. Recovery retains the original user turn,
-requester, model and budgets. It uses up to three continuations, delayed by 2, 4
-and 8 seconds using Temporal timers. The restored public journal must match the
-saved epoch and sequence before a fresh SDK invocation starts. Completed calls
-remain receipts; the orchestrator does not replay them or resend the failed POST.
+After a transient model connection failure or a recognized interrupted model
+stream, Codex keeps its native client and thread alive, including any running
+tools. It checks authenticated broker readiness for up to
+`TRANSPORT_RECOVERY_SECONDS` (default 600, range 30–3600) before continuing the
+same thread. Readiness probes consume no inference requests or continuation
+attempts. The original task deadline and Stop still apply. Public status events
+use `stage=model_transport` with `phase=reconnecting` or `phase=recovered` so
+the session shows the live recovery state separately from startup recovery.
 
-Partial streams, pending tool calls, uncertain tool transport, permanent upstream
-rejections, unknown process outcomes and failed checkpoints do not qualify. An
-upstream 401/403 wrapped in a gateway 502 remains terminal. Cancellation and the
-original task timeout still apply. Hermes receives diagnostics but its legacy
-history does not support this automatic recovery protocol. Arbitrary external
-writes and inference billing do not have a generic exactly-once guarantee; an
-accepted inference may still be billed after its connection is lost.
+The continuation uses the existing tool sessions and confirmed native history,
+waits for finite work, and can stop an unneeded preview server. Completions from
+earlier native turns still become durable receipts. The relay does not resend
+the failed model POST or restart tools; a receipt grace period alone cannot
+finish a long-running preview server.
+
+With Temporal enabled, a transient model failure before any response with
+settled tool receipts can instead continue after the SDK exits and the filesystem
+checkpoint succeeds. The restored public journal must match the saved epoch and
+sequence before a fresh SDK invocation starts. Live and checkpoint-based recovery
+share the original user turn's limit of three continuations. The count survives
+context handoffs, rotation and worker replacement, retaining the requester, model
+and budgets. Waiting for an offline broker does not spend this allowance. Temporal
+worker replacement reconnects to the existing sandbox supervisor; it does not
+restart the native agent. Loss of the native process with unresolved tools remains
+terminal.
+
+Partial streams do not qualify for a cold restart. Uncertain tool transport,
+permanent upstream rejections, unknown process outcomes and failed checkpoints
+remain terminal. An upstream 401/403 wrapped in a gateway 502 remains terminal.
+Pending receipts prohibit a cold restart; only the still-live Codex thread may
+continue with its existing tools. Hermes receives
+diagnostics but its legacy history does not support this automatic recovery
+protocol. Arbitrary external writes and inference billing do not have a generic
+exactly-once guarantee; accepted inference may be billed after its connection is
+lost.
 
 Run the local fault-injection proof with:
 
 ```sh
+uv run pytest -q --tb=line tests/test_codex_sdk_transport.py::test_native_redeploy_outage_preserves_preview tests/test_codex_sdk_transport.py::test_native_interrupted_sse_preserves_existing_command
+uv run pytest -q --tb=line tests/test_redeploy_recovery.py
 uv run pytest -q --tb=line tests/test_claude_sdk_transport.py::test_real_sdk_recovers_broker_failure_from_cold_tool_receipts
 uv run pytest -q --tb=line tests/test_durable.py tests/test_temporal_integration.py
 ```
 
-The first test uses the real bundled Claude SDK, encrypted broker, MCP and SQLite,
+The Codex tests keep a real preview server alive through a 40-second broker
+outage and interrupt a model stream after it has started a command. They verify
+the same native thread, preview process, single execution and saved receipt. The
+combined redeploy test replaces a real Temporal worker during that outage while
+the native subprocess and durable execution journal survive. Inference and cloud
+provisioning are local fixtures; these tests do not redeploy a production service.
+The Claude test uses the real bundled Claude SDK, encrypted broker, MCP and SQLite,
 with local model responses and an injected HTTP 502. One synthetic publication
 survives a cold restore and completes with its action count still one. Temporal
 tests use a real local server and simulated sandbox provisioning.

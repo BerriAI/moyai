@@ -28,6 +28,8 @@ class Settings(BaseSettings):
         return init_settings, dotenv_settings, env_settings, file_secret_settings
     data_dir: Path = Path(".data")
     attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
+    media_share_storage_limit_mb: int = Field(default=1024, ge=64, le=100000)
+    media_share_receipt_limit: int = Field(default=4096, ge=128, le=100000)
     object_storage_bucket: str = ''
     object_storage_endpoint: str = ''
     object_storage_region: str = 'us-east-1'
@@ -139,6 +141,7 @@ class Settings(BaseSettings):
     temporal_task_queue: str = "moyai-sessions-v1"
     temporal_checkpoint_seconds: int = Field(default=600, ge=30, le=3600)
     startup_recovery_seconds: int = Field(default=600, ge=30, le=3600)
+    transport_recovery_seconds: int = Field(default=600, ge=30, le=3600)
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
     linear_client_id: str = ""
     linear_client_secret: str = ""

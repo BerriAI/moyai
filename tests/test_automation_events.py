@@ -133,7 +133,7 @@ def test_linear_label_trigger_requires_label_added_not_just_present():
     assert normalize(trigger, payload | {'data': payload['data'] | {'teamId': USER}}) is None
 
 
-def test_events_queue_through_active_runs_and_hourly_limit(workspace):
+def test_events_queue_at_hourly_limit_and_resume_while_earlier_runs_remain_active(workspace):
     app, client = workspace
     a = configured(app, client, max_runs_per_hour=1)
     events = app.state.automations.events
@@ -144,10 +144,8 @@ def test_events_queue_through_active_runs_and_hourly_limit(workspace):
     first = app.state.store.rows('SELECT * FROM runs')[0]
     asyncio.run(events.dispatch())
     queued = app.state.store.rows("SELECT * FROM automation_events WHERE status='pending'")[0]
-    assert 'previous run' in queued['detail']
-    complete(app, first['id'])
-    asyncio.run(events.dispatch())
-    assert 'hourly run limit' in app.state.store.rows("SELECT * FROM automation_events WHERE status='pending'")[0]['detail']
+    assert 'hourly run limit' in queued['detail']
+    assert first['status']=='queued'
     before = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     app.state.store.execute('UPDATE automation_runs SET created_at=?', (before,))
     asyncio.run(events.dispatch())
@@ -588,3 +586,28 @@ async def test_native_receipt_and_cursor_rollback_and_checkpoint_recovery(worksp
     await restart(app).dispatch()
     assert len(app.state.store.rows('SELECT * FROM automation_events')) == 1
     assert len(app.state.store.rows('SELECT * FROM automation_runs')) == 1
+
+
+@pytest.mark.parametrize('queue_events', [False, True])
+def test_event_queue_is_opt_in_and_preserves_independent_runs(workspace, queue_events):
+    app, client = workspace
+    a = configured(app, client)
+    edited = client.put('/api/automations/' + a['id'], json={
+        'revision': a['revision'], 'definition': {**a['definition'], 'queue_events': queue_events}}).json()
+    assert client.post('/api/automations/' + a['id'] + '/state', json={'revision': edited['revision'], 'paused': False}).status_code == 200
+    path = '/hooks/automations/' + a['id']
+    events = app.state.automations.events
+    for index in range(2):
+        assert client.post(path, **signed('webhook', {'event': 'benchmark.ready', 'id': str(index)}, delivery=f'queue-option-{index}')).json()['status'] == 'accepted'
+        asyncio.run(events.dispatch())
+    assert len(app.state.store.rows('SELECT * FROM runs')) == (1 if queue_events else 2)
+    pending = app.state.store.rows("SELECT * FROM automation_events WHERE status='pending'")
+    assert len(pending) == (1 if queue_events else 0)
+    if queue_events:
+        assert 'previous run' in pending[0]['detail']
+        complete(app, app.state.store.rows('SELECT * FROM runs')[0]['id'])
+    asyncio.run(events.dispatch())
+    assert len(app.state.store.rows('SELECT * FROM runs')) == 2
+    assert not app.state.store.rows("SELECT * FROM automation_events WHERE status='pending'")
+    asyncio.run(events.dispatch())
+    assert len(app.state.store.rows('SELECT * FROM runs')) == 2

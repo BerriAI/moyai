@@ -332,6 +332,7 @@ def test_native_window_is_authenticated_and_reserves_injected_context(workspace,
     assert client.get(path).status_code == 401
     response = client.get(path, headers={'Authorization': 'Bearer cap'})
     assert response.status_code == 200
-    assert response.json() == {'model': 'openai/gpt-6-astra', 'input_budget': 72000 - 1400 - 4096}
+    assert response.json() == {'model': 'openai/gpt-6-astra', 'input_budget': 72000 - 1400 - 4096,
+                               'live_compaction': True}
     assert 'private' not in response.text
     assert not app.state.store.rows('SELECT * FROM model_requests')

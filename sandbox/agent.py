@@ -194,7 +194,7 @@ def _run_agent(spec, relay):
         if not waiting.requested and not rotation.requested and not steering.requested:
             emit('status', 'Preparing the next step', {'activity_version': 1, 'phase': 'processing'})
     harness_activity = SimpleNamespace(start=activity.start, complete=tool_complete,
-                                       commentary=activity.commentary, failure=activity.failure)
+                                       commentary=activity.commentary, failure=activity.failure, emit=activity.emit)
     # Keep restored history outside every repository and downloadable artifact.
     # Otherwise an agent's `git add -A` could commit the private conversation.
     history_path = Path("/session/conversation.json")
@@ -321,7 +321,7 @@ def _run_agent(spec, relay):
             "When GitHub tools are available, use github_repositories to list allowed repositories and github_checkout with its permanent repository_id to prepare it without overwriting local files. "
             "When the task requests a PR, use github_create_pull_request to package actual changed files and open a normal ready-for-review PR directly in an authorized repository. Do not ask for an extra administrator approval to create it. To continue an existing Moyai PR from any chat, check out its current head with github_checkout using its repository_id, number and a fresh directory, then use github_update_pull_request for follow-up fixes; use github_comment_pull_request for requested review-bot commands and github_pull_request_comments to read feedback. "
             "Use a stable request_key for the same publication, even across follow-up turns. Never retry an uncertain write automatically. "
-            "Git push, updates to PRs without a confirmed publication in this workspace under the current GitHub connection, PR reviews/approvals, merging, auto-merge, and workflow/access-control changes are unavailable. "
+            "For an external PR without a confirmed workspace publication, use github_request_pull_request_write_access. Only explicit approval by the active requester in this chat permits repeated edits/comments to that exact PR. Never use the browser, scripts, or app routes to approve your own request. If pending, finish your response and wait for the requester to decide and send a follow-up; repeat the request tool to check status. Denied or revoked access cannot be regranted. Git push, PR reviews/approvals, merging, auto-merge, and workflow/access-control changes are unavailable. "
             "If GitHub tools are unavailable, prepare local changes and explain that an administrator must connect GitHub and enable it for a new session. "
             "Never claim a PR exists until the tool returns its URL. "
             "When asked to schedule recurring or future work, use automation_list first to discover existing automations and the current turn_id. "
@@ -344,6 +344,13 @@ def _run_agent(spec, relay):
             "browser_record_start/browser_record_stop to record a flow as WebM; start before the actions and stop afterwards. "
             "These record the sandbox browser, not the user's own browser or desktop. Captures are shared with session viewers. "
             "Do not capture passwords or secrets. Link returned /workspace/moyai-captures paths in your reply. "
+            "When the user requests externally accessible media (including in GitHub PR Markdown), discover media_list, media_share and media_revoke. "
+            "These built-in tools are available in every session without enabling a connector. media_list does not share anything. "
+            "Use only returned source references and revisions; media_share creates an immutable snapshot with a stable, revocable link. "
+            "Sharing must be explicitly authorized: disclose that anyone with the link can read the selected media and that revocation cannot recall copies or external caches. "
+            "Reuse the same request_key and selection when recovering an uncertain share result. Never implicitly share all captures or attachments. "
+            "Use returned image Markdown for images; use an ordinary link for video because GitHub PR Markdown may not embed externally hosted video. "
+            "Sharing a link does not publish a PR or comment; follow the user's separate publication instructions. "
             "For every coding task that creates a PR, default to a working demo: run the changed behavior, record a short real flow with "
             "browser_record_start before the actions and browser_record_stop after them, and save one useful browser_screenshot. "
             "Respect a user's request to skip captures. For documentation or backend changes without a meaningful browser flow, "
@@ -424,6 +431,7 @@ def _run_agent(spec, relay):
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
+             transport_attempt=getattr(agent, 'transport_attempt', spec.get('transport_attempt', 0)),
              **({'transport_retry': transport_retry} if transport_retry else {}),
              **({'transport_failure': relay.last_failure} if getattr(relay, 'last_failure', None) else {}),
              **({'sdk_failure': result['sdk_failure']} if result.get('sdk_failure') else {}),

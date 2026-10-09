@@ -13,7 +13,7 @@ from fastapi.responses import Response, StreamingResponse, JSONResponse
 
 from .spend import UsageCapture
 from .native_trace import NativeModelContent
-from .context_compaction import compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
+from .context_compaction import compaction_payload, private_compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
 from .broker_diagnostics import upstream_headers
 
@@ -114,6 +114,8 @@ class HarnessGateway:
         self.native_sessions = None
         from .context_maintenance import ContextMaintenance
         self.maintenance = ContextMaintenance(self)
+        from .live_context import LiveContext
+        self.live_context = LiveContext(self)
 
     async def context_window(self, run_id, request):
         run = self.require_run(run_id, request)
@@ -127,7 +129,7 @@ class HarnessGateway:
         # well as room for a new tool result before the next native compact.
         window = max(1, budget.input_budget - len(context.encode()) - 4096)
         self.require_run(run_id, request)
-        return {'model': model, 'input_budget': window}
+        return {'model': model, 'input_budget': window, 'live_compaction': True}
 
     async def forward(self, run_id, request, route):
         if route != '/context/compact':
@@ -139,12 +141,19 @@ class HarnessGateway:
         body = await self.read_body(request, route)
         return await self.summarize(run_id, request, body)
 
-    async def summarize(self, run_id, request, body, *, expected_run=None):
+    async def summarize_private(self, run, request, history: list[str], model: str, summary_bytes: int) -> str:
+        response = await self.summarize(run['id'], request,
+            {'history': history.copy(), 'summary_bytes': summary_bytes},
+            expected_run=dict(run), private=True, expected_model=model)
+        return json.loads(response.body)['summary']
+
+    async def summarize(self, run_id, request, body, *, expected_run=None, private=False, expected_model=None):
         # Only tool-free maintenance is retried. Each attempt goes through run
         # authorization, admission, usage accounting and cleanup independently.
         for attempt in range(SUMMARY_ATTEMPTS):
             try:
-                return await self._forward_once(run_id, request, '/context/compact', attempt, body, expected_run=expected_run)
+                return await self._forward_once(run_id, request, '/context/compact', attempt, body,
+                    expected_run=expected_run, private=private, expected_model=expected_model)
             except SummaryFailure as exc:
                 retry = exc.retryable and attempt + 1 < SUMMARY_ATTEMPTS
                 labels = {
@@ -155,28 +164,42 @@ class HarnessGateway:
                 }
                 message = labels.get(exc.reason, 'The model did not return a usable context summary.')
                 message += ' Retrying the summary; task actions will not be repeated.' if retry else ' Saved records are preserved.'
-                self.store.event(run_id, 'context', message, {
-                    'reason': exc.reason, 'attempt': attempt + 1, 'request_id': exc.request_id,
-                    'summary_bytes': exc.summary_bytes, 'retrying': retry,
-                })
-                await self.checkpoints.flush()
+                if not private:
+                    self.store.event(run_id, 'context', message, {
+                        'reason': exc.reason, 'attempt': attempt + 1, 'request_id': exc.request_id,
+                        'summary_bytes': exc.summary_bytes, 'retrying': retry,
+                    })
+                    await self.checkpoints.flush()
                 if not retry:
                     raise
                 if exc.transient:
                     await asyncio.sleep(attempt + 1)
 
-    async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None, *, expected_run=None):
+    async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None, *,
+                            expected_run=None, private=False, expected_model=None):
         compact = route == '/context/compact'
-        if route not in NATIVE_ROUTES and not compact:
+        if (route not in NATIVE_ROUTES and not compact) or (private and not compact):
             raise HTTPException(404, 'Unsupported model endpoint.')
-        run = self.require_run(run_id, request)
-        if expected_run and any(run[key] != expected_run[key] for key in
-                                ('token_hash', 'active_message_id', 'active_user_id', 'active_model')):
-            raise HTTPException(409, 'The originating response has ended.')
-        if self.model_slots.locked():
+        def current_run():
+            current = self.require_run(run_id, request)
+            if expected_run and any(current[key] != expected_run[key] for key in
+                                    ('token_hash', 'active_message_id', 'active_user_id', 'active_model')):
+                raise HTTPException(409, 'The originating response has ended.')
+            if expected_model is not None:
+                try:
+                    selected = self.settings.resolve_model(fallback=current['active_model'] or current['model'])
+                except ValueError:
+                    raise HTTPException(409, 'The originating model is no longer available.') from None
+                if selected != expected_model:
+                    raise HTTPException(409, 'The originating model has changed.')
+            return current
+        run = current_run()
+        # Internal private work already has a bounded snapshot. Let it queue
+        # behind the foreground request that scheduled it, including capacity 1.
+        if self.model_slots.locked() and not private:
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
-        await self.model_slots.acquire()
+        slot_acquired = False
         client = None
         upstream = None
         request_id = None
@@ -208,19 +231,23 @@ class HarnessGateway:
                         response, status, gateway_id=gateway_id)
                     await self.checkpoints.flush()
             finally:
-                self.model_slots.release()
+                if slot_acquired:
+                    self.model_slots.release()
 
         try:
             try:
                 model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
             except ValueError as exc:
                 raise HTTPException(409, str(exc)) from None
+            if not compact:
+                expected_run, expected_model = dict(run), model
             body = compaction_body if compact else await self.read_body(request, route)
             if compact:
-                # Persistable summaries must never receive requester-private
-                # memory, skills, attachments or the native SDK transcript.
-                payload = compaction_payload(body, model, attempt)
-                partial_cursor = type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
+                # Both summary paths omit injections and content tracing. Only
+                # the public journal protocol can return a durable partial cursor.
+                payload = (private_compaction_payload(body['history'], model, body['summary_bytes'], attempt)
+                           if private else compaction_payload(body, model, attempt))
+                partial_cursor = not private and type(body.get('cursor_protocol')) is int and body['cursor_protocol'] == 1
             else:
                 if self.native_sessions is not None:
                     self.native_sessions.observe_scope(run)
@@ -233,13 +260,18 @@ class HarnessGateway:
                 payload[field] = await asyncio.to_thread(self.store.attachments.with_images, run, items, protocol=route)
             while True:
                 try:
-                    checked_budget = await self.context_budget.check(payload, scope='' if compact else run_id + route)
+                    if compact:
+                        checked_budget = await self.context_budget.check(payload)
+                    else:
+                        payload, checked_budget = await self.live_context.prepare(run, request, payload, route)
                     break
                 except ContextPressure as exc:
                     if not compact:
                         self.store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
                         await self.checkpoints.flush()
                         raise
+                    if private:
+                        raise SummaryFailure('summary_input_too_large', retryable=False) from None
                     if not partial_cursor:
                         raise HTTPException(422, 'Reconnect the runtime to compact smaller journal batches safely. Saved records are preserved.') from None
                     if len(body['entries']) == 1:
@@ -249,18 +281,24 @@ class HarnessGateway:
                     # exactly which records were summarized; the rest stay pending.
                     body = {**body, 'entries': body['entries'][:max(1, len(body['entries']) // 2)]}
                     payload = compaction_payload(body, model, attempt)
-            self.require_run(run_id, request)
+            current_run()
+            await self.model_slots.acquire()
+            slot_acquired = True
+            current_run()
             admitted = self.store.execute(
                 "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
                 "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ?",
+                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ? "
+                "AND active_user_id IS ? AND active_model IS ? AND (coalesce(active_model,'')!='' OR model IS ?)",
                 (run_id, self.settings.max_agent_iterations, self.settings.max_agent_iterations * 3,
-                 run['token_hash'], run['active_message_id']))
+                 run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
             if self.tracing.enabled and not compact:
-                content = NativeModelContent(payload, route)
+                # A private working summary is model input, never a new public
+                # user message. Trace the original request's user text instead.
+                content = NativeModelContent(body, route)
             capture = NativeUsageCapture(bool(payload.get('stream')), route=route, content=content)
             headers = {'Authorization': 'Bearer ' + self.settings.litellm_api_key,
                        'x-litellm-call-id': request_id,
@@ -270,6 +308,7 @@ class HarnessGateway:
                 if request.headers.get('anthropic-beta'):
                     headers['anthropic-beta'] = request.headers['anthropic-beta']
             await self.checkpoints.flush()
+            current_run()
             client = httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30))
             base = self.settings.litellm_api_base.rstrip('/')
             upstream_route = '/v1/chat/completions' if compact else route
@@ -305,7 +344,7 @@ class HarnessGateway:
                 capture.feed(bytes(raw))
                 capture.finish()
                 result = (JSONResponse({**compaction_result(raw, body.get('summary_bytes', 12_000)),
-                                       'through_seq': body['entries'][-1]['seq']})
+                                       **({} if private else {'through_seq': body['entries'][-1]['seq']})})
                           if compact else Response(bytes(raw), media_type='application/json',
                                                    headers=upstream_headers(request_id, upstream)))
                 status = 'completed' if capture.done and not capture.failed else 'failed'

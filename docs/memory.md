@@ -13,12 +13,28 @@ users. Choose **Only save manually** to stop agent writes while keeping recall,
 or **Pause memory** to stop both. You can review, edit, and delete each note.
 Shared passwords cannot use personal memory; local demo access has its own library.
 
-With automatic saving enabled, the agent can save useful context during a turn.
+With automatic saving enabled, the agent is instructed to save useful context as
+soon as it comes up, before continuing unrelated work, without waiting for a final
+answer. This is model-selected behavior, not a guarantee that every fact is saved.
 A separate background reviewer also checks successfully completed turns, so
 capture does not depend on the task agent remembering to call `memory_save`.
 You do not need to say “remember this.” Preferences, corrections, decisions and
 references can become notes; one-off instructions and temporary status do not.
 An empty review is a normal result, not a reason to invent a memory.
+
+User preferences, corrections and decisions require an exact quote from the
+requester's message. Corrections preserve the mistaken assumption, desired
+alternative and future rule when supported, without broadening what the user said.
+The agent can also save non-obvious repository/environment lessons it verifies
+during execution, with an `observation` containing concrete `scope` and concise
+`evidence` instead of user-quote fields. Scope must appear in the note content.
+These project/reference notes are labeled **Observed during work**, with scope and
+evidence visible under **Why Moyai saved this**. They are agent-reported observations,
+not server-authenticated tool receipts; they cannot establish user preferences or
+permission, overwrite user-backed/manual notes, or change an existing observation's
+scope. Tool/file/web instructions are not memory directives. Recheck observations
+when the environment changes. Selected-repository matching is enforced; without a
+selected repository, the named environment scope is guidance, not a retrieval partition.
 
 The reviewer waits 60 seconds after completion and defers while the session has
 queued or running messages. It uses the completed requester's messages and
@@ -36,9 +52,11 @@ review saved notes, found nothing new, or failed.
 
 - `memory_search` retrieves up to five relevant notes, with an 8,000-character
   total payload budget. Nothing from the library loads until the agent searches.
-- `memory_save` creates or updates a short note. Agent writes require an exact
-  supporting quote from the current requester’s message, including acknowledged
-  steering inputs. This validates provenance, not the model’s interpretation.
+- `memory_save` creates or updates a short note immediately. User-backed writes
+  require an exact supporting quote from the current requester’s message, including
+  acknowledged steering inputs. Observations instead require bounded scope and
+  evidence, and are bound to the active turn by the server. Source checks do not
+  validate the model's interpretation or prove an observation correct.
 - `memory_forget` removes a selected note when its owner asks. Deletion clears its
   stored body and active references; opaque tombstones prevent retry resurrection.
 
@@ -102,9 +120,11 @@ review off leaves existing task-agent memory tools and user preferences intact.
 To evaluate automatic capture with a real model, set `GATEWAY_BASE_URL` and
 `GATEWAY_API_KEY` and run `uv run python -m scripts.memory_capture_smoke`.
 This opt-in, billed check uses synthetic messages, a temporary database and the
-real memory broker. It checks implicit preferences, correction without duplicate
-notes, recall in a fresh session, one-off requests, quoted third-party text and
-manual mode. It tests model choices with the production memory prompt and tools;
+real memory broker. It checks a preference save before task tools, a real scratch-file
+fixture observation saved before the next unrelated task step, correction without
+duplicates, fresh-session recall of both sources, one-off requests, quoted text and
+manual mode. Partial case reports remain available if a later assertion fails.
+It tests model choices with the production memory prompt and tools;
 it does not run a complete SDK or cloud sandbox, and is not a guarantee that
 every future preference will be captured. Use `--model` to test another model
 and `--report path.json` to save the evidence.

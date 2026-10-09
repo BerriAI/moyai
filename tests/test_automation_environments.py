@@ -62,13 +62,13 @@ def test_failed_environment_holds_events_across_restart_and_resumes_once_ready(b
     env.update(build['id'], phase='ready', snapshot_id='im-ready', commit_sha='a' * 40)
     store.execute('UPDATE environments SET enabled=1,activate_on_ready=0,active_build=?', (build['id'],))
     assert client.get('/api/automations').json()['automations'][0]['environment_blocker'] == ''
-    for number in range(3):
-        asyncio.run(service.events.dispatch())
-        runs = store.rows('SELECT * FROM runs ORDER BY rowid')
-        assert len(runs) == number + 1
-        assert f'Complaint {number}' in runs[-1]['prompt']
-        assert runs[-1]['owner_id'] == runs[-1]['active_user_id'] == a['owner_id']
-        complete(app, runs[-1]['id'])
+    asyncio.run(service.events.dispatch())
+    runs = store.rows('SELECT * FROM runs ORDER BY rowid')
+    assert len(runs) == 3
+    for number, run in enumerate(runs):
+        assert f'Complaint {number}' in run['prompt']
+        assert run['owner_id'] == run['active_user_id'] == a['owner_id']
+        assert run['status'] == 'queued'
     assert deliver(client, a, 0).json()['status'] == 'duplicate'
     asyncio.run(service.events.dispatch())
     assert len(store.rows('SELECT id FROM runs')) == 3

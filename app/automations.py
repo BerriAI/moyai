@@ -17,11 +17,13 @@ from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAl
 from temporalio.service import RPCError, RPCStatusCode
 
 from .automation_workflow import AutomationWorkflow
+from .automation_templates import templates
 from .automation_events import AutomationEvents, EventTrigger, EVENT_CHOICES
 from .connector_errors import ConnectorError
 from .db import now
 
 log = logging.getLogger(__name__)
+SCHEDULE_VERSION = 1  # Resync existing schedules when scheduler policy changes.
 
 LINEAR_TEMPLATE = '''Use linear_my_issues to read my open Linear tickets. Pick at most one clear, actionable ticket for the selected repository. Skip tickets already in review, blocked, or requiring product decisions. Read its details and recent comments.
 
@@ -102,6 +104,8 @@ class Definition(BaseModel):
     prompt: str = Field(min_length=3, max_length=14000)
     triggers: list[Trigger] = Field(min_length=1, max_length=20)
     max_runs_per_hour: int | None = Field(default=50, ge=1)
+    queue_events: bool = False
+    metadata: dict[str, str] = Field(default_factory=dict, max_length=20)
     repo_url: str = Field(default='', max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
     environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$')
@@ -138,6 +142,13 @@ class Definition(BaseModel):
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
         return self
+
+    @field_validator('metadata')
+    @classmethod
+    def valid_metadata(cls, value):
+        if any(not key.strip() or len(key) > 80 or len(text) > 500 for key, text in value.items()):
+            raise ValueError('Metadata needs a nonempty key up to 80 characters and a value up to 500 characters.')
+        return value
 
     @field_validator('repo_url')
     @classmethod
@@ -195,6 +206,10 @@ class Automations:
         self.events = AutomationEvents(self)
         store.execute('''CREATE TABLE IF NOT EXISTS automation_schedules (
             automation_id TEXT NOT NULL REFERENCES automations(id), schedule_id TEXT PRIMARY KEY)''')
+        with store.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if 'synced_schedule_version' not in {r['name'] for r in conn.execute('PRAGMA table_info(automations)')}:
+                conn.execute('ALTER TABLE automations ADD COLUMN synced_schedule_version INTEGER NOT NULL DEFAULT 0')
         # Remember already-synced single-trigger schedules for later removal.
         for row in store.rows('SELECT * FROM automations WHERE synced_revision>0'):
             if 'triggers' not in json.loads(row['definition']) and not json.loads(row['definition']).get('event'):
@@ -253,6 +268,7 @@ class Automations:
         result = {key: row[key] for key in ('id', 'owner_id', 'revision', 'synced_revision', 'paused', 'sync_error', 'created_at', 'updated_at')}
         definition = Definition.model_validate_json(row['definition'])
         result['definition'] = definition.model_dump(mode='json')
+        result['schedule_sync_pending'] = row['synced_schedule_version'] < SCHEDULE_VERSION or row['synced_revision'] != row['revision']
         result['completed_triggers'] = [t.id for t in definition.triggers if t.schedule and t.schedule.frequency == 'once'
             and self.store.rows('SELECT 1 FROM automation_runs WHERE occurrence=?', (self.once_id(row['id'], t),))]
         result['can_edit'] = row['owner_id'] == actor
@@ -401,12 +417,10 @@ class Automations:
                     if event:
                         return {'run_id': '', 'outcome': 'waiting', 'detail': environment_blocker}
                     error = reason = environment_blocker
-                elif conn.execute('''SELECT 1 FROM automation_runs a JOIN run_ancestry tree ON tree.ancestor_id=a.run_id JOIN runs r ON r.id=tree.run_id
+                elif event and definition.queue_events and conn.execute('''SELECT 1 FROM automation_runs a JOIN run_ancestry tree ON tree.ancestor_id=a.run_id JOIN runs r ON r.id=tree.run_id
                     WHERE a.automation_id=? AND (r.status NOT IN ('idle','completed','failed','cancelled','interrupted')
                     OR EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status IN ('queued','running','injected')))''', (automation_id,)).fetchone():
-                    if event:
-                        return {'run_id': '', 'outcome': 'waiting', 'detail': 'Waiting for the previous run to finish.'}
-                    reason = 'The previous run is still active or waiting for input.'
+                    return {'run_id': '', 'outcome': 'waiting', 'detail': 'Waiting for the previous run to finish.'}
                 elif definition.max_runs_per_hour is not None and conn.execute("SELECT COUNT(*) FROM automation_runs WHERE automation_id=? AND outcome='started' AND created_at>?",
                                            (automation_id, (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())).fetchone()[0] >= definition.max_runs_per_hour:
                     if event:
@@ -419,6 +433,8 @@ class Automations:
                 else:
                     pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted')").fetchone()[0]
                     if pending >= self.store.max_pending_runs:
+                        if event:
+                            return {'run_id': '', 'outcome': 'waiting', 'detail': 'Waiting for workspace session capacity.'}
                         raise HTTPException(429, 'The session queue is full. Retry later.')
                     run_id, stamp = uuid4().hex, now()
                     prompt = definition.prompt
@@ -485,7 +501,7 @@ class Automations:
         return Schedule(
             action=ScheduleActionStartWorkflow(AutomationWorkflow.run, args=[row['id'], row['revision']] if not suffix else [row['id'], row['revision'], '', trigger.id],
                 id='moyai-automation-tick-' + row['id'] + suffix, task_queue=self.settings.temporal_task_queue),
-            spec=trigger.schedule.spec(), policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP,
+            spec=trigger.schedule.spec(), policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL,
                 catchup_window=timedelta(minutes=15)), state=ScheduleState(paused=bool(row['paused']) or used,
                     limited_actions=once and not used, remaining_actions=1 if once and not used else 0))
 
@@ -495,7 +511,7 @@ class Automations:
         async with self.sync_lock:
             if not automation_id:
                 self.next_sync = asyncio.get_running_loop().time() + 15
-            query = 'SELECT * FROM automations WHERE revision>synced_revision'
+            query = f'SELECT * FROM automations WHERE (revision>synced_revision OR synced_schedule_version<{SCHEDULE_VERSION})'
             rows = self.store.rows(query + ' AND id=?', (automation_id,)) if automation_id else self.store.rows(query + ' ORDER BY updated_at LIMIT 20')
             for row in rows:
                 try:
@@ -521,7 +537,8 @@ class Automations:
                             if exc.status != RPCStatusCode.NOT_FOUND:
                                 raise
                         self.store.execute('DELETE FROM automation_schedules WHERE schedule_id=?', (schedule_id,))
-                    self.store.execute("UPDATE automations SET synced_revision=?,sync_error='' WHERE id=? AND revision=?", (row['revision'], row['id'], row['revision']))
+                    self.store.execute("UPDATE automations SET synced_revision=?,synced_schedule_version=?,sync_error='' WHERE id=? AND revision=?",
+                                       (row['revision'], SCHEDULE_VERSION, row['id'], row['revision']))
                 except Exception as exc:
                     log.warning('Automation schedule sync failed (%s)', type(exc).__name__)
                     # SDK diagnostics may include credentials; expose only a safe message.
@@ -539,7 +556,7 @@ class Automations:
             return {'enabled': self.settings.temporal_enabled, 'connected': bool(getattr(self.manager, 'ready', None) and self.manager.ready.is_set()),
                     'automations': [self.public(row, actor) for row in self.store.rows('SELECT * FROM automations ORDER BY updated_at DESC')],
                     'event_choices': EVENT_CHOICES,
-                    'templates': [{'id': 'linear-pr', 'name': 'My Linear tickets → PR', 'prompt': LINEAR_TEMPLATE, 'plugins': ['linear', 'github']}]}
+                    'templates': templates(LINEAR_TEMPLATE)}
 
         @router.post('/api/automations', status_code=201)
         async def create(body: Save, request: Request):

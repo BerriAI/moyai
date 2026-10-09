@@ -2,6 +2,7 @@
 import asyncio
 from datetime import timedelta
 
+from temporalio.client import ScheduleOverlapPolicy
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
 
@@ -16,7 +17,7 @@ from app.persistence import Checkpoints
 from test_temporal_integration import eventually
 
 
-async def test_real_schedule_launch_survives_replacement_and_skips_overlap(tmp_path):
+async def test_real_schedule_upgrade_allows_overlap_and_survives_replacement(tmp_path):
     settings=Settings(_env_file=None,data_dir=tmp_path,public_url='http://127.0.0.1:8787',
                       session_secret='stable-test-key', temporal_enabled=True,
                       agent_model='test-model', demo_step_seconds=0.01, sandbox_idle_seconds=0)
@@ -38,38 +39,49 @@ async def test_real_schedule_launch_survives_replacement_and_skips_overlap(tmp_p
         try:
             await manager.recover()
             await asyncio.wait_for(manager.ready.wait(),20)
+            legacy=automations.schedule(automations.row(a['id']))
+            legacy.policy.overlap=ScheduleOverlapPolicy.SKIP
+            await env.client.create_schedule('moyai-automation-'+a['id'],legacy)
+            store.execute('UPDATE automations SET synced_revision=revision')
             await automations.sync(env.client)
             handle=env.client.get_schedule_handle('moyai-automation-'+a['id'])
             description=await handle.describe()
             assert not description.schedule.state.paused
+            assert description.schedule.policy.overlap==ScheduleOverlapPolicy.ALLOW_ALL
             assert description.info.next_action_times
             await handle.trigger()
             await eventually(lambda: bool(store.rows('SELECT run_id FROM automation_runs WHERE run_id IS NOT NULL')),seconds=25)
             run_id=store.rows('SELECT run_id FROM automation_runs WHERE run_id IS NOT NULL')[0]['run_id']
             assert store.run(run_id)['owner_id']==owner
-            await handle.trigger()  # SKIP while the first scheduled session remains active.
-            await asyncio.sleep(.5)
-            assert len(store.rows('SELECT * FROM automation_runs'))==1
-            occurrence=store.rows('SELECT occurrence FROM automation_runs')[0]['occurrence']
+            # Temporal's manual trigger IDs use second-resolution timestamps.
+            # Keep the first session active, but start a distinct clock occurrence.
+            await asyncio.sleep(1.1)
+            await handle.trigger()  # Launch another occurrence while the first remains active.
+            await eventually(lambda:len(store.rows('SELECT * FROM automation_runs'))==2,seconds=25)
+            receipts=store.rows('SELECT occurrence,run_id FROM automation_runs ORDER BY rowid')
+            assert len({r['run_id'] for r in receipts})==2
+            assert all(store.run(r['run_id'])['status']=='queued' for r in receipts)
             await manager.shutdown()
             successor=TemporalRunManager(Store(tmp_path),settings)
             successor.connect_temporal=connect
             service=Automations(successor.store,settings,security,successor,None,None,Checkpoints(successor.store,settings))
             successor.automations=service
             await successor.recover()
-            await eventually(lambda: successor.store.run(run_id)['status']=='idle',seconds=30)
-            wrapper=env.client.get_workflow_handle(occurrence)
-            assert (await asyncio.wait_for(wrapper.result(),25))['run_id']==run_id
-            assert len(store.rows('SELECT * FROM automation_runs'))==1
-            history=await wrapper.fetch_history()
-            await Replayer(workflows=[AutomationWorkflow]).replay_workflow(history)
-            assert 'PRIVATE WORKFLOW CONTENT' not in history.to_json()
+            await eventually(lambda:all(successor.store.run(r['run_id'])['status']=='idle' for r in receipts),seconds=30)
+            for receipt in receipts:
+                wrapper=env.client.get_workflow_handle(receipt['occurrence'])
+                assert (await asyncio.wait_for(wrapper.result(),25))['run_id']==receipt['run_id']
+                history=await wrapper.fetch_history()
+                await Replayer(workflows=[AutomationWorkflow]).replay_workflow(history)
+                assert 'PRIVATE WORKFLOW CONTENT' not in history.to_json()
+            assert len(store.rows('SELECT * FROM automation_runs'))==2
             # Pause takes effect on the authoritative DB before scheduler delivery.
             store.execute('UPDATE automations SET paused=1,revision=2 WHERE id=?',(a['id'],))
             await service.sync(env.client)
             assert (await handle.describe()).schedule.state.paused
             await handle.delete()
-            await env.client.get_workflow_handle('moyai-session-'+run_id).terminate('Test complete')
+            for receipt in receipts:
+                await env.client.get_workflow_handle('moyai-session-'+receipt['run_id']).terminate('Test complete')
         finally:
             if successor:await successor.shutdown()
             await manager.shutdown()

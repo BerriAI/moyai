@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import tempfile
 
+_deepagents_live_compaction = False
+
 
 @dataclass(frozen=True)
 class RuntimeBinding:
@@ -63,13 +65,27 @@ def local_sandbox(cwd, config, native=None):
 def opencode_options(config):
     from litellm import OpenCodeOptions
     server = config['mcp_servers']['workspace']
-    return OpenCodeOptions(config={'mcp': {'moyai': {'type': 'local',
+    compaction = {'compaction': {'auto': False, 'prune': False}} if config.get('live_compaction') is True else {}
+    return OpenCodeOptions(config={**compaction,
+        'mcp': {'moyai': {'type': 'local',
         'command': [server['command'], *server.get('args', [])],
         'environment': server.get('env', {}), 'enabled': True}}})
 
 
 def deepagents_options(config):
     from litellm import DeepAgentsOptions
+    global _deepagents_live_compaction
+    if _deepagents_live_compaction and config.get('live_compaction') is not True:
+        # The public profile API cannot restore an excluded middleware. A
+        # fresh process can safely select the older gateway's native policy.
+        raise RuntimeError('Live compaction is no longer available. Restart the runtime to restore native compaction.')
+    if config.get('live_compaction') is True:
+        from deepagents import HarnessProfile, register_harness_profile
+        # Applies to the main graph and its default subagents. The public profile
+        # registry merges this exclusion with all other middleware and settings.
+        register_harness_profile('litellm', HarnessProfile(
+            excluded_middleware=frozenset({'SummarizationMiddleware'})))
+        _deepagents_live_compaction = True
     return DeepAgentsOptions()
 
 
