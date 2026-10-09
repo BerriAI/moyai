@@ -164,9 +164,13 @@ class Environments:
             recipe = json.loads(row['recipe'])
             value = {k: row[k] for k in ('id', 'revision', 'active_build', 'enabled', 'is_default', 'updated_at', 'refresh_daily')}
             value.update(name=recipe['name'], repository=recipe['repository'])
-            if not admin and row['active_build']:
-                active_recipe = json.loads(self.build(row['active_build'])['recipe'])
-                value.update(name=active_recipe['name'], repository=active_recipe['repository'])
+            value['prepared_build'] = None
+            if row['active_build']:
+                build = self.build(row['active_build'])
+                value['prepared_build'] = {k: build[k] for k in ('id', 'revision', 'commit_sha', 'sandbox_provider')}
+                if not admin:
+                    active_recipe = json.loads(build['recipe'])
+                    value.update(name=active_recipe['name'], repository=active_recipe['repository'])
             if admin:
                 value['activate_on_ready'] = row['activate_on_ready']
                 value['recipe'] = recipe

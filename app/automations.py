@@ -108,7 +108,8 @@ class Definition(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict, max_length=20)
     repo_url: str = Field(default='', max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
-    environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$')
+    environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$',
+                                description='Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.')
     plugins: list[Literal['linear', 'github', 'slack', 'notion']] = Field(default_factory=list, max_length=4)
     model: str = Field(default='', max_length=120)
     # Missing on old saved definitions: preserve their original runtime.
