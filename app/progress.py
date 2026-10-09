@@ -6,6 +6,10 @@ from sandbox.activity import focus_text, public_text
 
 
 MAX_UPDATES = 2
+COMPACTION_NOTICES = {
+    'Compacting saved context before continuing. Completed tool receipts are preserved.',
+    'The agent compacted its context and is continuing. Completed tool receipts remain saved.',
+}
 INACTIVE = {'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'idle', 'steered'}
 
 
@@ -85,16 +89,23 @@ def record(conn: Connection, run_id: str, message: str, data: dict[str, object],
     previous = [(row['message'], json.loads(row['data'])) for row in rows]
     if data.get('activity_id') and any(meta.get('activity_id') == data['activity_id'] for _, meta in previous):
         return
+    # These exact runtime notices already render separately from assistant prose.
+    # Keep one of each per turn, including across sandbox restarts, without
+    # spending either a routine update or a delivered-input reply slot.
+    maintenance = message in COMPACTION_NOTICES
+    if maintenance and any(text == message for text, _ in previous):
+        return
     # The sandbox may answer before its next model request acknowledges receipt.
     # Only server-owned, delivered steering children grant a direct-answer slot.
     input_id = data.get('input_id')
     reply = None
-    if turn_id and type(input_id) is int:
+    if not maintenance and turn_id and type(input_id) is int:
         reply = conn.execute("""SELECT id FROM messages WHERE run_id=? AND id=? AND steering_parent_id=?
             AND (status='injected' OR (status='queued' AND queue_locked=1))""", (run_id, input_id, turn_id)).fetchone()
     reply_to = reply['id'] if reply and not any(meta.get('public_reply_to') == reply['id'] for _, meta in previous) else None
-    if reply_to is None:
-        routine = [text for text, meta in previous if not meta.get('public_reply_to')]
+    if reply_to is None and not maintenance:
+        routine = [text for text, meta in previous
+                   if not meta.get('public_reply_to') and text not in COMPACTION_NOTICES]
         if len(routine) >= MAX_UPDATES or message in routine:
             return
     metadata = {**data, 'turn_id': turn_id, 'public_update': True, 'public_reply_to': reply_to}
