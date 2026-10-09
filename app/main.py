@@ -986,7 +986,9 @@ def create_app(settings: Settings | None = None):
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
             store.event(run_id, "error", f"{body.name}: {message}")
-            return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
+            return {"error": message, "outcome_uncertain": write,
+                    "instruction": "Verify the destination before retrying a write." if write else
+                                   "Resolve the app error, then retry this read. No write was requested."}
 
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
