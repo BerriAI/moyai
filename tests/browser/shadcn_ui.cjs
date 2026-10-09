@@ -51,6 +51,12 @@ for (const width of [1440, 768, 320]) test(`PR tab status refresh owns its toolt
   await tabFor('Open').hover();
   await page.getByRole('tooltip', {name:`${title} · Open`,exact:true}).waitFor();
   assert.equal(await tabFor('Open').getAttribute('title'), null, 'Only the shared tooltip owns the hover label');
+  await page.getByRole('tab', {name:'Pull requests',exact:true}).click();
+  assert.equal(await page.getByRole('tab', {name:'Pull requests',exact:true}).getAttribute('aria-selected'), 'true');
+  await tabFor('Open').hover();
+  await page.getByRole('tooltip', {name:`${title} · Open`,exact:true}).waitFor();
+  await tabFor('Open').click();
+  assert.equal(await tabFor('Open').getAttribute('aria-selected'), 'true', 'Opening the tooltip must not replace the tab click handler');
   for (const [state, merged, label] of [['closed',true,'Merged'],['closed',false,'Closed'],['open',false,'Open']]) {
     const previous = await page.locator('.panel-tabs [aria-selected=true]').getAttribute('aria-label');
     await page.evaluate(({state,merged}) => {
@@ -70,7 +76,11 @@ for (const width of [1440, 768, 320]) test(`PR tab status refresh owns its toolt
     await tabFor(label).hover();
     await page.getByRole('tooltip', {name:`${title} · ${label}`,exact:true}).waitFor();
     await page.getByRole('tab', {name:'Pull requests',exact:true}).click();
+    assert.equal(await page.getByRole('tab', {name:'Pull requests',exact:true}).getAttribute('aria-selected'), 'true');
+    await tabFor(label).hover();
+    await page.getByRole('tooltip', {name:`${title} · ${label}`,exact:true}).waitFor();
     await tabFor(label).click();
+    assert.equal(await tabFor(label).getAttribute('aria-selected'), 'true');
     await page.getByRole('heading', {name:title,exact:true}).waitFor();
   }
   await page.getByRole('button', {name:`Close ${title} tab`,exact:true}).click();

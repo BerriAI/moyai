@@ -59,7 +59,8 @@
         const pr=t.kind==='pr'?MoyaiPullRequest.presentation(t.prStatus):null,label=pr?t.title+' · '+pr.label:t.title;
         return `<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(label)}" aria-label="${esc(label)}"><span class="panel-tab-icon${pr?' panel-pr-'+pr.state:''}">${ico(pr?.icon||glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`;
       }).join(''));
-      host.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>select(b.dataset.tab));
+      // Tooltip rerenders can replace React's onclick property; native listeners stay attached.
+      host.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>select(b.dataset.tab)));
       host.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
       // A background PR status read must not move keyboard focus or scroll the tab strip.
       if(focusKey)[...host.querySelectorAll(`[${focusAttribute}]`)].find(b=>b.getAttribute(focusAttribute)===focusKey)?.focus({preventScroll:true});
