@@ -326,11 +326,6 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .rail-collapsed .rail { display: none; }
 .rail-collapsed .topbar #open-sidebar { display: grid; }
 @media (max-width: 760px) { .panel-open > .workspace-panel { margin-top: 0; border-left: 0; } }
-/* Main's My/All sessions scope picker, styled as the section heading. */
-.sessions-label #session-scope { font-size: 14px; font-weight: 500; color: #1f1f1f; padding: 2px 20px 2px 0; border-radius: 6px; }
-.sessions-label #session-scope:disabled { padding-right: 0; }
-.sessions-label #session-scope:not(:disabled):hover { background-color: #efefef; }
-
 /* Give the phone composer its own layout instead of shrinking the desktop hero. */
 @media (max-width: 600px) {
   .home-view #content { align-items: flex-start; padding: 28px 16px 24px; }

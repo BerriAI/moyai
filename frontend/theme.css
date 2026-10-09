@@ -63,7 +63,7 @@
 [data-slot="native-select-icon"] { width: 16px; height: 16px; }
 .model-picker [data-slot="native-select-wrapper"] { display: contents; }
 .model-picker [data-slot="native-select-icon"] { display: none; }
-.sessions-label [data-slot="native-select-wrapper"] { width: auto; }
+.sessions-label [data-slot="native-select-wrapper"] { flex: 1; min-width: 0; }
 .sessions-label [data-slot="native-select-icon"] { right: 0; }
 .nav-button[data-slot="button"], [data-popover-id="session-actions"] [data-slot="button"] { justify-content: flex-start; }
 .model-picker [data-slot="native-select"], .sessions-label [data-slot="native-select"] { box-shadow: none; }
@@ -106,7 +106,6 @@
 [data-slot="select-error"] { display: block; margin-block-start: 4px; color: var(--settings-danger, #b42332); font-size: .866667rem; }
 .model-picker [data-slot="native-select-wrapper"][data-styled] { display: block; width: auto; flex: 1; min-width: 0; }
 .model-picker [data-styled] [data-slot="select-trigger"] { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; font: inherit; }
-.sessions-label [data-styled] [data-slot="select-trigger"] { min-height: 0; padding: 2px 0; border: 0; background: transparent; box-shadow: none; font: inherit; }
 @media (max-width: 850px) {
   [data-styled] [data-slot="select-trigger"] { font-size: 16px; }
   [data-slot="select-item"] { min-height: 44px; }

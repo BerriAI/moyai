@@ -202,7 +202,7 @@ function renderSidebar(){
   }
   MoyaiRegions.sync(list, sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
-    return `<section class="session-folder" data-region-key="folder:${esc(folder.id)}" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" data-region-key="folder-body:${esc(folder.id)}" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${expanded?(sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'):''}</div></section>`;
+    return `<section class="session-folder" data-region-key="folder:${esc(folder.id)}" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${globalThis.MoyaiIcon?.('chevron',16)||''}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button></div><div class="folder-sessions" data-region-key="folder-body:${esc(folder.id)}" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${expanded?(sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'):''}</div></section>`;
   }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section data-region-key="unfiled" class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search))));
   if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)MoyaiRegions.sync(list, `<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`);
   if(state.sessionSearchError){
@@ -844,7 +844,8 @@ async function boot(){
       return;
     }
     registerWebMCP();
-    document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
+    // Select owns its permission-derived disabled state through the native bridge.
+    document.querySelectorAll('.rail button:not([data-slot="select-trigger"])').forEach(b=>b.disabled=false);
     state.sessionSearchLoading=!state.runs.length;renderSidebar();
     state.configError=null;
     state.configReady=api('/api/config').then(config=>{state.config=config;}).catch(error=>{state.configError=error;throw error;});

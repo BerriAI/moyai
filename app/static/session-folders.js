@@ -85,7 +85,7 @@ function sessionFolderDialog(title,body){
   dialog.onclose=null;
   // Let Escape close only this dialog, keeping the mobile sidebar open.
   dialog.onkeydown=e=>{if(e.key==='Escape')e.stopPropagation();};
-  MoyaiUI.render(dialog, `<form class="folder-form"><button type="button" class="dialog-close" aria-label="Close folder dialog">×</button><h2 id="session-folder-title">${esc(title)}</h2>${body}<p class="folder-error" role="alert"></p></form>`);
+  MoyaiUI.render(dialog, `<form class="folder-form"><div class="folder-dialog-header"><h2 id="session-folder-title">${esc(title)}</h2><button type="button" class="dialog-close" aria-label="Close folder dialog">${globalThis.MoyaiIcon?.('x',16)||'×'}</button></div>${body}<p class="folder-error" role="alert"></p></form>`);
   dialog.querySelector('.dialog-close').onclick=()=>dialog.close();
   dialog.querySelector('[data-folder-cancel]')?.addEventListener('click',()=>dialog.close());
   dialog.showModal();

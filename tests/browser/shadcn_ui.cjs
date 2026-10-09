@@ -92,10 +92,15 @@ for (const width of [1440, 768, 320]) test(`folder headings keep their leading a
       const bounds = await toggle.evaluate(el => {
         const rect = el.getBoundingClientRect(), chevron = el.querySelector('.folder-chevron').getBoundingClientRect();
         const menu = el.parentElement.querySelector('.folder-menu').getBoundingClientRect();
-        return { leading: chevron.left - rect.left, padding: parseFloat(getComputedStyle(el).paddingLeft), right: rect.right, menuLeft: menu.left };
+        const centers = [...el.querySelectorAll('svg,.folder-name,.folder-count')].map(node => {
+          const box = node.getBoundingClientRect(); return box.top + box.height / 2;
+        });
+        return { leading: chevron.left - rect.left, padding: parseFloat(getComputedStyle(el).paddingLeft), right: rect.right, menuLeft: menu.left, centers, iconCount: el.querySelectorAll('svg').length };
       });
       assert.ok(Math.abs(bounds.leading - bounds.padding) <= 1, 'Folder contents start at the leading padding');
       assert.ok(bounds.right <= bounds.menuLeft, 'The folder menu remains outside the toggle');
+      assert.equal(bounds.iconCount, 2, 'Folder and disclosure both use SVG icons, independent of font baselines');
+      assert.ok(Math.max(...bounds.centers) - Math.min(...bounds.centers) <= 1, 'Icons, label and count share a vertical center');
       await toggle.focus();
       await page.keyboard.press('Enter');
     }
@@ -105,7 +110,54 @@ for (const width of [1440, 768, 320]) test(`folder headings keep their leading a
   await page.getByRole('button', { name: 'Rename or remove hello', exact: true }).click();
   await page.getByRole('dialog', { name: 'Rename folder', exact: true }).waitFor();
   assert.equal(await page.getByLabel('Folder name', { exact: true }).inputValue(), 'hello');
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Rename folder', exact: true });
+  const geometry = await dialog.evaluate(el => {
+    const rect = node => node.getBoundingClientRect().toJSON();
+    return { title: rect(el.querySelector('h2')), close: rect(el.querySelector('.dialog-close')), input: rect(el.querySelector('input')), box: rect(el) };
+  });
+  assert.ok(Math.abs(geometry.title.top + geometry.title.height / 2 - geometry.close.top - geometry.close.height / 2) <= 1, 'Close control aligns with the dialog title');
+  assert.ok(geometry.title.right <= geometry.close.left - 8, 'Title and close control do not overlap');
+  assert.ok(Math.abs(geometry.close.right - geometry.input.right) <= 1, 'Close control and field share the trailing content edge');
+  assert.ok(geometry.box.left >= 0 && geometry.box.right <= width, 'Dialog stays inside the viewport');
+  await page.getByRole('button', { name: 'Close folder dialog', exact: true }).click();
+  await dialog.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Rename or remove hello');
+});
+
+for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'member']) test(`session scope uses a readable field in ${fixture} at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', fixture, width);
+  await page.evaluate(fixture => { state.authenticated = true; state.role = fixture === 'member' ? 'member' : 'admin'; restoreSessionScope(); }, fixture);
+  if (width < 850) await page.locator('#open-sidebar').click();
+  const trigger = page.getByRole('combobox', { name: 'Filter sessions', exact: true });
+  for (const count of ['4', '100', '100000']) {
+    await page.locator('#task-count').evaluate((el, value) => { el.textContent = value; }, count);
+    const geometry = await trigger.evaluate(el => {
+      const label = el.querySelector('span'), row = el.closest('.sessions-label');
+      const rect = node => node.getBoundingClientRect().toJSON();
+      return { box: rect(el), label: rect(label), count: rect(row.querySelector('#task-count')), add: rect(row.querySelector('#new-folder')), textSize: parseFloat(getComputedStyle(label).fontSize), border: parseFloat(getComputedStyle(el).borderTopWidth), clipped: label.scrollWidth > label.clientWidth };
+    });
+    assert.ok(geometry.textSize >= 14, 'Heading text is at least normal control size');
+    assert.ok(geometry.border >= 1 && geometry.box.height >= 36, 'Session scope is a visible field with a full control target');
+    assert.equal(geometry.clipped, false, 'My sessions remains fully visible');
+    assert.ok(geometry.box.right <= geometry.count.left && geometry.count.right <= geometry.add.left, 'Count and action do not overlap the field');
+    assert.ok(Math.abs(geometry.box.top + geometry.box.height / 2 - geometry.add.top - geometry.add.height / 2) <= 1, 'The field and add-folder button share a center');
+  }
+  if (fixture === 'member') {
+    assert.equal(await trigger.isEnabled(), false, 'Members cannot switch to all sessions');
+    return;
+  }
+  const labelSize = await trigger.locator('span').first().evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+  await trigger.click();
+  const option = page.getByRole('option', { name: 'All sessions', exact: true });
+  const optionSize = await option.evaluate(el => parseFloat(getComputedStyle(el).fontSize));
+  assert.ok(Math.abs(optionSize - labelSize) <= 2, 'The open menu and trigger have consistent typography');
+  await option.click();
+  assert.match(await trigger.innerText(), /All sessions/);
+  await trigger.press('Enter');
+  await page.keyboard.press('Escape');
+  await page.getByRole('listbox').waitFor({ state: 'hidden' });
+  assert.equal(await page.getByRole('listbox').count(), 0);
+  await page.waitForFunction(() => document.activeElement === document.querySelector('.sessions-label [role=combobox]'));
 });
 
 for (const width of [1440, 768, 320]) test(`PR tab status refresh owns its tooltip and survives focused redraws and closure at ${width}px`, async t => {
