@@ -909,7 +909,7 @@ def create_app(settings: Settings | None = None):
             try:
                 return await automation_tools.call(run, body.name, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid automation arguments. Check the current revision, schedule and tool schema.') from None
+                raise HTTPException(500, 'The saved automation could not be validated.') from None
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from None
         if body.name in MEMORY_TOOLS:

@@ -1,14 +1,14 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const source=fs.readFileSync('app/static/app.js','utf8');
 const functions=source.slice(source.indexOf('function harnessLogo('),source.indexOf('\nfunction setSidebar('));
 function setup(){
   const context={state:{config:{harness:'codex',model:'openai/gpt-6-astra',harnesses:[{id:'hermes',name:'Hermes'},{id:'codex',name:'Codex'},{id:'claude-agent-sdk',name:'Claude Code',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra',default_harness:'codex'},{id:'anthropic/claude-opus-5-5',name:'Opus',default_harness:'claude-agent-sdk'}]}},esc:s=>String(s),MoyaiProviderLogos:require('../app/static/provider-logos.js')};
   vm.createContext(context);vm.runInContext(functions,context);return context;
 }
-function picker(value){return {value,innerHTML:'',parentElement:{querySelector:()=>null},addEventListener(type,handler){this[type]=handler;}};}
+function picker(value){return {value,innerHTML:'',closest:()=>({querySelector:()=>null}),addEventListener(type,handler){this[type]=handler;}};}
 test('new picker displays the automatic model default and retains explicit drafts',()=>{
   const c=setup();assert.match(c.harnessPicker(),/value="" selected>Auto · Codex/);
   assert.match(c.harnessPicker('', 'anthropic/claude-opus-5-5'),/value="" selected>Auto · Claude Code/);

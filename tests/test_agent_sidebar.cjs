@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const {readFileSync} = require('node:fs');
 const {test} = require('node:test');
-const vm = require('node:vm');
+const vm = require('./helpers/ui-vm.cjs');
 const script = readFileSync('app/static/app.js','utf8');
 function helpers(){
   const context={state:{selected:'worker-b'},relative:()=> '2m ago'};
@@ -251,7 +251,7 @@ test('search failure is distinct from empty results and retry uses the current q
 test('refresh failures keep rendered sessions and retry while scope changes discard old rows',async()=>{
   for(const search of ['', 'answer'])for(const failedPath of ['/api/runs','/api/session-folders']){
     const {context:c,element}=scopeHelpers(),retry={};
-    const list={innerHTML:'',scrollTop:12,querySelector:()=>retry};
+    const list={innerHTML:'',scrollTop:12,querySelector:()=>retry,insertAdjacentHTML(position,html){assert.equal(position,'afterbegin');this.innerHTML=html+this.innerHTML;}};
     const elements={'#session-list':list,'#session-search':{value:search},'#session-scope':element,'#task-count':{},'#workspace-name':{}};
     Object.assign(c,{document:{activeElement:null},$:selector=>elements[selector]});
     Object.assign(c.state,{sessionSearch:search,folders:[],organization:{},expandedParents:new Set(),closedFolders:new Set()});

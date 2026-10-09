@@ -1,7 +1,7 @@
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 const panelPath=process.env.PANEL_SOURCE||'app/static/workspace-panel.js';
 const {prUrl,restore}=require(require('node:path').resolve(panelPath));
 const url='https://github.com/BerriAI/moyai/pull/145';

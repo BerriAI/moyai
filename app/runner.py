@@ -181,6 +181,12 @@ class RunManager:
         rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued'))")
         for row in rows:
             pending = json.loads(row.get("pending_result") or "null")
+            # Finished turns retain their receipt until the next claim. A new
+            # unclaimed input cannot recover that old answer as its outcome.
+            if pending and row['chat_enabled'] and not self.store.rows(
+                    "SELECT 1 FROM messages WHERE run_id=? AND id=? AND id=? AND role='user' AND status='running'",
+                    (row['id'], pending.get('message_id'), row['active_message_id'])):
+                pending = None
             if pending and pending.get("message"):
                 saved = pending.get("checkpoint_saved") is True
                 if not saved:

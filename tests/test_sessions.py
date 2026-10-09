@@ -424,6 +424,71 @@ def test_message_idempotency_is_transactional_and_conflicts_are_rejected(tmp_pat
         store.enqueue_message(run['id'], 'Different', 'same-request')
 
 
+@pytest.mark.parametrize('previous_status', ['completed', 'failed', 'save_failed'])
+@pytest.mark.parametrize('saved_receipt', [False, True])
+async def test_restart_of_unclaimed_followup_displays_current_failure_not_previous_answer(
+    runner: RunManager, previous_status: str, saved_receipt: bool,
+) -> None:
+    from pathlib import Path
+    import shutil
+    import subprocess
+    from app.main import public_run
+
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node is needed to exercise the real browser failure selector')
+    store = runner.store
+    run = store.create_run('First request', '', 'demo', [], chat_enabled=True)
+    first = store.claim_message(run['id'])
+    previous_answer = {'completed': 'Previous successful answer', 'failed': 'Previous failed answer',
+                       'save_failed': 'Previous answer with an unsaved workspace'}[previous_status]
+    previous_warning = 'The previous turn workspace files could not be saved.'
+    if saved_receipt:
+        # A normal cloud completion retains this receipt until the next claim.
+        runner.receive_result(run['id'], {'message_id': first['id'], 'message': previous_answer,
+            'completed': previous_status != 'failed', 'exit_code': 1 if previous_status == 'failed' else 0,
+            'checkpoint_saved': previous_status != 'save_failed'})
+        if previous_status == 'save_failed':
+            assert runner.preserve_answer(run['id'], previous_warning)
+            previous_answer = store.run(run['id'])['summary']
+            assert json.loads(store.run(run['id'])['pending_result'])['save_failed'] is True
+    elif previous_status == 'save_failed':
+        store.update_run(run['id'], checkpoint_error=previous_warning)
+        previous_answer += '\n\n---\n**Workspace save warning:** ' + previous_warning
+    store.finish_message(run['id'], first['id'], previous_answer, previous_status)
+    store.update_run(run['id'], status='idle' if previous_status == 'completed' else 'failed', summary=previous_answer)
+    followup, _ = store.enqueue_message(run['id'], 'Follow-up not claimed before restart', 'unclaimed-followup')
+    queued = store.run(run['id'])
+    assert queued['status'] == 'queued' and queued['summary'] == previous_answer
+    assert queued['active_message_id'] == first['id']
+    assert bool(queued['pending_result']) is saved_receipt
+
+    recovery = RunManager(Store(runner.settings.data_dir), runner.settings)
+    await recovery.recover()
+    stopped = recovery.store.run(run['id'])
+    messages = public_messages(stopped, recovery.store.messages(run['id']))
+    assert stopped['status'] == 'interrupted'
+    assert stopped['summary'] == previous_answer
+    assert stopped['error'] == 'The workspace restarted. This task was not replayed.'
+    if previous_status == 'save_failed':
+        # Preserve the warning in its saved answer and workspace state without
+        # letting it own this follow-up's interruption reason.
+        assert stopped['checkpoint_error'] == previous_warning
+        assert previous_warning in next(message['content'] for message in messages
+                                        if message['role'] == 'assistant' and message['status'] == 'save_failed')
+    assert messages[-1]['id'] == followup['id'] and messages[-1]['status'] == 'interrupted'
+    assert messages[-1]['started_at'] == ''
+    assert len([message for message in messages if message['role'] == 'assistant']) == 1
+    snapshot = {**public_run(stopped), 'messages': messages,
+                'events': recovery.store.events(run['id'])}
+    result = subprocess.run([node, '-e',
+        "const fs=require('node:fs'),ui=require(process.argv[1]),run=JSON.parse(fs.readFileSync(0,'utf8'));"
+        "process.stdout.write(JSON.stringify({answer:ui.terminalAnswer(run),error:ui.terminalError(run)}));",
+        str(Path(__file__).resolve().parents[1] / 'app/static/activity.js')],
+        input=json.dumps(snapshot), text=True, capture_output=True, check=True)
+    assert json.loads(result.stdout) == {'answer': None, 'error': stopped['error']}
+
+
 async def test_restart_preserves_idle_session_and_interrupts_unfinished_messages(runner):
     # This checks recovery, not the demo's four seconds of presentation delays.
     runner.settings.demo_step_seconds = 0

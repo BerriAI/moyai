@@ -55,7 +55,7 @@ for(const method of ['Enter','button'])test(`successful ${method} submission cle
   await send(page,text,method);
   assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),text);
   await home(page);
-  assert.equal(await page.locator('#prompt').inputValue(),'');
+  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });
 
 test('unsent drafts and rejected submissions retain text; retry clears only on success',async t=>{
@@ -64,16 +64,16 @@ test('unsent drafts and rejected submissions retain text; retry clears only on s
   await page.locator('.nav-button[data-view="settings"]').click();
   await page.locator('.settings-back').waitFor();
   await home(page);
-  assert.equal(await page.locator('#prompt').inputValue(),'Keep this draft until accepted');
+  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Keep this draft until accepted');
   const reject=route=>route.request().method()==='POST'?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test rejection: retry safely'})}):route.continue();
   await page.route('**/api/runs',reject);
   await page.locator('#prompt').press('Enter');
   await page.locator('#toast').filter({hasText:'Test rejection'}).waitFor();
-  assert.equal(await page.locator('#prompt').inputValue(),'Keep this draft until accepted');
+  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Keep this draft until accepted');
   await page.unroute('**/api/runs',reject);
   await page.locator('#prompt').press('Enter');await page.locator('#followup').waitFor();
   await home(page);
-  assert.equal(await page.locator('#prompt').inputValue(),'');
+  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });
 
 test('text typed during a pending create is not discarded',async t=>{
@@ -89,7 +89,7 @@ test('text typed during a pending create is not discarded',async t=>{
   await waiting;
   await page.locator('#prompt').fill('Different next request');release();
   await page.locator('#followup').waitFor();await home(page);
-  assert.equal(await page.locator('#prompt').inputValue(),'Different next request');
+  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Different next request');
 });
 
 test('accepted creation clears text even if subsequent sidebar refresh fails',async t=>{
@@ -97,9 +97,9 @@ test('accepted creation clears text even if subsequent sidebar refresh fails',as
   await page.route('**/api/runs?*',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test sidebar unavailable'})}));
   await page.locator('#prompt').fill('Accepted despite sidebar outage');await page.locator('#prompt').press('Enter');
   await page.locator('#toast').filter({hasText:'Test sidebar unavailable'}).waitFor();
-  assert.equal(await page.locator('#prompt').inputValue(),'');
+  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
   await page.unroute('**/api/runs?*');
-  await home(page);assert.equal(await page.locator('#prompt').inputValue(),'');
+  await home(page);assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });
 
 async function renameDialog(page){
@@ -109,6 +109,46 @@ async function renameDialog(page){
   await page.getByLabel('Session name',{exact:true}).waitFor();
   return page.locator('#session-folder-dialog');
 }
+
+test('session deletion dialog preserves cancellation, errors and locked shadcn controls during cleanup',async t=>{
+  const page=await setup(t);
+  await send(page,'Verify deletion through the migrated controls');
+  const id=await page.evaluate(()=>state.selected);
+  const dialog=page.getByRole('dialog',{name:'Delete session?'});
+  const openDelete=async()=>{
+    await page.getByRole('button',{name:'Session actions',exact:true}).click();
+    await page.locator('[data-delete-session]').click();
+    await dialog.waitFor();
+  };
+  const requests=[];
+  let allow=false;
+  await page.route(`**/api/runs/${id}`,route=>{
+    if(route.request().method()!=='DELETE')return route.continue();
+    requests.push(route.request());
+    return allow?route.fulfill({status:202,json:{deleted:false}}):route.fulfill({status:503,json:{detail:'Synthetic cleanup rejection'}});
+  });
+  await openDelete();
+  assert.equal(await dialog.getByRole('button',{name:'Cancel',exact:true}).evaluate(el=>el===document.activeElement),true);
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({state:'detached'});
+  assert.equal(requests.length,0);
+  await openDelete();
+  await dialog.getByRole('button',{name:'Delete session',exact:true}).click();
+  await dialog.getByText('Synthetic cleanup rejection',{exact:true}).waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'Delete session',exact:true}).isEnabled(),true);
+  allow=true;
+  await dialog.getByRole('button',{name:'Delete session',exact:true}).click();
+  await dialog.waitFor({state:'detached'});
+  await page.waitForFunction(()=>document.querySelector('#message-form').inert);
+  const picker=page.locator('#message-form [data-skill-picker]');
+  await page.waitForFunction(el=>el.disabled,await picker.elementHandle());
+  assert.equal(await page.locator('#followup').getAttribute('contenteditable'),'false');
+  assert.equal(await page.locator('#message-form [type=submit]').first().isDisabled(),true);
+  await page.evaluate(()=>updateChatStatus({...state.chatRun,status:'idle'}));
+  assert.equal(await picker.isDisabled(),true,'An older response cannot unlock a deleting session');
+  assert.equal(await page.locator('#message-form').evaluate(el=>el.inert),true);
+  assert.equal(requests.length,2);
+});
 
 test('rename persists after reload, preserves messages and drafts, and rejects stale reads',async t=>{
   const page=await setup(t);
@@ -132,7 +172,7 @@ test('rename persists after reload, preserves messages and drafts, and rejects s
   assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
   assert.equal(await page.title(),'Navigation follow-up · Moyai');
   assert.equal(await page.locator(`[data-run="${id}"] .session-link-title`).textContent(),'Navigation follow-up');
-  assert.equal(await page.locator('#followup').inputValue(),'Unsent follow-up');
+  assert.equal(await page.locator('#followup').evaluate(el=>el.value),'Unsent follow-up');
   await page.reload();await page.locator('#followup').waitFor();
   assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
   assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Original rename request');
@@ -158,6 +198,7 @@ test('rename supports cancel, Escape, blank validation, failure retry and litera
   await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
   assert.equal(await page.locator('#page-title').textContent(),'Rename error recovery');
   dialog=await renameDialog(page);await page.getByLabel('Session name',{exact:true}).press('Escape');
+  await dialog.waitFor({state:'hidden'});
   assert.equal(await dialog.isVisible(),false);
   dialog=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('   ');
@@ -192,9 +233,10 @@ test('session actions and rename remain usable at desktop, tablet and narrow mob
     const id=await page.evaluate(()=>state.selected),trigger=page.locator(`[data-session-actions="${id}"]`);
     await trigger.focus();await trigger.press('Enter');
     await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('ArrowDown');
     assert.equal(await page.evaluate(()=>document.activeElement.textContent),'Move to folder');
     await page.keyboard.press('ArrowUp');await page.keyboard.press('Enter');
-    const dialog=page.locator('#session-folder-dialog'),box=await dialog.boundingBox();
+    const dialog=page.locator('[data-dialog-id="session-folder-dialog"]'),box=await dialog.boundingBox();
     assert.ok(box.x>=0&&box.x+box.width<=width);
     assert.equal(await page.getByLabel('Session name',{exact:true}).evaluate(el=>el===document.activeElement),true);
     await page.getByLabel('Session name',{exact:true}).fill('Renamed at '+width);

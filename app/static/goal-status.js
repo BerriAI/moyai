@@ -22,12 +22,12 @@
   function render(node,run,esc){
     if(!node)return;
     const goal=current(run);
-    node.hidden=!goal;if(!goal){node.innerHTML='';delete node.dataset.signature;return;}
+    node.hidden=!goal;if(!goal){MoyaiUI.render(node, '');delete node.dataset.signature;return;}
     const labels={active:'Running',waiting:'Waiting',paused:'Paused',blocked:'Blocked',completed:'Completed'};
     const signature=JSON.stringify([goal.id,goal.objective,goal.status,goal.reason]);
     if(node.dataset.signature!==signature){
       node.dataset.signature=signature;
-      node.innerHTML=`<div class="goal-heading"><strong>Goal</strong><span class="goal-state">${esc(labels[goal.status]||goal.status)}</span><time class="goal-elapsed" aria-label="Goal elapsed time"></time></div><div class="goal-objective">${esc(goal.objective)}</div>${goal.reason&&goal.status!=='active'?`<p class="goal-reason">${esc(goal.reason)}</p>`:''}`;
+      MoyaiUI.render(node, `<div class="goal-heading"><strong>Goal</strong><span class="goal-state">${esc(labels[goal.status]||goal.status)}</span><time class="goal-elapsed" aria-label="Goal elapsed time"></time></div><div class="goal-objective">${esc(goal.objective)}</div>${goal.reason&&goal.status!=='active'?`<p class="goal-reason">${esc(goal.reason)}</p>`:''}`);
     }
     node.dataset.status=goal.status;
     node.querySelector('time').textContent=root.MoyaiActivity.duration(0,elapsed(goal,run)*1000);

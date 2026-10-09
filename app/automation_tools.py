@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .automations import Definition, Save, Toggle, SCHEDULE_VERSION
 from .automation_events import WebhookSetup
@@ -204,7 +204,16 @@ class AutomationTools:
         return value
 
     async def call(self, run, name, arguments):
-        args = SPECS[name][0].model_validate(arguments)
+        try:
+            args = SPECS[name][0].model_validate(arguments)
+        except ValidationError as exc:
+            # Only rejected input is a correctable tool outcome. Validation of
+            # saved state or failures after an action must retain their cause.
+            return {'error': 'Invalid automation arguments. Correct the listed fields and try again.',
+                    'status_code': 422, 'validation_errors': [
+                        {'field': '.'.join(str(part) for part in error['loc']) or 'arguments',
+                         'type': error['type'], 'message': error['msg']}
+                        for error in exc.errors(include_input=False, include_context=False, include_url=False)]}
         run, actor = self.actor(run, getattr(args, 'turn_id', None))
         if name == 'automation_environments':
             environments = self.service.environments

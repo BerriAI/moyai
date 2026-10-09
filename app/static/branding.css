@@ -2,7 +2,7 @@
    Keep typography, panel geometry, responsive rules and semantic errors intact. */
 :root {
   --text: #28282b;
-  --muted: #73717b;
+  --muted: var(--ui-muted, #68636f);
   --line: #e9e5ef;
   --border: #e4dfea;
   --purple: #7155ba;

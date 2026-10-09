@@ -50,7 +50,7 @@
   root.MoyaiIcon=icon;
   if(typeof document!=='undefined'){
     // Static shell controls declare data-icon so their markup stays readable.
-    const apply=()=>document.querySelectorAll('[data-icon]').forEach(node=>{if(!node.querySelector('.ui-icon'))node.insertAdjacentHTML('afterbegin',icon(node.dataset.icon,Number(node.dataset.iconSize)||16));});
+    const apply=()=>document.querySelectorAll('[data-icon]').forEach(node=>{if(!node.querySelector('.ui-icon'))MoyaiUI.insert(node, 'afterbegin', icon(node.dataset.icon,Number(node.dataset.iconSize)||16));});
     if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',apply);else apply();
   }
 })(typeof globalThis!=='undefined'?globalThis:this);

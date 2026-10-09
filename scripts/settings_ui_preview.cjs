@@ -164,4 +164,4 @@ const server=http.createServer(async(req,res)=>{
  }
  return json(res,501,{detail:'This operation is not available in the visual preview.'});
 });
-server.listen(port,'127.0.0.1',()=>console.log(`Settings UI fixture at http://127.0.0.1:${port}. Synthetic data; no external services.`));
+server.listen(port,'127.0.0.1',()=>console.log(`Settings UI fixture at http://127.0.0.1:${server.address().port}. Synthetic data; no external services.`));

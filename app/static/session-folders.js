@@ -85,7 +85,7 @@ function sessionFolderDialog(title,body){
   dialog.onclose=null;
   // Let Escape close only this dialog, keeping the mobile sidebar open.
   dialog.onkeydown=e=>{if(e.key==='Escape')e.stopPropagation();};
-  dialog.innerHTML=`<form class="folder-form"><button type="button" class="dialog-close" aria-label="Close folder dialog">×</button><h2 id="session-folder-title">${esc(title)}</h2>${body}<p class="folder-error" role="alert"></p></form>`;
+  MoyaiUI.render(dialog, `<form class="folder-form"><button type="button" class="dialog-close" aria-label="Close folder dialog">×</button><h2 id="session-folder-title">${esc(title)}</h2>${body}<p class="folder-error" role="alert"></p></form>`);
   dialog.querySelector('.dialog-close').onclick=()=>dialog.close();
   dialog.querySelector('[data-folder-cancel]')?.addEventListener('click',()=>dialog.close());
   dialog.showModal();
@@ -160,12 +160,12 @@ function moveSessionToFolder(run){
 
 function showSessionActions(run,button){
   const menu=$('#session-actions');
-  if(menu.matches(':popover-open'))menu.hidePopover();
-  menu.innerHTML=(typeof renameSession==='function'?'<button type="button" data-rename-session>Rename</button>':'')+'<button type="button" data-move-to-folder>Move to folder</button>';
+  if(MoyaiUI.isOpen(menu))menu.hidePopover();
+  MoyaiUI.render(menu, (typeof renameSession==='function'?'<button type="button" data-rename-session>Rename</button>':'')+'<button type="button" data-move-to-folder>Move to folder</button>');
   menu.querySelector('[data-rename-session]')?.addEventListener('click',()=>{menu.hidePopover();renameSession(run);});
   menu.querySelector('[data-move-to-folder]').onclick=()=>{menu.hidePopover();moveSessionToFolder(run);};
   if(!run.parent_run_id){
-    menu.insertAdjacentHTML('afterbegin',`<button type="button" data-pin-session ${state.sessionMutation?'disabled':''}>${globalThis.MoyaiIcon?.('pin',16)||''}${run.pinned?'Unpin session':'Pin session'}</button>`);
+    MoyaiUI.insert(menu, 'afterbegin', `<button type="button" data-pin-session ${state.sessionMutation?'disabled':''}>${globalThis.MoyaiIcon?.('pin',16)||''}${run.pinned?'Unpin session':'Pin session'}</button>`);
     menu.querySelector('[data-pin-session]').onclick=()=>{menu.hidePopover();changeSessionPin(run).catch(showError);};
   }
   if(typeof bindSessionLifecycleActions==='function')bindSessionLifecycleActions(menu,run);
@@ -176,14 +176,7 @@ function showSessionActions(run,button){
       items[e.key==='Home'?0:e.key==='End'?items.length-1:(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
     }
   };
-  const rect=button.getBoundingClientRect();
-  const row=button.closest('.parent-session')?.getBoundingClientRect();
   menu.showPopover({source:button});
-  const beside=row&&row.right+8+menu.offsetWidth<=innerWidth-8;
-  const left=beside?row.right+8:rect.right-menu.offsetWidth;
-  const top=beside?row.top:rect.bottom+4;
-  menu.style.left=Math.max(8,Math.min(left,innerWidth-menu.offsetWidth-8))+'px';
-  menu.style.top=Math.max(8,Math.min(top,innerHeight-menu.offsetHeight-8))+'px';
   menu.querySelector('button').focus();
 }
 

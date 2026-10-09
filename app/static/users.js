@@ -34,23 +34,23 @@ async function renderUsers() {
   if (version !== state.pageVersion) return;
   applyUserSession(session);
   if (state.role !== 'admin') {
-    $('#content').innerHTML = '<div class="page-heading"><div><h1>Users</h1><p class="subtext">Only administrators can manage workspace roles.</p></div></div>';
+    MoyaiUI.render($('#content'), '<div class="page-heading"><div><h1>Users</h1><p class="subtext">Only administrators can manage workspace roles.</p></div></div>');
     return;
   }
   const data = await api('/api/admin/users');
   if (version !== state.pageVersion) return;
   const admins = data.users.filter(user => user.role === 'admin').length;
-  $('#content').innerHTML = `<section class="users-page">
+  MoyaiUI.render($('#content'), `<section class="users-page">
     <div class="page-heading"><div><h1>Users</h1><p class="subtext">Manage workspace members and their access.</p></div><button class="primary" id="add-user">Add user</button></div>
     <div class="users-overview"><span><strong>${data.users.length}</strong> users</span><span><strong>${admins}</strong> admins</span><span><strong>${data.users.length - admins}</strong> internal users</span></div>
     <div class="users-panel"><div class="users-toolbar"><label class="users-search"><span class="sr-only">Search users</span><input id="user-search" type="search" placeholder="Search by name or email" autocomplete="off"></label><label><span class="sr-only">Filter by role</span><select id="user-role-filter"><option value="all">All roles</option><option value="admin">Admins</option><option value="member">Internal users</option></select></label></div><div id="user-table" class="users-table-scroll" role="region" aria-label="Workspace users" tabindex="0"></div><p class="users-domain">Sign-in is restricted to ${data.domains.map(domain => '@' + esc(domain)).join(', ')} Google accounts. New teammates join as internal users by default.</p></div>
     <div class="user-role-guide"><div><h2>Admin</h2><p>Manage users, shared connections and organization settings. View team spend and manage allowed actions.</p></div><div><h2>Internal user</h2><p>Start sessions, chat with agents and use shared tools and skills. Create Linear tickets and GitHub PRs directly. Access follows each connection’s permissions.</p></div></div>
     <details class="user-history"><summary>Role activity <span>${data.activity.length ? 'Recent changes' : 'No changes yet'}</span></summary><ul>${data.activity.map(entry => `<li><div><strong>${esc(entry.email)}</strong><span>${entry.previous_role ? userRoleLabel(entry.previous_role) + ' → ' : 'Assigned '}${userRoleLabel(entry.role)}</span><small>By ${esc(entry.actor)}</small></div><time datetime="${esc(entry.created_at)}">${esc(new Date(entry.created_at).toLocaleString())}</time></li>`).join('') || '<li class="subtext">Role changes will appear here with the administrator who made them.</li>'}</ul></details>
-  </section>`;
+  </section>`);
   $('#user-search').value = userDirectoryState.query;
   $('#user-role-filter').value = userDirectoryState.filter;
   const redraw = () => {
-    $('#user-table').innerHTML = userTable(data.users, userDirectoryState.query, userDirectoryState.filter);
+    MoyaiUI.render($('#user-table'), userTable(data.users, userDirectoryState.query, userDirectoryState.filter));
     document.querySelectorAll('[data-edit-user]').forEach(button => button.onclick = () =>
       editUserRole(data, data.users.find(user => user.email === button.dataset.editUser)));
   };
@@ -63,10 +63,10 @@ async function renderUsers() {
 function editUserRole(data, user) {
   const dialog = $('#user-role-dialog');
   const lastAdmin = user?.role === 'admin' && data.users.filter(row => row.role === 'admin').length === 1;
-  dialog.innerHTML = `<form id="user-role-form"><button class="dialog-close" type="button" aria-label="Close">×</button><div class="eyebrow">WORKSPACE ACCESS</div><h2>${user ? 'Change role' : 'Add a user'}</h2><p class="subtext">${user ? 'Changes apply on their next request. No sign-out or redeploy needed.' : 'Set a role before their first sign-in. They will still need a verified work Google account; no invitation email is sent.'}</p>
+  MoyaiUI.render(dialog, `<form id="user-role-form"><button class="dialog-close" type="button" aria-label="Close">×</button><div class="eyebrow">WORKSPACE ACCESS</div><h2>${user ? 'Change role' : 'Add a user'}</h2><p class="subtext">${user ? 'Changes apply on their next request. No sign-out or redeploy needed.' : 'Set a role before their first sign-in. They will still need a verified work Google account; no invitation email is sent.'}</p>
     <div class="field"><label for="role-email">Work email</label><input id="role-email" type="email" maxlength="254" required autocomplete="off" ${user ? 'readonly' : ''} placeholder="name@${esc(data.domains[0] || 'company.com')}" value="${esc(user?.email || '')}"></div>
     <div class="field"><label for="role-choice">Role</label><select id="role-choice"><option value="member" ${lastAdmin ? 'disabled' : ''}>Internal user</option><option value="admin">Admin</option></select></div>
-    <p id="role-description" class="role-description"></p>${lastAdmin ? '<p class="role-notice">This is the last admin. Promote another user before changing this role.</p>' : ''}<p id="role-error" class="signin-error" role="alert"></p><div class="role-actions"><button type="button" id="role-cancel">Cancel</button><button type="submit" class="primary">${user ? 'Save role' : 'Add user'}</button></div></form>`;
+    <p id="role-description" class="role-description"></p>${lastAdmin ? '<p class="role-notice">This is the last admin. Promote another user before changing this role.</p>' : ''}<p id="role-error" class="signin-error" role="alert"></p><div class="role-actions"><button type="button" id="role-cancel">Cancel</button><button type="submit" class="primary">${user ? 'Save role' : 'Add user'}</button></div></form>`);
   $('#role-choice').value = user?.role || 'member';
   const describe = () => {$('#role-description').textContent = $('#role-choice').value === 'admin' ?
     'Can manage workspace users and shared connections, view team spend, and manage allowed actions.' :

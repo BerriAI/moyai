@@ -1,7 +1,7 @@
 const assert=require('node:assert/strict');
 const {test}=require('node:test');
 const {readFileSync}=require('node:fs');
-const vm=require('node:vm');
+const vm=require('./helpers/ui-vm.cjs');
 function context(){const c={Intl,Date,Map,esc:s=>String(s).replace(/[&<>"']/g,x=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]))};vm.createContext(c);for(const file of ['automation-triggers.js','automations.js'])vm.runInContext(readFileSync('app/static/'+file,'utf8'),c);return c;}
 test('session source roundtrips filters, escapes values and explains scope',()=>{
   const c=context();vm.runInContext('automationEventChoices={session:[["message.posted","New session message"]]}',c);

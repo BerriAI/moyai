@@ -39,9 +39,9 @@ function restoreAutomationFocus(opener,version) {
 }
 function automationDialog(title,body) {
   const opener=document.activeElement,version=state.pageVersion;
-  const dialog=document.createElement('dialog');
+  const dialog=MoyaiUI.createDialog();
   dialog.className='automation-start-dialog';dialog.setAttribute('aria-label',title);
-  dialog.innerHTML=`<form class="automation-form"><header><div><h2>${esc(title)}</h2></div><button type="button" class="icon-button" data-close aria-label="Close">×</button></header>${body}</form>`;
+  MoyaiUI.render(dialog, `<form class="automation-form"><header><div><h2>${esc(title)}</h2></div><button type="button" class="icon-button" data-close aria-label="Close">×</button></header>${body}</form>`);
   document.body.append(dialog);
   dialog.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>dialog.close());
   dialog.addEventListener('close',()=>{dialog.remove();restoreAutomationFocus(opener,version);},{once:true});dialog.showModal();
@@ -61,7 +61,7 @@ function automationConnections(connections,selected) {
 function bindAutomationConnections(form) {
   const box=form.querySelector('.automation-connections');
   const update=()=>{box.querySelector('[data-selected-connections]').textContent=`${box.querySelectorAll('[name=plugin]:checked').length} selected`;};
-  box.querySelectorAll('[name=plugin]').forEach(input=>input.onchange=update);
+  box.onchange=update;
   box.querySelector('input[type=search]').oninput=e=>{
     let count=0;box.querySelectorAll('[data-connection]').forEach(row=>{row.hidden=!row.textContent.toLowerCase().includes(e.target.value.trim().toLowerCase());if(!row.hidden)count++;});
     box.querySelector('[data-connection-empty]').hidden=count>0;
@@ -72,7 +72,7 @@ function automationMetadata(form,metadata) {
   const refresh=()=>{add.disabled=host.children.length>=20;};
   const row=(key='',value='')=>{
     const item=document.createElement('div');item.className='automation-metadata-row';
-    item.innerHTML=`<label>Key<input name="metadata_key" required maxlength="80" value="${esc(key)}" placeholder="team"></label><label>Value<textarea name="metadata_value" rows="3" placeholder="engineering">${esc(value)}</textarea></label><button type="button" class="quiet" aria-label="Remove metadata">Remove</button>`;
+    MoyaiUI.render(item, `<label>Key<input name="metadata_key" required maxlength="80" value="${esc(key)}" placeholder="team"></label><label>Value<textarea name="metadata_value" rows="3" placeholder="engineering">${esc(value)}</textarea></label><button type="button" class="quiet" aria-label="Remove metadata">Remove</button>`);
     const input=item.querySelector('[name=metadata_value]');
     // Count Unicode characters like the server; maxlength counts UTF-16 units.
     input.oninput=()=>input.setCustomValidity(Array.from(input.value.trim()).length>16384?'Use at most 16,384 characters for this metadata value.':'');input.oninput();
@@ -93,8 +93,8 @@ async function editAutomation(existing,template) {
   catch(e){toast(e.message);return;}
   if(state.pageVersion!==version)return;
   const d=existing?.definition||automationNewDefinition(template),dialog=$('#automation-dialog');
-  dialog.classList.add('automation-drawer');dialog.onclose=()=>{dialog.innerHTML='';dialog.classList.remove('automation-drawer');restoreAutomationFocus(opener,version);};
-  dialog.innerHTML=`<form class="automation-form automation-editor"><header><h2>${existing?'Edit automation':'Create automation'}</h2><div><button type="button" class="quiet" data-close>Cancel</button><button type="submit" class="primary">Save paused</button><button type="button" class="icon-button" data-close aria-label="Close automation editor">×</button></div></header>
+  dialog.classList.add('automation-drawer');dialog.onclose=()=>{MoyaiUI.render(dialog, '');dialog.classList.remove('automation-drawer');restoreAutomationFocus(opener,version);};
+  MoyaiUI.render(dialog, `<form class="automation-form automation-editor"><header><h2>${existing?'Edit automation':'Create automation'}</h2><div><button type="button" class="quiet" data-close>Cancel</button><button type="submit" class="primary">Save paused</button><button type="button" class="icon-button" data-close aria-label="Close automation editor">×</button></div></header>
     <div class="automation-editor-body"><label>Automation name<input name="name" required minlength="2" maxlength="100" placeholder="Name your automation" value="${esc(d.name)}"></label>
     <section class="automation-editor-section"><h3>Triggers</h3>${automationTriggerFields(d)}</section>
     <section class="automation-editor-section"><h3>Agent definition</h3><p class="subtext">Define what happens when a trigger matches.</p>
@@ -106,7 +106,7 @@ async function editAutomation(existing,template) {
     <section class="automation-editor-section"><h3>Environment</h3><label>Repository<input name="repo_url" type="url" placeholder="https://github.com/owner/repository" value="${esc(d.repo_url)}"></label><label>Project environment<select name="environment_id">${environmentOptions(environments,d.environment_id)}</select></label><p class="automation-policy">Uses the workspace’s existing connection permissions, tool approvals, and environment access. Runs use your account and spend; sessions are shared with signed-in teammates.</p></section>
     <section class="automation-editor-section"><h3>Metadata</h3><p class="subtext">Add key-value pairs to organize and find your automations.</p><div data-metadata></div><button type="button" data-add-metadata>＋ Add metadata</button></section>
     <section class="automation-editor-section"><h3>Limits & queueing</h3><label>Maximum runs per hour<input name="max_runs_per_hour" type="number" min="1" step="1" placeholder="No limit" value="${d.max_runs_per_hour===null?'':d.max_runs_per_hour??50}"></label><p class="automation-policy">Shared across all triggers. Clear for no hourly cap. Default: 50, or 150 for Slack message watching.</p><label class="automation-check"><input type="checkbox" name="queue_events" ${d.queue_events===true?'checked':''}>Queue overlapping event runs</label><p class="automation-policy">When selected, events wait up to 24 hours for the previous run. Otherwise, each event starts an independent session. Scheduled runs remain independent. Hourly and workspace capacity limits can still delay events.</p></section>
-    <p class="automation-policy">${existing?'Saving edits pauses the automation.':'Saved automations start paused.'} Use Run now to test, then Enable when ready. Pausing stops future runs; stop active work from its session. ${d.mode==='demo'?'This local preview runs a simulation without AI or cloud usage.':''}</p><p data-error role="alert"></p></div></form>`;
+    <p class="automation-policy">${existing?'Saving edits pauses the automation.':'Saved automations start paused.'} Use Run now to test, then Enable when ready. Pausing stops future runs; stop active work from its session. ${d.mode==='demo'?'This local preview runs a simulation without AI or cloud usage.':''}</p><p data-error role="alert"></p></div></form>`);
   dialog.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>dialog.close());
   dialog.querySelector('[data-manage-connections]').onclick=()=>dialog.close();
   const form=dialog.querySelector('form');bindAutomationTrigger(form,d);bindAutomationConnections(form);automationMetadata(form,d.metadata);
