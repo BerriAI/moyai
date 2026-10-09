@@ -18,7 +18,7 @@ def definition(**changes):
 
 
 def call(client, run, name, **arguments):
-    if name != 'automation_list':
+    if name not in {'automation_list', 'automation_webhook_info'}:
         arguments.setdefault('turn_id', run['active_message_id'])
     return client.post(f"/broker/{run['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
                        json={'name': name, 'arguments': arguments})
@@ -263,3 +263,194 @@ async def test_real_temporal_confirms_weekly_next_run_update_and_pause(workspace
         await app.state.automations.sync(env.client, automation_id=saved['id'])
         assert (await schedule.describe()).schedule.state.paused
         await schedule.delete()
+
+
+def webhook_credential(app, client, run, *, value='synthetic-webhook-secret', lifetime='persistent', name='webhook-signing-secret', expires_at=''):
+    import json
+    from app.credentials import CredentialRequest
+    saved = client.post('/api/credentials/secrets', json={
+        'provider': 'generic', 'name': name, 'format': 'env', 'label': 'Webhook test',
+        'scope': 'personal', 'lifetime': lifetime, 'root_id': run['id'] if lifetime == 'session' else '',
+        'expires_at': expires_at, 'value': json.dumps({'WEBHOOK_SECRET': value}), 'client_id': 'webhook-' + str(len(value)),
+    })
+    assert saved.status_code == 201, saved.text
+    result = app.state.credentials.request(run, CredentialRequest(
+        provider='generic', name=name, format='env', secret_id=saved.json()['id'],
+        reason='Configure a persistent automation receiver', request_key='webhook-' + str(len(value))))
+    assert result['status'] == 'provided'
+    return result['request_id']
+
+
+def webhook_automation(client, run):
+    return create(client, run, timing=None, event={'provider': 'webhook', 'event': 'probe.ready'})
+
+
+def test_webhook_tools_configure_receiver_atomically_without_secret_disclosure(workspace):
+    import json
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    saved = webhook_automation(client, run)
+    handle = webhook_credential(app, client, run)
+    args = dict(automation_id=saved['id'], revision=1, provider='webhook',
+                credential_request_id=handle, request_key='configure-webhook')
+    info = call(client, run, 'automation_webhook_info', automation_id=saved['id'])
+    assert info.status_code == 200
+    assert not info.json()['receiver']['ready']
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: call(client, run, 'automation_webhook_setup', **args), range(4)))
+    assert all(r.status_code == 200 for r in results), [r.text for r in results]
+    assert {r.json()['revision'] for r in results} == {2}
+    result = results[0].json()
+    assert result['paused'] and result['receiver']['ready']
+    assert result['provider_registration'] == 'not_verified'
+    assert result['receiver']['providers'][0]['url'].endswith('/' + saved['id'] + '/webhook')
+    serialized = json.dumps(result) + json.dumps(app.state.store.rows('SELECT * FROM automation_operations'))
+    assert 'synthetic-webhook-secret' not in serialized
+    encrypted = app.state.store.rows('SELECT encrypted FROM automation_webhooks')[0]['encrypted']
+    assert encrypted not in serialized
+    assert app.state.security.decrypt(encrypted) == 'synthetic-webhook-secret'
+    assert call(client, run, 'automation_webhook_setup', **{**args, 'provider': 'github'}).status_code == 409
+    assert call(client, run, 'automation_webhook_setup', **{**args, 'request_key': 'stale-webhook-config'}).status_code == 409
+
+
+@pytest.mark.parametrize('lifetime,name,value', [
+    ('session', 'webhook-signing-secret', 'synthetic-webhook-secret'),
+    ('persistent', 'other-capability', 'synthetic-webhook-secret'),
+    ('persistent', 'webhook-signing-secret', 'short'),
+    ('persistent', 'webhook-signing-secret', 'x' * 513),
+])
+def test_webhook_setup_rejects_wrong_credential_shape_without_echo(workspace, lifetime, name, value):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    saved = webhook_automation(client, run)
+    handle = webhook_credential(app, client, run, lifetime=lifetime, name=name, value=value)
+    result = call(client, run, 'automation_webhook_setup', automation_id=saved['id'], revision=1,
+                  provider='webhook', credential_request_id=handle, request_key='invalid-webhook')
+    assert result.status_code == 422
+    assert value not in result.text
+    assert not app.state.store.rows('SELECT * FROM automation_webhooks')
+    assert app.state.automations.row(saved['id'])['revision'] == 1
+
+
+def test_webhook_setup_owner_turn_and_revocation_checks(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    alice = active(app)
+    saved = webhook_automation(client, alice)
+    handle = webhook_credential(app, client, alice)
+    args = dict(automation_id=saved['id'], revision=1, provider='webhook',
+                credential_request_id=handle, request_key='protected-webhook')
+    assert call(client, alice, 'automation_webhook_setup', **args, turn_id=alice['active_message_id']+1).status_code == 409
+    sign_in(app, client, 'bob', 'bob@berri.ai')
+    app.state.settings.google_admin_emails = 'bob@berri.ai'
+    bob = active(app, 'google:bob')
+    assert call(client, bob, 'automation_webhook_info', automation_id=saved['id']).status_code == 404
+    assert call(client, bob, 'automation_webhook_setup', **args).status_code == 404
+    bobs = webhook_automation(client, bob)
+    assert call(client, bob, 'automation_webhook_setup', **{**args, 'automation_id': bobs['id']}).status_code == 403
+    app.state.store.execute("UPDATE provider_secrets SET revoked_at=?", (now(),))
+    assert call(client, alice, 'automation_webhook_setup', **args).status_code == 403
+    assert not app.state.store.rows('SELECT * FROM automation_webhooks')
+
+
+def test_webhook_setup_checkpoint_recovery_and_rotation(workspace, monkeypatch):
+    from test_automation_events import signed
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    saved = webhook_automation(client, run)
+    handle = webhook_credential(app, client, run, value='webhook-test-secret-only')
+    args = dict(automation_id=saved['id'], revision=1, provider='webhook',
+                credential_request_id=handle, request_key='recover-webhook')
+    flush = app.state.automations.checkpoints.flush
+    async def failed():
+        raise RuntimeError('synthetic checkpoint failure')
+    monkeypatch.setattr(app.state.automations.checkpoints, 'flush', failed)
+    with pytest.raises(RuntimeError, match='synthetic checkpoint'):
+        call(client, run, 'automation_webhook_setup', **args)
+    monkeypatch.setattr(app.state.automations.checkpoints, 'flush', flush)
+    assert call(client, run, 'automation_webhook_setup', **args).json()['revision'] == 2
+    app.state.store.execute('UPDATE automations SET paused=0 WHERE id=?', (saved['id'],))
+    path = '/hooks/automations/' + saved['id'] + '/webhook'
+    payload = {'event': 'probe.ready'}
+    assert client.post(path, **signed('webhook', payload)).json()['status'] == 'accepted'
+    second = webhook_credential(app, client, run, value='rotated-webhook-secret')
+    rotated = call(client, run, 'automation_webhook_setup', **{
+        **args, 'revision': 2, 'credential_request_id': second, 'request_key': 'rotate-webhook'})
+    assert rotated.json()['revision'] == 3 and rotated.json()['paused']
+    assert client.post(path, **signed('webhook', payload)).status_code == 401
+    assert call(client, run, 'automation_webhook_setup', **args).status_code == 409
+
+
+def test_webhook_catalog_and_storage_failure_are_safe(workspace, monkeypatch):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    catalog = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'}).json()
+    tools = {t['name']: t for t in catalog}
+    assert tools['automation_webhook_info']['annotations']['readOnlyHint']
+    setup = tools['automation_webhook_setup']
+    assert not setup['annotations']['readOnlyHint']
+    assert 'secret' not in setup['inputSchema']['properties']
+    assert 'credential_request_id' in setup['inputSchema']['required']
+    saved = webhook_automation(client, run)
+    handle = webhook_credential(app, client, run)
+    args = dict(automation_id=saved['id'], revision=1, provider='webhook',
+                credential_request_id=handle, request_key='rollback-webhook')
+    response = call(client, run, 'automation_webhook_setup', **args, secret='canary-never-echo')
+    assert response.status_code == 422 and 'canary-never-echo' not in response.text
+    def fail_encrypt(value):
+        raise RuntimeError('synthetic encryption failure')
+    monkeypatch.setattr(app.state.security, 'encrypt', fail_encrypt)
+    with pytest.raises(RuntimeError, match='synthetic encryption'):
+        call(client, run, 'automation_webhook_setup', **args)
+    assert app.state.automations.row(saved['id'])['revision'] == 1
+    assert not app.state.store.rows('SELECT * FROM automation_webhooks')
+    assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
+
+
+@pytest.mark.parametrize('provider,event', [('linear', 'issue.created'), ('pagerduty', 'incident.triggered'),
+                                            ('github', 'push'), ('slack', 'message.posted'), ('webhook', 'probe.ready')])
+def test_shared_receiver_configuration_validates_provider_invariant(workspace, provider, event):
+    from app.automation_events import WebhookSetup
+    from app.automations import Definition, Save
+    from fastapi import HTTPException
+    app, client = workspace
+    sign_in(app, client)
+    source = {'provider': provider, 'event': event}
+    if provider == 'github':
+        source.update(repository='BerriAI/example', repository_id=123)
+    if provider == 'slack':
+        source['channel_id'] = 'C12345678'
+    if provider == 'linear':
+        source['team_id'] = '11111111-1111-1111-1111-111111111111'
+    model = Definition(name='Provider test', prompt='Test only', event=source)
+    row = app.state.automations.save(Save(definition=model), 'google:alice')
+    service = app.state.automations.events
+    if provider == 'slack':
+        with pytest.raises(HTTPException) as error:
+            service.configure(row['id'], WebhookSetup(revision=1, provider=provider, secret='synthetic-valid-secret'), 'google:alice')
+        assert error.value.status_code == 409
+    else:
+        if provider in {'linear', 'pagerduty'}:
+            with pytest.raises(HTTPException) as error:
+                service.configure(row['id'], WebhookSetup(revision=1, provider=provider), 'google:alice')
+            assert error.value.status_code == 422
+        secret, revision = service.configure(row['id'], WebhookSetup(revision=1, provider=provider, secret='synthetic-valid-secret'), 'google:alice')
+        assert secret == 'synthetic-valid-secret' and revision == 2
+    with pytest.raises(HTTPException):
+        service.configure(row['id'], WebhookSetup(revision=2, provider=provider, secret='synthetic-valid-secret'), 'google:bob')
+
+
+def test_webhook_setup_does_not_extend_credential_expiration(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    saved = webhook_automation(client, run)
+    handle = webhook_credential(app, client, run, expires_at='2099-01-01T00:00:00+00:00')
+    response = call(client, run, 'automation_webhook_setup', automation_id=saved['id'], revision=1,
+                    provider='webhook', credential_request_id=handle, request_key='expiring-secret')
+    assert response.status_code == 422
+    assert not app.state.store.rows('SELECT * FROM automation_webhooks')
