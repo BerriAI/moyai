@@ -137,11 +137,23 @@
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
   function completedHistory(run,turns=groups(run)){
-    const histories=new Map();
+    const histories=new Map(),answered=new Set(),pending=[];
+    // The API orders messages by delivery, not enqueue time. Match each
+    // answer to its delivered root input, skipping queues and steering.
+    // A stack also handles an inline session-ID exchange during live work.
+    for(const message of run.messages||[]){
+      if(message.role==='user'){
+        if(!message.steering_parent_id&&!['queued','steered'].includes(message.status)&&message.started_at!=='')pending.push(String(message.id));
+      }else if(message.role==='assistant'&&message.status!=='steered'){
+        const id=pending.pop();
+        if(id&&message.status==='completed')answered.add(id);
+      }
+    }
     for(const turn of turns.values()){
       // A failed, interrupted, or waiting turn may still need a reply. Keep
-      // its commentary visible until the task has a successful closeout.
-      if(!['completed','idle'].includes(turn.status))continue;
+      // commentary visible until its successful answer is in the transcript:
+      // streamed save/idle events can arrive before the fresh message list.
+      if(!['completed','idle'].includes(turn.status)||!answered.has(turn.id))continue;
       const ids=new Set([turn.id,...(run.messages||[]).filter(message=>String(message.steering_parent_id)===turn.id).map(message=>String(message.id)),
         ...turn.events.filter(event=>event.data?.phase==='steering'&&event.data.message_id).map(event=>String(event.data.message_id))]);
       for(const id of ids)histories.set(id,id===turn.input?(turn.start?`Worked for ${duration(turn.start,turn.end)}`:'Work history'):'Earlier activity');

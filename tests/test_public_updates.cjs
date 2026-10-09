@@ -3,6 +3,7 @@ const {test}=require('node:test');
 const {groups,updates,completedHistory,updateHTML,html,sync}=require('../app/static/activity.js');
 const stamp=n=>new Date(Date.UTC(2026,9,1,12,0,n)).toISOString();
 const event=(id,kind,message,data={})=>({id,kind,message,data,created_at:stamp(id)});
+const answer=(id=4,status='completed')=>({id,role:'assistant',status,content:'The change is saved.',created_at:stamp(id)});
 function run(){return {status:'running',active_message_id:1,messages:[
   {id:1,role:'user',status:'running'},{id:2,role:'user',status:'injected',steering_parent_id:1},
   {id:3,role:'user',status:'queued'}],events:[
@@ -35,10 +36,60 @@ test('only successful closeouts collapse progress, with steering replies under t
     assert.equal(completedHistory(data).size,0,status);
   }
   data.status='idle';data.messages[0].status='completed';
+  data.messages.push(answer());
   data.events.push(event(30,'chat','Response saved',{message_id:1}));
   assert.deepEqual([...completedHistory(data)],[['1','Earlier activity'],['2','Worked for 29s']]);
   assert.equal(completedHistory(data).has('3'),false,'a queued input has no completed history');
   assert.deepEqual(completedHistory(structuredClone(data)),completedHistory(data),'reload reconstructs history');
+});
+
+test('save and idle events keep progress visible until the final reply reaches the transcript',()=>{
+  for(const signal of ['saved','idle','completed message']){
+    const data=run(),view=dom();sync(view.container,data,view.options);
+    const update=view.slots[1].children[0];
+    if(signal==='saved')data.events.push(event(30,'chat','Response saved',{message_id:1}));
+    if(signal==='idle')data.status='idle';
+    if(signal==='completed message')data.messages[0].status='completed';
+    assert.equal(completedHistory(data).size,0,signal);
+    sync(view.container,data,view.options);
+    assert.equal(view.slots[1].children[0],update,'the update stays visible before the answer');
+    data.messages[0].status='completed';data.messages.push(answer());
+    sync(view.container,data,view.options);
+    assert.equal(view.slots[1].children[0].className,'turn-work completed-work');
+    assert.equal(view.slots[1].children[0].querySelector('.work-body').children[0],update);
+  }
+});
+
+test('a previous answer and queued inputs cannot close a later turn without its own final reply',()=>{
+  const data=run();data.messages[0].status='completed';
+  data.messages=[data.messages[0],data.messages[1],answer(),{...data.messages[2],status:'running'}];
+  data.active_message_id=3;
+  data.events.push(event(30,'chat','Response saved',{message_id:1}),event(31,'chat','Response started',{message_id:3}),
+    event(32,'message','Checking the follow-up.',{turn_id:3}),event(33,'chat','Response saved',{message_id:3}));
+  assert.equal(completedHistory(data).has('1'),true);
+  assert.equal(completedHistory(data).has('3'),false,'the first answer is not the follow-up answer');
+  data.messages.push({id:5,role:'user',status:'queued',send_immediately:true},answer(6));
+  data.messages[3].status='completed';
+  assert.equal(completedHistory(data).has('3'),true,'a queued input cannot claim the preceding turn answer');
+  assert.equal(completedHistory(data).has('5'),false);
+  assert.deepEqual(completedHistory(structuredClone(data)),completedHistory(data));
+});
+
+test('only a visible successful answer closes progress, including interleaved session metadata replies',()=>{
+  const data=run();data.status='idle';data.messages[0].status='completed';
+  for(const status of ['steered','queued','failed','cancelled','interrupted','save_failed']){
+    data.messages.push(answer(4,status));
+    assert.equal(completedHistory(data).size,0,status);
+    data.messages.pop();
+  }
+  data.messages.push({id:4,role:'user',status:'cancelled',started_at:''},
+    {id:5,role:'user',status:'completed',started_at:stamp(10)},answer(6));
+  assert.equal(completedHistory(data).has('1'),false,'an inline session-ID reply is not the task answer');
+  data.messages.push(answer(7));
+  assert.equal(completedHistory(data).has('1'),true,'the task answer follows the inline reply');
+  assert.equal(completedHistory(data).has('2'),true,'delivered steering shares the task answer');
+  assert.equal(completedHistory(data).has('3'),false);
+  assert.equal(completedHistory(data).has('4'),false,'a cancelled queued input has no answer');
 });
 
 test('multiple steering inputs, replay, and a later turn retain the correct update order',()=>{
@@ -113,6 +164,7 @@ test('completion folds existing updates once; expansion, copy and focus survive 
   const data=run(),view=dom();sync(view.container,data,view.options);
   const update=view.slots[1].children[0];view.document.activeElement=update;
   data.messages[0].status='completed';data.status='idle';data.events.push(event(30,'chat','Response saved',{message_id:1}));
+  data.messages.push(answer());
   sync(view.container,data,view.options);
   const history=view.slots[1].children[0];
   assert.equal(history.open,false);assert.equal(history.querySelector('.work-title').textContent,'Worked for 29s');
