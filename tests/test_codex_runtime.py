@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -172,3 +173,99 @@ def test_reused_runtime_native_search_and_real_broker(tmp_path, monkeypatch, run
         assert all(proof.values())
     assert info[1]['reused'] and info[0]['pid'] == info[1]['pid']
     assert all(value['clean'] for value in info)
+
+
+@pytest.mark.parametrize('fault', ['unload', 'unload_and_lease', 'unload_and_sdk', 'sdk_exit'])
+def test_cleanup_failure_preserves_completed_answer_and_discards_process(tmp_path, monkeypatch, runtime_root, fault):
+    from openai_codex.async_client import AsyncCodexClient
+    injected = []
+    request, sdk_exit, close = AsyncCodexClient.request, AsyncCodexClient.__aexit__, RuntimeLease.close
+
+    async def cleanup_request(self, method, *args, **kwargs):
+        if method == 'thread/unsubscribe' and fault.startswith('unload'):
+            injected.append('unload')
+            raise OSError('Injected unload failure')
+        return await request(self, method, *args, **kwargs)
+
+    async def close_sdk(self, *args):
+        await sdk_exit(self, *args)
+        if fault in {'unload_and_sdk', 'sdk_exit'}:
+            injected.append('sdk')
+            raise OSError('Injected SDK shutdown failure')
+
+    def close_lease(self):
+        close(self)
+        if fault == 'unload_and_lease' and 'lease' not in injected:
+            injected.append('lease')
+            raise OSError('Injected lease close failure')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncCodexClient, 'request', cleanup_request)
+        patch.setattr(AsyncCodexClient, '__aexit__', close_sdk)
+        patch.setattr(RuntimeLease, 'close', close_lease)
+        proof, requests, result = reuse_case(tmp_path, patch, runtime_root)
+    assert injected, 'The fault must be reached after the real native turn'
+    assert result['completed'] and not result['failed'], result
+    assert result['final_response'] == 'Tools were ready before the first request.'
+    assert proof['tool_calls'] == ['echo'] and len(requests) == 2  # No replay.
+    assert not proof['clean']
+    replacement, _, result = reuse_case(tmp_path, monkeypatch, runtime_root)
+    assert replacement['completed'] and replacement['pid'] != proof['pid'], result
+    print(f'PASS {fault}: completed answer preserved; tool executed once; runtime discarded.')
+
+
+@pytest.mark.parametrize('fault', ['pool', 'disconnect', 'stream', 'connection', 'lock'])
+def test_lease_close_attempts_all_resources_even_when_one_fails(fault):
+    calls = []
+
+    def release(name):
+        calls.append(name)
+        if name == fault:
+            raise OSError('Injected close failure')
+
+    lease = RuntimeLease.__new__(RuntimeLease)
+    lease.pool = SimpleNamespace(shutdown=lambda **kwargs: release('pool'))
+    lease.info = None
+    lease.stream = SimpleNamespace(close=lambda: release('stream'))
+    lease.connection = SimpleNamespace(shutdown=lambda *args: release('disconnect'),
+                                       close=lambda: release('connection'))
+    lease.lock = SimpleNamespace(close=lambda: release('lock'))
+    lease.close()
+    assert {'pool', 'disconnect', 'stream', 'connection', 'lock'} <= set(calls)
+    assert lease.stream is lease.connection is lease.lock is None
+    lease.close()
+    assert calls.count('stream') == calls.count('connection') == calls.count('lock') == 1
+
+
+@pytest.mark.parametrize('turn_failed', [False, True])
+def test_entrypoint_always_closes_relay_without_changing_turn_outcome(monkeypatch, turn_failed):
+    from sandbox import agent, codex_runtime
+    calls = []
+    relay = SimpleNamespace(url='http://fixture', close=lambda: calls.append('relay'))
+    relay.start = lambda: relay
+
+    def close():
+        calls.append('lease')
+        raise OSError('Injected lease cleanup failure')
+
+    def run_agent(spec, relay):
+        calls.append('turn')
+        if turn_failed:
+            raise ValueError('Original turn failure')
+        agent.emit('final', 'Completed answer.', completed=True)
+        return 0
+
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-only')
+    monkeypatch.setattr(agent, 'BrokerRelay', lambda *args, **kwargs: relay)
+    monkeypatch.setattr(codex_runtime, 'RuntimeLease', lambda *args, **kwargs: SimpleNamespace(close=close))
+    monkeypatch.setattr(codex_runtime, 'discard_orphan', lambda: None)
+    monkeypatch.setattr(agent, 'run_agent', run_agent)
+    monkeypatch.setattr(agent, 'emit', lambda *args, **kwargs: calls.append('final'))
+    spec = {'broker_url': 'http://fixture', 'harness': 'codex', 'model': 'openai/gpt-6-astra',
+            'codex_runtime_scope': 'fixture', 'codex_runtime_idle_seconds': 5}
+    if turn_failed:
+        with pytest.raises(ValueError, match='Original turn failure'):
+            agent.run(spec)
+    else:
+        assert agent.run(spec) == 0
+    assert calls == (['turn'] if turn_failed else ['turn', 'final']) + ['lease', 'relay']

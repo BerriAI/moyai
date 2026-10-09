@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 
 
 ROOT = Path('/run/moyai-codex')
@@ -113,21 +114,26 @@ class RuntimeLease:
             return None  # Before inference only: the normal cold path remains usable.
 
     def close(self):
-        self.pool.shutdown(wait=True)
         try:
+            self.pool.shutdown(wait=True)
             if self.info and self.stream:
                 self.connection.settimeout(5)
                 write_message(self.stream, {'clean': self.clean})
                 read_message(self.stream)
-        except (OSError, ValueError):
+        except Exception:
             pass  # A missing clean release makes the supervisor discard the process.
         finally:
-            if self.stream:
-                self.stream.close()
-            if self.connection:
-                self.connection.close()
-            if self.lock:
-                self.lock.close()
+            # Disconnect even if a buffered stream cannot flush/close. Every
+            # handle gets its own close attempt; release is safe to repeat.
+            with suppress(Exception):
+                if self.connection:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+            for name in ('stream', 'connection', 'lock'):
+                resource = getattr(self, name)
+                setattr(self, name, None)
+                with suppress(Exception):
+                    if resource:
+                        resource.close()
 
 
 def stop_process(process):

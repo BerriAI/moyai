@@ -1,6 +1,6 @@
 """Native Codex SDK execution within Moyai's existing sandbox and lifecycle."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import replace
 import json
 import os
@@ -183,31 +183,44 @@ class CodexAgent(HarnessAgent):
             config = replace(config, launch_args_override=(sys.executable, str(proxy),
                              'proxy', self.runtime_info['socket']))
             lease.clean = False
-        async with AsyncCodexClient(config) as client:
-            try:
+        if not self.runtime_info:
+            async with AsyncCodexClient(config) as client:
                 yield client
+            return
+
+        # Close the SDK transport before discarding its native process. Keep
+        # teardown separate from the turn so it cannot replace either a saved
+        # answer or the original execution exception/cancellation.
+        stack, unloaded = AsyncExitStack(), False
+        try:
+            client = await stack.enter_async_context(AsyncCodexClient(config))
+            yield client
+            with suppress(Exception):
+                if self.runtime_clean and self.runtime_thread:
+                    async with asyncio.timeout(5):
+                        await client.request('thread/backgroundTerminals/clean',
+                            {'threadId': self.runtime_thread}, response_model=RootModel[dict])
+                        await client.request('thread/unsubscribe', {'threadId': self.runtime_thread},
+                                             response_model=RootModel[dict])
+                        while True:
+                            loaded = await client.request('thread/loaded/list', {}, response_model=RootModel[dict])
+                            if not loaded.root['data']:
+                                unloaded = True
+                                break
+                            await asyncio.sleep(.01)
+        finally:
+            clean = False
+            try:
+                await stack.aclose()
+                clean = unloaded
+            except Exception:
+                pass
             finally:
-                if self.runtime_info:
-                    clean = False
-                    try:
-                        if self.runtime_clean and self.runtime_thread:
-                            async with asyncio.timeout(5):
-                                await client.request('thread/backgroundTerminals/clean',
-                                    {'threadId': self.runtime_thread}, response_model=RootModel[dict])
-                                await client.request('thread/unsubscribe', {'threadId': self.runtime_thread},
-                                                     response_model=RootModel[dict])
-                                while True:
-                                    loaded = await client.request('thread/loaded/list', {}, response_model=RootModel[dict])
-                                    if not loaded.root['data']:
-                                        clean = True
-                                        break
-                                    await asyncio.sleep(.01)
-                    except Exception:
-                        pass  # Cleanup failure discards reuse, never a completed answer.
-                    lease.clean = clean
-                    if not clean:
+                lease.clean = clean
+                if not clean:
+                    self.context.relay.codex_runtime = None
+                    with suppress(Exception):
                         await asyncio.to_thread(lease.close)
-                        self.context.relay.codex_runtime = None
 
     def record_item(self, item, *, completed):
         kind = item.get('type')

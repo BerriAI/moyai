@@ -103,6 +103,44 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
     return observed
 
 
+@pytest.mark.parametrize('error_type', [ValueError, asyncio.CancelledError])
+def test_warm_teardown_preserves_original_execution_error(codex_agent, monkeypatch, tmp_path, error_type):
+    agent, _, _ = codex_agent
+    closed = []
+
+    async def stream():
+        yield None  # No turn is started in this lifecycle-only case.
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    from openai_codex.async_client import AsyncCodexClient
+    sdk_exit = AsyncCodexClient.__aexit__
+
+    async def failed_exit(self, *args):
+        await sdk_exit(self, *args)
+        raise OSError('SDK cleanup failed')
+
+    def failed_close():
+        closed.append('lease')
+        raise OSError('Lease cleanup failed')
+
+    lease = SimpleNamespace(clean=False, close=failed_close,
+        ready=lambda: {'socket': '/fixture/runtime.sock', 'catalog': '/fixture/models.json'})
+    agent.context.relay.codex_runtime = lease
+    monkeypatch.setattr(codex_harness, 'search_catalog', lambda *args, **kwargs: None)
+    monkeypatch.setattr(AsyncCodexClient, '__aexit__', failed_exit)
+    original = error_type('Original execution error')
+
+    async def execute():
+        async with agent.native_client(tmp_path):
+            raise original
+
+    with pytest.raises(error_type) as caught:
+        asyncio.run(execute())
+    assert caught.value is original
+    assert closed == ['lease'] and observed.exits == [0]
+    assert not lease.clean and agent.context.relay.codex_runtime is None
+
+
 @pytest.mark.parametrize('delivery', ['active', 'ended', 'accepted-at-finish', 'unknown-error'])
 @pytest.mark.parametrize('phase', ['final_answer', None])
 def test_live_input_uses_current_native_turn_and_preserves_journal(codex_agent, monkeypatch, delivery, phase):
@@ -844,7 +882,18 @@ def test_broker_readiness_cannot_override_recovery_boundaries(codex_agent, monke
     sleep, probes = asyncio.sleep, []
     agent.context.spec['transport_recovery_seconds'] = 0.04 if reason == 'recovery_deadline' else 5
     if reason == 'task_deadline':
-        agent.context.spec['timeout'] = 0.04
+        # Expire the actual task timeout only after readiness is reached. A
+        # 40 ms startup deadline can fire before the first probe on busy CI.
+        agent.context.spec['timeout'] = 5
+        task_timeouts, timeout = [], asyncio.timeout
+
+        def task_timeout(seconds):
+            scope = timeout(seconds)
+            if seconds == 5:
+                task_timeouts.append((asyncio.get_running_loop(), scope))
+            return scope
+
+        monkeypatch.setattr(codex_harness.asyncio, 'timeout', task_timeout)
     monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.01)
 
     async def fast_backoff(seconds):
@@ -853,6 +902,9 @@ def test_broker_readiness_cannot_override_recovery_boundaries(codex_agent, monke
     def model_ready(*, timeout):
         probes.append(timeout)
         assert not observed.exits and agent.model_calls == 1
+        if reason == 'task_deadline':
+            loop, scope = task_timeouts[0]
+            loop.call_soon_threadsafe(scope.reschedule, loop.time())
         if reason in {'unauthorized', 'forbidden'}:
             raise urllib.error.HTTPError('http://broker/v1/models',
                 401 if reason == 'unauthorized' else 403, 'Unauthorized', {}, None)

@@ -90,9 +90,13 @@ def run(spec):
         emit('final', str(exc), completed=False)
         return 1
     finally:
-        if getattr(relay, 'codex_runtime', None):
-            relay.codex_runtime.close()
-        relay.close()
+        try:
+            if getattr(relay, 'codex_runtime', None):
+                relay.codex_runtime.close()
+        except Exception:
+            pass  # Optional runtime teardown must not change the emitted outcome.
+        finally:
+            relay.close()
 
 
 def reconnecting(message):
