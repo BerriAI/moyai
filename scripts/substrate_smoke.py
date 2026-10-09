@@ -144,7 +144,9 @@ async def main():
         assert output.strip() == 'Moyai'
         assert (await clone.filesystem.read_bytes.aio('/workspace/browser.png')).startswith(b'\x89PNG')
         print('PASS real Chromium and screenshot artifact', flush=True)
-        await verify_computer(clone)
+        # Headed Computer capture is excluded from this Substrate smoke run:
+        # https://github.com/BerriAI/moyai/actions/runs/37868797486
+        # Lambda conformance still exercises verify_computer before/after restore.
         if os.environ.get('MOYAI_SMOKE_FULL_IMAGE'):
             await verify_agent_image(clone)
             await verify_environment_build(clone)
