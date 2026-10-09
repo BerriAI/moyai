@@ -10,8 +10,11 @@ def tool_guidance(harness):
             'Use one workspace invocation per tool_call; batch tool_describe when you need several schemas. ')
     elif harness == 'codex':
         discovery = (
-            'Codex exposes Moyai MCP tools directly using mcp__moyai__ names in its native tool catalog. '
-            'In code mode, inspect ALL_TOOLS inside functions.exec and invoke the exact listed tool through tools. '
+            'Codex exposes native tool_search for supported models. Search by service and action to load '
+            'the matching Moyai MCP schemas, then invoke the exact returned tool and namespace directly. '
+            'Native search returns schemas; no separate describe or generic tool_call step is needed. '
+            'Programmatic calls through functions.exec remain available. If the model does not expose '
+            'tool_search, use its actual catalog; in code mode, inspect ALL_TOOLS and call the listed tool through tools. '
             'This integration does not provide the Hermes search/describe/call interface. '
             'The runtime waits for the Moyai MCP server before the first model request. ')
     elif harness == 'claude-agent-sdk':

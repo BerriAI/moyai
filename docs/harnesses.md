@@ -40,15 +40,31 @@ runtime waits for its actual tool catalog before sending the first model request
 failed or timed-out MCP discovery ends the turn without inference. Optional MCP
 startup previously let Codex begin with native tools only and add connected tools
 mid-turn. This could produce false missing-access answers and failed early calls.
-Codex uses direct `mcp__moyai__` tools (or `ALL_TOOLS` inside code mode), Claude
-uses native `ToolSearch`, and Hermes uses `tool_search`/`tool_describe`/`tool_call`.
+Codex uses native `tool_search` to discover MCP schemas and then calls the returned
+tool namespace directly. Claude uses native `ToolSearch`, and Hermes uses
+`tool_search`/`tool_describe`/`tool_call`.
 Shared instructions select the correct discovery path for the active harness.
 
-To reproduce the startup boundary using real Codex and MCP with local inference:
+Native search is always enabled in the pinned runtime for search-capable models;
+the old `features.tool_search` flag is a retired no-op. However, Astra and Sol's
+bundled `code_mode_only` setting hides the standalone search tool, and that special
+tool cannot be invoked inside `functions.exec`. At startup Moyai reads the pinned
+binary's full catalog with `debug models --bundled`, changes only the selected
+search-capable model from `code_mode_only` to `code_mode`, and supplies it through
+`model_catalog_json` in the disposable native home. This retains `functions.exec`
+and all original model metadata and prompts while exposing native client search.
+The catalog probe receives no provider credentials or broker capability and does
+not refresh from the network. Other models retain their original tool mode.
+Search covers only the MCP tools authorized for this session; discovery does not
+grant additional connection access. Models without search use their actual tool
+catalog, including `ALL_TOOLS` when code mode is available.
+
+To reproduce startup and native search using real Codex and MCP with scripted local inference:
 
 ```sh
-uv run pytest -q tests/test_codex_tool_readiness.py tests/test_workspace_diagnostics.py
+uv run pytest -q tests/test_codex_tool_readiness.py tests/test_codex_tool_search.py tests/test_workspace_diagnostics.py
 uv run python scripts/tool_readiness_demo.py --output /tmp/moyai-tool-readiness
+uv run python scripts/codex_tool_search_demo.py --output /tmp/moyai-tool-search
 ```
 
 The SDK receives the run capability and sends Responses requests to Moyai's local
@@ -65,9 +81,11 @@ shell/file tools and Moyai MCP tools. Moyai saves receipts from public
 `commandExecution`, `fileChange`, `mcpToolCall` and `imageView` lifecycle items.
 Code-mode outer call IDs differ from nested tool IDs. Before allowing the next
 model request, the relay waits for its output IDs to appear in the ordered native
-`rawResponseItem/completed` stream and for all nested receipts to settle. Only
-those IDs are consumed from raw events; private request/response contents never
-become public receipts. A missing receipt blocks the boundary rather than inventing
+`rawResponseItem/completed` stream and for all nested receipts to settle. Raw native
+client `tool_search_call` and `tool_search_output` events also supply search receipts,
+using their call IDs, arguments and discovered schemas. Other raw events contribute
+only output IDs; private reasoning and model responses never become public receipts.
+A missing receipt blocks the boundary rather than inventing
 completion. Corrections, delegation waits and cooperative checkpoints occur at
 these boundaries; native in-flight steering is not enabled.
 
@@ -85,7 +103,8 @@ rejection uses the same bounded journal-recovery path as Claude, preserving the
 original request, deadlines and completed receipts. The gateway must support both
 Responses and Chat Completions for durable summary generation. For Astra it must
 also preserve native Responses items such as `additional_tools`, tool namespaces,
-custom tool calls/outputs and streamed completion events.
+custom tool calls/outputs, client `tool_search_call`/`tool_search_output` items and
+streamed completion events.
 
 Transient model connection failures with pending tools continue in the same live
 native thread, preserving existing command sessions under the original turn

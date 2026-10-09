@@ -96,6 +96,9 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
             return event
 
     monkeypatch.setattr('openai_codex.async_client.AsyncCodexClient', Client)
+    # These synthetic transport tests include millisecond deadlines. Catalog
+    # preparation is exercised separately with the real pinned binary.
+    monkeypatch.setattr(codex_harness, 'search_catalog', lambda *args: None)
     monkeypatch.setattr(agent, 'validate', lambda: None)
     return observed
 
@@ -1202,11 +1205,21 @@ def test_sdk_config_clears_inherited_credentials_and_uses_only_broker(codex_agen
     project.mkdir()
     (project / 'config.toml').write_text('[mcp_servers.foreign]\ncommand="untrusted-command"\n')
     home = tmp_path / 'fresh-home'
+    catalog_env = {}
+    search_catalog = codex_harness.search_catalog
+    def observe_catalog(binary, home, model, env):
+        catalog_env.update(env)
+        return search_catalog(binary, home, model, env)
+    monkeypatch.setattr(codex_harness, 'search_catalog', observe_catalog)
     config = agent.sdk_config(home)
     settings = tomllib.loads('\n'.join(config.config_overrides))
     assert config.cwd == str(home) and config.env['CODEX_HOME'] == str(home)
     assert config.env['WORKSPACE_RUN_TOKEN'] == 'run-capability'
     assert 'inherited-private-marker' not in json.dumps(config.env)
+    assert set(catalog_env) <= {'PATH', 'LANG', 'LC_ALL', 'TMPDIR', 'SYSTEMROOT', 'CODEX_HOME'}
+    assert 'run-capability' not in json.dumps(catalog_env)
+    catalog = json.loads(Path(settings['model_catalog_json']).read_text())
+    assert next(model for model in catalog['models'] if model['slug'] == 'gpt-6-astra')['tool_mode'] == 'code_mode'
     assert settings['model_provider'] == 'moyai'
     provider = settings['model_providers']['moyai']
     assert (provider['base_url'], provider['env_key'], provider['wire_api']) == (

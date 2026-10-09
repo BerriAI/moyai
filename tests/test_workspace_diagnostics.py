@@ -70,7 +70,7 @@ def test_mcp_diagnostics_distinguishes_last_catalog_from_current_broker(monkeypa
 @pytest.mark.parametrize('harness', ['hermes', 'codex', 'claude-agent-sdk', 'deepagents', 'tool-loop', 'opencode', 'pi'])
 def test_discovery_instructions_match_runtime(harness):
     instructions = tool_guidance(harness)
-    assert ('tool_search' in instructions) is (harness == 'hermes')
+    assert ('tool_search' in instructions) is (harness in {'hermes', 'codex'})
     assert ('ToolSearch' in instructions) is (harness == 'claude-agent-sdk')
     assert ('ALL_TOOLS' in instructions) is (harness == 'codex')
     assert 'workspace_diagnostics' in instructions and 'github_checkout' in instructions
