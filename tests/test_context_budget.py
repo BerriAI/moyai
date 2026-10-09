@@ -179,7 +179,7 @@ def test_revocation_during_count_cannot_admit_model(workspace, monkeypatch):
 
 
 @pytest.mark.parametrize('route,field', [('messages', 'messages'), ('responses', 'input'), ('chat/completions', 'messages')])
-@pytest.mark.parametrize('code,expected', [('context_length_exceeded', 409), ('rate_limit_exceeded', 502)])
+@pytest.mark.parametrize('code,expected', [('context_length_exceeded', 409), ('rate_limit_exceeded', 400)])
 def test_only_confirmed_provider_context_rejection_can_request_recovery(workspace, monkeypatch, route, field, code, expected):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'

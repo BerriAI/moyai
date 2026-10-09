@@ -15,7 +15,7 @@ from .spend import UsageCapture
 from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, private_compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
-from .broker_diagnostics import upstream_headers
+from .broker_diagnostics import model_gateway_error, upstream_headers
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -333,8 +333,7 @@ class HarnessGateway:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
                     raise SummaryFailure('upstream_unavailable' if transient else 'upstream_rejected',
                                          retryable=transient, transient=transient)
-                raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}).',
-                                    headers=upstream_headers(request_id, upstream))
+                raise model_gateway_error(request_id, upstream, raw_error)
             if not capture.streaming:
                 raw = bytearray()
                 async for chunk in upstream.aiter_bytes():

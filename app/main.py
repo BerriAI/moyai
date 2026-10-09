@@ -33,7 +33,7 @@ from .user_roles import UserRoles
 from .user_preferences import UserPreferences
 from .model_preferences import preferred_model, save_model
 from .access_logging import configure_access_logging
-from .broker_diagnostics import BrokerDiagnosticsMiddleware, upstream_headers
+from .broker_diagnostics import BrokerDiagnosticsMiddleware, model_gateway_error, upstream_headers
 from .workspace_diagnostics import DIAGNOSTIC_TOOL, DiagnosticArgs, inspect_workspace
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
@@ -1197,8 +1197,7 @@ def create_app(settings: Settings | None = None):
                         if provider_context_rejection(upstream.status_code, raw_error):
                             store.event(run_id, 'context', 'The provider requested further context reduction.', checked_budget.public())
                             raise ContextPressure(checked_budget.public())
-                        raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}). Check model access and gateway configuration.',
-                                            headers=upstream_headers(request_id, upstream))
+                        raise model_gateway_error(request_id, upstream, raw_error)
                     # Bound transport memory independently of model token limits.
                     raw_response = bytearray()
                     async for chunk in upstream.aiter_bytes():

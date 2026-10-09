@@ -360,7 +360,7 @@ class BrokerRelay:
                     record_failure(exc, headers=exc.headers, status=exc.code,
                                    message=message if not credential_route else None)
                     exc.close()
-                    self.error(502 if exc.code == 403 else exc.code, message)
+                    self.error(502 if message == EDGE_ERROR else exc.code, message)
                 except (ValueError, KeyError, TypeError, AttributeError) as exc:
                     if not response_started:
                         self.error(422, 'Unsupported or invalid model wire payload.')

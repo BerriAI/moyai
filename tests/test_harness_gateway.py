@@ -13,7 +13,7 @@ from test_workspace import workspace
 
 
 @pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
-@pytest.mark.parametrize('upstream_status', [401, 403, 429, 503])
+@pytest.mark.parametrize('upstream_status', [400, 401, 403, 404, 408, 422, 429, 503])
 def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, monkeypatch, caplog, route, upstream_status):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
@@ -29,7 +29,9 @@ def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, 
     response = client.post(f"/broker/{run['id']}/v1/{route}?secret=private-query",
         headers={'Authorization': 'Bearer private-capability', 'X-Moyai-Request-ID': correlation},
         json={'messages': [{'role': 'user', 'content': 'private-prompt'}], 'input': [], 'stream': False})
-    assert response.status_code == 502
+    assert response.status_code == upstream_status
+    assert f'HTTP {upstream_status}' in response.json()['detail']
+    assert 'private' not in response.text
     assert response.headers['x-moyai-upstream-status'] == str(upstream_status)
     assert response.headers['x-moyai-request-id'] == correlation
     assert response.headers['x-request-id'] == 'provider-123'
@@ -42,6 +44,69 @@ def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, 
     assert records[-1]['upstream_status'] == upstream_status
     assert records[-1]['request_ids']['x-moyai-model-request-id'] == row['id']
     assert 'private' not in json.dumps(records)
+
+
+@pytest.mark.parametrize('raw,reason', [
+    (b'{"error":{"code":"cyber_policy","message":"private-body"}}', 'cybersecurity policy'),
+    (json.dumps({'error': {'code': '400', 'message': 'litellm.BadRequestError: OpenAIException - '
+        + json.dumps({'error': {'code': 'cyber_policy', 'message': 'private-body'}})
+        + '\nNo fallback was attempted.'}}).encode(), 'cybersecurity policy'),
+    (b'{"error":{"code":"content_policy_violation","message":"private-body"}}', 'content policy'),
+    (b'{"error":{"code":"private-code","message":"cyber_policy private-body"}}', 'invalid request'),
+    (json.dumps({'error': {'message': 'Invalid input: '
+        + json.dumps({'error': {'code': 'cyber_policy'}})}}).encode(), 'invalid request'),
+    (b'{"error":{"code":[],"message":{"private":"body"}}}', 'invalid request'),
+    (b'{"error":{"message":"prefix {invalid private-body"}}', 'invalid request'),
+    (b'{"error":{"message":"' + b'private-body' * 1000, 'invalid request'),
+    (b'<html>private-body</html>', 'invalid request'),
+])
+def test_gateway_rejection_only_publishes_known_structured_reasons(raw: bytes, reason: str) -> None:
+    from app.broker_diagnostics import model_gateway_error
+    error = model_gateway_error('ledger-id', httpx.Response(400), raw)
+    assert error.status_code == 400
+    assert reason in error.detail and 'HTTP 400' in error.detail
+    assert 'private' not in error.detail
+    assert ('cyber_policy' in error.detail) is (reason == 'cybersecurity policy')
+
+
+@pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
+def test_policy_rejection_reaches_relay_without_false_transport_recovery(workspace, monkeypatch, route):
+    from http.server import BaseHTTPRequestHandler
+    from sandbox.transport_recovery import retryable_failure
+    from test_broker_transport import diagnostic_relay
+    app, client = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    calls = []
+    def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(400, json={'error': {'code': 'cyber_policy', 'message': 'private-body'}})
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('Copy a skill', '', 'modal', [])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('private-capability'))
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            response = client.post('/broker/' + run['id'] + self.path,
+                content=self.rfile.read(int(self.headers['Content-Length'])),
+                headers={'Authorization': self.headers['Authorization'], 'Content-Type': self.headers['Content-Type']})
+            self.send_response(response.status_code)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            # Reproduce lost 502 diagnostics; even without custom headers a
+            # terminal provider status must not authorize cloud continuation.
+            self.wfile.write(b'upstream failure' if response.status_code == 502 else response.content)
+    with diagnostic_relay(Edge) as (relay, local, diagnostics):
+        response = local.post('/v1/' + route, json={'messages': [], 'input': [], 'stream': False})
+        assert response.status_code == 400
+        assert 'cyber_policy; HTTP 400' in relay.last_error
+        assert response.json()['error']['message'] == relay.last_error
+        assert not retryable_failure(relay.last_failure, live=True)
+        assert not relay.resume_model(relay.last_failure, live=True)
+        assert local.post('/v1/' + route, json={}).status_code == 409
+        assert len(calls) == len(diagnostics) == 1
+        assert 'private' not in response.text + json.dumps(diagnostics)
 
 
 @pytest.mark.parametrize('route', ['messages', 'chat/completions'])
