@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
 
 try:
     from .broker_relay import InputPending
@@ -93,6 +94,13 @@ class LiteLLMAgent(HarnessAgent):
         fence = self.input_fence
         with self.boundary_lock:
             if fence is None or fence is not self.input_fence:
+                return False
+            # Cancellation can spend time shutting down a native process. It
+            # may observe a killed tool and request another model call during
+            # that teardown, even while public tool outcomes remain pending.
+            # Fence it against the original deadline before admitting inference.
+            started, timeout = getattr(self, 'context_started_at', None), self.context.spec.get('timeout')
+            if started is not None and timeout and time.monotonic() >= started + timeout:
                 return False
             if self.journal and not self.journal.pending:
                 self.context.step()

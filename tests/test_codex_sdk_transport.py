@@ -42,7 +42,7 @@ def send_response(handler, output, sequence, input_tokens=500, *, interrupted=No
 
 
 def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upstream,
-                       progress=lambda text: None):
+                       progress=lambda text: None, *, on_public_summary=None):
     """Real broker/relay and a delayed provider, shared by installed SDK proofs."""
     import asyncio
     from contextlib import contextmanager
@@ -110,6 +110,8 @@ def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upst
                     'usage': {'prompt_tokens': 500, 'completion_tokens': 50, 'total_tokens': 550}})
             if isinstance(instructions, str) and instructions.startswith(INSTRUCTIONS):
                 state.public_summaries += 1
+                if on_public_summary is not None:
+                    return on_public_summary(body, state)
                 return httpx.Response(200, json={'choices': [{'index': 0, 'finish_reason': 'stop',
                     'message': {'role': 'assistant', 'content': 'Completed fixture tools remain in their saved receipts.'}}],
                     'usage': {'prompt_tokens': 500, 'completion_tokens': 20, 'total_tokens': 520}})
@@ -139,7 +141,7 @@ def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upst
             def forward(self):
                 raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
                 if self.path in {'/v1/responses', '/v1/messages', '/v1/chat/completions'}:
-                    state.original.append(json.loads(unseal(capability, self.path, raw)))
+                    state.original.append(json.loads(unseal(state.capability, self.path, raw)))
                 headers = {name: self.headers[name] for name in
                     ('Authorization', 'Content-Type', 'anthropic-version', 'anthropic-beta') if name in self.headers}
                 response = client.request(self.command, '/broker/' + run['id'] + self.path,

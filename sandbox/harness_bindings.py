@@ -37,6 +37,9 @@ def sandbox_class(native=None):
     class ScopedSandbox(LocalSandbox):
         def child_env(self, env=None):
             merged = {**native.env, **(env or {})}
+            # OpenCode resolves its project from PWD before process.cwd().
+            # The controller may have changed directories since inheriting it.
+            merged['PWD'] = self.workdir
             # Persistence setup and runtime launches must use the same home.
             # Keep runtime-specific CODEX_HOME/XDG paths inside our owned root.
             merged.update({key: native.env[key] for key in ('HOME', 'TMPDIR', 'TMP', 'TEMP') if key in native.env})
@@ -97,7 +100,11 @@ def tool_loop_options(config):
 def pi_options(config):
     from litellm import PiOptions
     server = config['mcp_servers']['workspace']
-    return PiOptions(config={'mcpServers': {'moyai': {'command': server['command'],
+    compaction = {'compaction': {'enabled': False}} if config.get('live_compaction') is True else {}
+    # The broker owns retry budgets and decides whether recovery is safe.
+    # Disable both Pi's agent retry and its model-provider retry layer.
+    return PiOptions(config={**compaction, 'retry': {'enabled': False, 'provider': {'maxRetries': 0}},
+        'mcpServers': {'moyai': {'command': server['command'],
         'args': server.get('args', []), 'env': server.get('env', {}), 'exposure': 'direct'}}})
 
 

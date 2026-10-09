@@ -219,7 +219,7 @@ configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
 Moyai's gateway owns background model-input compaction for Codex, Claude Agent
-SDK, Hermes, OpenCode, Deep Agents and Tool Loop. At 75% of the verified input
+SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
 budget it snapshots an older, closed prefix and starts tool-free summarization.
 Fitting model requests continue using the existing history while that summary
 runs. A later request uses the completed summary plus every item appended after
@@ -253,7 +253,7 @@ foreground work can preempt maintenance. Output allowances are unchanged.
 
 The authenticated `/context/window` capability enables supported native controls:
 Claude automatic compaction, Hermes proactive compression, OpenCode auto/prune,
-and Deep Agents summarization middleware yield to this gateway owner. Older
+Pi automatic compaction and Deep Agents summarization middleware yield to this gateway owner. Older
 gateways retain their existing controls. Codex has no supported disable switch;
 its usage-based native counter sees the projected input, while emergency native
 recovery remains available. Deep Agents' public middleware profile is process-wide;
@@ -397,6 +397,29 @@ Read the repository
 The task line is optional. A harness-only command starts no compute. Other IDs
 are `hermes`, `codex`, `opencode`, `deepagents`, `tool-loop` and `pi`.
 
+## Pi
+
+Choose **Pi** in the new-session engine picker, or start a Slack thread with
+`@Moyai harness pi`. Pi uses Chat Completions through the configured gateway;
+the selected model must support that API and tool calls. Its native file and shell
+tools run in the isolated workspace. Connected-app tools use Moyai's authorized
+MCP bridge.
+
+Workspace images include Pi `1.1.0` and its private Node `22.23.3` runtime. An older
+saved workspace installs those versions on first use without replacing the
+project's Node runtime. The LiteLLM runtime also upgrades its pinned source and
+MCP dependency automatically. If an installation fails, the turn stops before
+launching Pi; retry after restoring package-download access, or rebuild the
+workspace image.
+
+Moyai owns background compaction when the gateway advertises that capability.
+Pi's automatic compaction yields to it, and Pi's agent/provider retries are
+disabled. A confirmed context rejection can rebuild from the saved public
+receipts only after tool outcomes settle. Failed summaries and uncertain tool
+outcomes stop recovery. Compatible completed conversations can resume native
+state on the next turn with fresh broker credentials; invalid snapshots fall
+back to public context.
+
 ## Other runtimes and extension
 
 `sandbox/harness_registry.py` is the single catalog for API validation, UI model
@@ -408,10 +431,12 @@ checkpointing and delivery.
 OpenCode, Deep Agents, Tool Loop and Pi use `litellm.aagent_session`, or
 `litellm.aagent_resume` for eligible OpenCode and Pi conversations, with the named
 bindings in `sandbox/harness_bindings.py`. The pinned beta source
-is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
+is `36f96259f08d449bdc996ed36919c47b39ce527f`; the tested PyPI wheel alone does not
 contain that API. Claude Agent SDK stays pinned at `0.2.163`; the native Codex
 Python SDK and its bundled runtime are pinned at `0.161.0`. No upstream source
 is vendored. Add a new registry definition and lifecycle adapter to extend Moyai.
+The isolated harness environment uses MCP `2.2.0`; the controller retains its
+separate locked dependencies.
 
 ## Verification
 
@@ -420,6 +445,23 @@ uv run pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transpor
 uv run pytest -q --tb=line tests/test_context_store.py tests/test_context_gateway.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py
 node --test tests/test_harness_picker.cjs tests/test_automation_editor.cjs
 ```
+
+With `uv`, Git and npm installed, run the native Pi contract suite:
+
+```sh
+scripts/test_pi_runtime.sh
+```
+
+This creates a disposable runtime environment and installs the pinned source,
+Pi and OpenCode. Missing Pi dependencies fail the suite. Tests run the actual
+Pi process against the real broker, encrypted native-state store and MCP bridge,
+with scripted local inference. They cover file and app tools, cold resume with
+renewed credentials, invalid snapshots, provider errors, truncated streams,
+Stop, deadlines, call budgets and context-recovery failures. Shared harness tests
+exercise background compaction while tools continue and steering at request
+boundaries. The Pi CI job also builds the production workspace image. These
+checks make no external model calls and do not establish every provider's
+compatibility, model quality or production latency.
 
 The `native-resume` cases in `test_claude_sdk_transport.py` exercise the real
 pinned Claude SDK, MCP tool transport, encrypted broker endpoint and SQLite.

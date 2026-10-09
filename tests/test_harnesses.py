@@ -401,10 +401,15 @@ def test_unregistered_litellm_binding_fails_before_startup():
 
 @pytest.fixture
 def installed_litellm_runtime(monkeypatch):
+    import importlib.metadata
     import sys
     from pathlib import Path
     from types import ModuleType, SimpleNamespace
     from sandbox import harness_dependencies
+    installed_version = importlib.metadata.version
+    monkeypatch.setattr(importlib.metadata, 'version', lambda name:
+        harness_dependencies.MCP_VERSION if name == 'mcp' else installed_version(name))
+    monkeypatch.setattr(harness_dependencies, 'version', importlib.metadata.version)
     litellm = ModuleType('litellm')
     litellm.Harness, litellm.aagent_session = object(), object()
     monkeypatch.setitem(sys.modules, 'litellm', litellm)
@@ -416,7 +421,7 @@ def installed_litellm_runtime(monkeypatch):
     monkeypatch.setattr(harness_dependencies.shutil, 'which', lambda name: '/prepared/bin/' + name)
     def version_only(command, **kwargs):
         assert command[1:] == ['--version'] and command[0] in ('opencode', 'pi'), 'Unexpected runtime install'
-        return SimpleNamespace(returncode=0, stdout='1.18.35\n')
+        return SimpleNamespace(returncode=0, stdout='1.1.0\n' if command[0] == 'pi' else '1.18.35\n')
     monkeypatch.setattr(harness_dependencies.subprocess, 'run', version_only)
     return harness_dependencies
 
@@ -452,6 +457,8 @@ def test_native_validation_and_image_entrypoint_require_codex(installed_litellm_
         return installed_version(package)
     def install(args, **kwargs):
         calls.append(args)
+        if args == ['pi', '--version']:
+            return SimpleNamespace(returncode=0, stdout='1.1.0\n')
         if args[1:4] == ['-m', 'pip', 'install'] and install_fails:
             raise subprocess.CalledProcessError(1, args)
         return SimpleNamespace(returncode=0)
@@ -499,7 +506,7 @@ def test_catalog_covers_upstream_harness_enum():
 
 def test_native_compaction_controls_keep_other_runtime_settings():
     pytest.importorskip('litellm.harness')
-    from sandbox.harness_bindings import opencode_options, tool_loop_options
+    from sandbox.harness_bindings import opencode_options, pi_options, tool_loop_options
     server = {'command': '/prepared/python', 'args': ['bridge.py'], 'env': {'FIXTURE': '1'}}
     config = {'mcp_servers': {'workspace': server}}
     assert 'compaction' not in opencode_options(config).config
@@ -508,6 +515,11 @@ def test_native_compaction_controls_keep_other_runtime_settings():
     assert options.config['mcp']['moyai'] == {'type': 'local',
         'command': ['/prepared/python', 'bridge.py'], 'environment': {'FIXTURE': '1'}, 'enabled': True}
     assert tool_loop_options({}).completion_kwargs == {'num_retries': 0}
+    assert 'compaction' not in pi_options(config).config
+    pi = pi_options({**config, 'live_compaction': True}).config
+    assert pi['compaction'] == {'enabled': False}
+    assert pi['retry'] == {'enabled': False, 'provider': {'maxRetries': 0}}
+    assert pi['mcpServers']['moyai'] == {**server, 'exposure': 'direct'}
 
 
 def test_real_deepagents_disables_blocking_summary_in_main_and_children():
@@ -624,7 +636,7 @@ def background_litellm_worker():
         relay.close()
 
 
-@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop'])
+@pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
 def test_real_litellm_background_compaction_preserves_native_tools(workspace, tmp_path, monkeypatch, harness):
     """Pinned runtimes keep executing tools through the real broker while summarizing."""
     pytest.importorskip('litellm.harness')
@@ -640,10 +652,10 @@ def test_real_litellm_background_compaction_preserves_native_tools(workspace, tm
     revision = subprocess.check_output(['git', '-C', str(Path(litellm.__file__).parent.parent),
                                        'rev-parse', 'HEAD'], text=True).strip()
     assert revision == LITELLM_REVISION
-    if harness == 'opencode':
-        if not shutil.which('opencode'):
-            pytest.skip('Pinned OpenCode binary is not installed')
-        assert runtime_version('opencode') == '1.18.35'
+    if harness in ('opencode', 'pi'):
+        if not shutil.which(harness):
+            pytest.skip('Pinned CLI binary is not installed')
+        assert runtime_version(harness) == {'opencode': '1.18.35', 'pi': '1.1.0'}[harness]
     if harness == 'deepagents':
         pytest.importorskip('deepagents')
         assert importlib.metadata.version('deepagents') == '0.7.22'
@@ -652,21 +664,23 @@ def test_real_litellm_background_compaction_preserves_native_tools(workspace, tm
     directory.mkdir()
     executions = directory / 'executions.txt'
     steps = 0
+    total_steps = 48 if harness == 'pi' else BACKGROUND_STEPS
 
     def upstream(body, state):
         nonlocal steps
         names = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
-        tool_name = 'bash' if harness == 'opencode' else 'background_step'
+        tool_name = 'bash' if harness in ('opencode', 'pi') else 'background_step'
         message = {'role': 'assistant', 'content': 'background-tools-ok'}
-        if tool_name in names and steps < BACKGROUND_STEPS:
+        if tool_name in names and steps < total_steps:
             steps += 1
             arguments = {'step': steps, 'tail': state.tail_marker}
-            if harness == 'opencode':
+            if harness in ('opencode', 'pi'):
                 script = ('import pathlib; pathlib.Path("executions.txt").open("a").write('
                     + repr(str(steps) + '\n') + '); print(' + repr(f'receipt-{steps} ' + state.tail_marker)
                     + f" + ' x' * {BACKGROUND_RECEIPT_REPEATS})")
-                arguments = {'command': shlex.quote(sys.executable) + ' -c ' + shlex.quote(script),
-                             'description': f'Write receipt {steps}'}
+                arguments = {'command': shlex.quote(sys.executable) + ' -c ' + shlex.quote(script)}
+                if harness == 'opencode':
+                    arguments['description'] = f'Write receipt {steps}'
             message['content'] = None
             message['tool_calls'] = [{'id': f'background-{steps}', 'type': 'function',
                 'function': {'name': tool_name, 'arguments': json.dumps(arguments)}}]
@@ -686,14 +700,17 @@ def test_real_litellm_background_compaction_preserves_native_tools(workspace, tm
         assert proof['sessions'] == 1, 'Compaction restarted the native session'
         assert state.held_calls >= 2 and state.projections and not state.faults
         assert state.tail_marker not in json.dumps(state.summaries[0])
-        assert executions.read_text().splitlines() == [str(index) for index in range(1, BACKGROUND_STEPS + 1)]
+        assert executions.read_text().splitlines() == [str(index) for index in range(1, total_steps + 1)]
         started = [call for event, call in proof['events'] if event == 'start']
         completed = [call for event, call in proof['events'] if event == 'complete']
-        assert len(started) == len(set(started)) == BACKGROUND_STEPS and sorted(started) == sorted(completed)
+        assert len(started) == len(set(started)) == total_steps and sorted(started) == sorted(completed)
         assert not proof['pending'] and not proof['summary_visible']
         assert state.summary_marker not in json.dumps(state.original)
+        if harness == 'pi':
+            assert len(state.summaries) >= 2, 'Exercise repeated compaction in one Pi session'
         print(f'{harness}: {len(state.requests)} foreground calls, {state.held_calls} while summary held, '
-              f'{len(state.projections)} projected calls, {BACKGROUND_STEPS} tool receipts, one native session')
+              f'{len(state.projections)} projected calls, {len(state.summaries)} summaries, '
+              f'{total_steps} tool receipts, one native session')
 
 
 @pytest.mark.parametrize('harness', ['opencode', 'deepagents', 'tool-loop', 'pi'])
@@ -1334,7 +1351,8 @@ async def test_native_cli_storage_is_scoped_for_setup_launch_and_temporary_files
     from types import SimpleNamespace
     from sandbox.harness_bindings import local_sandbox
     class LocalSandbox:
-        def __init__(self, cwd): self._tempdirs = []
+        def __init__(self, cwd):
+            self._tempdirs, self.workdir = [], cwd
         def _check_open(self): pass
         def child_env(self, env=None): return {'upstream_filter_applied': 'yes', **(env or {})}
     monkeypatch.setitem(sys.modules, 'litellm.harness.sandbox.local', SimpleNamespace(LocalSandbox=LocalSandbox))
@@ -1367,3 +1385,19 @@ def test_native_cli_version_comes_from_installed_binary_and_failure_disables_res
     monkeypatch.setattr(harness_dependencies.subprocess, 'run', lambda *a, **k: SimpleNamespace(returncode=1, stdout=''))
     assert harness_dependencies.runtime_version('opencode') == ''
     assert harness_dependencies.runtime_version('pi') == ''
+
+
+@pytest.mark.parametrize('pending', [False, True])
+def test_litellm_deadline_fences_requests_during_native_teardown(native_cli_runtime, pending):
+    from sandbox.harness_agent import TurnJournal
+    agent = native_cli_runtime.create('pi')
+    agent.context_started_at = 0
+    agent.journal = TurnJournal([], 'task')
+    if pending:
+        agent.journal.tool_started('unknown-outcome', 'bash', {})
+    try:
+        assert agent.before_model() is False
+        assert agent.model_calls == 0
+        assert bool(agent.journal.pending) is pending
+    finally:
+        agent.close()
