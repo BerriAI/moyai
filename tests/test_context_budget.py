@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.context_budget import ContextBudget, ContextPressure, ModelContextLimits, counting_input
+from app.context_budget import ContextBudget, ContextPressure, ImageInputUnavailable, ModelContextLimits, counting_input
 from app.security import digest
 from test_workspace import workspace
 
@@ -73,6 +73,8 @@ async def test_output_room_is_reserved_without_changing_generation_fields(monkey
 async def test_full_serialized_input_and_images_reach_counter(monkeypatch):
     seen = []
     def upstream(request):
+        if request.url.path == '/model/info':
+            return httpx.Response(200, json={'data': []})
         assert request.url.path == '/utils/token_counter'
         assert request.url.params['call_endpoint'] == 'true'
         body = json.loads(request.content)
@@ -99,10 +101,10 @@ async def test_counter_outage_uses_conservative_text_bound_but_never_guesses_ima
     text = {'model': 'alias', 'messages': [{'role': 'user', 'content': '界' * 1000}]}
     result = await budget.check(text)
     assert result.input_tokens > 3000 and result.method == 'utf8_upper_estimate'
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ImageInputUnavailable) as exc:
         await budget.check({'model': 'alias', 'messages': [{'role': 'user', 'content': [
             {'type': 'image', 'source': {'type': 'url', 'url': 'https://example.test/image.png'}}]}]})
-    assert exc.value.status_code == 503
+    assert exc.value.status_code == 422
 
 
 @pytest.mark.parametrize('route,field,output_field', [
@@ -297,6 +299,8 @@ async def test_ordinary_turns_never_request_remote_count(monkeypatch):
 async def test_new_images_require_count_even_with_usage_anchor(monkeypatch):
     calls = []
     def upstream(request):
+        if request.url.path == '/model/info':
+            return httpx.Response(200, json={'data': []})
         calls.append(request)
         return httpx.Response(200, json={'total_tokens': 2500, 'tokenizer_type': 'openai_api'})
     budget = service(monkeypatch, upstream, {'astra': limits()})

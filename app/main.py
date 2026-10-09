@@ -1137,7 +1137,7 @@ def create_app(settings: Settings | None = None):
                 if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
         try:
-            payload, checked_budget = await harness_gateway.live_context.prepare(
+            payload, checked_budget = await harness_gateway.images.prepare(
                 run, request, payload, '/v1/chat/completions')
         except ContextPressure as exc:
             store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)

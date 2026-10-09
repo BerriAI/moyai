@@ -607,10 +607,12 @@ class Store:
             raise ValueError("Wait for the current response to stop before sending another message.")
         if send_now and not send_immediately and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
             raise ValueError('Moyai is already picking up another queued message. Wait or queue this normally.')
-        pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
         count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-        if pending >= 5 or count >= 100:
-            raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
+        # Durable queued messages consume the same bounded session allowance as
+        # completed turns. A burst must not lose work merely because inference
+        # is slower than Slack; worker/model admission controls concurrency.
+        if count >= 100:
+            raise ValueError("This session allows 100 turns. Start a new session.")
         if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= self.max_pending_runs and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()

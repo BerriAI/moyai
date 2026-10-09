@@ -116,6 +116,8 @@ class HarnessGateway:
         self.maintenance = ContextMaintenance(self)
         from .live_context import LiveContext
         self.live_context = LiveContext(self)
+        from .image_interpreter import ImageInterpreter
+        self.images = ImageInterpreter(self)
 
     async def context_window(self, run_id, request):
         run = self.require_run(run_id, request)
@@ -263,7 +265,7 @@ class HarnessGateway:
                     if compact:
                         checked_budget = await self.context_budget.check(payload)
                     else:
-                        payload, checked_budget = await self.live_context.prepare(run, request, payload, route)
+                        payload, checked_budget = await self.images.prepare(run, request, payload, route)
                     break
                 except ContextPressure as exc:
                     if not compact:

@@ -645,6 +645,8 @@ def test_shared_thread_chatter_never_becomes_agent_input(slack_app, state, user)
     submissions = len(submitted)
     for index, text in enumerate([
         'but if you have other things that are more urgent thats also ok', 'thanks', 'yes',
+        'Thanks <@U87654321>', '<@U87654321> did you know about findtools?',
+        'cc: <@U87654321> why is moyai messaging about trying to figure out what Thanks is responding to.',
     ], 11):
         payload = send(client, index, text, user=user)
         assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
@@ -810,15 +812,28 @@ def test_no_historical_answer_backfill_and_legacy_requires_a_new_mention(slack_a
     assert 'Continue the previous conversation' in app.state.store.messages(old['id'])[-1]['content']
 
 
-def test_queue_limit_has_one_visible_reply_and_no_dropped_duplicate_execution(slack_app):
+def test_directed_burst_is_saved_once_in_order_beyond_five_messages(slack_app):
     app, client, run_id = start(slack_app)
-    for index in range(1, 6):
+    for index in range(1, 21):
         send(client, index, f'<@U99999999> Followup {index}')
-    assert len(app.state.store.messages(run_id)) == 5
-    rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")
-    assert len(rows) == 1 and '5 queued messages' in rows[0]['text']
-    send(client, 5, '<@U99999999> Followup 5')
-    assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")) == 1
+        send(client, index, f'<@U99999999> Followup {index}')
+    messages = app.state.store.messages(run_id)
+    assert len(messages) == 21
+    assert [message['content'].splitlines()[-1] for message in messages[1:]] == [f'Followup {i}' for i in range(1, 21)]
+    assert all(message['status'] == 'queued' for message in messages)
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key LIKE 'rejected:%'")
+
+
+def test_session_limit_has_one_visible_reply_and_no_duplicate_execution(slack_app):
+    app, client, run_id = start(slack_app)
+    store = app.state.store
+    for index in range(1, 100):
+        store.enqueue_message(run_id, f'Followup {index}', f'fixture-{index}')
+    send(client, 1, '<@U99999999> Another followup')
+    send(client, 1, '<@U99999999> Another followup')
+    assert len(store.messages(run_id)) == 100
+    rows = store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat1'")
+    assert len(rows) == 1 and '100 turns' in rows[0]['text']
 
 
 def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app):
