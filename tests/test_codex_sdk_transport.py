@@ -1173,3 +1173,112 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
         relay.close()
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize('harness', ['claude-agent-sdk', 'codex'])
+@pytest.mark.parametrize('terminal', ['complete', 'iteration-limit'])
+def test_native_automation_validation_can_recover(tmp_path, monkeypatch, broker_workspace, harness, terminal):
+    native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, harness, terminal, progress=print)
+
+
+def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, harness, terminal,
+                                      progress=lambda text: None):
+    """Actual app, relay, MCP and native SDK; only inference is scripted."""
+    from io import BytesIO
+    import httpx
+    from sandbox import agent as entrypoint
+    from test_automation_tools import definition
+    from test_claude_native_compaction import send_message
+    from test_spend import sign_in
+
+    app, client = broker_workspace
+    sign_in(app, client, 'background-fixture', 'background-fixture@berri.ai')
+    codex = harness == 'codex'
+    attempts, events, validation_seen = [], [], []
+    guest = tmp_path / 'automation-native'
+    guest.mkdir()
+    mcp_script = str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')
+    original_config = entrypoint.hermes_config
+
+    def local_config(spec, broker_url, workspace):
+        config = original_config(spec, broker_url, workspace)
+        config['mcp_servers']['workspace'].update(command=sys.executable, args=[mcp_script])
+        return config
+
+    # Only guest paths and unrelated machine preparation/teardown are replaced.
+    # The entrypoint, terminal selection, native runtime and tool path are real.
+    monkeypatch.setattr(entrypoint, 'Path', lambda value: guest / str(value).lstrip('/'))
+    monkeypatch.setattr(entrypoint, 'hermes_config', local_config)
+    monkeypatch.setattr(entrypoint, 'prepare_attachments', lambda *args, **kwargs: None)
+    monkeypatch.setattr(entrypoint, 'prepare_project', lambda *args, **kwargs: None)
+    monkeypatch.setattr(entrypoint, 'collect_archive', lambda *args: None)
+    monkeypatch.setattr(entrypoint, 'computer_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(entrypoint, 'emit', lambda kind, message, data=None, **extra:
+        events.append({'kind': kind, 'message': message, 'data': data or {}, **extra}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
+
+    def upstream(body, state):
+        text = json.dumps(body)
+        tool = 'mcp__moyai__automation_create'
+        discover = not codex and not any(item['name'] == tool for item in body['tools'])
+        arguments = None
+        if not discover and len(attempts) < 2:
+            if attempts:
+                validation_seen.append('definition.metadata.bootstrap_source' in text and '16384 characters' in text)
+                assert not app.state.store.rows('SELECT * FROM automations')
+            arguments = {'turn_id': app.state.store.run(state.run['id'])['active_message_id'],
+                'request_key': 'native-corrected-automation', 'definition': definition(**(
+                    {} if attempts else {'metadata': {'bootstrap_source': 'private-script-marker' + 'x' * (16385 - len('private-script-marker'))}}))}
+            attempts.append('corrected' if attempts else 'invalid')
+        sequence = len(state.requests)
+        pipe = SimpleNamespace(server=state, wfile=BytesIO(), send_response=lambda *args: None,
+                               send_header=lambda *args: None, end_headers=lambda: None)
+        if codex:
+            output = ({'type': 'custom_tool_call', 'id': f'call_{sequence}', 'call_id': f'call_{sequence}',
+                'name': 'exec', 'namespace': 'functions', 'input': 'text(await tools.' + tool + '(' + json.dumps(arguments) + '));'}
+                if arguments is not None else {'type': 'message', 'id': 'final', 'role': 'assistant',
+                'phase': 'final_answer', 'status': 'completed',
+                'content': [{'type': 'output_text', 'text': 'automation-recovered'}]})
+            send_response(pipe, output, sequence)
+        else:
+            block = ({'type': 'tool_use', 'id': f'find_{sequence}', 'name': 'ToolSearch',
+                'input': {'query': 'select:' + tool, 'max_results': 1}} if discover else
+                {'type': 'tool_use', 'id': f'call_{sequence}', 'name': tool, 'input': arguments}
+                if arguments is not None else {'type': 'text', 'text': 'automation-recovered'})
+            send_message(pipe, body, block, {'input_tokens': 500, 'output_tokens': 100})
+        return httpx.Response(200, content=pipe.wfile.getvalue(), headers={'Content-Type': 'text/event-stream'})
+
+    with background_gateway(tmp_path, monkeypatch, broker_workspace, harness, upstream, progress) as state:
+        exit_code = entrypoint.run_agent({'run_id': state.run['id'], 'harness': harness,
+            'broker_url': state.relay.url, 'repo_url': '', 'model': app.state.settings.agent_model,
+            'prompt': 'Save the fixture automation, correcting any invalid fields.', 'chat_enabled': True,
+            'timeout': 45, 'max_iterations': (2 if codex else 3) if terminal == 'iteration-limit' else 6}, state.relay)
+        final = next(event for event in events if event['kind'] == 'final')
+        store = ContextStore(guest / 'session/context.sqlite3', state.run['id'])
+        try:
+            assert len(attempts) == 2
+            assert len(app.state.store.rows('SELECT * FROM automations')) == 1
+            assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
+            assert not store.pending
+            receipts = [event['data'] for event in events if event['kind'] == 'tool'
+                and event['data'].get('tool') == 'automation_create' and event['data'].get('phase') != 'started']
+            evidence = {'harness': harness, 'terminal': terminal, 'completed': final['completed'],
+                'automation_writes': 1, 'settled_receipts': len(receipts), 'transport_failures': len(state.faults),
+                'pending_tools': len(store.pending), 'exit_code': exit_code, 'final_response': final['message']}
+            progress(json.dumps(evidence))
+            assert [receipt['phase'] for receipt in receipts] == ['error', 'completed']
+            assert final['completed'] is (terminal == 'complete')
+            if terminal == 'complete':
+                assert final['message'] == 'automation-recovered' and exit_code == 0
+            else:
+                assert exit_code == 1 and final['sdk_failure']['pending_tools'] == 0
+                assert 'limit' in final['message'] or 'max_turns' in final['message']
+                assert 'Invalid automation' not in final['message']
+            assert 'transport_failure' not in final and 'transport_retry' not in final
+            assert not state.relay.last_error and state.relay.last_failure is None
+            assert not state.relay.uncertain_tool and not state.faults
+            assert validation_seen == [True]
+            return evidence
+        finally:
+            store.close()
