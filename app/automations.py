@@ -5,7 +5,7 @@ import logging
 import re
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -106,10 +106,12 @@ class Definition(BaseModel):
     triggers: list[Trigger] = Field(min_length=1, max_length=20)
     max_runs_per_hour: int | None = Field(default=50, ge=1)
     queue_events: bool = False
-    metadata: dict[str, str] = Field(default_factory=dict, max_length=20)
+    metadata: dict[Annotated[str, Field(min_length=1, max_length=80)],
+                   Annotated[str, Field(max_length=16384)]] = Field(default_factory=dict, max_length=20)
     repo_url: str = Field(default='', max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
-    environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$')
+    environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$',
+                                description='Reusable project environment id from automation_environments. Each run pins its active validated build. auto matches the repository, or the workspace default when no repository is set; none uses base tools.')
     plugins: list[Literal['linear', 'github', 'slack', 'notion']] = Field(default_factory=list, max_length=4)
     model: str = Field(default='', max_length=120)
     # Missing on old saved definitions: preserve their original runtime.
@@ -143,13 +145,6 @@ class Definition(BaseModel):
         if len({t.id for t in self.triggers}) != len(self.triggers):
             raise ValueError('Each trigger needs a unique identifier.')
         return self
-
-    @field_validator('metadata')
-    @classmethod
-    def valid_metadata(cls, value):
-        if any(not key.strip() or len(key) > 80 or len(text) > 500 for key, text in value.items()):
-            raise ValueError('Metadata needs a nonempty key up to 80 characters and a value up to 500 characters.')
-        return value
 
     @field_validator('repo_url')
     @classmethod

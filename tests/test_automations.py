@@ -245,19 +245,28 @@ def test_active_child_does_not_block_independent_occurrences(workspace,monkeypat
 
 def test_builder_metadata_and_queue_setting_round_trip(workspace):
     app, client = workspace
-    a = create(client, metadata={'team': 'engineering', 'owner': '<script>demo</script>'}, queue_events=False)
+    a = create(client, metadata={'team': 'engineering', 'owner': '<script>demo</script>', 'notes': 'x' * 501}, queue_events=False)
     assert a['definition']['metadata']['team'] == 'engineering'
     assert a['definition']['queue_events'] is False
+    notes = '界' * 16370 + '\nreview notes!'
+    assert len(notes) == 16384
     saved = client.put('/api/automations/' + a['id'], json={
-        'revision': a['revision'], 'definition': {**a['definition'], 'metadata': {'team': 'platform'}, 'queue_events': True}})
+        'revision': a['revision'], 'definition': {**a['definition'], 'metadata': {'team': 'platform', 'notes': notes}, 'queue_events': True}})
     assert saved.status_code == 200
     current = client.get('/api/automations').json()['automations'][0]
     assert current['paused'] and current['revision'] == 2
-    assert current['definition']['metadata'] == {'team': 'platform'}
+    assert current['definition']['metadata'] == {'team': 'platform', 'notes': notes}
     assert current['definition']['queue_events'] is True
-    for metadata in ({' ': 'empty'}, {'a' * 81: 'long key'}, {'team': 'x' * 501}, {str(i): '' for i in range(21)}):
+    for metadata in ({' ': 'empty'}, {'a' * 81: 'long key'}, {'team': 'x' * 16385}, {str(i): '' for i in range(21)}):
         result = client.post('/api/automations', json={'definition': {**a['definition'], 'metadata': metadata}})
         assert result.status_code == 422
+
+
+def test_metadata_schema_advertises_entry_limits():
+    schema = Definition.model_json_schema()['properties']['metadata']
+    assert schema['maxProperties'] == 20
+    assert schema['propertyNames'] == {'minLength': 1, 'maxLength': 80}
+    assert schema['additionalProperties'] == {'type': 'string', 'maxLength': 16384}
 
 
 def test_library_templates_are_valid_editable_workflows(workspace):

@@ -319,12 +319,12 @@ def test_codex_background_compaction_preserves_running_command(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('outcome', [
-    'complete', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
+    'complete', 'unphased', 'interrupt', 'provider-error', 'compaction', 'context-recovery-limit', 'iteration-limit'])
 def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, outcome):
     requests, attempts, calls, events, faults = [], [], [], [], []
     samples, summaries = [], []
     boundaries, recovered = [], []
-    successful = outcome in {'complete', 'compaction', 'context-recovery-limit'}
+    successful = outcome in {'complete', 'unphased', 'compaction', 'context-recovery-limit'}
     max_iterations = {'context-recovery-limit': 4, 'iteration-limit': 2}.get(outcome, 12)
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
@@ -412,6 +412,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
                 output = {'type': 'message', 'id': f'msg_{sequence}', 'role': 'assistant',
                           'phase': 'final_answer', 'status': 'completed',
                           'content': [{'type': 'output_text', 'text': 'codex-transport-ok'}]}
+                if outcome == 'unphased':
+                    output.pop('phase')
             send_response(self, output, len(requests),
                           input_tokens=100000 if outcome == 'compaction' and sequence <= 3 else 500)
 
@@ -499,6 +501,7 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         assert result['completed'], {'result': result['final_response'], 'boundaries': boundaries,
                                      'recovered': len(recovered)}
         assert result['final_response'] == 'codex-transport-ok'
+        assert ('commentary', 'codex-transport-ok') not in events
         assert (workspace / 'receipt.txt').read_text() == 'codex-file-ok\n'
         assert calls == [{'name': 'echo', 'arguments': {'text': 'codex-mcp-ok'}}]
         assert [args[1] for args in completed] == ['terminal', 'apply_patch', 'mcp__moyai__echo']
@@ -523,8 +526,14 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         store.close()
         store = ContextStore(tmp_path / 'context.sqlite3', 'codex-transport')
         agent = create_agent()
+        if outcome == 'unphased':
+            agent.context.spec['model'] = 'anthropic/claude-opus-5-5'
         result = agent.run_conversation('Continue using the saved receipts.', conversation_history=[],
                                         system_message='requester-private-second-marker')
+        if outcome == 'unphased':
+            assert requests[-1]['model'] == 'anthropic/claude-opus-5-5'
+            assert result['final_response'] == 'codex-transport-ok'
+            assert ('commentary', 'codex-transport-ok') not in events
         expected_samples = 6 if outcome == 'context-recovery-limit' else 5
         assert result['completed'] and len(samples) == expected_samples and len(calls) == 1
         assert len(requests) == expected_samples + len(summaries)

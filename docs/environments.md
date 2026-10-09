@@ -97,7 +97,9 @@ refresh dependencies in that checkout. Recipes can also be rebuilt manually.
 Automatic builds consume Modal compute just like manual builds.
 
 The LiteLLM starter installs a separate Python 3.13 project environment from
-`uv.lock`, proxy/database dependencies, pytest and Playwright. It initializes a
+`uv.lock`, proxy/database dependencies, pytest and Playwright. The frozen install
+builds the native extension with two Cargo workers and dev debug symbols disabled
+to fit the 8 GiB build sandbox; the extension remains enabled. It initializes a
 local PostgreSQL development database, applies `schema.prisma`, inserts 100 small
 synthetic case records, and verifies database-connected readiness plus key
 creation, lookup and deletion through the real proxy before stopping services

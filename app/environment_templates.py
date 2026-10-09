@@ -7,7 +7,9 @@ TEMPLATES = [{
     'apt_packages': ['postgresql', 'postgresql-client', 'libpq-dev', 'libsndfile1', 'curl'],
     'setup': '''python -m pip install uv==0.12.22
 uv python install 3.13
-uv sync --frozen --python 3.13 --extra proxy --extra extra_proxy --no-default-groups
+# Editable installs compile LiteLLM's native extension. Bound parallelism and
+# omit dev debug symbols so its linker fits the 2 CPU / 8 GiB build sandbox.
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 uv sync --frozen --python 3.13 --extra proxy --extra extra_proxy --no-default-groups
 uv pip install --python .venv/bin/python pytest==8.4.2 pytest-asyncio==1.2.0 playwright==1.58.0
 export PATH="$PWD/.venv/bin:$PATH"
 # Shell exports do not survive build phases or filesystem snapshots. LiteLLM

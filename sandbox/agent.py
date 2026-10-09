@@ -330,6 +330,7 @@ def _run_agent(spec, relay):
             "Never claim a PR exists until the tool returns its URL. "
             "When asked to schedule recurring or future work, use automation_list first to discover existing automations and the current turn_id. "
             "Use automation_create or automation_update with the requested cadence, timezone, repository and enabled connections. Preserve unrelated settings. "
+            "For database or runtime setup, use automation_environments and reference a reusable environment_id; keep installation scripts in the versioned environment recipe, task goals in the prompt, and descriptive metadata only. If no suitable environment is available, explain the administrator setup needed in Environments. Auto without a repository uses only the workspace default, if configured. "
             "Saves start paused; when the user has authorized scheduling, call automation_enable with the returned revision to complete that request without another approval question. "
             "Use automation_webhook_info to inspect receiver setup and automation_webhook_setup with a persistent webhook-signing-secret credential handle to configure it. Never put signing secrets in tool arguments or chat. Receiver setup does not register the webhook at its provider. "
             "Use automation_pause when asked to stop future runs. Only the current requester’s automations can be managed from chat. "

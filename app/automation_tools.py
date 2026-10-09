@@ -23,6 +23,11 @@ class Listing(Arguments):
     limit: int = Field(default=20, ge=1, le=50)
 
 
+class EnvironmentListing(Arguments):
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
 class Mutation(Arguments):
     turn_id: int = Field(ge=1, description='Current turn_id returned by automation_list; list first.')
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$', description='Stable key for this action, including identical retries across follow-ups.')
@@ -51,6 +56,7 @@ class WebhookConfigure(Target):
 
 
 SPECS = {
+    'automation_environments': (EnvironmentListing, 'List reusable organization project environments for automation setup, including their last validated build and setup blockers. Select an id as definition.environment_id to reuse installed tools and services such as PostgreSQL/Prisma. Does not build or enable environments or grant repository access. Ask an administrator to prepare a missing environment; keep setup scripts in its versioned recipe, not automation prompts or metadata.'),
     'automation_webhook_info': (WebhookRead, 'Inspect the current requester’s automation receiver URLs, provider configuration and recent deliveries. Readiness means a receiver secret exists, not that a provider webhook has been registered. Never returns secrets.'),
     'automation_webhook_setup': (WebhookConfigure, 'Configure or rotate a webhook RECEIVER owned by the current requester. First obtain a non-expiring persistent generic credential using credentials_request, name=webhook-signing-secret, format=env, input_fields=[{name: WEBHOOK_SECRET, label: Webhook signing secret}]. Pass its request_id only. The user must permit persistent reuse: this copies the secret into durable automation configuration. Configuring pauses the automation and increments its revision. It affects all triggers for that provider. Register the same secret and returned callback URL at the provider separately; this tool does not register GitHub or other remote webhooks. Use the current revision and a stable request_key for identical retries. No secrets are returned.'),
     'automation_list': (Listing, 'List the current requester’s saved automations, or read one by automation_id. Returns the current turn_id, revisions, and scheduler-confirmed next runs when available. List before creating to avoid duplicates, and before changing an existing automation. Results may be shared in the current chat; summarize only what the user requested.'),
@@ -104,7 +110,7 @@ class AutomationTools:
         except HTTPException:
             return []
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info'}}}
+                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments'}}}
                 for name, (schema, description) in SPECS.items()]
 
     def owned(self, automation_id, actor):
@@ -200,6 +206,15 @@ class AutomationTools:
     async def call(self, run, name, arguments):
         args = SPECS[name][0].model_validate(arguments)
         run, actor = self.actor(run, getattr(args, 'turn_id', None))
+        if name == 'automation_environments':
+            environments = self.service.environments
+            catalog = environments.catalog()
+            selected = catalog[args.offset:args.offset + args.limit]
+            results = [{**item, 'setup_blocker': environments.setup_blocker(item['id'], '')} for item in selected]
+            self.unchanged(run, actor)
+            return {'environments': results,
+                    'next_offset': args.offset + args.limit if args.offset + args.limit < len(catalog) else None,
+                    'instruction': 'Use an environment id in definition.environment_id. Each new run pins the active validated build; later runs can adopt a refreshed build. Auto without a repository uses only the workspace default, if configured. A listed build does not grant repository access or guarantee preparation for another sandbox provider. Keep reusable setup in Environments and task goals in the automation prompt.'}
         if name == 'automation_webhook_info':
             result = self.webhook_info(self.owned(args.automation_id, actor), actor)
             self.unchanged(run, actor)
