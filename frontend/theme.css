@@ -60,14 +60,12 @@
 [data-slot="native-select-wrapper"] { min-width: 0; width: 100%; }
 [data-slot="input"], [data-slot="native-select"] { height: 40px; }
 .settings-view :is([data-slot="input"], [data-slot="native-select"]) { height: auto; min-height: 40px; }
-.settings-view [data-slot="button"] { height: auto; white-space: normal; }
 [data-slot="native-select-icon"] { width: 16px; height: 16px; }
 .model-picker [data-slot="native-select-wrapper"] { display: contents; }
 .model-picker [data-slot="native-select-icon"] { display: none; }
 .sessions-label [data-slot="native-select-wrapper"] { width: auto; }
 .sessions-label [data-slot="native-select-icon"] { right: 0; }
 .nav-button[data-slot="button"], [data-popover-id="session-actions"] [data-slot="button"] { justify-content: flex-start; }
-.nav-button[data-slot="button"] { height: auto; }
 .model-picker [data-slot="native-select"], .sessions-label [data-slot="native-select"] { box-shadow: none; }
 [data-slot="checkbox"], [data-slot="switch"] { flex: none; }
 [data-slot="checkbox"], .settings-view [data-slot="checkbox"] { width: 16px; height: 16px; min-height: 16px; padding: 0; border-radius: 4px; }

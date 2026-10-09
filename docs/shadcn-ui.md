@@ -133,6 +133,11 @@ target `[data-slot="dialog-content"]`; per-dialog sizing uses `data-dialog-id`.
 The content host uses `display: contents`, so measure or focus the visible dialog
 via its dialog role or `data-dialog-id`, not the inner host.
 
+Template buttons default to automatic height, wrapping text and flexible shrink,
+so attachment thumbnails, multiline choices and narrow action rows stay inside
+their controls. Explicit template classes and feature styles still own sizing,
+including fixed-size icon buttons. Direct React `Button` defaults are unchanged.
+
 The template adapter removes Card's default flex layout and gap. Existing page
 styles already space the card contents; applying both doubles the gaps in
 Connections, Memory, and Environments. New React-only cards can use the normal

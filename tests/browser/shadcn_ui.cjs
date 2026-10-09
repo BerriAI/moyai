@@ -1499,3 +1499,81 @@ for (const width of [1440, 768, 320]) test(`Pi selection, keyboard, logo and sub
   assert.equal(submitted.prompt, 'Check the Pi integration');
   assert.equal(await source.inputValue(), 'pi', 'Selection survives a failed submission');
 });
+
+async function assertCardContentsFit(cards) {
+  const failures = await cards.evaluateAll(nodes => nodes.flatMap(card => {
+    const bounds = card.getBoundingClientRect();
+    return [...card.querySelectorAll('img,strong,small,.file-type')].flatMap(child => {
+      const rect = child.getBoundingClientRect();
+      return rect.width && rect.height && (rect.top < bounds.top - 1 || rect.bottom > bounds.bottom + 1 || rect.left < bounds.left - 1 || rect.right > bounds.right + 1)
+        ? [{ card: card.getAttribute('aria-label') || card.textContent.slice(0, 40), child: child.tagName, height: bounds.height, bottomOverflow: rect.bottom - bounds.bottom }] : [];
+    });
+  }));
+  assert.deepEqual(failures, [], 'Content, filename and metadata stay inside the interactive card');
+}
+
+for (const width of [1440, 768, 320]) test(`attachment cards preserve content geometry across chat owners at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  const files = ['png', 'txt', 'wav'].map((extension, index) => ({
+    id: String(index + 1).padStart(32, '0'), name: `layout-${'long-filename-'.repeat(3)}.${extension}`, size: 123,
+    media_type: ['image/png', 'text/plain', 'audio/wav'][index],
+    ...(index === 0 ? { preview_url: '/static/favicon.svg' } : { preview_text: 'Synthetic attachment' }),
+  }));
+  await page.route('**/api/attachments/**', route => {
+    const url = new URL(route.request().url()), file = files.find(file => file.name === url.searchParams.get('name'));
+    return route.fulfill({ json: file ? { ...file, id: url.pathname.split('/').at(-1) } : {} });
+  });
+  for (const formSelector of ['#task-form', '#message-form']) {
+    if (formSelector === '#message-form') {
+      const run = { id: '9'.repeat(32), chat_enabled: true, mode: 'demo', status: 'running', prompt: 'Attachment layout', plugins: [], events: [], approvals: [],
+        messages: [
+          { id: 1, role: 'user', status: 'completed', content: 'Please inspect these files.', attachments: files },
+          { id: 2, role: 'assistant', status: 'completed', content: 'These files remain inside their message.', attachments: files },
+          { id: 3, role: 'user', status: 'running', content: 'Keep working.' },
+          { id: 4, role: 'user', status: 'queued', content: 'Check these next.', attachments: files },
+        ] };
+      await page.route(`**/api/runs/${run.id}?*`, route => route.fulfill({ json: run }));
+      await page.evaluate(async id => { await openRun(id); state.source?.close(); state.source = null; }, run.id);
+      await assertCardContentsFit(page.locator('.sent-attachment'));
+      assert.equal(await page.evaluate(() => {
+        const messages = [...document.querySelectorAll('#conversation .chat-message')];
+        return messages.every((message, index) => (!index || messages[index - 1].getBoundingClientRect().bottom <= message.getBoundingClientRect().top)
+          && [...message.querySelectorAll('.sent-attachment')].every(card => card.getBoundingClientRect().bottom <= message.getBoundingClientRect().bottom));
+      }), true, 'Messages contain their attachments and never overlap the following reply');
+      for (const selector of ['.chat-message.user', '.chat-message.assistant', '.queued-message']) {
+        const card = page.locator(`${selector} .sent-attachment.is-image`).first();
+        await card.click();
+        await page.getByRole('dialog').waitFor();
+        await page.keyboard.press('Escape');
+        await page.getByRole('dialog').waitFor({ state: 'detached' });
+        await page.waitForFunction(el => el === document.activeElement, await card.elementHandle());
+      }
+    }
+    const form = page.locator(formSelector);
+    await form.locator('input[type=file]').setInputFiles(files.map(file => ({ name: file.name, mimeType: file.media_type, buffer: Buffer.from('synthetic file') })));
+    await form.locator('.draft-attachment small').filter({ hasText: '123 B' }).nth(2).waitFor();
+    await assertCardContentsFit(form.locator('.attachment-open'));
+    await assertCardContentsFit(form.locator('.draft-attachment'));
+    const preview = form.locator('.draft-attachment.is-image .attachment-open');
+    await preview.click();
+    await page.getByRole('dialog').waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog').waitFor({ state: 'detached' });
+    await page.waitForFunction(el => el === document.activeElement, await preview.elementHandle());
+    assert.deepEqual(await form.locator('.send-button').evaluate(el => ({ width: el.offsetWidth, height: el.offsetHeight })), { width: 28, height: 28 }, 'Explicit icon geometry survives content sizing');
+  }
+});
+
+test('template buttons retain multiline content and native flex shrink outside Settings', async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => {
+    MoyaiUI.render(document.querySelector('#content'), `<div style="width:180px">
+      <button class="skill-choice"><strong>Release review</strong><span>Review the release and summarize all validation results.</span></button>
+      <button class="saved-file-choice"><span class="saved-file-icon">▤</span><span><strong>release-notes.md</strong><small>outputs/release-notes.md · 1 KB</small></span></button>
+      <div class="approval-actions" style="width:150px"><button class="primary small">Approve once</button><button class="small">Deny</button></div>
+    </div>`);
+  });
+  await assertCardContentsFit(page.locator('.skill-choice,.saved-file-choice'));
+  assert.equal(await page.locator('.skill-choice').evaluate(el => el.scrollHeight <= el.clientHeight && el.scrollWidth <= el.clientWidth), true, 'Multiline descriptions fit their card');
+  assert.equal(await page.locator('.approval-actions').evaluate(el => el.scrollWidth <= el.clientWidth), true, 'Action buttons shrink and wrap within the available width');
+});

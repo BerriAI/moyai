@@ -86,7 +86,9 @@ const options: HTMLReactParserOptions = {
           : hasClass(node, ["quiet", "icon-button", "nav-button", "new-task", "session-link", "session-move", "agent-disclosure", "folder-toggle", "folder-menu", "folder-add", "panel-icon", "header-icon", "dialog-close", "session-section-heading", "settings-back"]) ? "ghost"
           : hasClass(node, ["primary", "send-button"]) || node.attribs.type === "submit" ? "default" : "outline"
         const title = node.attribs.title
-        const button = <Button {...props} title={undefined} variant={variant}>{children()}</Button>
+        // Templates own geometry, including content-sized cards and narrow action
+        // rows. Keep explicit template sizing after these low-priority defaults.
+        const button = <Button {...props} className={`h-auto whitespace-normal shrink ${props.className || ""}`} title={undefined} variant={variant}>{children()}</Button>
         return title ? <Tooltip><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent sideOffset={6}>{title}</TooltipContent></Tooltip> : button
       }
       case "input": {
