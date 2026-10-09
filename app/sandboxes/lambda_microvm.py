@@ -20,6 +20,7 @@ import httpx
 from modal.exception import NotFoundError
 
 from .substrate import Filesystem, Process, operation
+from . import ProvisioningTerminated
 
 _LOCKS = WeakValueDictionary()
 
@@ -111,9 +112,17 @@ class LambdaProvider:
             if not initialize:
                 raise RuntimeError('AWS creation outcome is unconfirmed; retry provisioning to resolve it')
             return await self.launch(name, record, token)
-        sandbox = await self.get('lambda:' + self.settings.lambda_region + ':' + record['vm_id'])
+        try:
+            sandbox = await self.get('lambda:' + self.settings.lambda_region + ':' + record['vm_id'])
+        except NotFoundError:
+            if initialize:
+                raise ProvisioningTerminated() from None
+            raise
         sandbox.env = {'WORKSPACE_RUN_TOKEN': token} if token else {}
         if initialize:
+            if sandbox.vm['state'] in {'TERMINATING', 'TERMINATED'}:
+                await sandbox.wait.aio()
+                raise ProvisioningTerminated()
             await self.initialize(sandbox, record)
         return sandbox
 
@@ -160,8 +169,11 @@ class LambdaProvider:
 
     async def initialize(self, sandbox, record):
         await sandbox.running()
-        await sandbox.request('/bootstrap', {})
-        async with asyncio.timeout(60):
+        try:
+            await sandbox.request('/bootstrap', {})
+        except (TransientEndpointError, httpx.TransportError):
+            pass  # Observe readiness after a lost ACK; never resend bootstrap.
+        async with asyncio.timeout(180):
             while True:
                 try:
                     if (await sandbox.request('/health', {})).get('bootstrapped'):

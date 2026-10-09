@@ -2,6 +2,10 @@
 from .modal import ModalProvider
 
 
+class ProvisioningTerminated(Exception):
+    """A named startup VM is confirmed terminated or absent, before handoff."""
+
+
 def provider(settings, name=None, *, modal_clients=None):
     name = name or settings.sandbox_provider
     if name == 'modal':
