@@ -269,8 +269,12 @@ async def test_failed_turns_do_not_stay_warm(durable, failure):
     assert not cloud.machines[0].alive and len(cloud.launches) == 1
 
 
-async def test_launch_capability_uses_exec_environment_not_command_args(durable):
+@pytest.mark.parametrize('access_enabled', [False, True])
+async def test_launch_capability_uses_exec_environment_not_command_args(durable, access_enabled):
     manager, cloud, root = durable
+    manager.settings.public_url = 'https://workspace.example'
+    manager.settings.cloudflare_access_client_id = 'fresh-access-client' if access_enabled else ''
+    manager.settings.cloudflare_access_client_secret = 'fresh-access-secret' if access_enabled else ''
     calls = []
     async def read():
         return ''
@@ -281,8 +285,14 @@ async def test_launch_capability_uses_exec_environment_not_command_args(durable)
         return SimpleNamespace(stdout=SimpleNamespace(read=aio(read)), stderr=SimpleNamespace(read=aio(read)), wait=aio(wait))
     machine = SimpleNamespace(exec=aio(execute))
     await DurableRunner.command(manager, machine, 'start', '/execution', '/spec', token='fresh-turn-capability')
-    assert calls[0][1]['env'] == {'WORKSPACE_RUN_TOKEN': 'fresh-turn-capability'}
-    assert 'fresh-turn-capability' not in str(calls[0][0])
+    assert calls[0][1]['env'] == {
+        'WORKSPACE_RUN_TOKEN': 'fresh-turn-capability',
+        'WORKSPACE_ACCESS_ORIGIN': 'https://workspace.example' if access_enabled else '',
+        'WORKSPACE_ACCESS_CLIENT_ID': 'fresh-access-client' if access_enabled else '',
+        'WORKSPACE_ACCESS_CLIENT_SECRET': 'fresh-access-secret' if access_enabled else '',
+    }
+    assert all(value not in str(calls[0][0]) for value in
+               ('fresh-turn-capability', 'fresh-access-client', 'fresh-access-secret'))
 
 
 def test_runtime_reports_effective_idle_setting(workspace):

@@ -6,8 +6,10 @@ from urllib.request import Request, urlopen
 
 def health_request() -> Request:
     render_origin = os.environ.get("RENDER_EXTERNAL_URL")
-    origin = render_origin or os.environ.get("PUBLIC_URL", "http://127.0.0.1:8787")
-    port = os.environ.get("PORT", "10000" if render_origin else "8787")
+    render_service = bool(render_origin or os.environ.get('RENDER_SERVICE_ID'))
+    origin = ((os.environ.get('MOYAI_PUBLIC_URL') or render_origin) if render_service else None
+              ) or os.environ.get("PUBLIC_URL", "http://127.0.0.1:8787")
+    port = os.environ.get("PORT", "10000" if render_service else "8787")
     return Request(f"http://127.0.0.1:{port}/health", headers={"Host": urlparse(origin).netloc})
 
 

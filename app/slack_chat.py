@@ -131,7 +131,7 @@ class SlackChat:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
                     name = user['name'] if user else 'Web user'
-                    if user and user['kind'] == 'google' and user['email']:
+                    if user and user['kind'] in {'google', 'cloudflare'} and user['email']:
                         name = f"{name} ({user['email']})" if name != user['email'] else name
                     value = self.scrub(content)
                     if attachment_ids:

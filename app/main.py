@@ -27,6 +27,7 @@ from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
 from .security import Security, digest
+from .cloudflare_access import CloudflareAccess, CloudflareAccessMiddleware
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
@@ -238,6 +239,7 @@ def create_app(settings: Settings | None = None):
             await memory_review.close()
             await spend.recovery.close()
             await harness_gateway.maintenance.close()
+            await harness_gateway.live_context.close()
             await computer.close()
             await session_pull_requests.close()
             await session_titles.close()
@@ -310,6 +312,8 @@ def create_app(settings: Settings | None = None):
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
     app.add_middleware(BrokerDiagnosticsMiddleware)
+    app.state.cloudflare_access = CloudflareAccess(settings)
+    app.add_middleware(CloudflareAccessMiddleware, access=app.state.cloudflare_access, security=security)
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
         setattr(app.state, key, value)
 
@@ -409,7 +413,7 @@ def create_app(settings: Settings | None = None):
     @app.post("/api/logout")
     async def logout(request: Request):
         security.require(request, mutation=True)
-        response = JSONResponse({"ok": True})
+        response = JSONResponse({"ok": True, **({'logout_url': '/cdn-cgi/access/logout'} if settings.cloudflare_access_login else {})})
         response.delete_cookie("workspace_session", path="/")
         return response
 
@@ -458,7 +462,7 @@ def create_app(settings: Settings | None = None):
                 "execution_engine": "Temporal" if settings.temporal_enabled else "Local worker",
                 "execution_connected": manager.ready.is_set() if settings.temporal_enabled else True,
                 "checkpoint_interval_seconds": settings.temporal_checkpoint_seconds if settings.temporal_enabled else None,
-                "hermes_revision": settings.hermes_revision, "auth": "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
+                "hermes_revision": settings.hermes_revision, "auth": "Cloudflare Access" if settings.cloudflare_access_login else "Google Workspace" if settings.google_enabled() else "Workspace password" if settings.workspace_password else "Local access only"}
 
     @app.get('/api/admin/pull-requests')
     async def pull_request_analytics(request: Request, start: date | None = None, end: date | None = None):
@@ -470,7 +474,7 @@ def create_app(settings: Settings | None = None):
     async def organization(request: Request):
         security.require(request)
         return {"name": store.rows("SELECT name FROM organization WHERE id=1")[0]["name"],
-                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password) or settings.google_enabled(),
+                "role": security.role(request), "member_access_configured": bool(settings.workspace_member_password) or settings.person_login_enabled(),
                 "google_signin": settings.google_enabled(),
                 "slack_sessions": slack.status(),
                 "activity": store.rows("SELECT provider,action,actor,created_at FROM connection_audit ORDER BY id DESC LIMIT 15")}
@@ -1065,10 +1069,11 @@ def create_app(settings: Settings | None = None):
         if model_slots.locked():
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
+        prepared = await prepare_model(run_id, request)
         async with model_slots:
-            return await forward_model(run_id, request)
+            return await forward_model(run_id, request, *prepared)
 
-    async def forward_model(run_id: str, request: Request):
+    async def prepare_model(run_id: str, request: Request):
         run = require_run(run_id, request)
         try:
             selected_model = settings.resolve_model(fallback=run['active_model'] or run['model'])
@@ -1100,14 +1105,23 @@ def create_app(settings: Settings | None = None):
                 if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
         try:
-            checked_budget = await context_budget.check(payload, scope=run_id + '/v1/chat/completions')
+            payload, checked_budget = await harness_gateway.live_context.prepare(
+                run, request, payload, '/v1/chat/completions')
         except ContextPressure as exc:
             store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
             await checkpoints.flush()
             raise
-        require_run(run_id, request)
-        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) AND status IN ('running','reconnecting','awaiting_approval')",
-                                 (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3))
+        return run, body, payload, checked_budget
+
+    async def forward_model(run_id: str, request: Request, run, body, payload, checked_budget):
+        selected_model = payload['model']
+        harness_gateway.live_context.require_current(run, request, selected_model)
+        admitted = store.execute("UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
+            "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
+            "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ? "
+            "AND active_user_id IS ? AND active_model IS ? AND (coalesce(active_model,'')!='' OR model IS ?)",
+            (run_id, settings.max_agent_iterations, settings.max_agent_iterations * 3,
+             run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
         request_id = spend.begin(run, selected_model)
@@ -1122,12 +1136,14 @@ def create_app(settings: Settings | None = None):
         payload.pop('stream_options', None)
         await checkpoints.flush()
         capture = UsageCapture(False)
-        status = 'unknown'
+        status = 'failed'
         trace_started = time.time_ns()
         trace_response = {}
         gateway_id = ''
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
+                harness_gateway.live_context.require_current(run, request, selected_model)
+                status = 'unknown'
                 async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
                                          json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
                     gateway_id = spend.headers(request_id, upstream, False)

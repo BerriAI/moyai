@@ -57,7 +57,8 @@ async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable
             await manager.shutdown()
 
 
-async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(durable):
+@pytest.mark.parametrize('early_final', [False, True])
+async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(durable, early_final):
     manager, cloud, root = durable
     manager.settings.temporal_enabled = True
     manager.settings.max_concurrent_runs = 100
@@ -72,7 +73,10 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
         peak = max(peak, sum(m.alive for m in cloud.machines))
         if action == 'read' and machine.spec.get('run_id') != root and not release_children:
             return json.dumps({'state': 'running', 'events': [], 'cursor': 0})
-        return await original_command(machine, action, directory, value, **kwargs)
+        output = await original_command(machine, action, directory, value, **kwargs)
+        if action == 'start' and machine.spec.get('agent_results', {}).get('settled') is False:
+            machine.operations[directory]['message'] = "I've read the skill. I'll apply it."
+        return output
 
     cloud.finished = False
     manager.command = command
@@ -94,6 +98,21 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
             children = manager.coordinator.children(result['group_id'])
             await eventually(lambda: all(manager.state(c['id']).get('phase') == 'monitor' for c in children), seconds=30)
             assert sum(m.alive for m in cloud.machines) == 5
+            if early_final:
+                cloud.finished = False
+                original_message = manager.state(root)['message_id']
+                target, _ = manager.store.enqueue_message(root, 'Apply the design skill.', 'design-correction')
+                manager.message_queue.change(root, target['id'], '', False, 0, 'steer')
+                manager.submit(manager.store.run(root))
+                # Simulate the native receipt for the same-turn correction.
+                await eventually(lambda: manager.state(root).get('phase') == 'monitor', seconds=30)
+                packet = manager.message_queue.live_control(root, original_message, [])
+                assert packet['input']['id'] == target['id']
+                manager.message_queue.live_control(root, original_message, [target['id']])
+                cloud.finished = True
+                await eventually(lambda: manager.state(root).get('phase') == 'waiting_children', seconds=30)
+                assert manager.state(root)['message_id'] == original_message
+                assert not [m for m in manager.store.messages(root) if m['role'] == 'assistant']
             await manager.shutdown()
             successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
             successor.coordinator = AgentCoordinator(successor.store, successor.settings, successor)
@@ -102,7 +121,7 @@ async def test_real_temporal_fanout_waits_without_parent_machine_and_recovers(du
             release_children = True
             await successor.recover()
             await eventually(lambda: successor.store.run(root)['status'] == 'idle', seconds=60)
-            assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 7
+            assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == (8 if early_final else 7)
             assert peak >= 5
             assert len([m for m in successor.store.messages(root) if m['role'] == 'assistant']) == 1
             handle = env.client.get_workflow_handle('moyai-session-' + root)
@@ -208,12 +227,50 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             await manager.shutdown()
 
 
-async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable):
+async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable, tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler
+    from sandbox.startup import _read_with_reconnect
+    from sandbox.transport_recovery import recovery_marker
+    from test_broker_transport import diagnostic_relay
+    from test_context_recovery import runtime
     from test_durable import transport_failure_report
     manager, cloud, run_id = durable
     cloud.saving_before_answer = False
     command = cloud.command
     failure = transport_failure_report()
+    # Obtain the actual safe-read -> model outage classification and checkpoint;
+    # only Modal execution remains synthetic in this Temporal restart test.
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps([{'name': 'agents_results', 'annotations': {
+                'readOnlyHint': True, 'idempotentHint': True}}]).encode())
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(b'{}')
+    def bounded_read(request, reader, **options):
+        return _read_with_reconnect(request, reader, **{**options, 'budget': 0.01})
+    monkeypatch.setattr('sandbox.broker_relay._read_with_reconnect', bounded_read)
+    agent, _ = runtime(tmp_path)
+    try:
+        with diagnostic_relay(Edge) as (relay, client, diagnostics):
+            agent.context.relay = relay
+            assert client.get('/tools').status_code == 200
+            agent.journal.tool_started('results', 'agents_results', {})
+            response = client.post('/tools/call', json={'name': 'agents_results', 'arguments': {}})
+            agent.journal.tool_finished('results', f'Tool failed (HTTP {response.status_code}).')
+            assert not relay.uncertain_tool and not relay.last_error
+            assert response.status_code == 503
+            assert client.post('/v1/responses', json={}).status_code == 502
+            marker = recovery_marker(agent, {'failed': True})
+            assert marker and marker['failure'] == diagnostics[-1]
+            failure['final']['transport_retry'] = marker
+    finally:
+        agent.context_store.close()
     failed_directory = None
 
     async def model_outage(machine, action, directory, value, **kwargs):

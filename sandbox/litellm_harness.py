@@ -166,7 +166,8 @@ class LiteLLMAgent(HarnessAgent):
                 instructions=system_message + '\n' + binding.instructions
                     + ' Hermes discovery wrappers are unavailable. Do not start detached work.',
                 max_turns=ctx.spec.get('max_iterations') or None, timeout=getattr(self, 'context_timeout', ctx.spec.get('timeout')),
-                permissions='full', options=binding.options_factory(ctx.config),
+                permissions='full', options=binding.options_factory({**ctx.config,
+                    'live_compaction': getattr(ctx.relay, 'live_compaction', False)}),
                 tools=binding.tools(ctx.cwd, ctx.config),
             ) as session:
                 while True:

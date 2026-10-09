@@ -132,6 +132,7 @@ def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp
     from sandbox import github_tools, harness_registry
     from sandbox.startup import _read_with_reconnect
     from sandbox.broker_relay import BrokerRelay
+    from sandbox.access_transport import open_broker
     repo, metadata, _, _, _ = checkout
     metadata = {**metadata, 'git_path': '/github/repositories/101.git'}
     (repo / 'edit.py').write_text('preserve local work\n')
@@ -145,10 +146,13 @@ def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp
         original_open = urllib.request.urlopen
         def scaled_open(request, timeout):
             return original_open(request, timeout=timeout * scale)
+        def scaled_broker_open(request, timeout):
+            return open_broker(request, timeout=timeout * scale)
         def scaled_read(request, reader, **options):
             return _read_with_reconnect(request, reader, **options,
                 clock=lambda: time.monotonic() / scale, sleep=lambda seconds: time.sleep(seconds * scale))
         monkeypatch.setattr(urllib.request, 'urlopen', scaled_open)
+        monkeypatch.setattr('sandbox.broker_relay.open_broker', scaled_broker_open)
         monkeypatch.setattr('sandbox.broker_relay._read_with_reconnect', scaled_read)
     if outcome == 'legacy':
         path = repo / '.git/moyai.json'

@@ -98,9 +98,9 @@ def writing_actor(skills, run):
     settings = skills.security.settings
     # Only independently verified Google profiles and fresh matching Slack
     # profiles qualify. Accounting links never grant access or admin status.
-    users = skills.store.rows("SELECT * FROM users WHERE kind='google'")
+    users = skills.store.rows("SELECT * FROM users WHERE kind IN ('google','cloudflare')")
     matches = [u for u in users if skills.same_requester(u['id'], actor)]
-    if len(matches) != 1 or not settings.google_enabled():
+    if len(matches) != 1 or not settings.person_login_enabled():
         raise HTTPException(403, 'Sign in with Google first. Slack also needs a fresh verified matching profile to save skills.')
     user = matches[0]
     if user['email'].rpartition('@')[2] not in settings.google_domains():

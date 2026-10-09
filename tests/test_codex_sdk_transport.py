@@ -6,15 +6,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from sandbox.codex_harness import CodexAgent
+from sandbox.broker_relay import BrokerRelay
 from sandbox.context_store import ContextStore, ContextUnavailable
+from test_workspace import workspace as broker_workspace
 
 
-def send_response(handler, output, sequence, input_tokens=500):
+def send_response(handler, output, sequence, input_tokens=500, *, interrupted=None):
     response = {'id': f'resp_fixture_{sequence}', 'status': 'completed', 'output': [output],
                 'usage': {'input_tokens': input_tokens, 'output_tokens': 30, 'total_tokens': input_tokens + 30}}
     frames = [
@@ -23,13 +26,296 @@ def send_response(handler, output, sequence, input_tokens=500):
         {'type': 'response.output_item.done', 'output_index': 0, 'item': output},
         {'type': 'response.completed', 'response': response},
     ]
+    if interrupted:
+        frames.pop()
     raw = ''.join('event: ' + frame['type'] + '\ndata: ' + json.dumps(frame) + '\n\n'
                   for frame in frames).encode()
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream')
-    handler.send_header('Content-Length', str(len(raw)))
+    handler.send_header('Content-Length', str(len(raw) + (64 if interrupted == 'truncated' else 0)))
     handler.end_headers()
     handler.wfile.write(raw)
+    handler.wfile.flush()
+    if interrupted:
+        handler.close_connection = True
+
+
+def background_gateway(tmp_path, monkeypatch, broker_workspace, harness, on_upstream,
+                       progress=lambda text: None):
+    """Real broker/relay and a delayed provider, shared by installed SDK proofs."""
+    import asyncio
+    from contextlib import contextmanager
+    import httpx
+    from app.context_budget import ModelContextLimits
+    from app.context_compaction import INSTRUCTIONS, PRIVATE_INSTRUCTIONS
+    from app.security import digest
+    from sandbox.broker_transport import unseal
+
+    @contextmanager
+    def running():
+        app, client = broker_workspace
+        model = 'anthropic/claude-opus-5-5' if harness == 'claude-agent-sdk' else 'openai/gpt-6-astra'
+        capability = 'background-fixture-capability'
+        app.state.settings.agent_model = model
+        app.state.settings.litellm_api_base = 'http://background-provider.test'
+        app.state.settings.max_agent_iterations = 100
+        run = app.state.store.create_run('Continue each tool once.', '', 'modal', [],
+            harness=harness, model=model, chat_enabled=True, user_id='google:background-fixture')
+        app.state.store.claim_message(run['id'])
+        app.state.store.update_run(run['id'], status='running', token_hash=digest(capability))
+        async def limits(model):
+            window = 280000 if harness == 'claude-agent-sdk' else 200000
+            return ModelContextLimits(context_window=window, max_input_tokens=window,
+                                      max_output_tokens=128000, default_output_tokens=4096)
+        monkeypatch.setattr(app.state.context_budget, 'limits', limits)
+        state = SimpleNamespace(app=app, run=run, requests=[], original=[], summaries=[],
+            service_requests=[], counter_requests=[], public_summaries=0,
+            held_calls=0, projections=[], summary_started=threading.Event(),
+            release=threading.Event(), summary_done=False, tail_marker='', faults=[],
+            summary_marker='private-background-summary-marker', message_seq=0)
+
+        async def upstream(request):
+            state.service_requests.append(request.url.path)
+            body = json.loads(request.content)
+            if request.url.path == '/utils/token_counter':
+                state.counter_requests.append(body)
+                count = sum(len(block['text'].encode()) for message in body['messages']
+                    for block in message['content'] if block['type'] == 'text')
+                return httpx.Response(200, json={'total_tokens': max(1, count),
+                                                'tokenizer_type': 'fixture_utf8'})
+            assert request.url.path in {'/v1/messages', '/v1/responses',
+                                         '/v1/chat/completions', '/chat/completions'}
+            instructions = body.get('messages', [{}])[0].get('content', '')
+            if isinstance(instructions, str) and instructions.startswith(PRIVATE_INSTRUCTIONS):
+                state.summaries.append(body)
+                if len(state.summaries) == 1:
+                    state.summary_started.set()
+                    progress('Background summary started; foreground inference remains available.')
+                    try:
+                        async with asyncio.timeout(20):
+                            while not state.release.is_set():
+                                await asyncio.sleep(0.005)
+                    finally:
+                        state.summary_done = True
+                source = json.dumps(body)
+                sessions = re.findall(r'session_id\\*"\s*:\s*(\d+)', source)
+                summary = state.summary_marker + ' Preserve the task and completed tools. '
+                if sessions:
+                    summary += 'The original command is still running: ' + json.dumps({'session_id': int(sessions[0])})
+                if state.tail_marker and state.tail_marker in source:
+                    summary += ' ' + state.tail_marker
+                return httpx.Response(200, json={'choices': [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': summary}}],
+                    'usage': {'prompt_tokens': 500, 'completion_tokens': 50, 'total_tokens': 550}})
+            if isinstance(instructions, str) and instructions.startswith(INSTRUCTIONS):
+                state.public_summaries += 1
+                return httpx.Response(200, json={'choices': [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': 'Completed fixture tools remain in their saved receipts.'}}],
+                    'usage': {'prompt_tokens': 500, 'completion_tokens': 20, 'total_tokens': 520}})
+            state.requests.append(body)
+            if state.summary_started.is_set() and not state.summary_done:
+                state.held_calls += 1
+                if not state.tail_marker:
+                    state.tail_marker = 'tail-added-while-summarizing'
+                progress(f'Foreground request {len(state.requests)} proceeds while summary is held.')
+                if state.held_calls >= 2:
+                    state.release.set()
+            text = json.dumps(body)
+            if state.summary_marker in text:
+                assert state.tail_marker in text, 'Installing the prefix summary discarded the new tail'
+                state.projections.append(body)
+            return on_upstream(body, state)
+
+        original_init = httpx.AsyncClient.__init__
+        def initialize_client(self, *args, **kwargs):
+            kwargs['mounts'] = {**(kwargs.get('mounts') or {}),
+                               'http://background-provider.test': httpx.MockTransport(upstream)}
+            original_init(self, *args, **kwargs)
+        monkeypatch.setattr(httpx.AsyncClient, '__init__', initialize_client)
+
+        class Bridge(BaseHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def forward(self):
+                raw = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                if self.path in {'/v1/responses', '/v1/messages', '/v1/chat/completions'}:
+                    state.original.append(json.loads(unseal(capability, self.path, raw)))
+                headers = {name: self.headers[name] for name in
+                    ('Authorization', 'Content-Type', 'anthropic-version', 'anthropic-beta') if name in self.headers}
+                response = client.request(self.command, '/broker/' + run['id'] + self.path,
+                                          content=raw, headers=headers)
+                if response.status_code >= 400:
+                    progress(f'Fixture broker {self.path}: HTTP {response.status_code} {response.text[:250]}')
+                    if state.original:
+                        progress('Requested output allowance: ' + str(state.original[-1].get('max_tokens')))
+                self.send_response(response.status_code)
+                for name, value in response.headers.items():
+                    if name.lower() not in {'content-length', 'connection', 'transfer-encoding'}:
+                        self.send_header(name, value)
+                self.send_header('Content-Length', str(len(response.content)))
+                self.end_headers()
+                self.wfile.write(response.content)
+            do_GET = do_POST = forward
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Bridge)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
+        relay = BrokerRelay(f'http://127.0.0.1:{server.server_port}', capability,
+                            report_error=state.faults.append).start()
+        state.relay, state.capability = relay, capability
+        try:
+            yield state
+        finally:
+            state.release.set()
+            relay.close()
+            server.shutdown()
+            server.server_close()
+    return running()
+
+
+def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, progress=lambda text: None,
+                           *, expect_background=True):
+    """A held summary overlaps real native tools without replacing their runtime."""
+    from dataclasses import replace
+    from io import BytesIO
+    import httpx
+    from sandbox.claude_harness import ClaudeAgent
+    from test_claude_native_compaction import send_message
+
+    workspace = tmp_path / 'native-tools'
+    workspace.mkdir()
+    executions = workspace / 'executions.txt'
+    (workspace / 'held.py').write_text(
+        'import pathlib,time\n'
+        'with pathlib.Path("executions.txt").open("a") as f: f.write("held\\n")\n'
+        'while not pathlib.Path("release").exists(): time.sleep(0.02)\n'
+        'print("original-command-finished", flush=True)\n')
+    events, sessions = [], []
+    command_session = None
+    codex = harness == 'codex'
+    tool_steps = 16 if codex else 24
+    # Each Codex receipt includes the command input and output. Keep those
+    # increments small enough for two more calls inside the 25% headroom.
+    # Claude's native Read truncates long lines; give it enough real reads
+    # to exercise the projected history after crossing the same threshold.
+    receipt_repeats = 2500 if codex else 4500
+
+    def upstream(body, state):
+        nonlocal command_session
+        sequence = len(state.requests)
+        pipe = SimpleNamespace(server=state, wfile=BytesIO(), send_response=lambda *a: None,
+            send_header=lambda *a: None, end_headers=lambda: None)
+        text = json.dumps(body)
+        if codex:
+            sessions.append(state.original[-1]['client_metadata']['thread_id'])
+            handles = re.findall(r'session_id\\*"\s*:\s*(\d+)', text)
+            if handles and command_session is None:
+                command_session = int(handles[0])
+            if sequence == 1:
+                code = 'text(await tools.exec_command(' + json.dumps({
+                    'cmd': shlex.quote(sys.executable) + ' held.py', 'tty': True,
+                    'login': False, 'yield_time_ms': 1000}) + '));'
+            elif sequence <= tool_steps + 1:
+                step = sequence - 1
+                script = ('import pathlib; '
+                    f'pathlib.Path("executions.txt").open("a").write("step-{step}\\n"); '
+                    + 'print(' + repr(f'receipt-{step} ' + state.tail_marker + ' x' * receipt_repeats) + ')')
+                code = 'text(await tools.exec_command(' + json.dumps({
+                    'cmd': shlex.quote(sys.executable) + ' -c ' + shlex.quote(script),
+                    'login': False, 'yield_time_ms': 1000, 'max_output_tokens': 5000}) + '));'
+            elif sequence == tool_steps + 2:
+                assert (state.projections or not expect_background) and command_session in [int(value) for value in handles]
+                (workspace / 'release').touch()
+                code = 'text(await tools.write_stdin(' + json.dumps({
+                    'session_id': command_session, 'chars': '', 'yield_time_ms': 1000}) + '));'
+            else:
+                assert sequence == tool_steps + 3 and 'original-command-finished' in text
+                code = None
+            block = ({'type': 'custom_tool_call', 'id': f'code_{sequence}', 'call_id': f'code_{sequence}',
+                'name': 'exec', 'namespace': 'functions', 'input': code} if code else
+                {'type': 'message', 'id': 'final', 'role': 'assistant', 'phase': 'final_answer',
+                 'status': 'completed', 'content': [{'type': 'output_text', 'text': 'background-native-ok'}]})
+            send_response(pipe, block, sequence, input_tokens=len(text) // 4)
+        else:
+            sessions.append(json.loads(state.original[-1]['metadata']['user_id'])['session_id'])
+            if sequence <= tool_steps:
+                receipt = workspace / f'receipt-{sequence}.txt'
+                receipt.write_text(f'receipt-{sequence} ' + state.tail_marker + ' x' * receipt_repeats)
+                block = {'type': 'tool_use', 'id': f'read_{sequence}', 'name': 'Read',
+                         'input': {'file_path': str(receipt)}}
+            else:
+                assert sequence == tool_steps + 1 and (state.projections or not expect_background)
+                block = {'type': 'text', 'text': 'background-native-ok'}
+            send_message(pipe, body, block, {'input_tokens': len(text) // 4, 'output_tokens': 100})
+        return httpx.Response(200, content=pipe.wfile.getvalue(), headers={'Content-Type': 'text/event-stream'})
+
+    with background_gateway(tmp_path, monkeypatch, broker_workspace, harness, upstream, progress) as state:
+        store = ContextStore(tmp_path / 'native-context.sqlite3', state.run['id'])
+        store.initialize([])
+        cls = CodexAgent if codex else ClaudeAgent
+        agent = cls(spec={'model': state.app.state.settings.agent_model, 'timeout': 60,
+            'max_iterations': tool_steps + 10},
+            relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
+            activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
+                complete=lambda *args: events.append(('complete', args)), commentary=progress),
+            step=lambda: None, cwd=str(workspace), definition=None, context_store=store)
+        if not codex:
+            options = agent.options
+            agent.options = lambda system: replace(options(system), tools=['Read'], allowed_tools=['Read'], mcp_servers={})
+        try:
+            from sandbox.context_store import ContextUnavailable
+            try:
+                result = agent.run_conversation('Perform the fixture steps once and preserve the current task.',
+                    conversation_history=[], system_message='Keep each tool receipt. Do not repeat completed actions.')
+            except ContextUnavailable as exc:
+                if expect_background:
+                    raise
+                result = {'completed': False, 'final_response': str(exc)}
+            if not expect_background:
+                assert not result['completed'], 'This baseline completed; do not label it a reproduced failure'
+                assert not state.summaries and not state.held_calls and not state.projections
+                pending = len(store.pending)
+                progress(f'BASELINE {harness}: {len(state.requests)} foreground calls, '
+                         f'{len(state.service_requests)} total provider requests, {pending} pending tool(s); '
+                         + result['final_response'])
+                return {'completed': False, 'foreground_calls': len(state.requests), 'overlap': 0,
+                        'provider_calls': len(state.service_requests), 'pending': pending,
+                        'failure': result['final_response'], 'projections': 0}
+            assert result['completed'], (result['final_response'], state.faults, len(state.requests), len(state.summaries))
+            assert result['final_response'] == 'background-native-ok'
+            assert state.held_calls >= 2 and state.projections and not state.faults
+            assert len(state.original) == len(state.requests) == tool_steps + (3 if codex else 1)
+            assert len(state.service_requests) == (len(state.requests) + len(state.summaries)
+                                                   + state.public_summaries + len(state.counter_requests))
+            assert len(set(sessions)) == 1, 'Compaction replaced the native runtime'
+            assert not store.pending
+            started = [args[0] for kind, args in events if kind == 'start']
+            completed = [args[0] for kind, args in events if kind == 'complete']
+            assert len(started) == len(set(started)) == tool_steps + int(codex)
+            assert sorted(started) == sorted(completed)
+            assert state.tail_marker not in json.dumps(state.summaries[0])
+            assert state.summary_marker not in json.dumps(state.original)
+            assert state.summary_marker not in ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
+            if codex:
+                assert 'You are performing a CONTEXT CHECKPOINT COMPACTION.' not in json.dumps(state.original)
+                assert executions.read_text().splitlines() == ['held', *[f'step-{i}' for i in range(1, tool_steps + 1)]]
+            else:
+                assert agent.native_compactions == 0
+            progress(f'PASS {harness}: {len(state.requests)} foreground calls, {state.held_calls} while summary held; '
+                     f'{len(state.service_requests)} total provider requests; {len(completed)} receipts, '
+                     'one native session, preserved new tail.')
+            return {'foreground_calls': len(state.requests), 'overlap': state.held_calls,
+                    'provider_calls': len(state.service_requests),
+                    'receipts': len(completed), 'projections': len(state.projections)}
+        finally:
+            (workspace / 'release').touch()
+            agent.close()
+            store.close()
+
+
+def test_codex_background_compaction_preserves_running_command(tmp_path, monkeypatch, broker_workspace):
+    native_background_case(tmp_path, monkeypatch, broker_workspace, 'codex', progress=print)
 
 
 @pytest.mark.parametrize('outcome', [
@@ -327,9 +613,52 @@ def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypa
     assert proof['final_response'] == 'yield-test-complete'
 
 
+def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 2000, 'read-outage')
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert not proof['faults'] and not proof['transport_errors']
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == 2
+    assert proof['read_attempts'] == 2 and proof['upstream_requests'] == 3
+    assert (tmp_path / 'workspace' / 'writes').read_text() == 'once\n'
+    assert proof['final_response'] == 'yield-test-complete'
+
+
+def test_native_redeploy_outage_preserves_preview(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-transport-preview',
+                             outage_seconds=40, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['upstream_requests'] == proof['model_calls'] == 4
+    assert proof['transport_attempt'] == 1
+    assert proof['outage_elapsed'] >= 40
+    assert proof['readiness_statuses'][0] == 503 and proof['readiness_statuses'][-1] == 200
+    assert {sample['phase'] for sample in proof['preview_samples']} == {'before', 'during', 'after'}
+    assert len({(sample['pid'], sample['port']) for sample in proof['preview_samples']}) == 1
+    assert all(sample['status'] == 200 for sample in proof['preview_samples'])
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
+@pytest.mark.parametrize('interrupted', ['clean', 'truncated'])
+def test_native_interrupted_sse_preserves_existing_command(tmp_path, monkeypatch, interrupted):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-transport-preview',
+                             interrupted=interrupted, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['upstream_requests'] == proof['model_calls'] == 3
+    assert proof['transport_attempt'] == 1
+    assert len(proof['transport_errors']) == 1
+    assert proof['transport_errors'][0]['response_started'] is True
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
-                      context_rounds=1, compact_rejections=0):
+                      context_rounds=1, compact_rejections=0,
+                      outage_seconds=0, interrupted=None, on_outage=lambda: None,
+                      on_status=lambda kind, message, data: None):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
     The tool waits for the next model request to reach the upstream server.
@@ -339,7 +668,12 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     from sandbox.broker_transport import unseal
     capability = 'yield-fixture-capability'
     release = threading.Event()
-    calls, requests, steps, events, faults, diagnostics = [], [], [], [], [], []
+    calls, requests, steps, events, faults, diagnostics, read_attempts = [], [], [], [], [], [], []
+    outage_started = outage_until = 0
+    readiness_statuses, preview_samples, status_events = [], [], []
+    stop_observing = threading.Event()
+    observer = None
+    settlement_sent = False
     workspace = tmp_path / 'workspace'
     workspace.mkdir()
     settlement = outcome.startswith('settle-')
@@ -347,24 +681,43 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     transport = outcome.startswith('settle-transport-') or outcome == 'settle-context-transport-preview'
     context_case = outcome.startswith('settle-context')
     finish_during_compaction = outcome == 'settle-context-during-compaction'
+    read_outage = outcome == 'read-outage'
     receipt_during_compaction = threading.Event()
     compactions = []
     corrections = []
     if settlement:
         (workspace / 'command.py').write_text(
-            'import http.server, pathlib, signal, sys, time\n'
+            'import http.server, os, pathlib, signal, sys, time\n'
             'signal.signal(signal.SIGINT, lambda *_: sys.exit(0))\n'
+            'with pathlib.Path("command-starts").open("a") as starts: starts.write(str(os.getpid()) + "\\n")\n'
             'try:\n' + (
                 ' server = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)\n'
                 ' pathlib.Path("preview-port").write_text(str(server.server_port))\n'
+                ' pathlib.Path("preview-pid").write_text(str(os.getpid()))\n'
                 ' print("preview-ready", flush=True)\n server.serve_forever()\n'
                 if preview else
                 ' while not pathlib.Path("release").exists(): time.sleep(0.05)\n'
                 + (f' time.sleep({context_delay})\n' if context_case else '')) +
             'finally:\n print("slow-tool-complete", flush=True)\n')
+
+    def sample_preview(phase):
+        from urllib.request import urlopen
+        try:
+            port = int((workspace / 'preview-port').read_text())
+            pid = int((workspace / 'preview-pid').read_text())
+            with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
+                sample = {'phase': phase, 'pid': pid, 'port': port, 'status': response.status}
+            preview_samples.append(sample)
+            return sample
+        except (OSError, ValueError) as exc:
+            faults.append(f'Original preview unavailable {phase} recovery: {type(exc).__name__}')
+
+    def observe_outage():
+        while not stop_observing.wait(1) and time.monotonic() < outage_until:
+            sample_preview('during')
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     agent = None
-    native_errors, native_plugins, native_clients, native_threads = [], [], [], []
+    native_errors, native_error_payloads, native_plugins, native_clients, native_threads = [], [], [], [], []
     from openai_codex.async_client import AsyncCodexClient
     from sandbox.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
@@ -392,6 +745,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 (workspace / 'release').touch()
             if event.method == 'error':
                 payload = event.payload.model_dump(mode='json', by_alias=True)
+                native_error_payloads.append(payload)
+                if interrupted:
+                    progress('Synthetic fixture native error payload: ' + json.dumps(payload))
                 detail = codex_details(payload.get('error'), will_retry=payload.get('willRetry'))
                 native_errors.append(detail)
                 progress('Native SDK error: ' + json.dumps(detail))
@@ -415,20 +771,39 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 pass  # The baseline SDK exits with the fixture tool unresolved.
 
         def do_GET(self):
+            assert self.headers['Authorization'] == 'Bearer ' + capability
+            status = 503 if time.monotonic() < outage_until else 200
+            if self.path == '/v1/models':
+                readiness_statuses.append(status)
+                progress(f'Authenticated broker readiness: HTTP {status}')
+            if status == 503:
+                return self.reply({}, status)
+            if self.path == '/v1/models':
+                return self.reply({'object': 'list', 'data': [{'id': 'openai/gpt-6-astra'}]})
             if self.path == '/context/window':
                 return self.reply({'input_budget': 200000})
             assert self.path == '/tools'
             self.reply([{'name': 'slow_echo', 'description': 'Wait for a local fixture signal.',
+                **({'annotations': {'readOnlyHint': True, 'idempotentHint': True}} if read_outage else {}),
                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
 
         def do_POST(self):
+            nonlocal outage_started, outage_until, observer, settlement_sent
+            assert self.headers['Authorization'] == 'Bearer ' + capability
             raw = self.rfile.read(int(self.headers['Content-Length']))
             body = json.loads(unseal(capability, self.path, raw))
+            if time.monotonic() < outage_until:
+                if self.path == '/v1/responses':
+                    requests.append(body)
+                return self.reply({}, 503)
             if self.path == '/context/maintenance':
                 if agent.journal is not None:
                     assert not agent.journal.pending
                 return self.reply({})
             if self.path == '/tools/call':
+                read_attempts.append(body)
+                if read_outage and len(read_attempts) == 1:
+                    return self.reply({}, 502)
                 calls.append(body)
                 progress('Tool started; it waits for an admitted model poll')
                 if not release.wait(timeout=50):
@@ -472,19 +847,33 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     'cmd': shlex.quote(sys.executable) + ' command.py', 'tty': True,
                     'login': False, 'yield_time_ms': 1000}) + '));' if settlement else
                     'text(await tools.mcp__moyai__slow_echo({}));')
+                if read_outage:
+                    code = 'text(await tools.exec_command({cmd: "printf \'once\\n\' >> writes; printf write-receipt", login: false}));' + code
                 if yield_ms is not None and not settlement:
                     code = '// @exec: ' + json.dumps({'yield_time_ms': yield_ms}) + '\n' + code
                 output = {'type': 'custom_tool_call', 'id': 'exec_1', 'call_id': 'outer_1',
                           'name': 'exec', 'namespace': 'functions', 'input': code}
-            elif transport and sequence == 2:
+                if interrupted:
+                    progress('Interrupting SSE after the command output item, before response.completed')
+                    return send_response(self, output, sequence, interrupted=interrupted)
+            elif transport and sequence == 2 and not interrupted:
                 assert agent.journal.pending and steps == [0]
+                if outage_seconds:
+                    sample_preview('before')
+                    outage_started = time.monotonic()
+                    outage_until = outage_started + outage_seconds
+                    observer = threading.Thread(target=observe_outage, daemon=True)
+                    observer.start()
+                    progress(f'Broker unavailable for {outage_seconds} seconds; original preview stays running')
+                    on_outage()
+                    return self.reply({}, 503)
                 progress('Injecting an edge HTTP 502 with the existing command still running')
                 return self.reply({}, 502)
             elif context_case and 2 + int(transport) <= sequence <= context_rounds + 1 + int(transport):
                 assert agent.journal.pending and steps == [0]
                 return self.reply({'detail': {'code': 'context_compaction_required',
                     'input_tokens': 300000, 'input_budget': 200000}}, 409)
-            elif settlement and sequence == 2:
+            elif settlement and sequence == 2 and not interrupted:
                 assert agent.journal.pending and steps == [0]
                 if preview:
                     from urllib.request import urlopen
@@ -495,14 +884,12 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 output = {'type': 'message', 'id': 'premature', 'role': 'assistant',
                     'phase': 'final_answer', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': 'premature-answer'}]}
-            elif settlement and sequence == (context_rounds + 2 + int(transport) if context_case else 3):
+            elif (settlement and not settlement_sent and sequence >=
+                    (context_rounds + 2 + int(transport) if context_case else 2 if interrupted else 3)):
                 assert bool(agent.journal.pending) != finish_during_compaction
                 assert agent.model_calls == sequence + len(compactions)
                 if transport and preview:
-                    from urllib.request import urlopen
-                    port = (workspace / 'preview-port').read_text()
-                    with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
-                        assert response.status == 200
+                    sample_preview('after')
                     progress('After reconnect: original preview server still answers HTTP 200')
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
                 sessions = re.findall(r'session_id(?:\\?"\s*:\s*|:\s*)(\d+)', json.dumps(body))
@@ -514,7 +901,13 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     'input': 'text(await tools.write_stdin(' + json.dumps({
                         'session_id': int(sessions[-1]), 'yield_time_ms': 20000 if context_case else 1000,
                         'chars': '\u0003' if preview else ''}) + '));'}
-            elif sequence == 2:
+                settlement_sent = True
+            elif sequence == 2 and not settlement:
+                if read_outage and not calls:
+                    faults.append('Safe read returned before recovery')
+                    return send_response(self, {'type': 'message', 'id': 'unrecovered', 'role': 'assistant',
+                        'phase': 'final_answer', 'status': 'completed', 'content': [
+                            {'type': 'output_text', 'text': 'read-outage-unrecovered'}]}, sequence)
                 assert len(calls) == 1 and agent.journal.pending
                 assert steps == [0], 'Lifecycle must not run while the nested tool is pending'
                 assert agent.model_calls == 2, 'Polling must count toward the model-call cap'
@@ -526,7 +919,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 release.set()
             else:
                 if not settlement:
-                    assert not agent.journal.pending and agent.journal.completed_tools == 1
+                    assert not agent.journal.pending and agent.journal.completed_tools == 1 + int(read_outage)
                 assert 'slow-tool-complete' in json.dumps(body)
                 output = {'type': 'message', 'id': 'answer', 'role': 'assistant', 'phase': 'final_answer',
                           'status': 'completed', 'content': [{'type': 'output_text', 'text': 'yield-test-complete'}]}
@@ -558,13 +951,20 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         if relay.native_compacting:
             receipt_during_compaction.set()
 
-    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 60,
+    def emit_status(kind, message, data=None):
+        event = {'kind': kind, 'message': message, 'data': data or {}}
+        status_events.append(event)
+        progress('Status: ' + json.dumps(event))
+        on_status(kind, message, data or {})
+
+    agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': max(60, outage_seconds + 45),
         'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
-            complete=completed, commentary=lambda text: None),
+            complete=completed, commentary=lambda text: None,
+            emit=emit_status),
         step=step, cwd=str(workspace), definition=None, context_store=store)
     try:
         try:
@@ -575,7 +975,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       'messages': agent.journal.messages, 'final_response': str(exc)}
         assert calls == ([] if settlement else [{'name': 'slow_echo', 'arguments': {}}])
         receipts = [m for m in result['messages'] if m['role'] == 'tool']
-        assert all('slow-tool-complete' in receipt['content'] for receipt in receipts)
+        assert all('slow-tool-complete' in receipt['content'] or
+                   (read_outage and 'write-receipt' in receipt['content']) for receipt in receipts)
         proof = {key: result[key] for key in ('completed', 'interrupted', 'failed', 'final_response')}
         proof.update(boundary_failed=agent.boundary_failed, model_calls=agent.model_calls,
             upstream_requests=len(requests), lifecycle_steps=steps,
@@ -585,13 +986,22 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             sdk_failure=result.get('sdk_failure'), native_errors=native_errors, native_plugins=native_plugins,
             native_clients=len(native_clients), native_threads=len(native_threads),
             transport_attempt=agent.transport_attempt, native_compactions=len(compactions),
+            read_attempts=len(read_attempts),
             receipt_during_compaction=receipt_during_compaction.is_set(),
             corrections_delivered=len(corrections),
+            native_error_payloads=native_error_payloads,
+            command_starts=len((workspace / 'command-starts').read_text().splitlines())
+                if (workspace / 'command-starts').exists() else 0,
+            outage_elapsed=time.monotonic() - outage_started if outage_started else 0,
+            readiness_statuses=readiness_statuses, preview_samples=preview_samples, status_events=status_events,
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
         return proof
     finally:
+        stop_observing.set()
+        if observer:
+            observer.join(timeout=3)
         release.set()
         (workspace / 'release').touch()
         agent.close()

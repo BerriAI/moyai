@@ -14,7 +14,7 @@ import modal
 from fastapi import HTTPException
 from .environments import EnvironmentPending
 
-from .runner import RunManager, SAVE_WARNING, TERMINAL, safe_error_detail, refresh_sandbox_files
+from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files
 from .security import digest
 from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
@@ -192,6 +192,15 @@ class DurableRunner(RunManager):
             if not row or row['deleted_at']:
                 return False
             state = self.state(run_id)
+            # Stop only at boundaries before a process is launched. Active
+            # execution, checkpoint saving and cleanup keep running. The saved
+            # state and inbox are resumed by the replacement worker.
+            if (self.settings.maintenance_drain and row['status'] != 'stopping'
+                    and state.get('phase', 'idle') in {
+                        'idle', 'warm', 'prepare', 'provision', 'waiting_environment',
+                        'install', 'startup_wait', 'transport_wait',
+                        'waiting_children', 'waiting_credential'}):
+                return {'retry_seconds': 15}
             if state.get('computer_only') and state.get('phase') not in {'idle', 'warm'}:
                 return await self.advance_computer(run_id, state)
             if state.get('phase') in {'warm', 'warm_cleanup'}:
@@ -453,11 +462,22 @@ class DurableRunner(RunManager):
         # task spec, command argument or Temporal payload. Reused machines have
         # an older creation-time environment, so every launch overrides it.
         process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args,
-                                         timeout=30, env={'WORKSPACE_RUN_TOKEN': token} if token else {})
+                                         timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:
             raise RuntimeError('Sandbox supervisor command failed')
         return output
+
+    def guard_agent_completion(self, run_id, result):
+        # A native final ends one model segment, not outstanding delegation.
+        # Query persisted groups: steering can change turns, and workers may
+        # settle after this segment received partial results. Only handoff (or
+        # explicit cancellation) discharges the obligation to gather results.
+        if self.coordinator and completed_response(self.store.run(run_id), result):
+            group = self.coordinator.pending_group(run_id)
+            if group:
+                return {**result, 'completed': False, 'continuation': True, 'wait_group': group}
+        return result
 
     async def step(self, run_id, state):
         phase = state['phase']
@@ -555,7 +575,8 @@ class DurableRunner(RunManager):
                 if self.store.run(run_id)['status'] == 'stopping':
                     return True
                 output = await self.command(sandbox, 'read', self.directory(state), str(state['cursor']))
-                for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret):
+                for value in (self.token(run_id, state['message_id']), self.settings.litellm_api_key, self.settings.modal_token_secret,
+                              self.settings.cloudflare_access_client_id, self.settings.cloudflare_access_client_secret):
                     if value:
                         output = output.replace(value, '[redacted]')
                 report = json.loads(output)
@@ -570,6 +591,9 @@ class DurableRunner(RunManager):
                         self.acknowledge_credential(run_id, state)
                         state.pop('startup_deadline', None)
                         self.running_status(run_id, 'running')
+                    elif (event.get('kind') == 'status' and event.get('data', {}).get('stage') == 'model_transport'
+                            and state.get('execution_started') and event_phase in {'reconnecting', 'recovered'}):
+                        self.running_status(run_id, 'running' if event_phase == 'recovered' else 'reconnecting')
                     elif event_phase == 'reconnecting' and not state.get('execution_started'):
                         self.running_status(run_id, 'reconnecting')
                     if event.get('kind') == 'error':
@@ -582,7 +606,8 @@ class DurableRunner(RunManager):
                     if report['final'].get('completed') or report['final'].get('steer_message_id'):
                         self.acknowledge_credential(run_id, state)
                     self.message_queue.acknowledge(run_id, state['message_id'], report['final'].get('steering_applied', []))
-                    state['result'] = {**report['final'], 'message_id': state['message_id']}
+                    state['result'] = self.guard_agent_completion(
+                        run_id, {**report['final'], 'message_id': state['message_id']})
                     attempts = report['final'].get('transport_attempt')
                     if type(attempts) is int and attempts >= 0:
                         state['transport_attempt'] = max(state.get('transport_attempt', 0),
@@ -669,7 +694,12 @@ class DurableRunner(RunManager):
                 conn.execute("UPDATE runs SET snapshot_id=?,checkpoint_error='',pending_result=? WHERE id=?",
                              (snapshot.object_id, '' if result.get('transport_retry') else json.dumps(result), run_id))
         elif phase == 'checkpointed':
-            result = state['result']
+            # Also cover receipts checkpointed before this safeguard existed.
+            result = self.guard_agent_completion(run_id, state['result'])
+            if result != state['result']:
+                state['result'] = result
+                self.save(run_id, state)
+                self.receive_result(run_id, result)
             if result.get('transport_retry'):
                 if state['exit_code'] == 75 and valid_retry(result['transport_retry']) and not result.get('completed'):
                     self.wait_for_transport(run_id, state)

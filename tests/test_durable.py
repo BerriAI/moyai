@@ -155,6 +155,101 @@ def transport_failure_report():
                         'transient': True, 'response_started': False, 'request_id': 'request-fixture'}}}}
 
 
+async def test_maintenance_drain_preserves_inbox_and_resumes_after_worker_replacement(durable):
+    manager, cloud, run_id = durable
+    manager.settings.maintenance_drain = True
+    assert await manager.advance(run_id) == {'retry_seconds': 15}
+    assert not cloud.launches and not cloud.machines
+    assert manager.store.messages(run_id)[0]['status'] == 'queued'
+    manager.settings.maintenance_drain = False
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await drive(replacement, run_id)
+    assert len(cloud.launches) == 1
+    assert replacement.store.messages(run_id)[0]['status'] == 'completed'
+
+
+async def test_maintenance_drain_saves_active_checkpoint_before_holding_continuation(durable):
+    manager, cloud, run_id = durable
+    cloud.continue_once = True
+    await drive(manager, run_id, phase='monitor')
+    manager.settings.maintenance_drain = True
+    await drive(manager, run_id, phase='install')
+    assert cloud.snapshots == 1 and len(cloud.launches) == 1
+    state = manager.state(run_id)
+    assert await manager.advance(run_id) == {'retry_seconds': 15}
+    assert manager.state(run_id) == state
+    manager.settings.maintenance_drain = False
+    manager.settings.public_url = 'https://moyai-private.example'
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await drive(replacement, run_id)
+    assert len(cloud.launches) == 2 and len(set(cloud.launches)) == 2
+    assert cloud.machines[0].spec['broker_url'] == f'https://moyai-private.example/broker/{run_id}'
+    assert replacement.store.messages(run_id)[0]['status'] == 'completed'
+
+
+async def test_maintenance_drain_still_honors_cancellation(durable):
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='install')
+    manager.settings.maintenance_drain = True
+    await manager.cancel(run_id)
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'cancelled'
+    assert not cloud.launches and cloud.terminations
+
+
+async def test_live_transport_window_reaches_launched_agent(durable: tuple[TemporalRunManager, Cloud, str]) -> None:
+    manager, cloud, run_id = durable
+    manager.settings.transport_recovery_seconds = 90
+    await drive(manager, run_id, phase='monitor')
+    assert cloud.machines[0].spec['transport_recovery_seconds'] == 90
+    assert cloud.machines[0].spec['timeout'] is None
+
+
+@pytest.mark.parametrize(('kind', 'phase', 'stage', 'initial', 'expected'), [
+    ('status', 'reconnecting', 'model_transport', 'running', 'reconnecting'),
+    ('status', 'recovered', 'model_transport', 'reconnecting', 'running'),
+    ('status', 'reconnecting', 'context_window', 'running', 'running'),
+    ('status', 'recovered', 'context_window', 'reconnecting', 'reconnecting'),
+    ('status', 'reconnecting', '', 'running', 'running'),
+    ('status', 'recovered', '', 'reconnecting', 'reconnecting'),
+    ('message', 'recovered', 'model_transport', 'reconnecting', 'reconnecting'),
+])
+@pytest.mark.parametrize('stop_during_read', [False, True])
+async def test_live_transport_status_survives_worker_detach_without_reviving_stop(
+        durable: tuple[TemporalRunManager, Cloud, str], kind: str, phase: str,
+        stage: str, initial: str, expected: str, stop_during_read: bool) -> None:
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='monitor')
+    state = manager.state(run_id)
+    state['execution_started'] = True
+    manager.save(run_id, state)
+    manager.store.update_run(run_id, status=initial)
+    capability = manager.store.run(run_id)['token_hash']
+    event = {'kind': kind, 'message': 'Transport state changed',
+             'data': {'activity_version': 1, 'phase': phase, 'stage': stage}}
+
+    async def read(machine: Machine, action: str, directory: str, cursor: str) -> str:
+        assert machine is cloud.machines[0] and action == 'read'
+        if stop_during_read:
+            await manager.cancel(run_id)
+        # Shutdown detaches at the next await, after this batch is persisted.
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        return json.dumps({'state': 'running', 'events': [event], 'cursor': 1})
+
+    manager.command = read
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.create_task(manager.advance(run_id))
+    successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    row = successor.store.run(run_id)
+    assert row['status'] == ('stopping' if stop_during_read else expected)
+    assert row['token_hash'] == ('' if stop_during_read else capability)
+    assert successor.state(run_id)['phase'] == 'monitor'
+    assert successor.state(run_id)['cursor'] == 1
+    assert len(cloud.launches) == 1 and cloud.machines[0].alive
+
+
 @pytest.mark.parametrize('lost_machine', [False, True])
 async def test_transport_recovery_checkpoints_and_resumes_same_turn_after_worker_loss(durable, lost_machine):
     manager, cloud, run_id = durable

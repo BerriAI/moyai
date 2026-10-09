@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -164,6 +165,11 @@ class Store:
                     name TEXT NOT NULL, linked_user_id TEXT REFERENCES users(id),
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS access_identities (
+                    issuer TEXT NOT NULL, subject TEXT NOT NULL, email TEXT NOT NULL,
+                    user_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL,
+                    PRIMARY KEY(issuer,subject), UNIQUE(issuer,user_id), UNIQUE(issuer,email)
+                );
                 CREATE TABLE IF NOT EXISTS user_model_preferences (
                     user_id TEXT PRIMARY KEY REFERENCES users(id), model TEXT NOT NULL
                 );
@@ -318,7 +324,7 @@ class Store:
     def session_view_owner_in(conn: sqlite3.Connection, user_id: str) -> str:
         """Resolve shared-workspace view links, never authentication or authorship."""
         linked = conn.execute("""SELECT target.id FROM users source JOIN users target
-            ON target.id=source.linked_user_id AND target.kind='google'
+            ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare')
             WHERE source.id=? AND source.kind='slack'""", (user_id,)).fetchone()
         return linked['id'] if linked else user_id
 
@@ -670,6 +676,8 @@ class Store:
 
     def identity(self, info):
         """Only call with the server-verified session, never request JSON."""
+        if info.get('method') == 'cloudflare':
+            return self.access_identity(info['identity'])
         if info.get('method') == 'google':
             identity = info['identity']
             user_id = 'google:' + identity['sub']
@@ -689,6 +697,42 @@ class Store:
                     self.reconcile_email_in(conn, value)
         return user_id
 
+    def access_identity(self, identity):
+        """Pin a verified Access subject to a person without changing ownership.
+
+        The employee Access policy and signed email are authoritative for the
+        one-time match to an existing work account. Once enrolled, a different
+        subject or changed/ambiguous email requires administrator review.
+        """
+        issuer, subject, email = identity['issuer'], identity['sub'], identity['email']
+        stamp = now()
+        with self.connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            binding = conn.execute('SELECT * FROM access_identities WHERE issuer=? AND subject=?',
+                                   (issuer, subject)).fetchone()
+            if binding:
+                user = conn.execute('SELECT * FROM users WHERE id=?', (binding['user_id'],)).fetchone()
+                if (not user or user['kind'] not in {'google', 'cloudflare'}
+                        or binding['email'] != email or user['email'] != email):
+                    raise ValueError('Access account mapping requires administrator review.')
+                user_id = user['id']
+                conn.execute('UPDATE users SET updated_at=? WHERE id=?', (stamp, user_id))
+            else:
+                matches = conn.execute("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,)).fetchall()
+                if len(matches) > 1 or conn.execute('SELECT 1 FROM access_identities WHERE issuer=? AND email=?', (issuer, email)).fetchone():
+                    raise ValueError('Access account mapping requires administrator review.')
+                if matches:
+                    user_id = matches[0]['id']
+                    if conn.execute('SELECT 1 FROM access_identities WHERE issuer=? AND user_id=?', (issuer, user_id)).fetchone():
+                        raise ValueError('Access account mapping requires administrator review.')
+                else:
+                    user_id = 'cloudflare:' + hashlib.sha256((issuer + '\0' + subject).encode()).hexdigest()
+                    conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                                 (user_id, 'cloudflare', email, email, stamp, stamp))
+                conn.execute('INSERT INTO access_identities VALUES(?,?,?,?,?)', (issuer, subject, email, user_id, stamp))
+            self.reconcile_email_in(conn, email)
+        return user_id
+
     def reconcile_email_in(self, conn, email):
         """Accounting links only. Never authenticate a user or grant a role here.
 
@@ -697,7 +741,7 @@ class Store:
         """
         if not email or not self.auto_link_identities:
             return
-        google = conn.execute("SELECT id FROM users WHERE kind='google' AND email=?", (email,)).fetchall()
+        google = conn.execute("SELECT id FROM users WHERE kind IN ('google','cloudflare') AND email=?", (email,)).fetchall()
         slack = conn.execute("SELECT * FROM users WHERE kind='slack' AND email=? AND profile_eligible=1", (email,)).fetchall()
         fresh_after = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         # Retain collision detection for older/deactivated Slack identities too:

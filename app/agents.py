@@ -116,8 +116,10 @@ class AgentCoordinator:
     def tools(self, run):
         if not self.available(run):
             return []
+        # Result/artifact reads have no selection effects and can reconnect safely.
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': read_only}} for name, (schema, read_only, description) in TOOLS.items()]
+                 'annotations': {'readOnlyHint': read_only, 'idempotentHint': read_only}}
+                for name, (schema, read_only, description) in TOOLS.items()]
 
     def group(self, parent_id, group_id):
         rows = self.store.rows('SELECT * FROM agent_groups WHERE id=? AND parent_id=?', (group_id, parent_id))
@@ -127,6 +129,12 @@ class AgentCoordinator:
 
     def children(self, group_id):
         return self.store.rows('SELECT id,agent_label,status,summary,error,checkpoint_error,created_at,updated_at FROM runs WHERE agent_group_id=? ORDER BY created_at,id', (group_id,))
+
+    def pending_group(self, parent_id):
+        """A worker finishing does not discharge the parent's result handoff."""
+        groups = self.store.rows("""SELECT id FROM agent_groups WHERE parent_id=?
+            AND status IN ('preparing','running') ORDER BY created_at,id LIMIT 1""", (parent_id,))
+        return groups[0]['id'] if groups else None
 
     @staticmethod
     def unsettled_in(conn, group_id):

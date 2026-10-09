@@ -73,9 +73,9 @@ class AutomationTools:
         security = self.service.security
         if security.local_preview() and actor == 'shared:local:admin':
             return run, actor
-        matches = [u for u in self.store.rows("SELECT id,email FROM users WHERE kind='google'")
+        matches = [u for u in self.store.rows("SELECT id,email FROM users WHERE kind IN ('google','cloudflare')")
                    if self.same_requester(u['id'], actor)]
-        if (not security.settings.google_enabled() or len(matches) != 1
+        if (not security.settings.person_login_enabled() or len(matches) != 1
                 or matches[0]['email'].rpartition('@')[2] not in security.settings.google_domains()):
             raise HTTPException(403, 'Sign in with Google first. Slack scheduling also needs a fresh verified matching profile.')
         return run, matches[0]['id']

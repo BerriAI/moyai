@@ -11,15 +11,18 @@ import urllib.request
 from uuid import uuid4
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import nullcontext
+from collections import Counter
 
 try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
-    from .broker_failure import MODEL_ROUTES, failure
+    from .access_transport import broker_headers, open_broker
+    from .broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from .transport_recovery import retryable_failure
     from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
-    from broker_failure import MODEL_ROUTES, failure
+    from access_transport import broker_headers, open_broker
+    from broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
     from transport_recovery import retryable_failure
     from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 
@@ -37,7 +40,10 @@ class BrokerRelay:
         self.notify = notify
         self.last_error = ''
         self.last_failure = None
+        self.model_response = None
+        self.report_error = report_error
         self.uncertain_tool = False
+        self.retry_safe_tools = frozenset()
         self.model_failed = False
         self.failure_lock = threading.Lock()
         self.wait_group = ''
@@ -51,6 +57,7 @@ class BrokerRelay:
         self.context_required = None
         self.context_recovery = False
         self.native_compacting = False
+        self.live_compaction = False
         relay = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -92,18 +99,24 @@ class BrokerRelay:
                 response_started, response_bytes = False, 0
                 response_headers, response_status = {}, None
                 request_started = time.monotonic()
+                tool_read = False
 
                 def record_failure(exc, *, headers=None, status=None, message=None):
                     diagnostic = failure(route, request_id, exc, headers=headers,
                         status=status, response_started=response_started, response_bytes=response_bytes)
                     diagnostic.update(occurred_at=time.time(), duration_ms=round((time.monotonic() - request_started) * 1000))
                     with relay.failure_lock:
-                        if message is not None:
-                            relay.last_error = message
-                        relay.last_failure = diagnostic
-                        relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
-                        if route in MODEL_ROUTES:
-                            relay.model_failed = True
+                        if tool_read:
+                            # A confirmed safe read cannot create uncertainty or
+                            # overwrite a concurrent model/write failure.
+                            diagnostic['uncertain_tool'] = False
+                        else:
+                            if message is not None:
+                                relay.last_error = message
+                            relay.last_failure = diagnostic
+                            relay.uncertain_tool = relay.uncertain_tool or diagnostic['uncertain_tool']
+                            if route in MODEL_ROUTES:
+                                relay.model_failed = True
                     if report_error:
                         report_error(diagnostic)
                 if self.path == '/v1/messages?beta=true':
@@ -116,12 +129,20 @@ class BrokerRelay:
                     authorized = authorized or hmac.compare_digest(self.headers.get('x-api-key',''),token)
                 if not authorized:
                     return self.error(401, 'Invalid cloud session capability.')
+                # MCP Git reads use this relay just like other tool calls. The
+                # destination and repository authorization stay at the broker;
+                # no push, arbitrary URL, path traversal or extra query is allowed.
+                git_route = bool(re.fullmatch(r'/github/repositories/[1-9][0-9]*\.git/' +
+                    (r'info/refs\?service=git-upload-pack' if self.command == 'GET' else
+                     r'git-upload-pack' if self.command == 'POST' else r'(?!)'), self.path))
+                tool_read = git_route
                 allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize'}}
-                if not credential_route and self.path not in allowed.get(self.command, set()):
+                if not git_route and not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:
                     size = int(self.headers.get('Content-Length', '0'))
-                    if size < 0 or size > body_limit(self.path):
+                    limit = 1024 * 1024 if git_route else body_limit(self.path)
+                    if size < 0 or size > limit:
                         if (size > body_limit(self.path) and relay.context_recovery
                                 and self.path in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}):
                             # Full uncovered history can reach the transport
@@ -129,6 +150,13 @@ class BrokerRelay:
                             relay.context_required = {'input_tokens': size, 'input_budget': body_limit(self.path)}
                             return self.context_error('Saved context exceeds transport capacity. Compact before retrying.')
                         return self.error(413, 'Broker request is too large.')
+                    if git_route:
+                        if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) > 1
+                                or (self.command == 'GET' and size)
+                                or (self.command == 'POST' and self.headers.get('Content-Type') != 'application/x-git-upload-pack-request')
+                                or self.headers.get('Content-Encoding', 'identity') not in {'identity', 'gzip'}
+                                or self.headers.get('Git-Protocol', '') not in {'', 'version=2'}):
+                            return self.error(400, 'Invalid Git read request.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
                     if route in MODEL_ROUTES:
@@ -137,6 +165,7 @@ class BrokerRelay:
                         if (relay.context_recovery and relay.context_required
                                 and not (relay.native_compacting and route == '/v1/responses')):
                             return self.error(400, 'Context length exceeded; waiting for the saved-context handoff.', 'context_length_exceeded')
+                        relay.model_response = None
                         try:
                             if relay.before_model and not relay.before_model(raw):
                                 return self.error(409, 'Saving at a complete tool boundary.')
@@ -156,6 +185,7 @@ class BrokerRelay:
                     if self.path == '/tools/call':
                         try:
                             name = json.loads(raw).get('name')
+                            tool_read = isinstance(name, str) and name in relay.retry_safe_tools
                             control_call = name in {'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
                             # These broker operations only read repository/PR
                             # metadata. Git mutations happen after their reply.
@@ -163,24 +193,31 @@ class BrokerRelay:
                                                and name in {'github_checkout', 'github_repository'})
                         except (ValueError, AttributeError):
                             pass
-                    if repository_read or (self.command == 'GET' and self.path in {'/tools', '/v1/models'}):
+                    if (tool_read and not git_route) or repository_read or (self.command == 'GET' and self.path in {'/tools', '/v1/models'}):
                         if self.path == '/tools' or repository_read:
                             relay.startup_failure = None
                         request_id = uuid4().hex
                         request = urllib.request.Request(remote.rstrip('/') + self.path,
-                            data=seal(token, route, raw) if repository_read else None,
-                            headers={'Authorization': 'Bearer ' + token, 'X-Moyai-Request-ID': request_id,
-                                     **({'Content-Type': CONTENT_TYPE} if repository_read else {})}, method=self.command)
+                            data=seal(token, route, raw) if repository_read or tool_read else None,
+                            headers={**broker_headers(remote, token), 'X-Moyai-Request-ID': request_id,
+                                     **({'Content-Type': CONTENT_TYPE} if repository_read or tool_read else {})}, method=self.command)
                         try:
-                            read = _read_with_reconnect if repository_read else read_with_reconnect
+                            read = _read_with_reconnect if repository_read or tool_read else read_with_reconnect
                             # GitHub metadata fans out to several upstream reads;
                             # preserve its former 90s allowance per lookup.
-                            options = {'budget': REPOSITORY_METADATA_BUDGET, 'attempt_timeout': 90} if repository_read else {}
-                            status, content_type, body = read(request,
-                                lambda response: (response.status, response.headers.get('Content-Type', 'application/json'),
-                                                  response.read(MAX_BODY + 1)),
-                                stage='repository_metadata' if repository_read else 'workspace_tools', notify=notify, **options)
+                            options = {'budget': REPOSITORY_METADATA_BUDGET, 'attempt_timeout': 90} if repository_read or tool_read else {}
+                            def read_reply(response):
+                                body = response.read(MAX_BODY + 1)
+                                if len(body) <= MAX_BODY and response.length:
+                                    raise http.client.IncompleteRead(body, response.length)
+                                return response.status, response.headers.get('Content-Type', 'application/json'), body
+                            status, content_type, body = read(request, read_reply,
+                                stage='tool_read' if tool_read else 'repository_metadata' if repository_read else 'workspace_tools',
+                                notify=notify, opener=open_broker, **options)
                         except StartupUnavailable as exc:
+                            if tool_read:
+                                record_failure(exc, status=503)
+                                return self.error(503, 'Workspace services are temporarily unavailable. This read can be retried.')
                             if self.path == '/tools' or repository_read:
                                 relay.startup_failure = exc
                             return self.error(503, str(exc))
@@ -188,6 +225,19 @@ class BrokerRelay:
                             relay.startup_failure = None
                         if len(body) > MAX_BODY:
                             return self.error(502, 'Workspace service reply exceeds size limit.')
+                        if self.path == '/tools':
+                            # Only the authenticated broker's explicit declarations
+                            # authorize replay. readOnlyHint alone can include
+                            # context-selection effects; caller annotations do not count.
+                            try:
+                                catalog = json.loads(body)
+                                names = Counter(tool['name'] for tool in catalog)
+                                relay.retry_safe_tools = frozenset(tool['name'] for tool in catalog
+                                    if isinstance(tool['name'], str) and names[tool['name']] == 1
+                                    and tool.get('annotations', {}).get('readOnlyHint') is True
+                                    and tool.get('annotations', {}).get('idempotentHint') is True)
+                            except (ValueError, KeyError, TypeError, AttributeError):
+                                relay.retry_safe_tools = frozenset()
                         response_status, response_bytes = status, len(body)
                         self.send_response(status)
                         self.send_header('Content-Type', content_type)
@@ -204,15 +254,16 @@ class BrokerRelay:
                         while True:
                             if steering and (steering.cancelled(generation) if hasattr(steering, 'cancelled') else steering.requested):
                                 return self.error(409, 'This model request was superseded by a queued message.')
-                            data = seal(token, route, raw) if method == 'POST' else None
+                            data = (raw if git_route else seal(token, route, raw)) if method == 'POST' else None
                             request_id = uuid4().hex
                             request_started = time.monotonic()
                             request = urllib.request.Request(remote.rstrip('/') + route, data=data,
-                                headers={'Authorization': 'Bearer ' + token, 'Content-Type': CONTENT_TYPE,
+                                headers={**broker_headers(remote, token), 'Content-Type': 'application/x-git-upload-pack-request' if git_route else CONTENT_TYPE,
                                          'X-Moyai-Request-ID': request_id,
+                                         **({k: self.headers[k] for k in ('Git-Protocol', 'Content-Encoding') if k in self.headers} if git_route else {}),
                                          **{k: self.headers[k] for k in ('anthropic-version', 'anthropic-beta') if k in self.headers}}, method=method)
                             try:
-                                response = urllib.request.urlopen(request, timeout=940)
+                                response = open_broker(request, timeout=940)
                                 break
                             except urllib.error.HTTPError as exc:
                                 if (route not in {'/v1/chat/completions', '/v1/messages', '/v1/responses'} or exc.code != 429
@@ -228,8 +279,15 @@ class BrokerRelay:
                         if steering and hasattr(steering, 'cancelled') and steering.cancelled(generation):
                             return  # A redirected request may complete/bill later; discard its output.
                         response_headers, response_status = response.headers, response.status
+                        if route == '/v1/responses':
+                            # Keep only transport metadata. The native consumer
+                            # identifies a clean EOF missing response.completed.
+                            relay.model_response = failure(route, request_id, http.client.IncompleteRead(b''),
+                                headers=response_headers, status=response_status, response_started=True)
                         self.send_response(response.status)
                         self.send_header('Content-Type', response.headers.get('Content-Type', 'application/json'))
+                        if git_route and response.headers.get('Content-Length') is not None:
+                            self.send_header('Content-Length', response.headers['Content-Length'])
                         response_started = True
                         self.end_headers()
                         if control_call:
@@ -314,11 +372,45 @@ class BrokerRelay:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.url = f'http://127.0.0.1:{self.server.server_port}'
 
-    def resume_model(self, observed_failure):
+    def note_stream_disconnect(self):
+        """Correlate the native protocol EOF with its last Responses request."""
+        with self.failure_lock:
+            if self.last_failure is not None or self.uncertain_tool or self.model_response is None:
+                return
+            self.last_failure = self.model_response
+            self.model_failed = True
+            self.last_error = 'The model connection closed before the response completed.'
+            diagnostic = self.last_failure
+        if self.report_error:
+            self.report_error(diagnostic)
+
+    def model_ready(self, *, timeout):
+        """One bounded authenticated read; the live runtime owns retry/cancel."""
+        request = urllib.request.Request(self.remote.rstrip('/') + '/v1/models',
+            headers={**broker_headers(self.remote, self.token), 'X-Moyai-Request-ID': uuid4().hex})
+        try:
+            with open_broker(request, timeout=timeout) as response:
+                raw = response.read(8193)
+                if len(raw) > 8192:
+                    raise ValueError('Invalid broker readiness response')
+                value = json.loads(raw)
+                if (not isinstance(value, dict) or value.get('object') != 'list'
+                        or not isinstance(value.get('data'), list)):
+                    raise ValueError('Invalid broker readiness response')
+                return True
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            if exc.code not in TRANSIENT_STATUSES:
+                raise
+            return False
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException):
+            return False
+
+    def resume_model(self, observed_failure, *, live=False):
         """Reopen only the failed model boundary a live SDK has finished handling."""
         with self.failure_lock:
             if (self.last_failure is not observed_failure or not self.model_failed
-                    or self.uncertain_tool or not retryable_failure(observed_failure)):
+                    or self.uncertain_tool or not retryable_failure(observed_failure, live=live)):
                 return False
             self.last_failure = None
             self.last_error = ''
@@ -332,10 +424,10 @@ class BrokerRelay:
     def control(self, body=None):
         request = urllib.request.Request(self.remote.rstrip('/') + '/control',
             data=seal(self.token, '/control', json.dumps(body or {}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:
+            with open_broker(request, timeout=5) as response:
                 value = json.load(response)
                 return value if isinstance(value, dict) else {}
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException, ValueError):
@@ -344,20 +436,21 @@ class BrokerRelay:
 
     def context_window(self):
         request = urllib.request.Request(self.remote.rstrip('/') + '/context/window',
-            headers={'Authorization': 'Bearer ' + self.token, 'X-Moyai-Request-ID': uuid4().hex})
+            headers={**broker_headers(self.remote, self.token), 'X-Moyai-Request-ID': uuid4().hex})
         value = read_with_reconnect(request, lambda response: json.loads(response.read(8192)),
-                                    stage='context_window', notify=self.notify)
+                                    stage='context_window', notify=self.notify, opener=open_broker)
         if type(value.get('input_budget')) is not int or value['input_budget'] < 1:
             raise ValueError('The broker did not return a usable compaction window.')
+        self.live_compaction = value.get('live_compaction') is True
         return value
 
     def native(self, body):
         route = '/context/native'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps(body).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
-        with urllib.request.urlopen(request, timeout=3) as response:
+        with open_broker(request, timeout=3) as response:
             raw = response.read(2_001_025)
             if len(raw) > 2_001_024:
                 raise ValueError('Native state response exceeded its limit.')
@@ -367,10 +460,10 @@ class BrokerRelay:
         route = '/context/maintenance'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
             data=seal(self.token, route, json.dumps({'snapshot': snapshot, 'ack': ack}).encode()),
-            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         # This waits for durable job admission, never for summary inference.
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with open_broker(request, timeout=2) as response:
             raw = response.read(64_001)
             if len(raw) > 64_000:
                 raise ValueError('Context maintenance response exceeded its limit.')
@@ -391,10 +484,10 @@ class BrokerRelay:
         while True:
             request = urllib.request.Request(self.remote.rstrip('/') + route,
                 data=seal(self.token, route, body),
-                headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': CONTENT_TYPE,
+                headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
                          'X-Moyai-Request-ID': uuid4().hex}, method='POST')
             try:
-                response = urllib.request.urlopen(request, timeout=max(1, deadline - time.monotonic()))
+                response = open_broker(request, timeout=max(1, deadline - time.monotonic()))
                 break
             except urllib.error.HTTPError as exc:
                 if (exc.code != 429 or exc.headers.get('X-Moyai-Model-Queue') != '1'

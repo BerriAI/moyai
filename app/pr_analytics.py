@@ -103,7 +103,7 @@ def report(service: SessionPullRequests, start: date | None = None, end: date | 
         user = users.get(identity)
         if user and user['kind'] == 'slack' and user['linked_user_id']:
             user = users.get(user['linked_user_id'])
-        if not user or user['kind'] not in {'google', 'slack'}:
+        if not user or user['kind'] not in {'google', 'cloudflare', 'slack'}:
             return Contributor()
         return Contributor(user_id=user['id'], name=user['name'], email=user['email'])
 

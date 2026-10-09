@@ -22,6 +22,11 @@ class HermesAgent(HarnessAgent):
             tool_start_callback=activity.start, tool_complete_callback=activity.complete,
             interim_assistant_callback=activity.commentary, step_callback=step,
             clarify_callback=lambda *a, **k: "Ask the user for the missing information in your final response, then wait for their next chat message.")
+        # The gateway compacts model input concurrently. Keep the native
+        # transcript intact instead of blocking this loop on another summary.
+        window = relay.context_window() if hasattr(relay, 'context_window') else {}
+        if window.get('live_compaction') is True:
+            self.agent.compression_enabled = False
 
     def validate(self):
         from model_tools import get_tool_definitions

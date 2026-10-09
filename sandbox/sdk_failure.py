@@ -47,6 +47,12 @@ def codex_details(error, *, will_retry=None):
     code = next(iter(info), '') if isinstance(info, dict) else info
     if isinstance(code, str) and code in CODEX_ERRORS:
         result['code'] = code
+        # Pinned Codex reports clean HTTP EOF without response.completed as
+        # `other`. Recognize only this exact protocol failure, never arbitrary
+        # native error text (which can contain private provider payloads).
+        if (code == 'other' and error.get('message') ==
+                'stream disconnected before completion: stream closed before response.completed'):
+            result['code'] = 'responseStreamDisconnected'
         value = info.get(code) if isinstance(info, dict) else None
         if isinstance(value, dict) and (http := status(value.get('httpStatusCode'))) is not None:
             result['http_status'] = http

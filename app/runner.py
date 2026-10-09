@@ -378,6 +378,7 @@ class RunManager:
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
                 "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
+                "transport_recovery_seconds": self.settings.transport_recovery_seconds,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
                 "continuation": bool(run.get("continuation")),
                 "activity_input_id": activity_input_id,
@@ -454,9 +455,11 @@ class RunManager:
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
         process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",
-                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1)
+                                         timeout=self.settings.run_timeout_seconds or None, bufsize=1,
+                                         env=self.settings.broker_environment(token))
         result = None
-        secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret]
+        secrets_to_hide = [token, self.settings.litellm_api_key, self.settings.modal_token_secret,
+                           self.settings.cloudflare_access_client_id, self.settings.cloudflare_access_client_secret]
 
         def scrub(value):
             for secret_value in secrets_to_hide:
