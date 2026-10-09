@@ -9,7 +9,8 @@ const root=path.resolve(arg('--root',path.join(__dirname,'../app/static'))),port
 const stamp='2026-10-07T15:00:00Z';
 const model='openai/gpt-6-astra';
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
-let fixture='populated';
+let fixture='populated', personalConnected=false;
+const privateRuns=new Map();
 const skills=[
  ['review-pr','Review a pull request for correctness, regressions, and missing tests.','organization'],
  ['benchmark-report','Compare benchmark runs and summarize changes in latency, throughput, and cost.','organization'],
@@ -88,6 +89,7 @@ const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
  if(p==='/'){
   fixture=url.searchParams.get('fixture')||'populated';
+  personalConnected=['personal-connected','personal-error','personal-chat'].includes(fixture);
   let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
   res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
  }
@@ -95,9 +97,9 @@ const server=http.createServer(async(req,res)=>{
   const file=path.resolve(root,p.slice(8));if(!file.startsWith(root+path.sep)||!fs.existsSync(file))return json(res,404,{});
   res.writeHead(200,{'Content-Type':{'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.png':'image/png'}[path.extname(file)]||'application/octet-stream','Cache-Control':'no-store'});return res.end(fs.readFileSync(file));
  }
- const role=fixture==='member'?'member':'admin',empty=fixture==='empty';
+ const role=(fixture==='member'||fixture.startsWith('personal-'))?'member':'admin',empty=fixture==='empty';
  let body={};if(req.method!=='GET'){const chunks=[];for await(const chunk of req)chunks.push(chunk);try{body=JSON.parse(Buffer.concat(chunks).toString()||'{}');}catch{return json(res,400,{detail:'Invalid JSON'});}}
- const supportedWrite = (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
+ const supportedWrite = (p.startsWith('/api/connections/slack/personal') && ['POST','DELETE'].includes(req.method)) || (p==='/api/runs' && req.method==='POST') || (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
   (req.method==='POST' && p==='/api/memory') ||
   (['PUT','DELETE'].includes(req.method) && /^\/api\/memory\/[^/]+$/.test(p)) ||
   (req.method==='POST' && /^\/api\/automations\/[^/]+\/state$/.test(p));
@@ -114,10 +116,23 @@ const server=http.createServer(async(req,res)=>{
   }
   return json(res,200,role==='admin'?sandboxConnection:{provider:sandboxConnection.provider});
  }
+ if(p.startsWith('/api/connections/slack/personal')){
+  if(p.endsWith('/oauth'))return json(res,200,{url:'/?fixture=personal-connected#personal-slack'});
+  if(p.endsWith('/check')&&fixture==='personal-error')return json(res,503,{detail:'Synthetic Slack outage. Retry your personal connection; organization fallback is not used.'});
+  if(req.method==='DELETE')personalConnected=false;
+  return json(res,200,{connected:personalConnected,available:fixture!=='personal-unavailable',oauth_configured:fixture!=='personal-unconfigured',label:personalConnected?'Alex Morgan · Example Slack (synthetic)':'',effective_source:personalConnected?'personal':'organization',health:personalConnected?(fixture==='personal-error'?'transient_error':'healthy'):'absent',description:'Synthetic UI fixture only. No OAuth or Slack request is performed.'});
+ }
+ if(p==='/api/runs'&&req.method==='POST'){
+  const id=require('node:crypto').randomBytes(16).toString('hex');
+  const run={id,prompt:body.prompt,private_owner_id:body.private_session?'user-0':null,plugins:body.plugins||[],mode:'demo',status:'completed',chat_enabled:fixture==='personal-chat',messages:[{id:1,role:'user',content:body.prompt,status:'completed',created_at:stamp},{id:2,role:'assistant',content:'Synthetic UI fixture. No Slack or backend request was executed.',status:'completed',created_at:stamp}],events:[{id:1,kind:'result',message:'Synthetic UI preview. No backend, model, OAuth, or Slack provider request was executed.',created_at:stamp}],approvals:[],artifacts:[],created_at:stamp,updated_at:stamp};
+  privateRuns.set(id,run);return json(res,200,run);
+ }
+ if(p.endsWith('/events')&&privateRuns.has(p.split('/')[3])){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store'});res.write(': Synthetic UI fixture stream\n\n');req.on('close',()=>res.end());return;}
+ if(privateRuns.has(p.split('/').at(-1)))return json(res,200,privateRuns.get(p.split('/').at(-1)));
  if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
  if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
- if(p==='/api/runs')return json(res,200,['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
+ if(p==='/api/runs')return json(res,200,[...privateRuns.values(),...['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]}))]);
  if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:false,mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);

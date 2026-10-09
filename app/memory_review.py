@@ -3,6 +3,7 @@
 The task agent can still save immediately. This separate pass catches omissions,
 uses only the requester's own messages, and never delays or replays their task.
 """
+from .private_sinks import private_run
 import asyncio
 import json
 import logging
@@ -81,6 +82,8 @@ class MemoryReview:
             FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?''', (message_id,)).fetchone()
 
     def allowed_in(self, conn, source, *, owner='', revision=None):
+        if source and private_run(self.store, source['run_id'], conn):
+            return None
         if (not source or source['role'] != 'user' or source['status'] != 'completed'
                 or source['steering_parent_id'] or not source['chat_enabled'] or source['parent_run_id']
                 or source['deleted_at'] or source['automated'] or source['mode'] == 'demo'):

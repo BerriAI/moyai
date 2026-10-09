@@ -3,8 +3,10 @@ import json
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
+from starlette.requests import HTTPConnection
 
 from .db import now
+from .session_privacy import SessionPrivacy
 from .runner import TERMINAL
 
 
@@ -49,7 +51,9 @@ class SessionLifecycle:
         args = SearchSessions.model_validate(arguments)
         actor = self.search_actor(run)
         ids = self.store.sidebar_run_ids(actor, archive_owner=actor, archived=None, pin_owner=actor,
-                                        search=args.query.split(), limit=args.limit + 1, exclude_id=run['id'])
+                                        search=args.query.split(), limit=args.limit + 1, exclude_id=run['id'],
+                                        include_private=SessionPrivacy.is_private(run),
+                                        privacy_owner=run.get('private_owner_id', ''))
         archives = self.archives(actor)
         sessions = []
         for run_id in ids[:args.limit]:
@@ -61,17 +65,18 @@ class SessionLifecycle:
                              'url': self.security.settings.public_url.rstrip('/') + '/#run=' + run_id})
         return {'sessions': sessions, 'has_more': len(ids) > args.limit}
 
-    async def require_live_api(self, request: Request):
+    async def require_live_api(self, request: HTTPConnection):
         """Guard the actual dispatched run routes, including files and computer."""
         route = request.scope.get('route')
         if not getattr(route, 'path', '').startswith('/api/runs/{run_id}'):
             return
-        self.security.require(request, mutation=request.method in {'POST', 'PUT', 'PATCH', 'DELETE'})
+        method = request.scope.get('method', '')
+        self.security.require(request, mutation=method in {'POST', 'PUT', 'PATCH', 'DELETE'})
         run = self.store.run(request.path_params['run_id'])
-        deleting = request.method == 'DELETE' and route.path == '/api/runs/{run_id}'
+        deleting = method == 'DELETE' and route.path == '/api/runs/{run_id}'
         # A fresh/reconnecting stream must receive its terminal marker. The
         # events handler checks deletion before reading any retained history.
-        events = request.method == 'GET' and route.path == '/api/runs/{run_id}/events'
+        events = method == 'GET' and route.path == '/api/runs/{run_id}/events'
         if not run or (run['deleted_at'] and not (deleting or events)):
             raise HTTPException(404, 'Session not found.')
 
@@ -80,7 +85,7 @@ class SessionLifecycle:
 
     @staticmethod
     def can_delete(run, actor, admin):
-        return not run['parent_run_id'] and (admin or bool(actor and run['owner_id'] == actor))
+        return SessionPrivacy.can_access(run, actor) and not run['parent_run_id'] and (admin or bool(actor and run['owner_id'] == actor))
 
     def metadata(self, run, actor, admin, archives=None):
         archives = self.archives(actor) if archives is None else archives
@@ -93,6 +98,7 @@ class SessionLifecycle:
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run or run['deleted_at']:
                 raise HTTPException(404, 'Session not found.')
+            SessionPrivacy(self.store).require_owner(run, actor)
             if run['parent_run_id']:
                 raise HTTPException(422, 'Archive the parent session to keep its agents together.')
             if archived:
@@ -109,6 +115,7 @@ class SessionLifecycle:
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run:
                 raise HTTPException(404, 'Session not found.')
+            SessionPrivacy(self.store).require_owner(run, actor)
             if run['parent_run_id']:
                 raise HTTPException(422, 'Delete the parent session to keep its agents together.')
             if not self.can_delete(run, actor, admin):

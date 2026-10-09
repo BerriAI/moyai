@@ -7,6 +7,7 @@ import sqlite3
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from .private_sinks import private_run
 from . import captures
 from .config import Settings
 
@@ -32,6 +33,9 @@ class Capture(BaseModel):
 
 
 def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullRequest]:
+    run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+    if run and dict(run).get('private_owner_id'):
+        return []
     # A URL selects an existing receipt; it cannot establish a publication.
     urls = {url.rstrip('.,;!?') for url in re.findall(r'https://[^\s<>`"\)\]\|]+', answer)}
     result = []
@@ -51,6 +55,8 @@ def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullR
 
 def select_captures(settings: Settings, run_id: str, answer: str, *, store,
                     conn: sqlite3.Connection | None = None) -> list[Capture]:
+    if private_run(store, run_id, conn):
+        return []
     tokens = TOKENS.findall(answer)
     names = [match[1] for token in tokens if (match := re.fullmatch(
         r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))', token))]

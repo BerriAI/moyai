@@ -143,6 +143,9 @@ class Security:
             self.check_origin(request)
             if not hmac.compare_digest(request.headers.get("x-csrf-token", ""), self.csrf(sid)):
                 raise HTTPException(403, "Refresh the page and try again.")
+        privacy = getattr(self, 'session_privacy', None)
+        if privacy:
+            privacy.guard_request(request)
         return sid
 
     def check_origin(self, request: Request):

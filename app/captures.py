@@ -1,4 +1,5 @@
 """Completed browser captures, stored independently of sandbox lifetime."""
+from .private_sinks import require_owner
 from pathlib import Path
 import re
 from urllib.parse import quote
@@ -28,7 +29,8 @@ def directory(settings, run_id):
     return settings.data_dir / 'artifacts' / (run_id + '-captures')
 
 
-def listing(settings, run_id, *, store):
+def listing(settings, run_id, *, store, actor=""):
+    require_owner(store, run_id, actor)
     prefix = directory(settings, run_id).name + '/'
     result = []
     for row in store.artifacts.listing(prefix):
@@ -40,21 +42,25 @@ def listing(settings, run_id, *, store):
                        'archive_path': 'capture:' + name, 'name': name, 'size': row['size'],
                        'kind': 'video' if name.endswith('.webm') else 'image', 'url': url + '?download=true',
                        'inline_url': url})
+    require_owner(store, run_id, actor)
     return result
 
 
-def read(path: Path, *, store) -> tuple[bytes, str]:
+def read(path: Path, *, store, actor="") -> tuple[bytes, str]:
     """Read bounded media without following a replaced file's symlink."""
     name = path.relative_to(store.path.parent / 'artifacts').as_posix()
+    require_owner(store, path.parent.name.removesuffix('-captures'), actor)
     try:
         raw = store.artifacts.read(name, MAX_FILE)
     except FileNotFoundError:
         raise HTTPException(404, 'Capture not found.') from None
+    require_owner(store, path.parent.name.removesuffix('-captures'), actor)
     return raw, media_type(path.name, raw)
 
 
-def response(path: Path, request, download=False, *, store):
-    raw, mime = read(path, store=store)
+def response(path: Path, request, download=False, *, store, actor=""):
+    raw, mime = read(path, store=store, actor=actor)
+    require_owner(store, path.parent.name.removesuffix("-captures"), actor)
     return bytes_response(raw, mime, path.name, request, download)
 
 

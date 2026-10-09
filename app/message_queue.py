@@ -16,6 +16,8 @@ class MessageQueue:
             row = conn.execute("SELECT * FROM messages WHERE run_id=? AND id=? AND role='user'", (run_id, message_id)).fetchone()
             if not run or not row:
                 raise HTTPException(404, 'Queued message not found.')
+            if dict(run).get('private_owner_id') and run['private_owner_id'] != actor:
+                raise HTTPException(404, 'Queued message not found.')
             # Accounting email links never grant editing authority.
             if not admin and row['user_id'] != actor:
                 raise HTTPException(403, 'You can only change your own queued messages.')

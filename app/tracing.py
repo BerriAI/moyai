@@ -1,4 +1,5 @@
 """Durable OTLP export from the control plane; no gateway key enters a sandbox."""
+from .private_sinks import private_run, deny_export
 import asyncio
 from datetime import datetime
 from functools import wraps
@@ -60,6 +61,7 @@ class AgentTracing:
                        if raindrop and processor is None else None)
 
     def identity(self, run, message_id, connection=None):
+        deny_export(self.store, run["id"], connection)
         if connection is None:
             with self.store.connect() as conn:
                 return self.identity(run, message_id, conn)
@@ -146,6 +148,8 @@ class AgentTracing:
         return format(identifier('user:' + user, 16), '032x')
 
     def emit(self, run, message_id, name, span_id, start, end, attrs, *, root=False, failed=False, connection=None):
+        if private_run(self.store, run['id'], connection):
+            return
         trace_id, agent_id, parent_id, session, agent_name = self.identity(run, message_id, connection)
         parent_id = parent_id if root else agent_id
         attributes = {'session.id': session, 'agent.name': agent_name, 'gen_ai.agent.name': agent_name,
@@ -233,6 +237,8 @@ class AgentTracing:
         def rows(sql, values):
             return [dict(r) for r in connection.execute(sql, values).fetchall()] if connection is not None else self.store.rows(sql, values)
         run = rows('SELECT * FROM runs WHERE id=?', (run_id,))[0]
+        if run.get('private_owner_id'):
+            return
         if run['mode'] != 'modal':
             return
         messages = rows('SELECT * FROM messages WHERE id=? AND run_id=?', (message_id, run_id))
@@ -270,6 +276,8 @@ class AgentTracing:
     @best_effort
     def tool(self, run_id, data):
         run = self.store.run(run_id)
+        if run and run.get('private_owner_id'):
+            return
         if run['mode'] != 'modal' or not isinstance(data, dict):
             return
         now = time.time_ns()
@@ -287,6 +295,8 @@ class AgentTracing:
 
     @best_effort
     def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = ''):
+        if private_run(self.store, run['id']):
+            return
         # Keep images, system prompts, loaded skills and private reasoning out of traces.
         inputs = [{'role': 'user', 'content': m.get('content')}
                   for m in messages if isinstance(m, dict) and m.get('role') == 'user'][-5:]

@@ -3,6 +3,7 @@
 Moyai owns authorization, model pinning and accounting. LiteLLM AI Gateway owns
 Messages/Responses protocol handling. No request/response format translation.
 """
+from .private_sinks import private_run
 import asyncio
 import json
 import time
@@ -295,7 +296,7 @@ class HarnessGateway:
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
-            if self.tracing.enabled and not compact:
+            if self.tracing.enabled and not compact and not private_run(self.store, run['id']):
                 # A private working summary is model input, never a new public
                 # user message. Trace the original request's user text instead.
                 content = NativeModelContent(body, route)

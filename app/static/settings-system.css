@@ -567,3 +567,9 @@
   .automation-connection-search input { flex-basis: 100%; }
   .settings-view dialog :is(input,textarea,select) { font-size: 16px; }
 }
+
+.settings-view .personal-slack-page > .card { margin-block:0 24px; }
+.settings-view .personal-slack-page .connection-facts dd { overflow-wrap:anywhere; }
+.settings-view #personal-slack-error { color:var(--settings-danger); }
+
+.settings-view .personal-slack-page .connection-state.needs-attention { color:var(--settings-warning); background:var(--settings-warning-bg); }

@@ -316,8 +316,11 @@ class Spend:
             return {**bucket, 'spend': str(bucket['spend']), 'sessions': len(bucket['sessions'])}
         def identity(user_id):
             return users.get(user_id, {'id': 'unattributed', 'name': 'Unattributed / earlier usage', 'email': '', 'kind': 'unattributed'})
+        from .private_sinks import private_run
+        private_ids = {run_id for run_id in {row['run_id'] for row in rows}
+                       if run_id and private_run(self.store, run_id)}
         titles = {r['id']: r['prompt'].split('\n')[0][:150] for r in self.store.rows(
-            'SELECT id,prompt FROM runs WHERE id IN (SELECT run_id FROM model_requests WHERE ' + predicate + ')', params)}
+            'SELECT id,prompt FROM runs WHERE id IN (SELECT run_id FROM model_requests WHERE ' + predicate + ')', params) if r['id'] not in private_ids}
         result = {'scope': 'personal' if user_id is not None else 'organization',
                 'start': str(start), 'end': str(end), 'currency': 'USD', 'timezone': 'UTC', 'total': clean(total),
                 'priced_requests': sum(row['cost'] is not None for row in rows),
@@ -326,9 +329,9 @@ class Spend:
                                       for model, bucket in daily_models[day].items()]}
                           for day, value in daily.items()],
                 'users': [{**identity(key), **clean(value)} for key, value in sorted(groups.items(), key=lambda x: x[1]['spend'], reverse=True)],
-                'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True)],
+                'sessions': [{'user_id': user, 'user_name': identity(user)['name'], 'run_id': run, 'title': titles.get(run, 'Session'), **clean(value)} for (user, run), value in sorted(sessions.items(), key=lambda x: x[1]['spend'], reverse=True) if run not in private_ids],
                 'models': [{'model': key, **clean(value)} for key, value in models.items()],
-                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_status','cost_source','cost_recovery_error','prompt_tokens','completion_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500]],
+                'request_details': [{key: row[key] for key in ('id','gateway_id','run_id','message_id','user_id','model','created_at','status','cost','cost_status','cost_source','cost_recovery_error','prompt_tokens','completion_tokens','total_tokens','cache_read_input_tokens','cache_creation_input_tokens')} for row in sorted(rows, key=lambda r: r['created_at'], reverse=True)[:500] if row['run_id'] not in private_ids],
                 'identities': list(users.values()), 'tracked_since': tracked_since}
 
         if user_id is not None:

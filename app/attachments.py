@@ -1,4 +1,5 @@
 """Bounded, durable user uploads. Drafts are private; sent files share chat access."""
+from .private_sinks import require_owner
 import asyncio
 import base64
 from datetime import datetime, timedelta, timezone
@@ -210,6 +211,7 @@ class Attachments:
                  'path': f"/workspace/.moyai-attachments/{row['id']}/{row['name']}"} for row in rows]
 
     def broker_row(self, run, attachment_id, *, conn=None):
+        require_owner(self.store, run['id'], run.get('active_user_id', ''), conn)
         query = "SELECT a.* FROM attachments a JOIN messages m ON m.id=a.message_id WHERE a.id=? AND m.run_id=? AND m.status!='deleted' AND (m.id=? OR m.status!='queued' OR (m.steering_parent_id=? AND m.queue_locked=1))"
         params = (attachment_id, run['id'], run.get('active_message_id') or 0, run.get('active_message_id') or 0)
         rows = conn.execute(query, params).fetchall() if conn is not None else self.store.rows(query, params)
@@ -221,6 +223,7 @@ class Attachments:
         return Response(self.payload(self.broker_row(run, attachment_id)), media_type='application/octet-stream')
 
     def with_images(self, run, messages, *, protocol='/v1/chat/completions'):
+        require_owner(self.store, run['id'], run.get('active_user_id', ''))
         # Keep image bytes out of sandbox transcripts, Temporal history and logs.
         # Only this run's sent attachments, up to its currently executing turn,
         # are eligible. Future queued messages cannot leak into the active turn.
@@ -307,6 +310,9 @@ class Attachments:
             if rows[0]['message_id'] is not None and not self.store.rows("""SELECT 1 FROM messages m
                     JOIN runs r ON r.id=m.run_id WHERE m.id=? AND r.deleted_at=''""", (rows[0]['message_id'],)):
                 raise HTTPException(404, 'Attachment not found.')
+            if rows[0]['message_id'] is not None:
+                message = self.store.rows('SELECT run_id FROM messages WHERE id=?', (rows[0]['message_id'],))[0]
+                require_owner(self.store, message['run_id'], owner)
             return rows[0]
 
         @router.get('/api/attachments/{attachment_id}/preview')
@@ -314,7 +320,9 @@ class Attachments:
             row = accessible(request, attachment_id)
             if not row['preview_ref'] and not row['preview']:
                 raise HTTPException(404, 'No image preview available.')
-            return Response(await asyncio.to_thread(self.payload, row, 'preview'), media_type='image/jpeg')
+            raw = await asyncio.to_thread(self.payload, row, 'preview')
+            accessible(request, attachment_id)
+            return Response(raw, media_type='image/jpeg')
 
         @router.get('/api/attachments/{attachment_id}/audio')
         async def audio(attachment_id: str, request: Request):
@@ -322,6 +330,7 @@ class Attachments:
             if not row['media_type'].startswith('audio/'):
                 raise HTTPException(404, 'No audio available.')
             raw = await asyncio.to_thread(self.payload, row)
+            accessible(request, attachment_id)
             headers = {'Accept-Ranges': 'bytes'}
             requested = request.headers.get('range')
             if requested:
@@ -340,6 +349,7 @@ class Attachments:
         async def download(attachment_id: str, request: Request):
             row = accessible(request, attachment_id)
             raw = await asyncio.to_thread(self.payload, row)
+            accessible(request, attachment_id)
             return Response(raw, media_type='application/octet-stream',
                             headers={'Content-Disposition': "attachment; filename*=UTF-8''" + quote(row['name'])})
 

@@ -3,6 +3,7 @@
 Never extract agent-controlled paths onto the server. A revision pins previews
 and downloads to the archive the user selected, rather than a later overwrite.
 """
+from .private_sinks import require_owner, require_request_owner
 from collections import Counter
 from contextlib import contextmanager
 from io import BytesIO
@@ -39,7 +40,8 @@ def safe_member(info):
 
 
 @contextmanager
-def saved_archive(settings, store, run_id, revision=None):
+def saved_archive(settings, store, run_id, revision=None, *, actor=""):
+    require_owner(store, run_id, actor)
     if not re.fullmatch(r'[0-9a-f]{32}', run_id) or not store.run(run_id):
         raise HTTPException(404, 'Session not found.')
     name = run_id + '.zip'
@@ -59,6 +61,7 @@ def saved_archive(settings, store, run_id, revision=None):
                 raise HTTPException(413, 'This archive exceeds the file browser limits. Download the ZIP instead.')
             counts = Counter(i.filename for i in entries)
             files = {i.filename: i for i in entries if safe_member(i) and counts[i.filename] == 1}
+            require_owner(store, run_id, actor)
             yield archive, files, current, len(entries) - len(files)
     except FileNotFoundError:
         raise HTTPException(404, 'No saved files are available yet.') from None
@@ -81,11 +84,11 @@ def routes(settings, store, security):
 
     @router.get('/api/runs/{run_id}/files')
     def list_files(run_id: str, request: Request):
-        security.require(request)
-        media = captures.listing(settings, run_id, store=store) if store.run(run_id) else []
+        actor = require_request_owner(store, security, request, run_id)
+        media = captures.listing(settings, run_id, store=store, actor=actor) if store.run(run_id) else []
         if media and store.artifacts.info(run_id + '.zip') is None:
             return {'revision': 'captures', 'files': media, 'limited': False, 'note': 'Saved browser captures.'}
-        with saved_archive(settings, store, run_id) as (_, files, revision, skipped):
+        with saved_archive(settings, store, run_id, actor=actor) as (_, files, revision, skipped):
             # Source inventories must not crowd recovery artifacts out of the capped catalog.
             ordered = sorted(files.values(), key=lambda i: (i.filename.startswith('new-files/'), i.filename.casefold()))
             return {'revision': revision, 'files': media + [file_info(run_id, i, revision) for i in ordered[:MAX_LIST]],
@@ -95,8 +98,8 @@ def routes(settings, store, security):
     @router.get('/api/runs/{run_id}/files/content')
     def content(run_id: str, request: Request, path: str = Query(max_length=1024),
                 revision: str | None = Query(default=None, max_length=64), preview: bool = False, inline: bool = False):
-        security.require(request)
-        with saved_archive(settings, store, run_id, revision) as (archive, files, _, __):
+        actor = require_request_owner(store, security, request, run_id)
+        with saved_archive(settings, store, run_id, revision, actor=actor) as (archive, files, _, __):
             info = files.get(path)
             if info is None:
                 raise HTTPException(404, 'This file is not available in the saved archive.')

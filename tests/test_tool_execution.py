@@ -13,7 +13,8 @@ def test_new_write_tool_needs_no_approval_exception(workspace, monkeypatch, rest
     run_id, headers = cloud_capability(app, ['slack'])
     calls = []
 
-    async def call(tool, arguments):
+    async def call(tool, arguments, *, run):
+        assert run['id'] == run_id
         calls.append((tool, arguments))
         return {'ok': True}
 

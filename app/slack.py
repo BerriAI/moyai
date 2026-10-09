@@ -191,12 +191,10 @@ class SlackSessions:
             return
         try:
             async with asyncio.timeout(25):
-                if not self.connectors.allowed("slack_thread"):
-                    raise ConnectorError("Slack is unavailable.")
-                headers = self.connectors.headers("slack", await self.connectors.credentials("slack"))
+                selection = await self.connectors.personal_slack.select(self.store.run(run_id), 'slack_thread')
+                headers = self.connectors.headers("slack", selection.credentials)
                 context.update(await self.read_context(source, headers))
-                if not self.connectors.allowed("slack_thread"):
-                    raise ConnectorError("Slack access was paused.")
+                self.connectors.personal_slack.recheck(selection)
                 # A permalink is helpful but must not discard successfully read context.
                 try:
                     async with asyncio.timeout(3):
@@ -207,6 +205,7 @@ class SlackSessions:
                             context["permalink"] = url
                 except (ConnectorError, TimeoutError):
                     pass
+                self.connectors.personal_slack.recheck(selection)
             status = "ready"
             message = f"Read {len(context['messages'])} Slack messages from the {context['kind']}"
             if context["truncated"]:
@@ -217,7 +216,7 @@ class SlackSessions:
         except Exception:
             status = "unavailable"
             context["messages"] = []
-            context["warning"] = "Could not read the Slack conversation with the shared connection. Use the request itself, or ask for the missing context; do not guess what the discussion said."
+            context["warning"] = "Could not read the Slack conversation with the selected connection. Personal Slack requires a private web chat; check Connections. Use the request itself, or ask for the missing context; do not guess what the discussion said."
             message = "Slack conversation could not be read; the agent will be told context is missing"
         self.store.execute("UPDATE slack_events SET context_status=?,context_json=? WHERE run_id=?", (status, json.dumps(context), run_id))
         self.store.event(run_id, "context", message)

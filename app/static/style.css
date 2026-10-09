@@ -215,3 +215,11 @@
 #pr-write-access .approval-actions button{min-height:36px}
 #pr-write-access details{margin-top:12px;overflow-wrap:anywhere}
 @media(max-width:600px){#pr-write-access .approval-actions button{min-height:44px}}
+
+/* Privacy is immutable after creation; keep the marker in the conversation view. */
+.session-privacy-choice { width:100%; margin-block:0 16px; text-align:start; }
+.session-privacy-choice label { display:flex; align-items:center; gap:8px; min-height:44px; font-size:14px; }
+.session-privacy-choice input { width:18px; height:18px; flex-shrink:0; }
+.session-privacy-choice p,.session-privacy-notice { font-size:13px; line-height:1.5; color:var(--text); }
+.session-privacy-choice p { margin:0; }
+.session-privacy-notice { flex-shrink:0; margin:0; padding:12px 16px; background:var(--soft); border-bottom:1px solid var(--line); overflow-wrap:anywhere; }

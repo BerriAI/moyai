@@ -1,4 +1,5 @@
 """Explicit, revocable bearer access to immutable session media snapshots."""
+from .private_sinks import deny_export, private_run
 import hashlib
 import hmac
 from io import BytesIO
@@ -149,6 +150,7 @@ class MediaShares:
         return getattr(self, name.removeprefix('media_'))(run, args)
 
     def active(self, conn, run):
+        deny_export(self.store, run['id'], conn)
         current = conn.execute('SELECT deleted_at,status,token_hash,active_message_id,active_user_id FROM runs WHERE id=?', (run['id'],)).fetchone()
         if (not current or current['deleted_at'] or current['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or not current['token_hash'] or not hmac.compare_digest(current['token_hash'], run['token_hash'])):
@@ -198,6 +200,7 @@ class MediaShares:
                 'shares': [self.receipt(row) for row in shares], 'notice': NOTICE}
 
     def source_bytes(self, run, args):
+        deny_export(self.store, run['id'])
         kind, name = args.source.split(':', 1)
         if kind == 'capture':
             path = captures.directory(self.settings, run['id']).name + '/' + name
@@ -282,7 +285,7 @@ class MediaShares:
             raise HTTPException(404, 'Media not found.')
         rows = self.store.rows('''SELECT s.* FROM media_shares s JOIN runs r ON r.id=s.run_id
             WHERE s.id=? AND s.revoked_at='' AND r.deleted_at='' ''', (share_id,))
-        if not rows or not hmac.compare_digest(rows[0]['token_hash'], hashlib.sha256(token.encode()).hexdigest()):
+        if not rows or private_run(self.store, rows[0]['run_id']) or not hmac.compare_digest(rows[0]['token_hash'], hashlib.sha256(token.encode()).hexdigest()):
             raise HTTPException(404, 'Media not found.')
         return rows[0]
 

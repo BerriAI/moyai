@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from .db import now
+from .session_privacy import SessionPrivacy
 
 FolderId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
@@ -67,19 +68,20 @@ class SessionFolders:
     def memberships(self, owner):
         return {row['run_id']: row['folder_id'] for row in self.store.rows('''
             SELECT m.run_id,m.folder_id FROM session_folder_memberships m
-            JOIN runs r ON r.id=m.run_id WHERE m.owner_id=? AND r.deleted_at=''
+            JOIN runs r ON r.id=m.run_id WHERE m.owner_id=? AND r.deleted_at='' AND (r.private_owner_id='' OR r.private_owner_id=m.owner_id)
             ORDER BY r.updated_at DESC,r.created_at DESC,r.id DESC''', (owner,))}
 
     def pins(self, owner):
         return {row['run_id'] for row in self.store.rows('''SELECT p.run_id FROM session_pins p
-            JOIN runs r ON r.id=p.run_id WHERE p.owner_id=? AND r.deleted_at='' ''', (owner,))}
+            JOIN runs r ON r.id=p.run_id WHERE p.owner_id=? AND r.deleted_at='' AND (r.private_owner_id='' OR r.private_owner_id=p.owner_id) ''', (owner,))}
 
     def pin(self, owner, run_id, pinned):
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            run = conn.execute("SELECT parent_run_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
+            run = conn.execute("SELECT parent_run_id,private_owner_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
             if not run:
                 raise HTTPException(404, 'Session not found.')
+            SessionPrivacy(self.store).require_owner(run, owner)
             if run['parent_run_id']:
                 raise HTTPException(422, 'Pin the parent session to keep its agents together.')
             if pinned:
@@ -92,7 +94,7 @@ class SessionFolders:
         return self.store.rows('''SELECT f.id,f.name,f.revision,COUNT(r.id) AS session_count
             FROM session_folders f LEFT JOIN session_folder_memberships m
             ON m.owner_id=f.owner_id AND m.folder_id=f.id
-            LEFT JOIN runs r ON r.id=m.run_id AND r.deleted_at=''
+            LEFT JOIN runs r ON r.id=m.run_id AND r.deleted_at='' AND (r.private_owner_id='' OR r.private_owner_id=f.owner_id)
                 AND NOT EXISTS(SELECT 1 FROM session_archives a WHERE a.owner_id=f.owner_id AND a.run_id=r.id)
             WHERE f.owner_id=?
             GROUP BY f.id ORDER BY f.name_key,f.id''', (owner,))
@@ -131,9 +133,10 @@ class SessionFolders:
     def move(self, owner, run_id, folder_id):
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            run = conn.execute("SELECT parent_run_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
+            run = conn.execute("SELECT parent_run_id,private_owner_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
             if not run:
                 raise HTTPException(404, 'Session not found.')
+            SessionPrivacy(self.store).require_owner(run, owner)
             if run['parent_run_id']:
                 raise HTTPException(422, 'Move the parent session to keep its agents together.')
             if folder_id:

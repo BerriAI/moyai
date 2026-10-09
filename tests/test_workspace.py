@@ -149,7 +149,7 @@ def test_writes_execute_without_approval(workspace, monkeypatch, role, provider,
 def test_scope_denial_and_bad_arguments_never_reach_provider(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         pytest.fail("Provider must not be called")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "slack_send", "arguments": {}}).status_code == 403
@@ -161,7 +161,8 @@ def test_uncertain_write_is_not_retried(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
     calls = []
-    async def fail(*args):
+    async def fail(*args, **kwargs):
+        assert kwargs['run']['id'] == run_id
         calls.append(1)
         raise ConnectorError("The connection dropped after sending.")
     monkeypatch.setattr(app.state.connectors, "call", fail)
@@ -207,7 +208,7 @@ def test_members_can_use_org_connections_but_cannot_administer_them(workspace):
 def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         pytest.fail("Disabled tool reached the provider")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
