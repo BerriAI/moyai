@@ -8,7 +8,7 @@ try:
 except ImportError:
     from activity import public_text
 
-PRIVATE_FIELDS = re.compile(r'(?i)(token|secret|password|authorization|api.?key|cookie|reasoning|thinking|instructions|system_prompt)')
+PRIVATE_FIELDS = re.compile(r'(?i)(token|secret|password|authorization|api.?key|cookie|reasoning|thinking|instructions|system_prompt|^env$|^environment$)')
 
 
 def private_tool(name):
