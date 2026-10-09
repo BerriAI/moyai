@@ -51,7 +51,7 @@ def cache_probe(directory):
     return result
 
 
-async def evaluate(model, directory, report_path=None):
+async def evaluate(model, directory, report_path=None, scope_only=False):
     # Explicit defaults prevent this test app from inheriting production paths,
     # connectors, workers, tracing or credentials when run on a service host.
     values = {key: field.get_default(call_default_factory=True)
@@ -69,8 +69,8 @@ async def evaluate(model, directory, report_path=None):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=values['public_url'],
                                 headers={'Authorization': 'Bearer memory-smoke-capability'}) as broker, \
                httpx.AsyncClient(base_url=base, headers={'Authorization': 'Bearer ' + key}, timeout=120) as gateway:
-        async def turn(label, prompt, task_tools=False):
-            run = store.create_run(prompt, '', 'modal', [], model=model, chat_enabled=True, user_id=owner)
+        async def turn(label, prompt, task_tools=False, repo=''):
+            run = store.create_run(prompt, repo, 'modal', [], model=model, chat_enabled=True, user_id=owner)
             store.claim_message(run['id'])
             store.update_run(run['id'], status='running', token_hash=digest('memory-smoke-capability'))
             run = store.run(run['id'])
@@ -103,7 +103,7 @@ async def evaluate(model, directory, report_path=None):
                     store.update_run(run['id'], status='idle', token_hash='')
                     notes = memory.listing(owner)
                     case = {'case': label, 'prompt': prompt, 'tools': calls, 'steps': steps, 'answer': answer,
-                            'notes': [{k: n[k] for k in ('id', 'key', 'content', 'revision', 'source')} for n in notes]}
+                            'notes': [{k: n[k] for k in ('id', 'key', 'content', 'revision', 'source', 'repo_url')} for n in notes]}
                     report['cases'].append(case)
                     if report_path:
                         report_path.write_text(json.dumps(report, indent=2) + '\n')
@@ -128,9 +128,11 @@ async def evaluate(model, directory, report_path=None):
                             'name': name, 'arguments': json.loads(call['function']['arguments'])})
                         result = response.json()
                         assert response.status_code == 200, f'{name} failed with HTTP {response.status_code}'
-                        if name == 'memory_search':
+                        if result.get('error'):
+                            step.update(error=result['error'], status_code=result.get('status_code'))
+                        elif name == 'memory_search':
                             step['loaded_ids'] = [match['id'] for match in result['matches']]
-                        if name == 'memory_save':
+                        elif name == 'memory_save':
                             note = next(n for n in memory.listing(owner) if n['id'] == result['id'])
                             step.update(source_type=note['source']['type'], memory_id=note['id'],
                                 run_status=store.run(run['id'])['status'], message_status=store.rows(
@@ -138,6 +140,27 @@ async def evaluate(model, directory, report_path=None):
                     steps.append(step)
                     messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': json.dumps(result)})
             raise AssertionError(f'{label}: model did not finish within 10 rounds')
+
+        if scope_only:
+            repo = 'https://github.com/example/alpha'
+            preference = await turn('General preference with a selected repository',
+                f'We are reviewing {repo}. For future code reviews, I prefer a short summary and explicit test results.', repo=repo)
+            assert len(preference['notes']) == 1 and preference['notes'][0]['repo_url'] == '', 'General preference was not saved in personal scope.'
+            recalled = await turn('Personal preference recalled from another repository',
+                'How should you format a code review for me?', repo='https://github.com/example/beta')
+            assert recalled['notes'] == preference['notes'] and any(step.get('loaded_ids') for step in recalled['steps'])
+            assert 'test' in recalled['answer'].lower()
+            one_off = await turn('Current-task approval constraint',
+                'For this PR only, do not merge without my permission. Tell me what 2 + 2 is.', repo=repo)
+            assert 'memory_save' not in one_off['tools'] and one_off['notes'] == preference['notes']
+            mentioned = await turn('Mentioned repository without a selected repository',
+                'I am looking at https://github.com/example/beta. For future release notes, I prefer three concise bullets.')
+            assert len(mentioned['notes']) == 2 and all(note['repo_url'] == '' for note in mentioned['notes'])
+            scoped = await turn('Explicit repository-specific decision',
+                f'For future work in {repo} only, use uv for Python checks because that repository is configured around uv.', repo=repo)
+            assert len(scoped['notes']) == 3 and sum(note['repo_url'] == repo for note in scoped['notes']) == 1
+            report['passed'] = True
+            return report
 
         first = await turn('Implicit lasting preference',
             'For my benchmark reports, I prefer a compact table with p95 latency and error rate. '
@@ -206,9 +229,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', default='openai/gpt-6-astra')
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--scope-only', action='store_true', help='Check personal/repository scope, cross-repository recall and one-task constraints.')
     args = parser.parse_args()
     with TemporaryDirectory(prefix='moyai-memory-capture-') as directory:
-        report = asyncio.run(evaluate(args.model, Path(directory), args.report))
+        report = asyncio.run(evaluate(args.model, Path(directory), args.report, args.scope_only))
     if args.report:
         args.report.write_text(json.dumps(report, indent=2) + '\n')
     print(f'\nPASS: all {len(report["cases"])} memory behavior checks ({args.model}).', flush=True)

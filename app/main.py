@@ -945,7 +945,13 @@ def create_app(settings: Settings | None = None):
             try:
                 result = memory.call(run, body.name, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid memory arguments. Check the current turn, text limits and tool schema.') from None
+                result = {'error': 'Invalid memory arguments. Check the current turn, text limits and tool schema.', 'status_code': 422}
+            except HTTPException as exc:
+                if exc.status_code not in {403, 404, 409, 422}:
+                    raise
+                # A definite rejection is a tool receipt, not an uncertain
+                # transport failure that prevents the runtime from continuing.
+                result = {'error': exc.detail, 'status_code': exc.status_code}
             await checkpoints.flush()
             return result
         if body.name == 'automation_claim_item':

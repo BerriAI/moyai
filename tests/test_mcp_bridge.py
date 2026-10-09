@@ -97,7 +97,7 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
 
 
 @pytest.mark.parametrize('harness', ['stdio', 'deepagents', 'tool-loop'])
-@pytest.mark.parametrize('tool_family', ['skills', 'automations'])
+@pytest.mark.parametrize('tool_family', ['skills', 'automations', 'memory-schema', 'memory-scope'])
 def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harness, tool_family):
     app, client = workspace
     sign_in(app, client)
@@ -137,6 +137,16 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
             'name': 'automation_create', 'arguments': {'turn_id': run['active_message_id'],
                 'request_key': 'correct-automation-fields', 'definition': definition(**changes)}}}
             for index, changes in enumerate([{'metadata': {'bootstrap_source': 'private-input-marker' + 'x' * (16385 - len('private-input-marker'))}}, {}], 1)]
+    elif tool_family.startswith('memory-'):
+        quote = 'Keep all future explanations concise.'
+        app.state.store.execute('UPDATE messages SET content=? WHERE id=?', (quote, run['active_message_id']))
+        invalid = ({'key': 'private-input-marker!'} if tool_family == 'memory-schema'
+                   else {'repo_url': 'https://github.com/private-input-marker/other'})
+        messages = [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call', 'params': {
+            'name': 'memory_save', 'arguments': {'turn_id': run['active_message_id'],
+                'key': 'concise-explanations', 'title': 'Concise explanations', 'content': quote,
+                'request_id': 'correct-memory-fields', 'source_message_id': run['active_message_id'],
+                'source_quote': quote, **changes}}} for index, changes in enumerate([invalid, {}], 1)]
     script = Path(__file__).resolve().parents[1] / 'sandbox' / 'mcp_bridge.py'
     with diagnostic_relay(Edge) as (relay, relay_client, diagnostics):
         saved = None
@@ -173,12 +183,18 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
             if tool_family == 'skills':
                 assert 'Invalid skill arguments' in rejected['content'][0]['text']
                 assert json.loads(recovered['content'][0]['text'])['loaded']
-            else:
+            elif tool_family == 'automations':
                 failure = json.loads(rejected['content'][0]['text'])
                 assert failure['status_code'] == 422
                 assert failure['validation_errors'][0]['field'] == 'definition.metadata.bootstrap_source'
                 assert json.loads(recovered['content'][0]['text'])['status'] == 'paused'
                 assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
+            else:
+                failure = json.loads(rejected['content'][0]['text'])
+                assert failure['status_code'] == 422 and failure['error']
+                assert json.loads(recovered['content'][0]['text'])['saved'] is True
+                notes = app.state.memory.listing('google:alice')
+                assert len(notes) == 1 and notes[0]['repo_url'] == '' and notes[0]['revision'] == 1
             assert 'private-input-marker' not in json.dumps([rejected, recovered])
 
 
