@@ -15,7 +15,7 @@ from app.db import Store
 from app.spend import Spend
 from app.temporal_runtime import TemporalRunManager
 from sandbox.continuation import AgentWait
-from test_durable import durable, drive
+from test_durable import durable, drive, transport_failure_report
 from test_workspace import workspace
 from test_spend import active, sign_in
 from storage_fixture import MemoryObjects
@@ -104,6 +104,39 @@ async def test_parent_releases_capacity_and_resumes_after_children_across_restar
     assert cloud.machines[-1].spec['agent_results']['completed'] == 5
     assert cloud.machines[-1].spec['continuation'] is True
     assert len([m for m in manager.store.messages(run_id) if m['role'] == 'assistant']) == 1
+
+
+async def test_recovered_transport_does_not_reuse_old_checkpoint_after_child_handoff(durable):
+    manager, cloud, run_id = durable
+    coordinator = attach(manager)
+    cloud.saving_before_answer = False
+    command = cloud.command
+    async def outage(machine, action, directory, value, **kwargs):
+        if action == 'read' and len(cloud.launches) == 1:
+            return json.dumps(transport_failure_report())
+        return await command(machine, action, directory, value, **kwargs)
+    cloud.command = manager.command = outage
+    await drive(manager, run_id, phase='transport_wait')
+    state = manager.state(run_id)
+    state['retry_at'] = 0
+    manager.save(run_id, state)
+    await drive(manager, run_id, phase='monitor')
+    assert cloud.machines[-1].spec['transport_recovery']
+    result = await coordinator.fanout(manager.store.run(run_id), Fanout(
+        request_key='after-recovery', instructions='Read the inherited file.', items=['A', 'B'], workers=2))
+    children = coordinator.children(result['group_id'])
+    await pause_parent(manager, run_id, result['group_id'])
+    manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    attach(manager)
+    for child in children:
+        await drive(manager, child['id'])
+    await drive(manager, run_id, phase='monitor')
+    resumed = cloud.machines[-1].spec
+    assert resumed['agent_results']['completed'] == 2
+    assert resumed['continuation'] is True
+    assert 'transport_recovery' not in resumed
+    assert resumed['transport_attempt'] == 1  # A handoff cannot refund retries.
+    assert len(manager.coordinator.children(result['group_id'])) == 2
 
 
 @pytest.mark.parametrize('settle_before_reply', [False, True])
