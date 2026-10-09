@@ -1,6 +1,6 @@
 """Select public commentary once, durably, for every conversation surface."""
 import json
-from sqlite3 import Connection
+from .database import Connection
 
 from sandbox.activity import focus_text, public_text
 
@@ -29,9 +29,9 @@ def active_input(conn: Connection, run_id: str, turn_id: int) -> int:
     if pending:
         return pending['id']
     receipt = conn.execute("""SELECT m.id AS input_id FROM events e JOIN messages m
-        ON m.id=json_extract(e.data,'$.message_id') AND m.run_id=e.run_id
-        WHERE e.run_id=? AND e.kind='status' AND json_extract(e.data,'$.phase')='steering'
-        AND json_extract(e.data,'$.turn_id')=? AND m.steering_parent_id=? AND m.status='injected'
+        ON m.id=json_number(e.data,'message_id') AND m.run_id=e.run_id
+        WHERE e.run_id=? AND e.kind='status' AND json_text(e.data,'phase')='steering'
+        AND json_number(e.data,'turn_id')=? AND m.steering_parent_id=? AND m.status='injected'
         ORDER BY e.id DESC LIMIT 1""", (run_id, turn_id, turn_id)).fetchone()
     return receipt['input_id'] if receipt else turn_id
 
@@ -42,8 +42,8 @@ def current_focus(conn: Connection, run_id: str) -> str:
         return ''
     input_id = active_input(conn, run_id, turn_id)
     row = conn.execute("""SELECT message FROM events WHERE run_id=? AND kind='status'
-        AND json_extract(data,'$.live_status')=1 AND json_extract(data,'$.turn_id')=?
-        AND json_extract(data,'$.input_id')=? ORDER BY id DESC LIMIT 1""",
+        AND json_number(data,'live_status')=1 AND json_number(data,'turn_id')=?
+        AND json_number(data,'input_id')=? ORDER BY id DESC LIMIT 1""",
         (run_id, turn_id, input_id)).fetchone()
     return row['message'] if row else ''
 
@@ -61,7 +61,7 @@ def record_focus(conn: Connection, run_id: str, message: str, data: dict[str, ob
     if not isinstance(identity, str) or not identity or len(identity) > 100:
         return
     if conn.execute("""SELECT 1 FROM events WHERE run_id=? AND kind='status'
-        AND json_extract(data,'$.activity_id')=? LIMIT 1""", (run_id, identity)).fetchone():
+        AND json_text(data,'activity_id')=? LIMIT 1""", (run_id, identity)).fetchone():
         return
     metadata = {'phase': 'focus', 'activity_version': 1, 'live_status': True,
                 'turn_id': turn_id, 'input_id': input_id, 'activity_id': identity}
@@ -80,8 +80,8 @@ def record(conn: Connection, run_id: str, message: str, data: dict[str, object],
     if turn_id is None or not message or message == '[System: Empty message content sanitised to satisfy protocol]':
         return
     rows = conn.execute("""SELECT message,data FROM events WHERE run_id=? AND kind='message'
-        AND COALESCE(json_extract(data,'$.turn_id'),0)=?
-        AND COALESCE(json_extract(data,'$.phase'),'')!='processing'""", (run_id, turn_id)).fetchall()
+        AND COALESCE(json_number(data,'turn_id'),0)=?
+        AND COALESCE(json_text(data,'phase'),'')!='processing'""", (run_id, turn_id)).fetchall()
     previous = [(row['message'], json.loads(row['data'])) for row in rows]
     if data.get('activity_id') and any(meta.get('activity_id') == data['activity_id'] for _, meta in previous):
         return

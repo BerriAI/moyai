@@ -105,15 +105,15 @@ class MemoryReview:
         if authorized:
             owner, revision = authorized
             available = (datetime.now(timezone.utc) + timedelta(seconds=self.settings.memory_review_idle_seconds)).isoformat()
-            conn.execute('''INSERT OR IGNORE INTO memory_reviews
+            conn.execute('''INSERT INTO memory_reviews
                 (message_id,run_id,actor_id,owner_id,preferences_revision,available_at,updated_at)
-                VALUES(?,?,?,?,?,?,?)''', (message_id, source['run_id'], source['user_id'], owner, revision, available, now()))
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING''', (message_id, source['run_id'], source['user_id'], owner, revision, available, now()))
 
     def backfill(self):
         # One bounded seed from recent sessions, not an unbounded transcript scan.
         since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             rows = conn.execute('''SELECT m.id FROM messages m JOIN runs r ON r.id=m.run_id
                 WHERE m.role='user' AND m.status='completed' AND m.steering_parent_id IS NULL
                 AND m.created_at>=? AND r.chat_enabled=1 AND r.parent_run_id='' AND r.deleted_at=''
@@ -194,7 +194,7 @@ class MemoryReview:
         if not self.configured:
             return False
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             job = conn.execute("SELECT * FROM memory_reviews WHERE status='pending' AND available_at<=? ORDER BY message_id LIMIT 1", (now(),)).fetchone()
             if not job:
                 return False
@@ -273,7 +273,7 @@ class MemoryReview:
         visible_keys = {n['key'] for n in detailed}
         source_by_id = {s['id']: s['content'] for s in sources}
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             fresh = self.source_in(conn, job['message_id'])
             if (not self.allowed_in(conn, fresh, owner=job['owner_id'], revision=job['preferences_revision'])
                     or fresh['user_id'] != job['actor_id'] or fresh['repo_url'] != source['repo_url']):

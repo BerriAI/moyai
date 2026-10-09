@@ -52,7 +52,7 @@ class DurableRunner(RunManager):
     def submit_in(self, conn, run):
         if not run.get('deleted_at'):
             conn.execute('''INSERT INTO durable_sessions(run_id,revision) VALUES(?,1)
-                ON CONFLICT(run_id) DO UPDATE SET revision=revision+1''', (run['id'],))
+                ON CONFLICT(run_id) DO UPDATE SET revision=durable_sessions.revision+1''', (run['id'],))
 
     def submit(self, run):
         # The DB outbox owns dispatch, including a wake admitted with its state.
@@ -134,7 +134,7 @@ class DurableRunner(RunManager):
 
     def computer_state(self, run_id):
         with self.store.connect() as conn:
-            conn.execute('BEGIN')
+            conn.begin_read()
             row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
             pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected')", (run_id,)).fetchone()
@@ -160,7 +160,7 @@ class DurableRunner(RunManager):
                 # Delete and enqueue use the same write transaction boundary.
                 # Persist admission and its dispatch together before effects.
                 with self.store.connect() as conn:
-                    conn.execute('BEGIN IMMEDIATE')
+                    conn.begin_write()
                     row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
                     row = dict(row) if row else None
                     current = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()

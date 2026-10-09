@@ -27,11 +27,18 @@ class GitHubWriteAccess:
             created_at TEXT NOT NULL)''')
         self.store.execute('''CREATE INDEX IF NOT EXISTS github_write_access_scope
             ON github_write_access(run_id,connection_version,repository_id,number)''')
-        self.store.execute('''CREATE TRIGGER IF NOT EXISTS revoke_github_write_access
-            AFTER UPDATE OF status,deleted_at ON runs
-            WHEN NEW.status IN ('stopping','cancelled') OR NEW.deleted_at!=''
-            BEGIN UPDATE github_write_access SET status='revoked'
-            WHERE run_id=NEW.id AND status IN ('pending','approved'); END''')
+        if self.store.database:
+            from .postgres_migration import REVOKE_FUNCTION, REVOKE_POSTGRES
+            with self.store.connect() as conn:
+                conn.begin_write()
+                conn.execute(REVOKE_FUNCTION.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'))
+                conn.execute(REVOKE_POSTGRES.replace('CREATE TRIGGER', 'CREATE OR REPLACE TRIGGER'))
+        else:
+            self.store.execute('''CREATE TRIGGER IF NOT EXISTS revoke_github_write_access
+                AFTER UPDATE OF status,deleted_at ON runs
+                WHEN NEW.status IN ('stopping','cancelled') OR NEW.deleted_at!=''
+                BEGIN UPDATE github_write_access SET status='revoked'
+                WHERE run_id=NEW.id AND status IN ('pending','approved'); END''')
 
     def write_actor(self, run, version, tool):
         self.ensure_publish_allowed(run, version, tool)
@@ -108,8 +115,8 @@ class GitHubWriteAccess:
         self.write_actor(run, version, 'github_request_pull_request_write_access')
         existing = self.find_access(run, actor, version, target, args.number)
         identity = existing['id'] if existing else self.access_id(run, actor, version, target, args.number)
-        self.store.execute('''INSERT OR IGNORE INTO github_write_access
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (identity, run['id'], actor, version, target, args.number,
+        self.store.execute('''INSERT INTO github_write_access
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING''', (identity, run['id'], actor, version, target, args.number,
             head, branch, base, str(pr.get('title', ''))[:500], 'pending', now()))
         row = self.store.rows('SELECT * FROM github_write_access WHERE id=?', (identity,))[0]
         if existing is None:
@@ -131,7 +138,7 @@ class GitHubWriteAccess:
 
     async def decide_write_access(self, run_id, identity, actor, decision):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             row = conn.execute('SELECT * FROM github_write_access WHERE id=? AND run_id=?', (identity, run_id)).fetchone()
             if not row or not run or not self.same_write_requester(row['actor_id'], actor) or not self.same_write_requester(run['active_user_id'], actor):

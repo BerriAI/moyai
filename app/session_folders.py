@@ -1,5 +1,5 @@
 """Personal sidebar organization for shared workspace sessions."""
-import sqlite3
+from .database import INTEGRITY_ERRORS
 from typing import Annotated
 from uuid import uuid4
 
@@ -76,14 +76,14 @@ class SessionFolders:
 
     def pin(self, owner, run_id, pinned):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute("SELECT parent_run_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
             if not run:
                 raise HTTPException(404, 'Session not found.')
             if run['parent_run_id']:
                 raise HTTPException(422, 'Pin the parent session to keep its agents together.')
             if pinned:
-                conn.execute('INSERT OR IGNORE INTO session_pins VALUES(?,?,?)', (owner, run_id, now()))
+                conn.execute('INSERT INTO session_pins VALUES(?,?,?) ON CONFLICT DO NOTHING', (owner, run_id, now()))
             else:
                 conn.execute('DELETE FROM session_pins WHERE owner_id=? AND run_id=?', (owner, run_id))
         return {'id': run_id, 'pinned': pinned}
@@ -110,7 +110,7 @@ class SessionFolders:
         stamp = now()
         try:
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 if folder_id:
                     old = self.require_folder(conn, owner, folder_id, body.revision)
                     revision = old['revision'] + 1
@@ -124,13 +124,13 @@ class SessionFolders:
                     folder_id, revision = uuid4().hex, 1
                     conn.execute('INSERT INTO session_folders VALUES(?,?,?,?,?,?,?)',
                                  (folder_id, owner, body.name, body.name.casefold(), revision, stamp, stamp))
-        except sqlite3.IntegrityError as exc:
+        except INTEGRITY_ERRORS as exc:
             raise HTTPException(409, 'You already have a folder with that name.') from exc
         return {'id': folder_id, 'name': body.name, 'revision': revision}
 
     def move(self, owner, run_id, folder_id):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute("SELECT parent_run_id FROM runs WHERE id=? AND deleted_at=''", (run_id,)).fetchone()
             if not run:
                 raise HTTPException(404, 'Session not found.')
@@ -168,7 +168,7 @@ class SessionFolders:
         async def delete(folder_id: str, body: FolderRevision, request: Request):
             owner = self.actor(request, True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 self.require_folder(conn, owner, folder_id, body.revision)
                 conn.execute('DELETE FROM session_folders WHERE id=? AND owner_id=?', (folder_id, owner))
             await self.checkpoints.flush()

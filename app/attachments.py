@@ -112,7 +112,7 @@ class Attachments:
                 CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
                 CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(owner_id);
             ''')
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(attachments)')}
+            columns = conn.column_names('attachments')
             for name, definition in [('data_ref', "TEXT NOT NULL DEFAULT ''"),
                                      ('preview_ref', "TEXT NOT NULL DEFAULT ''"),
                                      ('preview_size', 'INTEGER NOT NULL DEFAULT 0')]:
@@ -169,7 +169,7 @@ class Attachments:
             data_ref = self.store.objects.put(raw)
             preview_ref = self.store.objects.put(preview) if preview else ''
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             conn.execute('DELETE FROM attachments WHERE message_id IS NULL AND created_at<?', (cutoff,))
             prior = self.existing(conn, attachment_id, owner_id, name, checksum)
             if prior:

@@ -1,7 +1,7 @@
 """Scoped Markdown skills, loaded into model context at the trusted broker."""
 import json
 import re
-import sqlite3
+from .database import INTEGRITY_ERRORS
 from contextlib import nullcontext
 from typing import Annotated, Literal, Mapping
 from uuid import uuid4
@@ -98,7 +98,7 @@ class Skills:
                 CREATE TABLE IF NOT EXISTS skill_file_reads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    skill_id TEXT NOT NULL, path TEXT NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL
+                    skill_id TEXT NOT NULL, path TEXT NOT NULL, "offset" INTEGER NOT NULL, length INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_skill_file_reads_turn ON skill_file_reads(run_id,message_id);
                 CREATE TABLE IF NOT EXISTS skills (
@@ -123,7 +123,7 @@ class Skills:
                     actor_id TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
                 );
             ''')
-            if 'icon' not in {row[1] for row in conn.execute('PRAGMA table_info(skills)')}:
+            if 'icon' not in conn.column_names('skills'):
                 conn.execute("ALTER TABLE skills ADD COLUMN icon TEXT NOT NULL DEFAULT 'auto'")
 
     def visible(self, row, actor):
@@ -200,7 +200,7 @@ class Skills:
             own_transaction = conn is None
             with (self.store.connect() if own_transaction else nullcontext(conn)) as conn:
                 if own_transaction:
-                    conn.execute('BEGIN IMMEDIATE')
+                    conn.begin_write()
                 if skill_id:
                     old = conn.execute('SELECT * FROM skills WHERE id=?',(skill_id,)).fetchone()
                     if not old or not self.manageable(old,actor,admin):
@@ -227,7 +227,7 @@ class Skills:
                     conn.execute('INSERT INTO skills(id,name,description,encrypted,scope,owner_id,namespace,created_at,updated_at,client_id,icon) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                  (skill_id,body.name,body.description,self.security.encrypt(body.instructions),body.scope,actor,namespace,now(),now(),body.client_id,body.icon))
                 self.audit(conn,skill_id,actor,'saved '+body.scope)
-        except sqlite3.IntegrityError:
+        except INTEGRITY_ERRORS:
             raise HTTPException(409,'That skill name is already in this library, including archived skills. Choose another name or edit the existing skill.') from None
         return skill_id
 
@@ -237,7 +237,7 @@ class Skills:
         if not terms:
             raise HTTPException(422,'Search with specific skill keywords, such as benchmark or deployment.')
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT * FROM runs WHERE id=?',(run['id'],)).fetchone()
             if not current:
                 raise HTTPException(403,'Skills require an authenticated chat turn.')
@@ -275,7 +275,7 @@ class Skills:
             raise HTTPException(403,'Skills require an authenticated chat turn.')
         skill = self.find(name,run['active_user_id'])
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             params = (run['id'],run['active_message_id'])
             prior = conn.execute('SELECT * FROM skill_uses WHERE run_id=? AND message_id=? AND skill_id=?',(*params,skill['id'])).fetchone()
             if prior:
@@ -388,7 +388,7 @@ class Skills:
         async def archive(skill_id: str, body: ArchiveForm, request: Request):
             user,admin = actor(request,True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM skills WHERE id=?',(skill_id,)).fetchone()
                 if not row or not self.manageable(row,user,admin):
                     raise HTTPException(404,'Skill not found.')

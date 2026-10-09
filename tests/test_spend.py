@@ -616,6 +616,7 @@ async def test_cost_recovery_faults_remain_unknown_and_retry_without_leaking_dia
     assert len(calls) == 1 and calls[0].startswith('https://gateway.example/')
 
 
+@pytest.mark.sqlite_only
 async def test_cost_recovery_checkpoint_survives_a_new_app_and_migration_is_idempotent(
         workspace: tuple[FastAPI, TestClient], tmp_path: Path) -> None:
     from app.persistence import Checkpoints, restore_checkpoint

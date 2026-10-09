@@ -4,7 +4,6 @@ import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
-import sqlite3
 import stat
 import tempfile
 import threading
@@ -15,6 +14,8 @@ import boto3
 from botocore.config import Config
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
+
+from .database import Connection
 
 
 class ObjectStorage:
@@ -221,7 +222,7 @@ class ArtifactStore:
                 return False
         reference = self.store.objects.put(raw) if remote else ''
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             if not admitted(conn):
                 return False
             if reference:
@@ -274,7 +275,7 @@ class ArtifactStore:
             raise HTTPException(409, 'The saved archive changed. Refresh the file list.')
         return raw
 
-    def snapshot_in(self, conn: sqlite3.Connection, source: str, destination: str) -> None:
+    def snapshot_in(self, conn: Connection, source: str, destination: str) -> None:
         self.validate_name(destination)
         if self.info(destination, conn) is not None:
             return
@@ -282,8 +283,8 @@ class ArtifactStore:
         if info is None:
             return
         if info['reference']:
-            conn.execute('''INSERT OR IGNORE INTO artifact_objects(name,reference,size,sha256,created_at)
-                SELECT ?,reference,size,sha256,created_at FROM artifact_objects WHERE name=?''', (destination, source))
+            conn.execute('''INSERT INTO artifact_objects(name,reference,size,sha256,created_at)
+                SELECT ?,reference,size,sha256,created_at FROM artifact_objects WHERE name=? ON CONFLICT DO NOTHING''', (destination, source))
         else:
             original, target = self.path(source), self.path(destination)
             if not target.exists():

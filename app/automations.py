@@ -203,13 +203,13 @@ class Automations:
         store.execute('''CREATE TABLE IF NOT EXISTS automation_schedules (
             automation_id TEXT NOT NULL REFERENCES automations(id), schedule_id TEXT PRIMARY KEY)''')
         with store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            if 'synced_schedule_version' not in {r['name'] for r in conn.execute('PRAGMA table_info(automations)')}:
+            conn.begin_write()
+            if 'synced_schedule_version' not in conn.column_names('automations'):
                 conn.execute('ALTER TABLE automations ADD COLUMN synced_schedule_version INTEGER NOT NULL DEFAULT 0')
         # Remember already-synced single-trigger schedules for later removal.
         for row in store.rows('SELECT * FROM automations WHERE synced_revision>0'):
             if 'triggers' not in json.loads(row['definition']) and not json.loads(row['definition']).get('event'):
-                store.execute('INSERT OR IGNORE INTO automation_schedules VALUES(?,?)', (row['id'], 'moyai-automation-' + row['id']))
+                store.execute('INSERT INTO automation_schedules VALUES(?,?) ON CONFLICT DO NOTHING', (row['id'], 'moyai-automation-' + row['id']))
 
     def start(self):
         if self.settings.temporal_enabled:
@@ -325,7 +325,7 @@ class Automations:
         stamp = now()
         with self.store.connect() if connection is None else nullcontext(connection) as conn:
             if connection is None:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
             if automation_id:
                 row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
                 if not row or row['owner_id'] != owner_id:
@@ -355,7 +355,7 @@ class Automations:
         """Shared by the web editor and agent tools; permission and revision checks stay here."""
         with self.store.connect() if connection is None else nullcontext(connection) as conn:
             if connection is None:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
             row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Automation not found.')
@@ -394,7 +394,7 @@ class Automations:
         except (HTTPException, ValueError, ConnectorError) as exc:
             error = exc.detail if isinstance(exc, HTTPException) else str(exc)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             previous = conn.execute('SELECT * FROM automation_runs WHERE occurrence=?', (occurrence,)).fetchone()
             if previous:
                 result = {'run_id': previous['run_id'] or '', 'outcome': previous['outcome']}
@@ -479,11 +479,11 @@ class Automations:
     def claim(self, run, arguments):
         key = Claim.model_validate(arguments).item_key.lower()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             source = conn.execute('SELECT automation_id FROM automation_runs WHERE run_id=?', (run['id'],)).fetchone()
             if not source:
                 raise HTTPException(403, 'This tool is available only in automation sessions.')
-            conn.execute('INSERT OR IGNORE INTO automation_items VALUES(?,?,?,?)', (source['automation_id'], key, run['id'], now()))
+            conn.execute('INSERT INTO automation_items VALUES(?,?,?,?) ON CONFLICT DO NOTHING', (source['automation_id'], key, run['id'], now()))
             item = conn.execute('SELECT run_id FROM automation_items WHERE automation_id=? AND item_key=?', (source['automation_id'], key)).fetchone()
         return {'claimed': item['run_id'] == run['id'], 'run_id': item['run_id']}
 
@@ -525,7 +525,7 @@ class Automations:
                             await client.create_schedule(schedule_id, value, rpc_timeout=timedelta(seconds=10))
                         except ScheduleAlreadyRunningError:
                             await client.get_schedule_handle(schedule_id).update(lambda _, value=value: ScheduleUpdate(value), rpc_timeout=timedelta(seconds=10))
-                        self.store.execute('INSERT OR IGNORE INTO automation_schedules VALUES(?,?)', (row['id'], schedule_id))
+                        self.store.execute('INSERT INTO automation_schedules VALUES(?,?) ON CONFLICT DO NOTHING', (row['id'], schedule_id))
                     for binding in self.store.rows('SELECT schedule_id FROM automation_schedules WHERE automation_id=?', (row['id'],)):
                         schedule_id = binding['schedule_id']
                         if schedule_id in desired:

@@ -225,6 +225,8 @@ def main(argv=None) -> int:
         from .config import Settings
         from .blob_storage import ObjectStorage
         settings = Settings()
+        if settings.moyai_database_url:
+            raise MaintenanceError('This maintenance command is SQLite-only. Use Postgres backups for the configured runtime database.')
         directory = args.data_dir if args.data_dir is not None else settings.data_dir
         if args.operation == 'plan':
             result = plan(directory)

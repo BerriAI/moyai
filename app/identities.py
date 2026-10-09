@@ -196,7 +196,7 @@ class SlackIdentities:
             self.store.execute("UPDATE users SET link_status=CASE WHEN link_method='manual' THEN 'manual' WHEN linked_user_id IS NOT NULL THEN 'review' ELSE 'unavailable' END,profile_eligible=0,profile_next_check=? WHERE id=?", (int(time.time()) + 300, row['id']))
             return
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT * FROM users WHERE id=?', (row['id'],)).fetchone()
             # Do not move past spend to a different human after a profile email
             # change. Keep the first matched provider IDs and flag a review.

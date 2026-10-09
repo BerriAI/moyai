@@ -51,8 +51,8 @@ class AutomationEvents:
         self.store, self.security = automations.store, automations.security
         self.lock = asyncio.Lock()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
-            columns = {r['name'] for r in conn.execute('PRAGMA table_info(automation_webhooks)')}
+            conn.begin_write()
+            columns = conn.column_names('automation_webhooks')
             if columns and 'provider' not in columns:
                 conn.execute('ALTER TABLE automation_webhooks RENAME TO automation_webhooks_legacy')
             conn.execute("""CREATE TABLE IF NOT EXISTS automation_webhooks (
@@ -121,7 +121,7 @@ class AutomationEvents:
 
     async def accept(self, row, delivery, context):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             result = self.accept_in(conn, row, delivery, context)
         # Do not ACK before the local durable write / optional volume checkpoint.
         await self.automations.checkpoints.flush()
@@ -183,7 +183,7 @@ class AutomationEvents:
         changed = False
         for candidate in self.store.rows('SELECT id FROM automations WHERE paused=0'):
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM automations WHERE id=?', (candidate['id'],)).fetchone()
                 if not row or row['paused'] or not any(t.provider == 'session' for _,t in sources(row)):
                     continue
@@ -218,7 +218,7 @@ class AutomationEvents:
             # Drain bursts in bounded rounds across automations. Earlier sessions
             # do not block new events; a full cap or unavailable setup still does.
             rows = self.store.rows("""SELECT * FROM (
-                SELECT e.*,ROW_NUMBER() OVER (PARTITION BY automation_id ORDER BY rowid) AS position
+                SELECT e.*,ROW_NUMBER() OVER (PARTITION BY automation_id ORDER BY received_at,occurrence) AS position
                 FROM automation_events e WHERE status='pending')
                 ORDER BY position,received_at,automation_id LIMIT 200""")
             waiting = set()
@@ -337,7 +337,7 @@ class AutomationEvents:
         """One transactional owner for web and broker receiver configuration."""
         with self.store.connect() if connection is None else nullcontext(connection) as conn:
             if connection is None:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
             row = conn.execute('SELECT * FROM automations WHERE id=?', (automation_id,)).fetchone()
             if not row or row['owner_id'] != owner_id:
                 raise HTTPException(404, 'Automation not found for the current requester.')

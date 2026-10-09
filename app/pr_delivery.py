@@ -2,11 +2,11 @@
 import hashlib
 import html
 import re
-import sqlite3
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from .database import Connection
 from . import captures
 from .config import Settings
 
@@ -31,7 +31,7 @@ class Capture(BaseModel):
     sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
 
 
-def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullRequest]:
+def select_prs(conn: Connection, run_id: str, answer: str) -> list[PullRequest]:
     # A URL selects an existing receipt; it cannot establish a publication.
     urls = {url.rstrip('.,;!?') for url in re.findall(r'https://[^\s<>`"\)\]\|]+', answer)}
     result = []
@@ -50,7 +50,7 @@ def select_prs(conn: sqlite3.Connection, run_id: str, answer: str) -> list[PullR
 
 
 def select_captures(settings: Settings, run_id: str, answer: str, *, store,
-                    conn: sqlite3.Connection | None = None) -> list[Capture]:
+                    conn: Connection | None = None) -> list[Capture]:
     tokens = TOKENS.findall(answer)
     names = [match[1] for token in tokens if (match := re.fullmatch(
         r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))', token))]

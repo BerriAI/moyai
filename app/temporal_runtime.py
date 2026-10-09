@@ -114,7 +114,7 @@ class TemporalRunManager(DurableRunner):
                 )
                 self.store.execute('UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
                                    (row['revision'], row['run_id']))
-        rows = self.store.rows('SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY rowid LIMIT 200')
+        rows = self.store.rows('SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY run_id LIMIT 200')
         results = await asyncio.gather(*(deliver(row) for row in rows), return_exceptions=True)
         for result in results:
             if isinstance(result, BaseException):
