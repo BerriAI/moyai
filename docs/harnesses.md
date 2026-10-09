@@ -83,6 +83,8 @@ terminal cleanup and verified unloading of the finished native thread. A failed 
 interrupted invocation, owner disconnect, idle expiry or scope change discards the
 process. An unavailable lease falls back before inference to the cold launch;
 runtime failures after admission do not introduce an automatic turn replay.
+Orphaned native files from filesystem snapshots are removed before workspace
+preparation, including on cold runs and delegated workers.
 `CODEX_RUNTIME_REUSE=false` disables prewarming and reuse.
 
 The pinned SDK connects through a local JSON-lines/Unix-WebSocket adapter

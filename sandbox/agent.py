@@ -71,11 +71,12 @@ def run(spec):
             {'activity_version': 1, 'phase': 'broker_failure', **failure})).start()
     os.environ['MOYAI_CREDENTIAL_PROXY_URL'] = relay.url + '/credentials'
     try:
+        try:
+            from .codex_runtime import RuntimeLease, discard_orphan
+        except ImportError:
+            from codex_runtime import RuntimeLease, discard_orphan
+        discard_orphan()
         if spec.get('harness') == 'codex' and spec.get('codex_runtime_idle_seconds'):
-            try:
-                from .codex_runtime import RuntimeLease
-            except ImportError:
-                from codex_runtime import RuntimeLease
             relay.codex_runtime = RuntimeLease(spec['codex_runtime_scope'], spec['codex_runtime_idle_seconds'],
                                               model=spec['model'])
         return run_agent(spec, relay)

@@ -8,7 +8,7 @@ import time
 import pytest
 
 from sandbox.codex_harness import CodexAgent
-from sandbox.codex_runtime import RuntimeLease
+from sandbox.codex_runtime import RuntimeLease, discard_orphan
 from test_codex_tool_readiness import readiness_case
 from test_codex_tool_search import search_case
 from test_workspace import workspace as broker_workspace  # noqa: F401
@@ -26,7 +26,7 @@ def reuse_case(tmp_path, monkeypatch, root, *, scope='same-session', progress=la
 
     class WarmAgent(CodexAgent):
         def __init__(self, **kwargs):
-            self.lease = RuntimeLease(scope, .5, root=root)
+            self.lease = RuntimeLease(scope, 5, root=root)
             kwargs['relay'].codex_runtime = self.lease
             super().__init__(**kwargs)
 
@@ -133,6 +133,23 @@ def test_prewarm_does_not_inherit_provider_or_broker_secrets(monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'private-provider-key')
     monkeypatch.setenv('CODEX_HOME', '/untrusted')
     assert not {'WORKSPACE_RUN_TOKEN', 'OPENAI_API_KEY', 'CODEX_HOME'} & clean_env().keys()
+
+
+def test_snapshot_cleanup_removes_orphans_but_preserves_live_owner(runtime_root):
+    home = runtime_root / 'home'
+    home.mkdir()
+    (home / 'private-native-state').write_text('cloned state')
+    discard_orphan(runtime_root)
+    assert not home.exists()
+    owner = RuntimeLease('session', .1, root=runtime_root)
+    try:
+        info = owner.ready()
+        assert info
+        discard_orphan(runtime_root)
+        assert home.exists()
+        os.kill(info['pid'], 0)
+    finally:
+        owner.close()
 
 
 def test_reused_runtime_native_search_and_real_broker(tmp_path, monkeypatch, runtime_root, broker_workspace):

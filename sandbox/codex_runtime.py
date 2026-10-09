@@ -27,6 +27,19 @@ def clean_env():
     return {key: value for key, value in os.environ.items() if key in SAFE_ENV}
 
 
+def discard_orphan(root=ROOT):
+    """Scrub native files copied by a snapshot, including for cold/child runs."""
+    root = Path(root)
+    if not root.exists():
+        return
+    with (root / 'server.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # A live supervisor still owns its native state.
+        shutil.rmtree(root / 'home', ignore_errors=True)
+
+
 def read_message(stream):
     raw = stream.readline(MAX_CONTROL_BYTES + 1)
     if not raw.endswith(b'\n') or len(raw) > MAX_CONTROL_BYTES:
