@@ -713,6 +713,10 @@ class DurableRunner(RunManager):
                     self.fail(run_id, state, 'A safe cloud recovery could not be confirmed. '
                               'Saved receipts and error diagnostics are preserved; no actions were replayed.')
                 return True
+            # This segment consumed the old transport checkpoint and saved a
+            # newer one. Child/credential handoffs must resume that new state,
+            # without asking the harness to verify the obsolete recovery marker.
+            state.pop('resume_transport', None)
             continuing = result.get('continuation') and state['exit_code'] == 0
             steered = (state['exit_code'] == 0 and
                        self.message_queue.accepted(run_id, result.get('steer_message_id')))
@@ -747,7 +751,6 @@ class DurableRunner(RunManager):
                                  {'group_id': state['wait_group']})
                 self.save(run_id, state)
             elif continuing:
-                state.pop('resume_transport', None)
                 if time.time() - state['machine_started'] >= self.rotation_seconds(state):
                     await self.cleanup(state, run_id)
                     state.update(sandbox_id='', phase='provision')
