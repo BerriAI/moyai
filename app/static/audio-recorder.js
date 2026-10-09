@@ -13,7 +13,7 @@ function bindAudioRecorder(form, onFile, locked){
     button.disabled=locked()||waiting;
     const label=recorder?'Stop recording':waiting?'Opening microphone…':'Record audio';
     button.className='quiet record-button'+(busy()?'':' is-idle');
-    if(busy())button.textContent=label;else MoyaiUI.render(button, microphoneIcon);
+    MoyaiUI.render(button, busy()?label:microphoneIcon);
     button.title=label;button.setAttribute('aria-label',label);cancel.hidden=!busy();
     status.textContent=recorder?`Recording ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')} · 2 min max`:'';
   };

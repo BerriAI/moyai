@@ -4,7 +4,7 @@ const {test}=require('node:test');
 const vm=require('./helpers/ui-vm.cjs');
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function setup(){
-  class Element{setAttribute(){}remove(){this.removed=true;}prepend(...items){this.children=items;}}
+  class Element{set innerHTML(value){this.textContent=value.replace(/<[^>]*>/g,'');}setAttribute(){}remove(){this.removed=true;}prepend(...items){this.children=items;}}
   const toolbar=new Element(), form={querySelector:()=>toolbar},files=[],errors=[],requests=[],recorders=[],tracks=[];let locked=false;
   class Recorder{
     static isTypeSupported(type){return type.includes('webm');}

@@ -18,13 +18,19 @@ import { FormSelect } from "./form-select"
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible"
 
 type MountedRegion = { root: Root; nodes: ChildNode[]; connected: boolean }
+type RenderOptions = { preserve?: Iterable<HTMLElement> }
 const regions = new Map<HTMLElement, MountedRegion>()
 
 // Controllers replace regions rather than reconcile them. Dispose nested React
 // roots first, including regions in streamed messages and transient panels.
-export function dispose(host: HTMLElement) {
+export function dispose(host: HTMLElement, preserved: readonly HTMLElement[] = []) {
   for (const [node, region] of [...regions].reverse()) {
     if (!(node instanceof HTMLElement) || (node !== host && !host.contains(node))) continue
+    if (preserved.some(owner => owner === node || owner.contains(node))) {
+      // A caller will reattach these independently mounted subtrees this turn.
+      region.connected ||= node.isConnected
+      continue
+    }
     // Controllers may have replaced a top-level loading node or moved a panel.
     // Restore React's direct children before asking it to release their effects.
     for (const child of region.nodes) if (child.parentNode !== node) node.appendChild(child)
@@ -129,7 +135,7 @@ const options: HTMLReactParserOptions = {
   },
 }
 
-export function render(host: HTMLElement, html: string) {
+export function render(host: HTMLElement, html: string, { preserve = [] }: RenderOptions = {}) {
   const select = host instanceof HTMLSelectElement ? host : null
   let selected: string[] = []
   if (select) {
@@ -137,7 +143,7 @@ export function render(host: HTMLElement, html: string) {
     template.innerHTML = html
     selected = [...template.content.querySelectorAll("option[selected]")].map(option => (option as HTMLOptionElement).value)
   }
-  dispose(host)
+  dispose(host, [...preserve].filter(node => node !== host && host.contains(node)))
   host.replaceChildren()
   if (!html) return
   const root = createRoot(host)

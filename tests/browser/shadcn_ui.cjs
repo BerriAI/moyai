@@ -834,6 +834,162 @@ for (const width of [1440, 768, 320]) test(`runtime provider drafts remain edita
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
 });
 
+test('preserved roots survive synchronous moves and release when not reattached', async t => {
+  const page = await pageFor(t);
+  assert.equal(await page.evaluate(() => {
+    const host = document.createElement('div');
+    document.querySelector('#content').appendChild(host);
+    MoyaiUI.render(host, '<div data-retained></div>');
+    const slot = host.querySelector('[data-retained]');
+    // Match activity roots rendered detached and attached before the observer runs.
+    const article = document.createElement('article');
+    MoyaiUI.render(article, '<details open><summary>Retained tools</summary><button title="Copy result">Copy</button></details>');
+    slot.appendChild(article);
+    const disclosure = article.firstElementChild;
+    MoyaiUI.render(host, '<div data-retained></div>', { preserve: [slot] });
+    host.querySelector('[data-retained]').replaceWith(slot);
+    const retained = article.firstElementChild === disclosure && disclosure.open;
+    window.droppedActivity = article;
+    MoyaiUI.render(host, '<p>New transcript</p>', { preserve: [slot] });
+    return retained;
+  }), true);
+  await page.waitForFunction(() => !window.droppedActivity.childNodes.length);
+});
+
+for (const surface of ['main', 'side']) test(`${surface} transcript replacement retains rendered activity and releases removed controls`, async t => {
+  const page = await pageFor(t);
+  await page.evaluate(surface => {
+    const event = (id, kind, message, data = {}) => ({ id, kind, message, data, created_at: `2026-10-08T12:00:0${id}Z` });
+    window.lifecycleRun = {
+      id: '99999999999999999999999999999999', mode: 'demo', status: 'running', active_message_id: 1,
+      prompt: 'Verify retained activity', plugins: [], approvals: [], artifacts: [], credential_requests: [],
+      messages: [{ id: 1, role: 'user', status: 'running', content: 'Verify retained activity' }],
+      events: [event(1, 'chat', 'Response started', { message_id: 1 }),
+        event(2, 'message', 'Checking the [release](https://example.com/release).', { turn_id: 1 }),
+        event(3, 'tool', 'Run verification', { turn_id: 1, activity_version: 1, call_id: 'check', phase: 'completed', category: 'command', command: 'npm test', output: 'Checks passed', duration_ms: 1200 })],
+    };
+    window.lifecycleCopies = [];
+    if (surface === 'main') {
+      copyText = text => window.lifecycleCopies.push(text);
+      state.selected = window.lifecycleRun.id;
+      renderChat(structuredClone(window.lifecycleRun));
+      state.source?.close(); state.source = null;
+      window.refreshLifecycle = () => updateChat(structuredClone(window.lifecycleRun));
+    } else {
+      MoyaiUI.render(document.querySelector('#content'), '<div class="chat-layout"></div>');
+      Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async text => window.lifecycleCopies.push(text) });
+      window.lifecyclePanel = MoyaiPanel.create({
+        run: { id: '88888888888888888888888888888888', mode: 'demo' }, layout: document.querySelector('.chat-layout'),
+        api: async path => path.endsWith('/side-chats') ? [] : structuredClone(window.lifecycleRun),
+        markdown: renderMarkdown, escape: esc, size: fileSize, user: 'synthetic-lifecycle', models: [], toast,
+      });
+      window.lifecyclePanel.open('chat', { chatId: window.lifecycleRun.id, title: 'Verification side chat' });
+      window.refreshLifecycle = () => { window.lifecyclePanel.hide(); window.lifecyclePanel.open('chat', { chatId: window.lifecycleRun.id }); };
+    }
+  }, surface);
+  const container = page.locator(surface === 'main' ? '#conversation' : '.side-chat-messages');
+  const update = container.locator('.assistant-update');
+  const tool = container.locator('[data-work-key]').first();
+  await update.waitFor();
+  await tool.locator(':scope > summary').click();
+  await page.evaluate(selector => {
+    const container = document.querySelector(selector);
+    window.retainedUpdate = container.querySelector('.assistant-update');
+    window.retainedTool = container.querySelector('[data-work-key]');
+    window.lifecycleRun.messages.push({ id: 2, role: 'assistant', status: 'completed', content: 'Verification finished.' });
+    window.refreshLifecycle();
+  }, surface === 'main' ? '#conversation' : '.side-chat-messages');
+  await container.getByText('Verification finished.', { exact: true }).waitFor();
+  assert.equal(await update.locator('.message-content').textContent(), 'Checking the release.\n');
+  assert.match(await tool.textContent(), /npm test/);
+  assert.equal(await tool.evaluate(el => el === window.retainedTool && el.open), true, 'Expanded tools remain the same live DOM');
+  assert.equal(await update.evaluate(el => el === window.retainedUpdate), true);
+  await update.locator('.copy-update').click();
+  await page.waitForFunction(() => window.lifecycleCopies.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.lifecycleCopies), ['Checking the [release](https://example.com/release).']);
+  await tool.locator(':scope > summary').click();
+  assert.equal(await tool.evaluate(el => el.open), false, 'Retained shadcn disclosures still respond');
+  await update.locator('.copy-update').hover();
+  await page.getByRole('tooltip').waitFor();
+  await page.evaluate(() => {
+    window.lifecycleRun.messages = [];
+    window.lifecycleRun.events = [];
+    if (!window.lifecyclePanel) state.chatRun.events = [];
+    window.refreshLifecycle();
+  });
+  await container.locator('[data-activity-slot]').waitFor({ state: 'detached' });
+  await page.getByRole('tooltip').waitFor({ state: 'detached' });
+  await page.evaluate(() => window.lifecyclePanel?.dispose());
+});
+
+test('failed sidebar refreshes retain component tooltips, actions and retry behavior', async t => {
+  const page = await pageFor(t);
+  let failing = true;
+  await page.route('**/api/runs?*', route => failing
+    ? route.fulfill({ status: 503, json: { detail: 'Synthetic sidebar outage' } }) : route.continue());
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await page.locator('#content h1').click();
+    await page.evaluate(() => refreshRuns().catch(() => {}));
+    const list = page.locator('#session-list');
+    assert.equal(await list.locator('[data-search-retry]').count(), 1);
+    assert.equal(await list.locator('.session-link').count(), 4);
+    await list.locator('.session-link').first().hover();
+    await page.getByRole('tooltip', { name: 'Review release readiness', exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByRole('tooltip').waitFor({ state: 'detached' });
+    await list.locator('[data-session-actions]').first().click();
+    await page.locator('#session-actions').getByRole('button', { name: 'Rename', exact: true }).waitFor();
+    await page.keyboard.press('Escape');
+    await page.locator('[data-slot="popover-content"]').waitFor({ state: 'detached' });
+  }
+  failing = false;
+  await page.locator('[data-search-retry]').click();
+  await page.locator('[data-search-retry]').waitFor({ state: 'detached' });
+  assert.equal(await page.locator('#session-list .session-link').count(), 4);
+});
+
+test('audio control restores its icon through recording, cancellation and permission failures', async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => {
+    window.audioRequests = []; window.audioFiles = []; window.audioTracks = [];
+    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { configurable: true, value: () => new Promise((resolve, reject) => window.audioRequests.push({ resolve, reject })) });
+    window.MediaRecorder = class {
+      static isTypeSupported() { return true; }
+      constructor(stream, options) { this.mimeType = options.mimeType; this.state = 'inactive'; }
+      start() { this.state = 'recording'; }
+      stop() { this.state = 'inactive'; queueMicrotask(() => { this.ondataavailable({ data: new Blob(['synthetic audio']) }); this.onstop(); }); }
+    };
+    MoyaiUI.insert(document.querySelector('#content'), 'beforeend', '<form id="audio-lifecycle"><div class="composer-toolbar"></div></form>');
+    window.audioController = bindAudioRecorder(document.querySelector('#audio-lifecycle'), file => window.audioFiles.push(file.name), () => false);
+    window.acquireAudio = () => {
+      const track = { stopped: false, stop() { this.stopped = true; } };
+      window.audioTracks.push(track);
+      window.audioRequests.at(-1).resolve({ getTracks: () => [track] });
+    };
+  });
+  const form = page.locator('#audio-lifecycle');
+  const button = form.locator('.record-button');
+  assert.equal(await button.locator('svg').count(), 1);
+  for (const cancel of [false, true, false]) {
+    await button.click();
+    assert.equal(await button.getAttribute('aria-label'), 'Opening microphone…');
+    await page.evaluate(() => window.acquireAudio());
+    await form.getByRole('button', { name: 'Stop recording', exact: true }).waitFor();
+    if (cancel) await form.getByRole('button', { name: 'Cancel recording', exact: true }).click();
+    else await button.click();
+    await form.getByRole('button', { name: 'Record audio', exact: true }).waitFor();
+    assert.equal(await button.locator('svg').count(), 1);
+  }
+  await button.click();
+  await page.evaluate(() => window.audioRequests.at(-1).reject(Object.assign(new Error('Denied'), { name: 'NotAllowedError' })));
+  await form.getByRole('button', { name: 'Record audio', exact: true }).waitFor();
+  assert.equal(await button.locator('svg').count(), 1);
+  assert.deepEqual(await page.evaluate(() => window.audioFiles), ['Voice message.webm', 'Voice message.webm']);
+  assert.equal(await page.evaluate(() => window.audioTracks.every(track => track.stopped)), true);
+  await page.evaluate(() => { window.audioController.destroy(); MoyaiUI.render(document.querySelector('#audio-lifecycle'), ''); });
+  assert.equal(await form.locator('button').count(), 0);
+});
+
 test('session connection selections survive navigation and reach the submit payload', async t => {
   const page = await pageFor(t);
   await page.route('**/api/runs', route => route.request().method() === 'POST'

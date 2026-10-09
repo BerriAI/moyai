@@ -53,6 +53,11 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   disposed before their parent, and a removal observer releases detached regions.
   A native `<template>` is only an inert parser, never a render host: mount streamed
   content on the element that joins the document so its root is released on removal.
+- When replacing a transcript while reusing its activity slots, pass those nodes
+  in `render(host, html, { preserve: slots.values() })` and reattach them
+  synchronously. Their nested roots and component state remain live; preserved
+  nodes that are not reattached are released by the removal observer. Do not
+  serialize rendered components back into templates to keep their content.
 - Inputs remain uncontrolled. Controllers can read and set `value`, run native
   validation, use `FormData`, and retain drafts while requests are in flight.
   The adapter explicitly strips controlled form props, independently of the HTML
