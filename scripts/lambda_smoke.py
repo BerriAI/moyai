@@ -65,7 +65,7 @@ async def verify(backend):
             raise AssertionError('Detached background writer did not start')
         # An abandoned durable execution is never restarted in the clone.
         await original.filesystem.write_text.aio('{"pid":12345}', '/session/executions/uncertain/started.json')
-        snapshot = await original.snapshot_filesystem.aio(timeout=600)
+        snapshot = await original.snapshot_filesystem.aio(timeout=900)
         snapshots.append(snapshot.object_id)
         before = await original.filesystem.read_bytes.aio('/workspace/counter')
         await asyncio.sleep(.3)

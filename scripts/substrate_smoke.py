@@ -82,7 +82,7 @@ try:
 finally:
     server.shutdown()
     server.server_close()
-''', timeout=180)
+''', timeout=300)
     assert (await sandbox.filesystem.read_bytes.aio(json.loads(result)['path'])).startswith(b'\x89PNG')
     print('PASS Moyai Computer service, visible Chromium/Xvfb, click and saved screenshot', flush=True)
 

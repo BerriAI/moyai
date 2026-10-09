@@ -49,6 +49,24 @@ def test_configuration_is_provider_specific(settings):
     assert settings.sandbox_rotation_for() == 300
 
 
+def test_cold_checkpoint_budget_reaches_the_guest_watchdog(tmp_path, monkeypatch):
+    from sandbox import lambda_guest as guest
+    settings = Settings(_env_file=None, snapshot_timeout_seconds=900)
+    monkeypatch.setattr(guest, 'ROOT', tmp_path)
+    monkeypatch.setattr(guest, 'JOBS', {})
+    monkeypatch.setattr(guest, 'ACTIVE', set())
+    monkeypatch.setattr(guest, 'BUSY', None)
+    threads = []
+    def thread(**kwargs):
+        threads.append(kwargs)
+        return SimpleNamespace(start=lambda: None)
+    monkeypatch.setattr(guest.threading, 'Thread', thread)
+    identity = 'a' * 32
+    guest.start_job('/checkpoint', {'id': identity, 'timeout': settings.snapshot_timeout_seconds})
+    watchdog = next(t for t in threads if t['target'] is guest.expire_checkpoint)
+    assert watchdog['args'] == (identity, 900)
+
+
 def test_absolute_rotation_includes_boot_and_previous_turns_and_waits_for_boundary():
     now, stops = [0], []
     deadline = RotationDeadline(600, rotation_at=20, wall_clock=lambda: now[0])

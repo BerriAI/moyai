@@ -209,7 +209,7 @@ def start_job(path, body):
     ACTIVE.add(job_id)
     threading.Thread(target=perform, args=(path, body), daemon=True).start()
     if path == '/checkpoint':
-        threading.Thread(target=expire_checkpoint, args=(job_id, min(max(body['timeout'], 10), 600)), daemon=True).start()
+        threading.Thread(target=expire_checkpoint, args=(job_id, min(max(body['timeout'], 10), 900)), daemon=True).start()
     return {'state': 'running'}
 
 
