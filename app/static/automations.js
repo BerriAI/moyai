@@ -21,6 +21,10 @@ async function renderAutomations(background = false) {
   const version=state.pageVersion;
   const data=await api('/api/automations');
   if(version!==state.pageVersion)return;
+  if (background && settingsInteractionActive()) {
+    automationRefresh=setTimeout(()=>renderAutomations(true).catch(showError),5000);
+    return;
+  }
   automationEventChoices=data.event_choices||{};
   const content=$('#content');
   MoyaiUI.render(content, `<section class="automations-page"><div class="page-heading"><div><h1>Automations</h1><p class="subtext">Run a workflow on a schedule or when an event happens.</p></div>${automationCreateMenu()}</div>

@@ -235,11 +235,11 @@ test('library filters combine query and scope, survive redraw, and recover from 
   assert.equal(rows[0].onclick,handler);
 });
 
-test('background refresh defers while a dialog or page control is active', () => {
+test('background refresh defers while a dialog, portaled select or page control is active', () => {
   const {context} = setup();
-  let modal = null, contains = true, interactive = true;
+  let modal = null, menu = null, contains = true, interactive = true;
   context.document = {
-    querySelector:key=>key==='[data-slot="dialog-content"][data-state="open"]'?modal:{contains:()=>contains},
+    querySelector:key=>key==='[data-slot="dialog-content"][data-state="open"]'?modal:key==='[data-slot="select-trigger"][data-state="open"]'?menu:{contains:()=>contains},
     activeElement:{matches:()=>interactive},
   };
   assert.equal(context.settingsInteractionActive(),true);
@@ -249,4 +249,8 @@ test('background refresh defers while a dialog or page control is active', () =>
   assert.equal(context.settingsInteractionActive(),false);
   modal = {};
   assert.equal(context.settingsInteractionActive(),true);
+  modal = null; menu = {};
+  assert.equal(context.settingsInteractionActive(),true);
+  menu = null;
+  assert.equal(context.settingsInteractionActive(),false);
 });

@@ -81,6 +81,14 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   controller updates in sync; they never replace controller-owned DOM or patch
   global prototypes. Selection emits one native input/change pair. Synchronizing
   values must not emit writes. Multi-select/listbox templates retain NativeSelect.
+- Native option trees are controller-owned from their first mount. Rendering into
+  a select replaces parsed native options without mounting a nested React root.
+  Keep selected attributes as reset defaults, and retain labels, disabled groups
+  and submitted values. Label activation is cancelled on the hidden native select
+  and opens the styled menu instead; only the styled trigger receives focus.
+- Settings polling must check `settingsInteractionActive()` before a request and
+  again before committing its result. An open Select is active even while its
+  focused menu is portaled outside the page content.
 - Nested Select menus consume Escape before the enclosing dialog or workspace.
   Keep this guard in the overlay adapter: feature forms can have independent React
   roots even when they appear inside a Dialog portal.

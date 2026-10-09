@@ -8,7 +8,7 @@ function NativeSelect({
   control,
   children,
   ...props
-}: Omit<React.ComponentProps<"select">, "size"> & { size?: "sm" | "default"; control?: React.ReactNode }) {
+}: Omit<React.ComponentProps<"select">, "size"> & { size?: "sm" | "default" | number; control?: React.ReactNode }) {
   return (
     <div
       className="group/native-select relative w-fit has-[select:disabled]:opacity-50"
@@ -16,6 +16,7 @@ function NativeSelect({
       data-styled={control ? true : undefined}
     >
       <select
+        size={Number(size) > 0 ? Number(size) : undefined}
         data-slot="native-select"
         data-size={size}
         className={cn(

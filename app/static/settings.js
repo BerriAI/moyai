@@ -64,6 +64,7 @@ function confirmSettingsAction(title, description, action) {
 // Background polling must not replace the control someone is using.
 function settingsInteractionActive() {
   return !!document.querySelector('[data-slot="dialog-content"][data-state="open"]') ||
+    !!document.querySelector('[data-slot="select-trigger"][data-state="open"]') ||
     !!(document.querySelector('#content')?.contains(document.activeElement) &&
       document.activeElement?.matches('button,a,input,select,textarea,summary,[tabindex="0"]'));
 }

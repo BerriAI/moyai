@@ -197,7 +197,166 @@ test('select adapter preserves values, validation, reset, disabled options and d
   await page.keyboard.press('Enter');
   assert.equal(await source.inputValue(), 'long');
   await page.locator('label[for=choice]').click();
-  assert.equal(await trigger.evaluate(el => el === document.activeElement), true, 'Labels focus the styled control');
+  await page.getByRole('listbox').waitFor();
+  await page.keyboard.press('Escape');
+  await page.getByRole('listbox').waitFor({ state: 'detached' });
+  await page.waitForFunction(el => el === document.activeElement, await trigger.elementHandle());
+});
+
+test('replacement select options remain authoritative across snapshots, reset and teardown', async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => {
+    MoyaiUI.render(document.querySelector('#content'), '<form id="option-owner"><label for="owner-select">Choice</label><select id="owner-select" name="choice"><option value="original" selected>Original</option></select><select id="owner-multiple" name="many" multiple><option value="original" selected>Original</option></select></form>');
+    window.optionEvents = [];
+    for (const name of ['input', 'change']) document.querySelector('#option-owner').addEventListener(name, event => window.optionEvents.push([name, event.target.id]));
+  });
+  const source = page.locator('#owner-select');
+  const trigger = page.getByRole('combobox', { name: 'Choice', exact: true });
+  for (let cycle = 0; cycle < 3; cycle++) {
+    await source.evaluate((select, cycle) => {
+      MoyaiUI.render(select, `<optgroup label="Updated"><option value="new-${cycle}" selected>New ${cycle}</option><option value="next-${cycle}">Next ${cycle}</option></optgroup>`);
+      select.value = `next-${cycle}`;
+      select.disabled = true;
+    }, cycle);
+    await page.waitForFunction(() => document.querySelector('#owner-select').parentElement.querySelector('[role=combobox]').disabled);
+    await source.evaluate(select => { select.disabled = false; select.form.reset(); });
+    await page.waitForFunction(cycle => document.querySelector('#owner-select').parentElement.querySelector('[role=combobox]').textContent.includes(`New ${cycle}`), cycle);
+    await trigger.click();
+    assert.deepEqual(await page.getByRole('option').allTextContents(), [`New ${cycle}`, `Next ${cycle}`]);
+    await page.getByRole('option', { name: `Next ${cycle}`, exact: true }).click();
+    assert.equal(await source.inputValue(), `next-${cycle}`);
+    assert.equal(await source.evaluate(select => new FormData(select.form).get('choice')), `next-${cycle}`);
+  }
+  assert.deepEqual(await page.evaluate(() => window.optionEvents), Array.from({ length: 3 }, () => [['input', 'owner-select'], ['change', 'owner-select']]).flat());
+  await page.locator('#owner-multiple').evaluate(select => {
+    MoyaiUI.render(select, '<option value="a" selected>A &amp; B</option><option value="b" selected>B</option><option value="c">C</option>');
+    select.options[0].selected = false;
+    select.form.reset();
+  });
+  assert.deepEqual(await page.locator('#owner-multiple').evaluate(select => new FormData(select.form).getAll('many')), ['a', 'b']);
+  await page.evaluate(() => MoyaiUI.render(document.querySelector('#content'), '<h1>Replaced</h1>'));
+  assert.equal(await page.getByRole('listbox').count(), 0);
+});
+
+test('native option parsing preserves labels, empty values, disabled groups and reset defaults', async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => {
+    MoyaiUI.render(document.querySelector('#content'), '<form><select id="parsed-options" name="choice" aria-label="Parsed choice" required></select><select id="native-listbox" size="3" aria-label="Native choices"><option selected>First</option><option>Second</option></select></form>');
+    MoyaiUI.render(document.querySelector('#parsed-options'), '<option value="" selected>Choose</option><optgroup label="Unavailable" disabled><option value="blocked">Blocked</option></optgroup><option value="a&amp;b" label="A &amp; B" onclick="window.optionCodeExecuted=true">Different text</option><script>window.optionCodeExecuted=true</script>');
+  });
+  const source = page.locator('#parsed-options');
+  await page.getByRole('combobox', { name: 'Parsed choice', exact: true }).click();
+  assert.equal(await page.getByRole('option', { name: 'Blocked', exact: true }).getAttribute('aria-disabled'), 'true');
+  await page.getByRole('option', { name: 'A & B', exact: true }).click();
+  assert.equal(await source.inputValue(), 'a&b');
+  assert.equal(await source.locator('[onclick],script').count(), 0);
+  assert.equal(await page.evaluate(() => !!window.optionCodeExecuted), false);
+  await source.evaluate(select => select.form.reset());
+  assert.equal(await source.inputValue(), '');
+  assert.equal(await source.evaluate(select => select.validity.valueMissing), true);
+  const native = page.getByRole('listbox', { name: 'Native choices', exact: true });
+  assert.equal(await native.evaluate(select => select.size), 3);
+  await native.selectOption({ label: 'Second' });
+  assert.equal(await native.inputValue(), 'Second');
+  await native.evaluate(select => select.form.reset());
+  assert.equal(await native.inputValue(), 'First');
+});
+
+test('model and session scope pickers retain choices through real controller updates', async t => {
+  const page = await pageFor(t);
+  await page.route('**/api/config', async route => {
+    const response = await route.fetch();
+    const data = await response.json();
+    data.models.push({ id: 'synthetic-model', name: 'Synthetic model', default_harness: 'codex' });
+    data.harnesses.push({ id: 'codex', name: 'Codex' });
+    await route.fulfill({ response, json: data });
+  });
+  await page.reload();
+  await page.locator('#new-model').waitFor();
+  await choose(page, page.locator('#new-model'), 'synthetic-model');
+  const harness = page.locator('#new-harness');
+  await page.waitForFunction(() => document.querySelector('#new-harness').parentElement.querySelector('[role=combobox]').textContent.includes('Auto · Codex'));
+  await choose(page, harness, 'codex');
+  assert.equal(await harness.inputValue(), 'codex');
+  await choose(page, harness, '');
+  assert.equal(await harness.inputValue(), '');
+  assert.equal(await harness.locator('option').count(), 3);
+  await page.evaluate(() => { state.authenticated = true; state.role = 'admin'; restoreSessionScope(); });
+  await choose(page, page.locator('#session-scope'), 'all');
+  assert.equal(await page.evaluate(() => state.sessionScope), 'all');
+  await page.evaluate(() => { state.role = 'member'; restoreSessionScope(); });
+  assert.deepEqual(await page.locator('#session-scope').evaluate(select => [...select.options].map(option => option.value)), ['mine']);
+  assert.equal(await page.locator('#session-scope').isDisabled(), true);
+  await page.evaluate(() => { state.role = 'admin'; restoreSessionScope(); });
+  await choose(page, page.locator('#session-scope'), 'all');
+  assert.equal(await page.evaluate(() => state.sessionScope), 'all');
+});
+
+for (const width of [1440, 768, 320]) test(`picker label chrome opens only the styled menu at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  await page.evaluate(() => {
+    window.nativeSelectClicks = [];
+    document.addEventListener('click', event => {
+      if (event.target instanceof HTMLSelectElement) window.nativeSelectClicks.push(event.defaultPrevented);
+    });
+  });
+  const picker = page.locator('#new-model').locator('..').locator('..');
+  const trigger = picker.getByRole('combobox');
+  const clickChrome = async selector => {
+    const chrome = picker.locator(selector);
+    await chrome.scrollIntoViewIfNeeded();
+    const bounds = await chrome.boundingBox();
+    // Decorative chrome delegates hit testing to the enclosing label.
+    await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  };
+  for (const chrome of ['.provider-logo', '.picker-chevron']) {
+    await clickChrome(chrome);
+    await page.getByRole('listbox').waitFor();
+    await page.keyboard.press('Escape');
+    await page.getByRole('listbox').waitFor({ state: 'detached' });
+    await page.waitForFunction(el => el === document.activeElement, await trigger.elementHandle());
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+  }
+  assert.equal(await page.evaluate(() => window.nativeSelectClicks.length > 0 && window.nativeSelectClicks.every(Boolean)), true, 'Native label activation is prevented');
+  await page.locator('#new-model').evaluate(select => { select.disabled = true; });
+  await page.waitForFunction(() => document.querySelector('#new-model').parentElement.querySelector('[role=combobox]').disabled);
+  await clickChrome('.picker-chevron');
+  assert.equal(await page.getByRole('listbox').count(), 0);
+  await page.evaluate(() => MoyaiUI.render(document.querySelector('#content'), '<form><label for="explicit-choice">Explicit choice</label><select id="explicit-choice" name="choice"><option value="a">Alpha</option><option value="b">Beta</option></select></form>'));
+  await page.locator('label[for=explicit-choice]').click();
+  await page.getByRole('option', { name: 'Beta', exact: true }).click();
+  assert.equal(await page.locator('#explicit-choice').inputValue(), 'b');
+});
+
+for (const route of ['automations', 'environments']) for (const inFlight of [false, true]) test(`${route} polling preserves an open menu ${inFlight ? 'during an in-flight request' : 'before a request'}`, async t => {
+  const page = await pageFor(t, route);
+  const endpoint = route === 'automations' ? '**/api/automations' : '**/api/admin/environments';
+  const name = route === 'automations' ? 'Automation status' : 'Filter environments';
+  let requests = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  await page.route(endpoint, async request => { requests++; if (inFlight) await gate; await request.continue(); });
+  await page.evaluate(() => { clearTimeout(automationRefresh); clearTimeout(environmentRefresh); document.querySelector('#content h1').focus(); });
+  if (inFlight) {
+    const request = page.waitForRequest(endpoint);
+    await page.evaluate(route => { window.pendingPoll = route === 'automations' ? renderAutomations(true) : renderEnvironments(true); }, route);
+    await request;
+  }
+  const trigger = page.getByRole('combobox', { name, exact: true });
+  await trigger.click();
+  const menu = page.getByRole('listbox');
+  await menu.waitFor();
+  await page.evaluate(() => { window.openPollMenu = document.querySelector('[role=listbox]'); });
+  if (inFlight) { release(); await page.evaluate(() => window.pendingPoll); }
+  else await page.evaluate(route => route === 'automations' ? renderAutomations(true) : renderEnvironments(true), route);
+  assert.equal(await menu.count(), 1, 'Background rendering never closes the menu');
+  assert.equal(await menu.evaluate(el => el === window.openPollMenu), true);
+  assert.equal(requests, inFlight ? 1 : 0);
+  await page.keyboard.press('Escape');
+  await menu.waitFor({ state: 'detached' });
+  await page.locator('#content h1').click();
+  await page.evaluate(route => route === 'automations' ? renderAutomations(true) : renderEnvironments(true), route);
+  assert.equal(requests, inFlight ? 2 : 1, 'Polling resumes after the interaction ends');
 });
 
 test('read-only settings content remains keyboard scrollable', async t => {

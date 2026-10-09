@@ -3,13 +3,13 @@ import { flushSync } from "react-dom"
 import { NativeSelect } from "@/components/ui/native-select"
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select"
 
-type Props = React.ComponentProps<typeof NativeSelect>
+type Props = Omit<React.ComponentProps<typeof NativeSelect>, "children" | "defaultValue"> & { initialOptions: DocumentFragment }
 type Choice = { value: string; text: string; disabled: boolean; group: string }
 type Snapshot = { index: number; disabled: boolean; required: boolean; label: string; choices: Choice[] }
 
 // Keep the native element as the controller/form contract and sizing reference.
 // Only the shadcn trigger is exposed to pointer, keyboard and assistive technology.
-export function FormSelect(props: Props) {
+export function FormSelect({ initialOptions, ...props }: Props) {
   const source = useRef<HTMLSelectElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const control = useRef<HTMLSpanElement>(null)
@@ -17,9 +17,12 @@ export function FormSelect(props: Props) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ index: -1, disabled: !!props.disabled, required: !!props.required, label: "", choices: [] })
   const [error, setError] = useState("")
   const [open, setOpen] = useState(false)
+  const styled = !props.multiple && !(Number(props.size) > 1)
 
   useLayoutEffect(() => {
     const node = source.current!
+    node.replaceChildren(initialOptions.cloneNode(true))
+    if (!styled) return
     const sync = () => {
       const choices = [...node.options].map(option => ({
         value: option.value, text: option.label,
@@ -46,11 +49,17 @@ export function FormSelect(props: Props) {
     const observer = new MutationObserver(sync)
     observer.observe(node, { attributes: true, childList: true, subtree: true, characterData: true })
     const focus = () => trigger.current?.focus()
+    const activate = (event: MouseEvent) => {
+      // Labels and picker chrome dispatch clicks to this hidden native control.
+      event.preventDefault()
+      if (!node.disabled) { focus(); setOpen(true) }
+    }
     const invalid = (event: Event) => { event.preventDefault(); setError(node.validationMessage); focus() }
     const reset = () => queueMicrotask(sync)
     node.addEventListener("input", sync)
     node.addEventListener("change", sync)
     node.addEventListener("focus", focus)
+    node.addEventListener("click", activate)
     node.addEventListener("invalid", invalid)
     const form = node.form
     form?.addEventListener("reset", reset)
@@ -66,12 +75,15 @@ export function FormSelect(props: Props) {
       node.removeEventListener("input", sync)
       node.removeEventListener("change", sync)
       node.removeEventListener("focus", focus)
+      node.removeEventListener("click", activate)
       node.removeEventListener("invalid", invalid)
       form?.removeEventListener("reset", reset)
       controls.removeEventListener("input", stop)
       controls.removeEventListener("change", stop)
     }
   }, [])
+
+  if (!styled) return <NativeSelect {...props} ref={source} />
 
   // Radix reserves the empty string for its placeholder. Index keys also handle
   // native empty-valued filter choices and duplicate option values faithfully.

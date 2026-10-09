@@ -1,11 +1,10 @@
 import React from "react"
 import { createRoot, type Root } from "react-dom/client"
 import { flushSync } from "react-dom"
-import parse, { attributesToProps, domToReact, Element, type DOMNode, type HTMLReactParserOptions } from "html-react-parser"
+import parse, { attributesToProps, domToReact, htmlToDOM, Element, type DOMNode, type HTMLReactParserOptions } from "html-react-parser"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import { NativeSelect, NativeSelectOption, NativeSelectOptGroup } from "@/components/ui/native-select"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableHeader, TableBody, TableFooter, TableRow, TableHead, TableCell, TableCaption } from "@/components/ui/table"
@@ -15,6 +14,7 @@ import { Card } from "@/components/ui/card"
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip"
 import { FormCheckbox } from "./form-checkbox"
 import { FormSelect } from "./form-select"
+import { selectOptions } from "./select-options"
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible"
 
 type MountedRegion = { root: Root; nodes: ChildNode[]; connected: boolean }
@@ -102,16 +102,8 @@ const options: HTMLReactParserOptions = {
       }
       case "textarea": return <Textarea {...props} defaultValue={node.children.map(child => child.type === "text" ? child.data : "").join("")} />
       case "select": {
-        const selected = (node.children as Element[]).flatMap(child => child.name === "optgroup" ? child.children as Element[] : [child])
-          .filter(child => child.attribs && "selected" in child.attribs).map(child => child.attribs.value ?? (child.children[0]?.type === "text" ? child.children[0].data : ""))
-        const Component = props.multiple || Number(node.attribs.size) > 1 ? NativeSelect : FormSelect
-        return <Component {...props} defaultValue={props.multiple ? selected : selected[0]}>{children()}</Component>
+        return <FormSelect {...props} initialOptions={selectOptions(node.children as DOMNode[])} />
       }
-      case "option": {
-        delete props.selected
-        return <NativeSelectOption {...props}>{children()}</NativeSelectOption>
-      }
-      case "optgroup": return <NativeSelectOptGroup {...props}>{children()}</NativeSelectOptGroup>
       case "label": return <Label {...props}>{children()}</Label>
       case "table": return <Table {...props}>{children()}</Table>
       case "thead": return <TableHeader {...props}>{children()}</TableHeader>
@@ -136,12 +128,10 @@ const options: HTMLReactParserOptions = {
 }
 
 export function render(host: HTMLElement, html: string, { preserve = [] }: RenderOptions = {}) {
-  const select = host instanceof HTMLSelectElement ? host : null
-  let selected: string[] = []
-  if (select) {
-    const template = document.createElement("template")
-    template.innerHTML = html
-    selected = [...template.content.querySelectorAll("option[selected]")].map(option => (option as HTMLOptionElement).value)
+  if (host instanceof HTMLSelectElement) {
+    dispose(host)
+    host.replaceChildren(selectOptions(htmlToDOM(String(html)), host.ownerDocument))
+    return
   }
   dispose(host, [...preserve].filter(node => node !== host && host.contains(node)))
   host.replaceChildren()
@@ -149,9 +139,6 @@ export function render(host: HTMLElement, html: string, { preserve = [] }: Rende
   const root = createRoot(host)
   flushSync(() => root.render(<TooltipProvider delayDuration={500}>{parse(String(html), options)}</TooltipProvider>))
   regions.set(host, { root, nodes: [...host.childNodes], connected: host.isConnected })
-  if (select && selected.length) {
-    for (const option of select.options) option.selected = selected.includes(option.value)
-  }
 }
 
 export function insert(host: HTMLElement, position: InsertPosition, html: string) {
