@@ -2,9 +2,9 @@
 (function(root){
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const settled=new Set(['idle','completed','failed','cancelled','interrupted','steered']);
-  const waiting=new Set(['reconnecting','awaiting_approval','waiting_children','waiting_credential','stopping']);
+  const waiting=new Set(['reconnecting','awaiting_approval','waiting_children','waiting_credential','stopping','deleting']);
   const visible=new Set(['tool','message','status','error','plan','agents','credential','approval','artifact']);
-  const labels={reconnecting:'Reconnecting to workspace',running:'Reviewing the task',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
+  const labels={reconnecting:'Reconnecting to workspace',running:'Reviewing the task',provisioning:'Opening workspace',queued:'Waiting to start',saving:'Saving workspace',awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',stopping:'Stopping',deleting:'Deleting session',failed:'Response failed',cancelled:'Stopped',interrupted:'Interrupted',steered:'Earlier activity',completed:'Work finished',idle:'Work finished',save_failed:'Workspace save failed'};
   const isFocus=event=>event.kind==='status'&&event.data?.phase==='focus';
   function duration(start,end=Date.now()){
     const seconds=Math.max(0,Math.floor((Number(end)-Number(start))/1000))||0;

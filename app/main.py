@@ -222,6 +222,7 @@ def create_app(settings: Settings | None = None):
         store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
         harness_gateway.maintenance.recover()
         await manager.recover()
+        session_lifecycle.start()
         await checkpoints.flush()
         slack.recover()
         identities.start()
@@ -236,6 +237,7 @@ def create_app(settings: Settings | None = None):
         try:
             yield
         finally:
+            await session_lifecycle.close()
             await memory_review.close()
             await spend.recovery.close()
             await harness_gateway.maintenance.close()
@@ -517,7 +519,8 @@ def create_app(settings: Settings | None = None):
         nodes = dict(runs)
         for child in store.subtrees(list(runs)):
             if child['id'] not in runs and not child['deleted_at']:
-                nodes[child['id']] = {**public_run({key: child[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id', 'pending_result')}),
+                visible = public_run(child)
+                nodes[child['id']] = {**{key: visible[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id')},
                                      'archived': runs[child['ancestor_id']]['archived'], 'can_delete': False, 'children': []}
         for child in nodes.values():
             if child['id'] not in runs and child['parent_run_id'] in nodes:
@@ -578,7 +581,7 @@ def create_app(settings: Settings | None = None):
             raise HTTPException(404, 'Session not found.')
         actor = store.identity(security.session_info(request))
         archives = session_lifecycle.archives(actor)
-        rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at,active_message_id,pending_result FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
+        rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at,active_message_id,pending_result,deletion_requested_at,deleted_at FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
         return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     @app.get("/api/runs/{run_id}")
@@ -709,7 +712,7 @@ def create_app(settings: Settings | None = None):
                 if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': response_status(row), 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps({'status': response_status(row), 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'deletion_error': session_lifecycle.deletion_error(run_id), 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -823,7 +826,7 @@ def create_app(settings: Settings | None = None):
     def require_run(run_id, request):
         run = store.run(run_id)
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
-        if (not run or run['deleted_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
+        if (not run or run['deleted_at'] or run['deletion_requested_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
         return run

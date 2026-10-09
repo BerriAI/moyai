@@ -21,6 +21,7 @@ from .automation_templates import templates
 from .automation_events import AutomationEvents, EventTrigger, EVENT_CHOICES
 from .connector_errors import ConnectorError
 from .db import now
+from .runner import response_status
 
 log = logging.getLogger(__name__)
 SCHEDULE_VERSION = 1  # Resync existing schedules when scheduler policy changes.
@@ -275,8 +276,11 @@ class Automations:
         owner = self.store.rows('SELECT name,email FROM users WHERE id=?', (row['owner_id'],))[0]
         result['owner'] = owner['email'] or owner['name']
         result['history'] = self.store.rows('''SELECT a.occurrence,a.run_id,a.outcome,a.detail,a.created_at,
-            r.status FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id
+            r.status,r.deletion_requested_at,r.deleted_at FROM automation_runs a LEFT JOIN runs r ON r.id=a.run_id
             WHERE a.automation_id=? ORDER BY a.created_at DESC LIMIT 20''', (row['id'],))
+        for history in result['history']:
+            history['status'] = response_status(history) if history['status'] is not None else None
+            del history['deletion_requested_at'], history['deleted_at']
         result['trigger'] = self.events.public(row, actor)
         try:
             result['environment_blocker'] = self.environment_blocker(definition)

@@ -575,8 +575,8 @@ def test_delete_hides_parent_and_agents_and_blocks_all_session_access(workspace)
     assert client.post('/broker/' + parent + '/tools/call', json={'name': 'anything', 'arguments': {}}, headers={'Authorization': 'Bearer test-capability'}).status_code == 401
 
 
-@pytest.mark.parametrize('busy', ['running', 'queued', 'injected', 'manager', 'warm', 'warm_cleanup', 'slack_sending'])
-def test_delete_rejects_unsettled_parent_or_child(workspace, monkeypatch, busy):
+@pytest.mark.parametrize('busy', ['running', 'queued', 'injected', 'warm', 'warm_cleanup', 'slack_sending'])
+def test_delete_automatically_stops_family_and_waits_for_receipts(workspace, busy):
     from test_agent_sidebar import seeded_group
     from app.db import now
 
@@ -587,16 +587,100 @@ def test_delete_rejects_unsettled_parent_or_child(workspace, monkeypatch, busy):
         store.update_run(child, status='running')
     elif busy in {'queued', 'injected'}:
         store.execute('UPDATE messages SET status=? WHERE run_id=?', (busy, child))
-    elif busy == 'manager':
-        monkeypatch.setattr(app.state.manager, 'is_active', lambda run_id: run_id == child)
     elif busy == 'slack_sending':
         store.execute("INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,status,created_at) VALUES(?,'sending','answer','Answer','sending',?)", (child, now()))
+        receipt = store.rows("SELECT id FROM slack_outbox WHERE run_id=? AND dedupe_key='sending'", (child,))[0]['id']
+        app.state.slack.chat.delivering.add(receipt)
     else:
         store.execute('CREATE TABLE IF NOT EXISTS durable_sessions(run_id TEXT PRIMARY KEY,state TEXT NOT NULL)')
         store.execute('INSERT INTO durable_sessions VALUES(?,?)', (child, json.dumps({'phase': busy})))
     response = client.delete('/api/runs/' + parent)
-    assert response.status_code == 409 and 'Stop' in response.json()['detail']
-    assert store.run(parent)['deleted_at'] == store.run(child)['deleted_at'] == ''
+    assert response.status_code in {200, 202}
+    if busy in {'warm', 'warm_cleanup', 'slack_sending'}:
+        assert response.status_code == 202 and response.json()['deleting']
+        assert store.run(parent)['deleted_at'] == store.run(child)['deleted_at'] == ''
+        assert store.run(parent)['deletion_requested_at'] == store.run(child)['deletion_requested_at'] != ''
+        assert client.get('/api/runs/' + parent).json()['status'] == 'deleting'
+        warning = app.state.session_lifecycle.deletion_errors.get(parent, '')
+        assert 'retry automatically' in warning
+        for member in (parent, child):
+            assert client.get('/api/runs/' + member).json()['deletion_error'] == warning
+        listed = client.get('/api/runs', params={'scope': 'all'}).json()
+        assert next(row for row in listed if row['id'] == parent)['deletion_error'] == warning
+        for member in (parent, child):
+            with pytest.raises(ValueError, match='deleted'):
+                store.enqueue_message(member, 'Cannot start more work', 'during-delete')
+        # The real runtime/delivery owners acknowledge cleanup later. No
+        # second DELETE is required to complete the recorded request.
+        if busy == 'slack_sending':
+            store.execute("UPDATE slack_outbox SET status='sent' WHERE run_id=?", (child,))
+            app.state.slack.chat.delivering.discard(receipt)
+        else:
+            store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps({'phase': 'idle'}), child))
+    wait_for(lambda: store.run(parent)['deleted_at'])
+    assert store.run(child)['deleted_at'] == store.run(parent)['deleted_at']
+    assert parent not in app.state.session_lifecycle.deletion_errors
+    assert not store.rows("SELECT 1 FROM messages WHERE run_id IN (?,?) AND status IN ('queued','running','injected')", (parent, child))
+
+
+def test_delete_waits_for_local_job_and_finishes_without_another_request(workspace):
+    app, client = workspace
+    app.state.settings.demo_step_seconds = 1.5
+    run_id = client.post('/api/runs', json={'prompt': 'Delete active work', 'mode': 'demo'}).json()['id']
+    wait_for(lambda: app.state.store.run(run_id)['status'] == 'running')
+    response = client.delete('/api/runs/' + run_id)
+    assert response.status_code == 202
+    assert response.json()['deleting']
+    assert app.state.store.run(run_id)['deleted_at'] == ''
+    wait_for(lambda: app.state.store.run(run_id)['deleted_at'])
+    assert not app.state.manager.is_active(run_id)
+    assert client.get('/api/runs/' + run_id).status_code == 404
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_delete_confirms_legacy_sandbox_cleanup_and_retries_failure(workspace, monkeypatch, missing):
+    import modal
+    from unittest.mock import AsyncMock
+
+    app, client = workspace
+    store, manager = app.state.store, app.state.manager
+    run_id = settled_session(app)
+    store.execute("UPDATE runs SET sandbox_id='sb-leftover',mode='modal' WHERE id=?", (run_id,))
+    released = []
+    async def terminate():
+        released.append('terminated')
+    sandbox = SimpleNamespace(object_id='sb-leftover', poll=aio(AsyncMock(return_value=None)),
+                              terminate=aio(terminate), wait=aio(AsyncMock(return_value=0)))
+    get = AsyncMock(side_effect=ConnectionError('private provider diagnostic'))
+    monkeypatch.setattr(manager, 'provider', lambda **kwargs: SimpleNamespace(get=get))
+    manager.computer.save_captures = AsyncMock()
+    response = client.delete('/api/runs/' + run_id)
+    assert response.status_code == 202
+    assert 'private' not in response.text
+    assert store.run(run_id)['deleted_at'] == '' and store.run(run_id)['deletion_requested_at']
+    get.side_effect = modal.exception.NotFoundError('Gone') if missing else None
+    get.return_value = sandbox
+    wait_for(lambda: store.run(run_id)['deleted_at'], timeout=5)
+    assert released == ([] if missing else ['terminated'])
+    assert manager.computer.save_captures.await_count == (0 if missing else 1)
+    assert client.delete('/api/runs/' + run_id).json()['deleted']
+
+
+def test_pending_delete_restarts_from_saved_intent_without_new_confirmation(tmp_path):
+    settings = Settings(_env_file=None, data_dir=tmp_path, public_url='http://127.0.0.1:8787',
+                        litellm_api_key='', modal_token_id='', modal_token_secret='', session_titles_enabled=False)
+    original = create_app(settings)
+    with TestClient(original, base_url=settings.public_url, client=('127.0.0.1', 50000)):
+        run_id = settled_session(original)
+        # Process loss after the admission transaction, before scheduling.
+        original.state.session_lifecycle.request_delete(run_id, 'google:bob', False)
+        with pytest.raises(ValueError, match='deleted'):
+            original.state.store.enqueue_message(run_id, 'No revival', 'pending-delete')
+    recovered = create_app(settings)
+    with TestClient(recovered, base_url=settings.public_url, client=('127.0.0.1', 50000)) as client:
+        wait_for(lambda: recovered.state.store.run(run_id)['deleted_at'])
+        client.get('/api/session')
+        assert client.get('/api/runs/' + run_id).status_code == 404
 
 
 def test_delete_and_enqueue_share_transaction_boundary(workspace):
@@ -648,6 +732,13 @@ async def test_open_event_stream_closes_when_session_is_deleted(workspace):
             break
     else:
         pytest.fail('The open session stream never published its status')
+    lifecycle = app.state.session_lifecycle
+    lifecycle.request_delete(run_id, 'google:bob', False)
+    app.state.store.update_run(run_id, status='cancelled')
+    lifecycle.deletion_errors[run_id] = 'Cleanup will retry automatically.'
+    status = await anext(stream)
+    assert 'event: run-status' in status
+    assert json.loads(status.split('data: ')[1])['deletion_error'] == lifecycle.deletion_errors[run_id]
     app.state.session_lifecycle.delete(run_id, 'google:bob', False)
     assert await anext(stream) == 'event: deleted\ndata: {}\n\n'
     with pytest.raises(StopAsyncIteration):

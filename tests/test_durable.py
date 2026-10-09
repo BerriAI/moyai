@@ -9,12 +9,14 @@ import modal
 from modal._utils.name_utils import check_object_name
 import pytest
 
+from app.agents import AgentCoordinator
 from app.config import MODEL_CATALOG, Settings
 from app.db import Store
 from app.main import public_messages
 from app.durable_runner import DurableRunner
 from app.temporal_runtime import TemporalRunManager
 from app.runner import RunManager
+from app.session_lifecycle import SessionLifecycle
 from sandbox.durable_process import status, supervise
 
 
@@ -433,6 +435,61 @@ async def test_every_step_can_lose_worker_and_launch_ack_without_repeating_work(
     assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 1
     assert manager.store.run(run_id)['status'] == 'idle'
     assert [m['content'] for m in manager.store.messages(run_id) if m['role'] == 'assistant'] == ['Saved answer']
+
+
+async def test_deletion_intent_survives_interrupted_finish_commit(durable, monkeypatch):
+    manager, cloud, run_id = durable
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    await drive(manager, run_id, phase='finish')
+    SessionLifecycle(manager.store, None, manager, None).request_delete(run_id, '', True)
+    save = manager.save
+    def lose_idle_commit(identity, state):
+        if state['phase'] == 'idle':
+            raise ConnectionError('Worker lost after message and run commit')
+        save(identity, state)
+    monkeypatch.setattr(manager, 'save', lose_idle_commit)
+    with pytest.raises(ConnectionError):
+        await manager.advance(run_id)
+    assert manager.store.run(run_id)['status'] == 'cancelled'
+    assert manager.state(run_id)['phase'] == 'finish'
+    assert manager.state(run_id)['outcome'] == 'completed'
+    saved = manager.store.messages(run_id)
+    successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await drive(successor, run_id)
+    assert successor.store.run(run_id)['status'] == 'cancelled'
+    assert successor.store.run(run_id)['deletion_requested_at']
+    assert successor.store.messages(run_id) == saved
+    assert len([message for message in saved if message['role'] == 'assistant']) == 1
+    assert len(cloud.launches) == len(cloud.terminations) == 1
+    assert await successor.advance(run_id) is False
+    assert successor.store.run(run_id)['status'] == 'cancelled'
+
+
+@pytest.mark.parametrize('phase', ['provision', 'monitor', 'finish', 'warm'])
+@pytest.mark.parametrize('status', ['idle', 'completed', 'failed', 'cancelled', 'interrupted'])
+async def test_pending_delete_overrides_terminal_status_in_active_journal(durable, phase, status):
+    manager, cloud, run_id = durable
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    manager.settings.sandbox_idle_seconds = 300
+    await drive(manager, run_id, phase=phase)
+    SessionLifecycle(manager.store, None, manager, None).request_delete(run_id, '', True)
+    # Recovery matrix for older journals whose status already became terminal.
+    manager.store.update_run(run_id, status=status)
+    machines, launches = len(cloud.machines), len(cloud.launches)
+    command, commands = manager.command, []
+    async def observe_command(machine, action, *args, **kwargs):
+        commands.append(action)
+        return await command(machine, action, *args, **kwargs)
+    manager.command = observe_command
+    for _ in range(4):
+        await manager.advance(run_id)
+        assert len(cloud.machines) == machines and len(cloud.launches) == launches
+        assert not commands and manager.state(run_id)['phase'] != 'warm'
+        if manager.state(run_id)['phase'] == 'idle':
+            break
+    assert manager.state(run_id)['phase'] == 'idle'
+    assert not any(machine.alive for machine in cloud.machines)
+    assert manager.store.run(run_id)['status'] == (status if phase == 'warm' else 'cancelled')
 
 
 async def test_final_receipt_is_visible_before_save_and_survives_worker_restart(durable: tuple[TemporalRunManager, Cloud, str]) -> None:

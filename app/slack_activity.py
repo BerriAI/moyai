@@ -44,7 +44,7 @@ class SlackActivity:
         return STATUSES.get(state, '')
 
     def desired_status(self, run_id):
-        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,r.deletion_requested_at,r.deleted_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
             FROM slack_threads t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?''', (run_id,))
         return self.status_for(rows[0]) if rows else ''
@@ -56,7 +56,7 @@ class SlackActivity:
         team = self.owner.connectors.slack_installation().get('team_id')
         stamp = time.time()
         pending = []
-        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,a.status AS last_status,
+        rows = self.store.rows('''SELECT t.*,r.status AS run_status,r.active_message_id,r.pending_result,r.deletion_requested_at,r.deleted_at,a.status AS last_status,
             a.refreshed_at,a.retry_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id AND m.status='queued') AS queued
             FROM slack_threads t JOIN runs r ON r.id=t.run_id

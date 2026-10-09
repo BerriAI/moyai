@@ -31,40 +31,61 @@ function deleteSessionDialog(run) {
   const dialog = $('#session-delete-dialog');
   dialog.innerHTML = `<form class="folder-form"><h2 id="session-delete-title">Delete session?</h2>
     <p class="folder-session-name">${esc(sessionTitle(run))}</p>
-    <p>This removes the session and its agents for everyone. It cannot be reopened or continued.</p>
+    <p>This automatically stops the session and its agents, closes their sandboxes, and removes the session for everyone. It cannot be reopened or continued.</p>
     <p class="subtext">Stored conversation data, files, billing records, and backups are retained. Side chats, GitHub work, and messages already sent to Slack stay unchanged.</p>
-    <p class="folder-error" role="alert"></p><div class="folder-dialog-actions"><button type="button" data-stop-session hidden>Stop session and agents</button><button type="button" data-cancel>Cancel</button><button type="submit" class="danger">Delete session</button></div></form>`;
-  dialog.querySelector('[data-cancel]').onclick = () => dialog.close();
-  dialog.querySelector('[data-stop-session]').onclick = async () => {
-    const buttons = [...dialog.querySelectorAll('button')];
-    buttons.forEach(button => button.disabled = true);
-    try {
-      await api(`/api/runs/${run.id}/cancel`, {method:'POST'});
-      dialog.querySelector('.folder-error').textContent = 'Stop requested. Wait for cleanup, then try Delete session again.';
-    } catch (error) { dialog.querySelector('.folder-error').textContent = error.message; }
-    finally { buttons.forEach(button => button.disabled = false); }
-  };
+    <p class="folder-error" role="alert"></p><div class="folder-dialog-actions"><button type="button" data-cancel>Cancel</button><button type="submit" class="danger">Delete session</button></div></form>`;
+  const form = dialog.querySelector('form'), submit = dialog.querySelector('[type="submit"]');
+  const current = () => dialog.open && dialog.querySelector('form') === form;
+  let busy = false;
+  dialog.querySelector('[data-cancel]').onclick = () => { if (!busy && current()) dialog.close(); };
+  dialog.oncancel = null;
   dialog.onkeydown = event => { if (event.key === 'Escape') event.stopPropagation(); };
-  dialog.querySelector('form').onsubmit = async event => {
+  form.onsubmit = async event => {
     event.preventDefault();
+    if (busy || !current()) return;
+    busy = true;
     const buttons = [...dialog.querySelectorAll('button')];
     buttons.forEach(button => button.disabled = true);
+    submit.textContent = 'Deleting…';
     dialog.oncancel = event => event.preventDefault();
     dialog.querySelector('.folder-error').textContent = '';
+    let result;
     try {
-      await api(`/api/runs/${run.id}`, {method:'DELETE'});
+      result = await api(`/api/runs/${run.id}`, {method:'DELETE'});
     } catch (error) {
-      dialog.querySelector('.folder-error').textContent = error.message;
-      dialog.querySelector('[data-stop-session]').hidden = error.status !== 409;
-      buttons.forEach(button => button.disabled = false);
+      if (current()) dialog.querySelector('.folder-error').textContent = error.message;
       return;
-    } finally { dialog.oncancel = null; }
-    dialog.close();
+    } finally {
+      busy = false;
+      if (current()) {
+        dialog.oncancel = null;
+        buttons.forEach(button => button.disabled = false);
+        submit.textContent = 'Delete session';
+      }
+    }
+    const ownsDialog = current();
+    if (ownsDialog) dialog.close();
     state.runsRefresh++;
+    state.chatRefresh = (state.chatRefresh || 0) + 1;
+    state.sessionEdits = (state.sessionEdits || 0) + 1;
+    if (!result.deleted) {
+      // The server owns cleanup after acknowledgement, even if this page closes.
+      for (const item of [run, ...state.runs, state.chatRun, state.sessionHeaderRun]) {
+        if (item?.id === run.id) item.status = 'deleting';
+      }
+      if (state.chatRun && (state.selected === run.id || state.activeParentId === run.id)) {
+        state.chatRun.status = 'deleting';
+        updateChatStatus(state.chatRun);
+      }
+      renderSidebar();
+      toast(result.error || 'Deleting session. Its agents and sandboxes will stop automatically.');
+      await refreshRuns().catch(showError);
+      return;
+    }
     state.runs = state.runs.filter(item => item.id !== run.id);
     renderSidebar();
     // A completed request must not navigate away from a different session.
-    if (state.selected && (state.selected === run.id || state.activeParentId === run.id)) {
+    if (ownsDialog && state.selected && (state.selected === run.id || state.activeParentId === run.id)) {
       await navigate('tasks').catch(showError);
     } else await refreshRuns().catch(showError);
     toast('Session deleted.');

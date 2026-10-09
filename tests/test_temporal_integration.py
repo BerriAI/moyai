@@ -1,6 +1,8 @@
 """Real Temporal dev-server tests; the Modal boundary is a deterministic fake."""
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
@@ -8,6 +10,7 @@ from temporalio.worker import Replayer
 
 from app.agents import AgentCoordinator, Fanout
 from app.db import Store
+from app.session_lifecycle import SessionLifecycle
 from app.session_workflow import SessionWorkflow
 from app.temporal_runtime import TemporalRunManager
 from test_durable import durable  # noqa: F401 -- shared fixture
@@ -172,6 +175,69 @@ async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durabl
             assert deadline >= first_deadline
             await handle.terminate('Integration test complete')
         finally:
+            if successor:
+                await successor.shutdown()
+            await manager.shutdown()
+
+
+@pytest.mark.parametrize('restart_state', ['warm', 'claimed', 'missing_journal', 'injected'])
+async def test_real_temporal_restart_recovers_confirmed_delete_before_cleanup_starts(durable, restart_state):
+    manager, cloud, run_id = durable
+    manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
+    manager.settings.sandbox_idle_seconds = 300
+    checkpoints = SimpleNamespace(flush=AsyncMock())
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        async def connect():
+            return env.client
+        manager.connect_temporal = connect
+        successor = lifecycle = None
+        try:
+            if restart_state == 'warm':
+                await manager.recover()
+                await eventually(lambda: manager.state(run_id).get('phase') == 'warm', seconds=25)
+            else:
+                # A crash after claim commits, before begin_turn saves prepare.
+                manager.save(run_id, {'phase': 'idle'})
+                manager.store.claim_message(run_id)
+                if restart_state == 'missing_journal':
+                    manager.store.execute('DELETE FROM durable_sessions WHERE run_id=?', (run_id,))
+                elif restart_state == 'injected':
+                    # Legacy receipt left by an earlier stop; no active turn
+                    # remains to own it or produce an assistant response.
+                    manager.store.execute("UPDATE messages SET status='injected' WHERE run_id=?", (run_id,))
+                    manager.store.execute('UPDATE durable_sessions SET delivered=revision WHERE run_id=?', (run_id,))
+            saved = manager.store.messages(run_id)
+            launches = len(cloud.launches)
+            await manager.shutdown()
+            # The process disappears after persisting confirmation, before
+            # scheduling cleanup. Startup must reconstruct that operation.
+            SessionLifecycle(manager.store, None, manager, checkpoints).request_delete(run_id, '', True)
+            if restart_state == 'injected':
+                manager.store.update_run(run_id, status='cancelled')
+            assert manager.store.run(run_id)['deletion_requested_at']
+            assert not manager.store.run(run_id)['deleted_at']
+            successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+            successor.connect_temporal = connect
+            lifecycle = SessionLifecycle(successor.store, None, successor, checkpoints)
+            await successor.recover()
+            lifecycle.start()
+            await eventually(lambda: bool(successor.store.run(run_id)['deleted_at']), seconds=25)
+            assert successor.state(run_id).get('phase', 'idle') == 'idle'
+            assert len(cloud.launches) == launches
+            assert not any(machine.alive for machine in cloud.machines)
+            messages = successor.store.messages(run_id)
+            if restart_state == 'warm':
+                assert len(cloud.terminations) == 1 and messages == saved
+            else:
+                assert len(messages) == len(saved) and all(m['status'] == 'cancelled' for m in messages)
+                assert [{k: v for k, v in m.items() if k != 'status'} for m in messages] == [
+                    {k: v for k, v in m.items() if k != 'status'} for m in saved]
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
+            await handle.terminate('Integration test complete')
+        finally:
+            if lifecycle:
+                await lifecycle.close()
             if successor:
                 await successor.shutdown()
             await manager.shutdown()

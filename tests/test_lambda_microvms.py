@@ -480,7 +480,12 @@ async def test_dead_startup_gets_a_persisted_new_name_without_replaying_agent_wo
 
 async def test_repeated_dead_startups_fail_closed_instead_of_retrying_forever(durable, monkeypatch):
     manager, cloud, run_id = lambda_lifecycle(durable, monkeypatch)
-    manager.provider().find = AsyncMock(side_effect=ProvisioningTerminated())
+    find = manager.provider().find
+    async def dead_startup(name, *, initialize=False, **kwargs):
+        if initialize:
+            raise ProvisioningTerminated()
+        return await find(name, **kwargs)
+    manager.provider().find = dead_startup
     await drive(manager, run_id)
     assert manager.store.run(run_id)['status'] == 'failed'
     assert manager.state(run_id)['provision_attempt'] == 2
