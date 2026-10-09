@@ -18,7 +18,7 @@ AI generation requires the configured cloud runtime. In a local simulation it is
 
 Use **Mine / All**, the status filter, and search to find saved workflows. Search includes names, instructions, owners, repositories, and metadata. These filters preserve the existing shared-workspace visibility and owner-only editing permissions.
 
-**Queue overlapping event runs** defaults off, preserving independent parallel sessions. Turn it on to wait while a previous automation run is still active at dispatch. Scheduled runs remain independent. Hourly limits and capacity checks may still hold events. Metadata is descriptive only, with up to 20 key-value pairs; it does not change access or execution.
+**Queue overlapping event runs** defaults off, preserving independent parallel sessions. Turn it on to wait while a previous automation run is still active at dispatch. Scheduled runs remain independent. Hourly limits and capacity checks may still hold events. Metadata is descriptive only, with up to 20 key-value pairs, 80 characters per key, and 16,384 characters per value; it does not change access or execution. Keep reusable setup scripts in an environment or versioned skill and reference them from the instructions.
 
 The editor exposes Moyai's actual runtime capabilities. Runs start new sessions as the owner. Security and network access remain governed by the workspace and environment; this does not add Devin-style per-automation security profiles, domain allowlists, arbitrary run-as identities, or per-session dollar budgets.
 

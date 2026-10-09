@@ -1,5 +1,6 @@
 """Real broker requests: requester isolation, durable retries and schedule confirmation."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -36,6 +37,26 @@ def runtime(app):
     app.state.settings.modal_token_secret = 'test-runtime-secret'
     app.state.settings.litellm_api_base = 'https://model.example/v1'
     app.state.settings.litellm_api_key = 'test-runtime-key'
+
+
+def test_full_capacity_metadata_round_trips_within_broker_response_limit(workspace):
+    from sandbox.broker_transport import MAX_BODY
+
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    metadata = {str(i): '\U0001f680' * 16384 for i in range(20)}
+    saved = create(client, run, metadata=metadata)
+    read = call(client, run, 'automation_list', automation_id=saved['id']).json()
+    assert read['automations'][0]['definition']['metadata'] == metadata
+    # The bridge may ASCII-escape supplementary Unicode; even that fits.
+    assert len(json.dumps(read, ensure_ascii=True).encode()) < MAX_BODY
+    summary = call(client, run, 'automation_list', limit=50).json()['automations'][0]
+    assert 'metadata' not in summary and 'definition' not in summary
+    changed = {**saved['definition'], 'metadata': {'notes': 'x' * 16384}}
+    updated = call(client, run, 'automation_update', automation_id=saved['id'], revision=1,
+                   request_key='update-large-metadata', definition=changed).json()
+    assert updated['definition']['metadata'] == changed['metadata']
 
 
 def test_tools_available_in_verified_chat_and_create_retries_are_atomic(workspace):

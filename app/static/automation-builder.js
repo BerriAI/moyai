@@ -72,7 +72,10 @@ function automationMetadata(form,metadata) {
   const refresh=()=>{add.disabled=host.children.length>=20;};
   const row=(key='',value='')=>{
     const item=document.createElement('div');item.className='automation-metadata-row';
-    item.innerHTML=`<label>Key<input name="metadata_key" required maxlength="80" value="${esc(key)}" placeholder="team"></label><label>Value<input name="metadata_value" maxlength="500" value="${esc(value)}" placeholder="engineering"></label><button type="button" class="quiet" aria-label="Remove metadata">Remove</button>`;
+    item.innerHTML=`<label>Key<input name="metadata_key" required maxlength="80" value="${esc(key)}" placeholder="team"></label><label>Value<textarea name="metadata_value" rows="3" placeholder="engineering">${esc(value)}</textarea></label><button type="button" class="quiet" aria-label="Remove metadata">Remove</button>`;
+    const input=item.querySelector('[name=metadata_value]');
+    // Count Unicode characters like the server; maxlength counts UTF-16 units.
+    input.oninput=()=>input.setCustomValidity(Array.from(input.value.trim()).length>16384?'Use at most 16,384 characters for this metadata value.':'');input.oninput();
     item.querySelector('button').onclick=()=>{item.remove();refresh();};host.append(item);refresh();return item;
   };
   Object.entries(metadata||{}).forEach(([key,value])=>row(key,value));
