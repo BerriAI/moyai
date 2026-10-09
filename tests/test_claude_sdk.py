@@ -510,6 +510,7 @@ def test_claude_terminal_result_during_recovery_cannot_be_replaced_by_success(
     assert result['failed'] and not result['completed']
     assert agent.boundary_failed
     assert result['sdk_failure']['native_status'] == terminal.subtype
+    assert ('API error' if failure == 'http400' else failure) in result['final_response']
     if phase != 'query':
         assert result['sdk_failure']['broker_request_id'] == 'original-outage'
     if failure == 'http400':

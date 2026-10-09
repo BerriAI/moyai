@@ -421,8 +421,9 @@ class ClaudeAgent(HarnessAgent):
                                                     and observed_failure.get('transport_interrupted')))
                                             if (result.subtype not in {'success', 'error_during_execution'}
                                                     or not model_error):
+                                                # The native result owns the failure reason;
+                                                # this flag only prevents transport recovery.
                                                 self.boundary_failed = True
-                                                self.boundary_reason = 'native model turn failed'
                                                 break
                                             if recovery is not None:
                                                 # A new forwarded request can fail before query()
@@ -431,7 +432,6 @@ class ClaudeAgent(HarnessAgent):
                                                 if (observed_failure is recovery_failure
                                                         or not retryable_failure(observed_failure, live=True)):
                                                     self.boundary_failed = True
-                                                    self.boundary_reason = 'native model turn failed during recovery'
                                                     break
                                                 deferred = (result, observed_failure)
                                                 continue
