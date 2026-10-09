@@ -213,29 +213,18 @@ test('content matches retain their parent and folder with escaped message excerp
   assert.equal(c.sessionMatches({prompt:'Original tab title'},'original'),true);
 });
 
-test('typing invalidates old responses before debounce and clearing reloads the recent list',async()=>{
-  const {context:c,element}=scopeHelpers(),pending=[],timers=new Map();let timer=0;
-  c.clearTimeout=id=>timers.delete(id);c.setTimeout=fn=>{timers.set(++timer,fn);return timer;};
-  c.api=path=>path==='/api/session-folders'?Promise.resolve({folders:[]}):new Promise((resolve,reject)=>pending.push({path,resolve,reject}));
-  const recent=c.refreshRuns();
-  element.value=' Copper Lighthouse ';c.changeSessionSearch();
-  assert.equal(c.state.sessionSearch,'copper lighthouse');assert.equal(c.state.sessionSearchLoading,true);
-  pending[0].resolve([{id:'late-recent'}]);await recent;
-  assert.equal(c.state.runs.length,0);
-  timers.get(timer)();
-  assert.equal(new URL(pending[1].path,'http://local').searchParams.get('search'),'copper lighthouse');
-  element.value='new query';c.changeSessionSearch();
-  pending[1].reject(Error('Old query failed'));await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(c.state.runs.length,0);assert.equal(c.state.sessionSearchLoading,true);assert.equal(c.state.sessionSearchError,false);
-  timers.get(timer)();pending[2].resolve([{id:'current-result'}]);await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(c.state.runs[0].id,'current-result');assert.equal(c.state.sessionSearchLoading,false);
-  element.value='';c.changeSessionSearch();timers.get(timer)();
-  assert.equal(new URL(pending[3].path,'http://local').searchParams.has('search'),false);
-  pending[3].resolve([{id:'recent-again'}]);await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(c.state.runs[0].id,'recent-again');
+// Query/debounce/error races now belong to the palette and are exercised with
+// the real dialog in tests/browser/shadcn_ui.cjs.
+test('sidebar polling ignores obsolete search state and always keeps its recent inventory',async()=>{
+  const {context:c}=scopeHelpers(),paths=[];
+  c.state.sessionSearch='old inline query';
+  c.api=async path=>{paths.push(path);return path==='/api/session-folders'?{folders:[]}:[{id:'recent'}];};
+  await c.refreshRuns();
+  assert.equal(new URL(paths[0],'http://local').searchParams.has('search'),false);
+  assert.equal(c.state.runs[0].id,'recent');
 });
 
-test('search failure is distinct from empty results and retry uses the current query and scope',async()=>{
+test('list failure is distinct from empty results and retry uses the current scope',async()=>{
   const {context:c}=scopeHelpers();c.state.sessionSearch='answer';c.state.sessionSearchLoading=true;
   c.api=async()=>{throw Error('Unavailable');};
   await assert.rejects(c.refreshRuns(),/Unavailable/);
@@ -245,7 +234,7 @@ test('search failure is distinct from empty results and retry uses the current q
   await c.refreshRuns();
   assert.equal(c.state.sessionSearchError,false);assert.equal(c.state.runs.length,0);
   const query=new URL(paths[0],'http://local').searchParams;
-  assert.equal(query.get('search'),'answer');assert.equal(query.get('scope'),'all');assert.equal(query.has('archived'),false);
+  assert.equal(query.has('search'),false);assert.equal(query.get('scope'),'all');assert.equal(query.has('archived'),false);
 });
 
 test('refresh failures keep rendered sessions and retry while scope changes discard old rows',async()=>{

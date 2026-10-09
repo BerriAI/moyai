@@ -23,7 +23,7 @@ function loadingFixture(hash='#run='+runId){
   vm.createContext(context);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),context);
   load(context,'function stopStream()','function sessionTitle(');
   load(context,'function sessionRows(','function modelName(');
-  load(context,'async function refreshRuns(','function changeSessionSearch(');
+  load(context,'async function refreshRuns(','function restoreSessionScope(');
   load(context,'async function openRun(','function renderChat(');
   load(context,'async function boot(','function registerWebMCP(');
   load(context,'function registerWebMCP(',"\nmatchMedia('(max-width:850px)')");
