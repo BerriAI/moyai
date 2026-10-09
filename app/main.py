@@ -874,19 +874,26 @@ def create_app(settings: Settings | None = None):
 
     @app.post('/broker/{run_id}/control')
     async def session_control(run_id: str, request: Request):
-        run = require_run(run_id, request)
+        from .db import database
+        await database(require_run, run_id, request)
         body = await broker_body(request, '/control')
+        result = await database(apply_session_control, run_id, request, body)
+        await checkpoints.flush()
+        return result
+
+    def apply_session_control(run_id, request, body):
+        # Revalidate after reading the body: a stop or capability rotation can
+        # race a slow upload. Connections stay inside this worker thread, and
+        # cancellation waits for any outstanding receipt write.
+        run = require_run(run_id, request)
         if isinstance(body, dict) and body.get('version') == 2:
             if body.get('receipt_only') is True:
                 message_queue.acknowledge(run_id, run['active_message_id'], body.get('applied', []))
                 result = {'steer_message_id': None}
             else:
                 result = message_queue.live_control(run_id, run['active_message_id'], body.get('applied', []))
-            await checkpoints.flush()
             return {**result, 'receipt_only_supported': True}
         target = message_queue.accept_steer(run_id, run['active_message_id'])
-        if target:
-            await checkpoints.flush()
         return {'steer_message_id': target}
 
     def workspace_catalog(run):

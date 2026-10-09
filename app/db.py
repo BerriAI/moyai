@@ -1,7 +1,10 @@
+import asyncio
+from collections.abc import Callable
 import hashlib
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +13,7 @@ from uuid import uuid4
 from .attachments import Attachments
 from .blob_storage import ArtifactStore, ObjectStorage
 from .slack_mentions import SlackMentions
+from .scheduling_diagnostics import age_ms, record, slow_database
 
 
 # Shared by scoped selection (before LIMIT) and the returned match excerpts.
@@ -33,6 +37,17 @@ SESSION_SEARCH_CTE = """WITH search_input(term) AS (VALUES {terms}),
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+async def database[**P, T](operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
+    # Connections are opened and closed within the operation's thread. Finish
+    # an outstanding write before propagating cancellation to its caller.
+    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await task
+        raise
 
 
 def require_database_owner(path: Path) -> None:
@@ -270,6 +285,7 @@ class Store:
 
     @contextmanager
     def connect(self):
+        started = time.monotonic()
         require_database_owner(self.path)
         conn = sqlite3.connect(self.path, timeout=10)
         conn.row_factory = sqlite3.Row
@@ -282,6 +298,7 @@ class Store:
                 self.generation += 1
         finally:
             conn.close()
+            slow_database(started)
 
     def execute(self, sql, params=()):
         with self.connect() as conn:
@@ -649,6 +666,7 @@ class Store:
             if row['id'] == run['steer_message_id']:
                 conn.execute('UPDATE runs SET steer_message_id=NULL WHERE id=?', (run_id,))
             conn.execute("UPDATE runs SET status='queued',turn_model_calls=0,error='',summary='',pending_result='',active_model=?,active_user_id=?,active_message_id=? WHERE id=?", (row['model'], row['user_id'], row['id'], run_id))
+        record('session_turn_claimed', run_id=run_id, message_id=row['id'], queue_wait_ms=age_ms(row['created_at']))
         self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)
 

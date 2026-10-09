@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer
+from temporalio.testing import ActivityEnvironment
 
 from app.agents import AgentCoordinator, Fanout
 from app.db import Store
@@ -21,6 +22,62 @@ async def eventually(predicate, seconds=60):
     async with asyncio.timeout(seconds):
         while not predicate():
             await asyncio.sleep(0.1)
+
+
+async def test_wake_failure_does_not_restart_running_worker(durable, monkeypatch, caplog):
+    manager, cloud, run_id = durable
+    cloud.finished = False
+    async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
+        manager.connect_temporal = AsyncMock(return_value=env.client)
+        await manager.recover()
+        try:
+            await eventually(lambda: manager.state(run_id).get('phase') == 'monitor', seconds=25)
+            original_worker = manager.worker
+            original_task = manager.worker_task
+            start = env.client.start_workflow
+            failed = False
+            async def flaky_start(*args, **kwargs):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise ConnectionError('private-provider-detail')
+                return await start(*args, **kwargs)
+            monkeypatch.setattr(env.client, 'start_workflow', flaky_start)
+            manager.submit(manager.store.run(run_id))
+            await eventually(lambda: failed)
+            revision = manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))[0]['revision']
+            await eventually(lambda: manager.store.rows('SELECT delivered FROM durable_sessions WHERE run_id=?', (run_id,))[0]['delivered'] >= revision)
+            assert manager.worker is original_worker and manager.worker_task is original_task
+            assert manager.ready.is_set() and not original_task.done()
+            assert cloud.machines[0].alive and not cloud.terminations
+            assert 'private-provider-detail' not in caplog.text
+            cloud.finished = True
+            await eventually(lambda: manager.store.run(run_id)['status'] == 'idle')
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
+            await handle.terminate('Integration test complete')
+        finally:
+            await manager.shutdown()
+        assert manager.diagnostics_task.done()
+
+
+@pytest.mark.parametrize('failure_point', ['advance', 'state'])
+async def test_activity_timings_preserve_errors_without_payloads(durable, caplog, failure_point):
+    manager, _, run_id = durable
+    caplog.set_level('INFO', logger='uvicorn.error.moyai.scheduling')
+    manager.advance = AsyncMock(side_effect=ValueError('private-provider-detail'))
+    if failure_point == 'state':
+        def fail_state(run_id):
+            raise ValueError('private-provider-detail')
+        manager.state = fail_state
+    from temporalio.exceptions import ApplicationError
+    with pytest.raises(ApplicationError):
+        await ActivityEnvironment().run(manager.advance_session, run_id)
+    record = json.loads(next(r.message for r in caplog.records if r.name == 'uvicorn.error.moyai.scheduling'))
+    assert record['event'] == 'session_activity'
+    assert record['phase'] == ('idle' if failure_point == 'advance' else 'unknown')
+    assert record['schedule_to_start_ms'] >= 0 and record['duration_ms'] >= 0
+    assert record['error_type'] == 'ValueError' and 'private-provider-detail' not in caplog.text
 
 
 async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable):

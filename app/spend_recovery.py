@@ -1,6 +1,6 @@
 """Recover orphaned costs from exact gateway receipts, outside inference."""
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from .db import now
+from .db import database, now
 from .spend import money
 
 if TYPE_CHECKING:
@@ -25,17 +25,6 @@ MAX_RECEIPT_BYTES = 256 * 1024
 
 class ReceiptError(ValueError):
     """A fixed, safe reason; upstream exception bodies may contain secrets."""
-
-
-async def database[**P, T](operation: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
-    # Store opens a connection per operation. Keep disk waits off streaming's
-    # event loop, and finish an outstanding write before lifecycle shutdown.
-    task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
-        raise
 
 
 def receipt(value: object, row: Mapping[str, object]) -> tuple[str, str]:

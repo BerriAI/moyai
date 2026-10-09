@@ -38,11 +38,12 @@ class BrokerDiagnosticsMiddleware:
                   'request_id': correlation, 'method': scope['method']}
         started = time.monotonic()
         status, response_bytes, response_started = None, 0, False
+        first_response_body_ms = None
         response_ids, upstream_status, upstream_error_type = {}, None, ''
         logger.info(json.dumps({'event': 'broker_request_started', **fields}))
 
         async def observed_send(message):
-            nonlocal status, response_bytes, response_started, response_ids, upstream_status, upstream_error_type
+            nonlocal status, response_bytes, response_started, response_ids, upstream_status, upstream_error_type, first_response_body_ms
             if message['type'] == 'http.response.start':
                 status, response_started = message['status'], True
                 raw = [(key, value) for key, value in message.get('headers', []) if key.lower() != b'x-moyai-request-id']
@@ -53,6 +54,8 @@ class BrokerDiagnosticsMiddleware:
                 upstream_status = http_status(reply.get('x-moyai-upstream-status'))
                 upstream_error_type = reply.get('x-moyai-upstream-error-type', '')
             elif message['type'] == 'http.response.body':
+                if message.get('body') and first_response_body_ms is None:
+                    first_response_body_ms = round((time.monotonic() - started) * 1000, 2)
                 response_bytes += len(message.get('body', b''))
             await send(message)
 
@@ -70,4 +73,5 @@ class BrokerDiagnosticsMiddleware:
                 'response_bytes': response_bytes, 'error_type': error_type,
                 'upstream_error_type': upstream_error_type,
                 'duration_ms': round((time.monotonic() - started) * 1000),
+                'first_response_body_ms': first_response_body_ms,
             }))

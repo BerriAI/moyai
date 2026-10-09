@@ -3,14 +3,17 @@ import asyncio
 from datetime import timedelta
 import json
 import logging
+import time
 
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+from .db import database
 from .durable_runner import DurableRunner
 from .session_workflow import SessionWorkflow
 from .automation_workflow import AutomationWorkflow
+from .scheduling_diagnostics import elapsed_ms, record, watch_event_loop
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +25,7 @@ class TemporalRunManager(DurableRunner):
         self.worker = None
         self.worker_task = None
         self.dispatch_task = None
+        self.diagnostics_task = None
         self.ready = asyncio.Event()
 
     async def cancel(self, run_id):
@@ -62,6 +66,7 @@ class TemporalRunManager(DurableRunner):
         # preserve it for review instead of treating it as an unexecuted action.
         self.store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
         self.dispatch_task = asyncio.create_task(self.serve())
+        self.diagnostics_task = asyncio.create_task(watch_event_loop())
 
     async def connect_temporal(self):
         return await Client.connect(
@@ -88,7 +93,12 @@ class TemporalRunManager(DurableRunner):
                     if self.worker_task.done():
                         await self.worker_task
                         raise RuntimeError('Temporal worker stopped')
-                    await self.dispatch()
+                    try:
+                        await self.dispatch()
+                    except Exception as exc:
+                        # One failed wake must not tear down the healthy worker
+                        # and cancel observations for every running sandbox.
+                        log.warning('Temporal wake delivery will retry (%s)', type(exc).__name__)
                     await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
@@ -104,42 +114,69 @@ class TemporalRunManager(DurableRunner):
                 await asyncio.sleep(5)
 
     async def dispatch(self):
+        started = time.monotonic()
         slots = asyncio.Semaphore(10)
         async def deliver(row):
             async with slots:
+                delivery_started = time.monotonic()
                 await self.temporal.start_workflow(
                     SessionWorkflow.run, row['run_id'], id='moyai-session-' + row['run_id'],
                     task_queue=self.settings.temporal_task_queue, start_signal='wake',
                     rpc_timeout=timedelta(seconds=10),
                 )
-                self.store.execute('UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
-                                   (row['revision'], row['run_id']))
-        rows = self.store.rows('SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY rowid LIMIT 200')
+                await database(self.store.execute,
+                    'UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
+                    (row['revision'], row['run_id']))
+                record('session_wake_delivered', run_id=row['run_id'], revision=row['revision'],
+                       duration_ms=elapsed_ms(delivery_started))
+        rows = await database(self.store.rows,
+            'SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY rowid LIMIT 200')
         results = await asyncio.gather(*(deliver(row) for row in rows), return_exceptions=True)
+        if rows:
+            record('session_wake_batch', count=len(rows), failed=sum(isinstance(r, BaseException) for r in results),
+                   duration_ms=elapsed_ms(started))
         for result in results:
             if isinstance(result, BaseException):
                 raise result
 
     @activity.defn(name='advance_session')
     async def advance_session(self, run_id: str) -> bool | str | dict:
+        started = time.monotonic()
+        info = activity.info()
+        # Server timestamps avoid conflating provider work with task-queue wait.
+        queue_ms = max(0, (info.started_time - info.current_attempt_scheduled_time).total_seconds() * 1000)
+        state, before = {}, 'unknown'
+        error_type = ''
         async def heartbeat():
             while True:
                 activity.heartbeat(run_id)
                 await asyncio.sleep(5)
         pulse = asyncio.create_task(heartbeat())
         try:
+            state = self.state(run_id)
+            before = state.get('phase', 'idle')
             return await self.advance(run_id)
         except asyncio.CancelledError:
+            error_type = 'CancelledError'
             # Worker shutdown only detaches observation. The Modal supervisor
             # and persisted capability remain live for the replacement worker.
             raise
         except Exception as exc:
+            error_type = type(exc).__name__
             # Exception bodies must not leak into Temporal Cloud history.
             from temporalio.exceptions import ApplicationError
             raise ApplicationError('Session step temporarily unavailable', type=type(exc).__name__) from None
         finally:
             pulse.cancel()
             await asyncio.gather(pulse, return_exceptions=True)
+            # Normal monitor steps wait up to 20 seconds by design. Keep those
+            # quiet unless scheduling was slow or the activity failed.
+            if before != 'monitor' or queue_ms >= 500 or error_type:
+                record('session_activity', run_id=run_id, workflow_run_id=info.workflow_run_id,
+                       activity_id=info.activity_id, attempt=info.attempt, phase=before,
+                       message_id=state.get('message_id'), segment=state.get('segment'),
+                       schedule_to_start_ms=round(queue_ms, 2), duration_ms=elapsed_ms(started),
+                       error_type=error_type)
 
     @activity.defn(name='launch_automation')
     async def launch_automation(self, automation_id: str, revision: int, occurrence: str, expires_at: str, trigger_id: str = 'default') -> dict:
@@ -159,6 +196,9 @@ class TemporalRunManager(DurableRunner):
 
     async def shutdown(self):
         self.closing = True
+        if self.diagnostics_task:
+            self.diagnostics_task.cancel()
+            await asyncio.gather(self.diagnostics_task, return_exceptions=True)
         if self.dispatch_task:
             self.dispatch_task.cancel()
             await asyncio.gather(self.dispatch_task, return_exceptions=True)

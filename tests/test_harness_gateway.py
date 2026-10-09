@@ -85,6 +85,7 @@ async def test_broker_diagnostics_capture_partial_stream_failure(caplog):
     assert len(records) == 2 and records[-1]['event'] == 'broker_request_failed'
     assert records[-1]['http_status'] == 200 and records[-1]['response_started']
     assert records[-1]['response_bytes'] == 7 and records[-1]['error_type'] == 'ReadError'
+    assert 0 <= records[-1]['first_response_body_ms'] <= records[-1]['duration_ms'] + 1
     assert len(records[-1]['request_id']) == 32
     assert 'private' not in json.dumps(records) and 'secret' not in json.dumps(records)
 

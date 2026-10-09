@@ -54,6 +54,18 @@ class MessageQueue:
 
     def accept_steer(self, run_id, active_message_id):
         """Called between complete tool rounds or while durably checkpointed."""
+        # Most sandbox polls have no input. A read can proceed during another
+        # writer's transaction; do not acquire SQLite's writer lock just to poll.
+        # A newly queued input can wait until the next poll. Positive matches
+        # are only a hint: the transaction below rechecks ownership and state.
+        if not self.store.rows("""SELECT 1 FROM runs r JOIN messages m ON m.run_id=r.id
+                WHERE r.id=? AND r.active_message_id=?
+                AND r.status NOT IN ('stopping','cancelled','failed','interrupted')
+                AND m.status='queued' AND m.id!=?
+                AND (m.id=r.steer_message_id OR m.send_immediately=1 OR EXISTS (
+                    SELECT 1 FROM slack_receipts s WHERE s.run_id=m.run_id AND s.message_id=m.id))
+                LIMIT 1""", (run_id, active_message_id, active_message_id)):
+            return None
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
@@ -83,6 +95,8 @@ class MessageQueue:
         """Idempotent receipts from the live sandbox, also carried by model/final events."""
         if not isinstance(ids, list) or len(ids) > 100 or any(type(i) is not int for i in ids):
             raise HTTPException(422, 'Invalid steering receipts.')
+        if not ids:
+            return
         with self.store.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             for message_id in ids:
