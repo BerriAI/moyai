@@ -40,6 +40,7 @@ function restoreAutomationFocus(opener,version) {
 function automationDialog(title,body) {
   const opener=document.activeElement,version=state.pageVersion;
   const dialog=MoyaiUI.createDialog();
+  dialog.dataset.dialogScope='settings';
   dialog.className='automation-start-dialog';dialog.setAttribute('aria-label',title);
   MoyaiUI.render(dialog, `<form class="automation-form"><header><div><h2>${esc(title)}</h2></div><button type="button" class="icon-button" data-close aria-label="Close">×</button></header>${body}</form>`);
   document.body.append(dialog);

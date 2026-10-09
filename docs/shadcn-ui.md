@@ -20,6 +20,11 @@ API fixtures and cannot call models or modify connected services. `?fixture=empt
 `?fixture=error` and `?fixture=member` select alternate states. Use `npm run dev` in
 another terminal to rebuild on source changes, then refresh the browser.
 
+`?fixture=skill-picker` provides personal and organization skills with duplicate
+and long names. Type `/team` in the new-session composer, or open
+`?fixture=skill-picker#run=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` to check the reply
+composer. Both use the production picker against synthetic data.
+
 The production bundle lives in `app/static/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.
@@ -106,6 +111,10 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   shadcn Dialog; Radix provides the portal, focus trap, Escape, outside dismissal
   and return focus. The host remains queryable while closed, and sensitive forms
   keep their existing close/cancel cleanup.
+  Dialogs use their own portal mount. Set `host.dataset.dialogScope = 'settings'`
+  for Settings editors; workspace dialogs are the default. Reused hosts must set
+  their scope for each flow before opening. Route styles stay on the sidebar and
+  workspace containers, so global dialogs never inherit Settings form styles.
 - Single-choice dropdowns use shadcn Select with an anchored, viewport-aware
   menu, not the operating system popup. `FormSelect` retains an invisible native
   select for controller queries, sizing, validation, reset, and `FormData`.

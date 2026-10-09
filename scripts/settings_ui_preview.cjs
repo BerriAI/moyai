@@ -17,6 +17,13 @@ const skills=[
  ['investigate-issue','Reproduce an issue, trace the cause, and propose a focused fix.','personal'],
  ['writing-style','Keep explanations concise and include the evidence behind each recommendation.','personal']
 ].map(([name,description,scope],i)=>({id:'skill-'+i,name,description,scope,reference:(scope==='personal'?'personal:':'org:')+name,can_manage:true,archived:false,revision:1,instructions:'# '+name+'\n\n1. Gather context.\n2. Review the evidence.\n3. Summarize the result.',files:[]}));
+const pickerSkills=[
+ ['team','Use a team to reproduce an issue, review the implementation, and verify the fix.','personal'],
+ ['team','Coordinate the team workflow with shared engineering guidance and repository checks.','organization'],
+ ['team-release-readiness-and-regression-review','Review release readiness with the team, including tests, documentation, and deployment checks.','organization'],
+ ['ticket','Create or update a ticket for the issue under discussion with the team.','organization'],
+ ['verify','Verify the team’s changes and summarize the result with supporting evidence.','organization'],
+].map(([name,description,scope],i)=>({...skills[0],id:'picker-'+i,name,description,scope,reference:(scope==='personal'?'personal:':'org:')+name,icon:'team'}));
 let memories=[
  ['preference','Keep PR descriptions focused','Lead with what changed and why. Include the test results and any remaining limitations.'],
  ['feedback','Show the complete interaction','When sharing UI screenshots, include the relevant controls and verify the saved image before sending it.'],
@@ -118,7 +125,7 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
  if(p==='/api/runs')return json(res,200,['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
- if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:false,mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
+ if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:fixture==='skill-picker',mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);
  if(p==='/api/settings/preferences'){
@@ -129,8 +136,8 @@ const server=http.createServer(async(req,res)=>{
   return json(res,200,chatPreferences);
  }
  if(p==='/api/settings/session-titles'){if(req.method==='PUT')titleModel=body.model;return json(res,200,{model:titleModel,enabled:true,gateway_configured:true});}
- if(p==='/api/skills')return json(res,200,{skills:empty?[]:skills});
- if(p.startsWith('/api/skills/'))return json(res,200,skills.find(s=>s.id===p.split('/')[3])||{});
+ if(p==='/api/skills')return json(res,200,{skills:empty?[]:fixture==='skill-picker'?pickerSkills:skills});
+ if(p.startsWith('/api/skills/'))return json(res,200,[...skills,...pickerSkills].find(s=>s.id===p.split('/')[3])||{});
  if(p==='/api/memory/preferences'){preferences={...preferences,...body,revision:preferences.revision+1};return json(res,200,preferences);}
  if(p==='/api/memory'&&req.method==='POST'){memories.push({...body,id:'memory-new',updated_at:stamp,source:{type:'manual'}});return json(res,200,{});}
  if(p.startsWith('/api/memory/')&&req.method==='PUT'){const note=memories.find(n=>n.id===p.split('/')[3]);Object.assign(note,body);return json(res,200,note);}

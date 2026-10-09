@@ -106,7 +106,7 @@ test('built-in goal works without skills and only at the start of the request',a
   await flush();
   assert.equal(b.popup.hidden,true);
   b.type('Please /go');
-  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/small>/);
+  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/span>/);
   b.type('/goal verify the suite');
   assert.equal(b.popup.hidden,true);
   assert.match(b.hint.textContent,/Not running yet/);
@@ -127,7 +127,7 @@ test('provider failure is visible and untrusted descriptions stay text',async()=
 function pickerFixture(){
   const form={inert:false},input={id:'followup',isConnected:true,value:'Keep draft',maxLength:16000,closest:()=>form,dispatchEvent(){},focus(){}},choice={dataset:{pickSkill:'org'}};
   let current=input,finish;
-  const dialog={open:false,querySelector:()=>({}),querySelectorAll:()=>[choice],showModal(){this.open=true;},close(){this.open=false;this.onclose?.();}};
+  const dialog={open:false,dataset:{},querySelector:()=>({}),querySelectorAll:()=>[choice],showModal(){this.open=true;},close(){this.open=false;this.onclose?.();}};
   const c={state:{pageVersion:1},document:{getElementById:()=>current,addEventListener(){}},$:selector=>selector==='#skill-dialog'?dialog:{},
     api:()=>new Promise(resolve=>finish=resolve),skillToken:skill=>'/'+skill.reference,skillIcon:()=>'',esc:value=>value,autoSize(){},Event:class{}};
   vm.createContext(c);const source=readFileSync('app/static/skills.js','utf8');vm.runInContext(source.slice(source.indexOf('function insertSkill(')),c);

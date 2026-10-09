@@ -16,7 +16,7 @@ jobs:
     name: Lens agent regression check
     runs-on: ubuntu-24.04
     container:
-      image: rust:1.99-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+      image: public.ecr.aws/docker/library/rust:1.99-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
     timeout-minutes: 40
     permissions:
       contents: read

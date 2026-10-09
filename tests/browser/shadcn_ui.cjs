@@ -26,6 +26,59 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+for (const width of [1440, 768, 320]) for (const composer of ['new', 'reply']) test(`skill picker rows stay aligned in the ${composer} composer at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'skill-picker', width);
+  if (composer === 'reply') await page.goto(`${base}/?fixture=skill-picker#run=${'a'.repeat(32)}`);
+  const input = page.getByRole('textbox', { name: 'Message Moyai', exact: true });
+  await input.fill('/team');
+  await page.waitForFunction(() => document.querySelectorAll('.skill-inline-option').length === 5);
+  await page.evaluate(() => document.fonts.ready);
+  const popup = page.locator('.skill-inline');
+  const geometry = await popup.evaluate(el => {
+    const rect = node => node.getBoundingClientRect().toJSON();
+    return {
+      popup: rect(el), overflow: el.scrollWidth - el.clientWidth,
+      rows: [...el.querySelectorAll('[role=option]')].map(row => ({
+        box: rect(row), icon: rect(row.querySelector('.skill-inline-icon')),
+        name: rect(row.querySelector('.skill-inline-label')),
+        badge: rect(row.querySelector('[data-slot=badge]')),
+        description: rect(row.querySelector('.skill-inline-description')),
+        padding: parseFloat(getComputedStyle(row).paddingTop),
+        shadow: getComputedStyle(row).boxShadow,
+      })),
+    };
+  });
+  assert.equal(geometry.overflow, 0, 'The picker does not scroll horizontally');
+  assert.ok(geometry.popup.left >= 0 && geometry.popup.right <= width, 'The picker stays inside the viewport');
+  assert.ok(geometry.popup.top >= 0 && geometry.popup.bottom <= 1000, 'The picker fits vertically');
+  for (const [index, row] of geometry.rows.entries()) {
+    assert.ok(row.box.height >= 64, 'Two-line choices have room for their content and padding');
+    assert.ok(row.name.top >= row.box.top + row.padding - 1);
+    assert.ok(row.description.bottom <= row.box.bottom - row.padding + 1, 'Descriptions remain inside their own row');
+    assert.ok(row.name.bottom + 3 <= row.description.top, 'Wrapped names do not overlap descriptions');
+    assert.ok(row.name.right + 7 <= row.badge.left, 'Names cannot push into scope badges');
+    assert.ok(Math.abs(row.name.top - row.badge.top) <= 1, 'Scope badges align with the first title line');
+    assert.ok(Math.abs(row.name.left - row.description.left) <= 1, 'Names and descriptions share a leading edge');
+    assert.ok(Math.abs(row.badge.right - geometry.rows[0].badge.right) <= 1, 'Scope badges share a trailing edge');
+    assert.ok(row.icon.right < row.name.left, 'Icons remain in their own column');
+    assert.equal(row.shadow, 'none', 'Choices have a flat menu surface');
+    if (index) assert.ok(geometry.rows[index - 1].box.bottom <= row.box.top, 'Adjacent rows cannot overlap');
+  }
+  await input.press('ArrowDown');
+  assert.match(await popup.locator('[aria-selected=true]').innerText(), /Organization/);
+  await input.press('Enter');
+  assert.equal(await input.evaluate(el => el.value), '/org:team ');
+  assert.equal(await popup.isVisible(), false);
+  await input.fill('/team');
+  await popup.locator('[role=option]').first().click();
+  assert.equal(await input.evaluate(el => el.value), '/personal:team ');
+  await input.fill('/no-matching-command');
+  await popup.getByRole('status').waitFor();
+  assert.match(await popup.getByRole('status').innerText(), /No matching skills/);
+  await input.press('Escape');
+  assert.equal(await popup.isVisible(), false);
+});
+
 for (const width of [1440, 768, 320]) test(`folder headings keep their leading alignment at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'populated', width);
   const folders = ['hello', 'A very long folder name that must truncate within the sidebar'].map((name, i) => ({ id: String(i + 1).repeat(32), name, revision: 1 }));
@@ -210,6 +263,7 @@ for (const width of [1440, 768, 320]) {
         await page.locator('.analytics-range > summary').click();
         for (const tab of ['prs', 'users', 'history', 'infrastructure']) {
           await page.locator(`#spend-tab-${tab}`).click();
+          if (tab === 'users') await page.locator('#spend-activity').getByRole('heading', { name: 'Team activity', exact: true }).waitFor();
           if (tab === 'infrastructure') await page.getByRole('button', { name: 'Add monthly bill', exact: true }).click();
           await inspectMenus(page, width);
         }
@@ -1792,4 +1846,246 @@ test('template buttons retain multiline content and native flex shrink outside S
   await assertCardContentsFit(page.locator('.skill-choice,.saved-file-choice'));
   assert.equal(await page.locator('.skill-choice').evaluate(el => el.scrollHeight <= el.clientHeight && el.scrollWidth <= el.clientWidth), true, 'Multiline descriptions fit their card');
   assert.equal(await page.locator('.approval-actions').evaluate(el => el.scrollWidth <= el.clientWidth), true, 'Action buttons shrink and wrap within the available width');
+});
+
+for (const width of [1440, 768, 320]) test(`workspace dialogs keep their styles across settings routes at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  const styles = locator => locator.evaluateAll(nodes => nodes.map(node => {
+    const style = getComputedStyle(node);
+    return Object.fromEntries(['fontSize', 'lineHeight', 'borderWidth', 'borderRadius', 'padding', 'minHeight', 'backgroundColor', 'color', 'outline', 'outlineOffset', 'width', 'maxHeight'].map(key => [key, style[key]]));
+  }));
+  await page.route('**/api/runs?*', route => new URL(route.request().url()).searchParams.has('search')
+    ? route.fulfill({ status: 503, json: { detail: 'Search temporarily unavailable' } }) : route.continue());
+  const appearances = [];
+  for (const route of ['tasks', 'settings']) {
+    await page.evaluate(view => navigate(view), route);
+    await page.keyboard.press('Meta+k');
+    await page.getByRole('option', { name: /^Search sessions/ }).click();
+    await page.locator('#command-search').fill('retry needle');
+    await page.getByRole('button', { name: 'Retry search', exact: true }).waitFor();
+    const palette = await styles(page.locator('[data-dialog-id="command-palette"], #command-search, [data-command-back], [data-command-close], [data-command-retry]'));
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog').waitFor({ state: 'detached' });
+    await page.keyboard.press('Meta+k');
+    await page.getByRole('option', { name: /^New folder/ }).click();
+    const folder = page.getByRole('dialog', { name: 'New folder', exact: true });
+    await folder.waitFor();
+    const folderStyles = await styles(folder.locator('input, button'));
+    appearances.push({ palette, folder: folderStyles });
+    await page.keyboard.press('Escape');
+    await folder.waitFor({ state: 'detached' });
+  }
+  assert.deepEqual(appearances[1], appearances[0], 'Settings must not restyle global dialogs, including error and navigation controls');
+  await page.evaluate(() => navigate('skills'));
+  await page.getByRole('button', { name: 'Add skill', exact: true }).click();
+  const input = page.locator('#skill-name');
+  await input.waitFor();
+  assert.equal(await input.evaluate(node => getComputedStyle(node).padding), '9px 12px', 'Settings editors retain their form styling');
+  assert.equal(await input.evaluate(node => getComputedStyle(node).fontSize), width <= 768 ? '16px' : '14px');
+  assert.equal(await page.getByRole('dialog').evaluate(node => getComputedStyle(node).borderRadius), '16px');
+});
+
+test('reused skill and credential dialogs restore the styling of each owning flow', async t => {
+  const page = await pageFor(t);
+  const cases = [
+    { route: 'skills', open: 'Add skill', workspace: () => openSkillPicker('prompt') },
+    { route: 'secrets', open: 'Add credential', workspace: () => openCredentialDialog({ id: 'input-test', provider: 'generic', name: 'synthetic-service', format: 'env', reason: 'Verify dialog ownership', generation: 1, can_personal: true, can_organization: true, preferred_scope: 'personal' }) },
+  ];
+  const appearance = async (scope = 'workspace') => {
+    const dialog = page.getByRole('dialog');
+    await dialog.waitFor();
+    assert.equal(await dialog.evaluate(node => getComputedStyle(node).borderRadius), scope === 'settings' ? '16px' : '8px', `The ${scope} flow owns the dialog surface`);
+    return dialog.locator('input, textarea, button').evaluateAll(nodes => nodes.map(node => {
+      const s = getComputedStyle(node);
+      return [s.fontSize, s.padding, s.borderWidth, s.minHeight, s.backgroundColor];
+    }));
+  };
+  const close = async () => {
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog').waitFor({ state: 'detached' });
+  };
+  for (const flow of cases) {
+    await page.evaluate(() => navigate('tasks'));
+    await page.evaluate(flow.workspace);
+    const workspace = await appearance();
+    await close();
+    let settings;
+    for (let cycle = 0; cycle < 2; cycle++) {
+      await page.evaluate(view => navigate(view), flow.route);
+      await page.getByRole('button', { name: flow.open, exact: true }).click();
+      const current = await appearance('settings');
+      if (cycle) assert.deepEqual(current, settings, `${flow.route} restores settings styling after workspace use`);
+      settings = current;
+      await close();
+      await page.evaluate(() => navigate('tasks'));
+      await page.evaluate(flow.workspace);
+      assert.deepEqual(await appearance(), workspace, `${flow.route} releases settings styling for the workspace flow`);
+      await close();
+    }
+  }
+});
+
+for (const width of [1440, 768, 320]) test(`command palette preserves drafts, keyboard focus and viewport bounds at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  const prompt = page.locator('#prompt');
+  await prompt.fill('Keep my unsent session prompt');
+  await page.locator('#session-list [data-run]').first().waitFor({ state: 'attached' });
+  const sidebar = await page.locator('#session-list [data-run]').evaluateAll(rows => rows.map(row => row.dataset.run));
+  const route = page.url();
+  await prompt.press('Meta+k');
+  const dialog = page.getByRole('dialog', { name: 'Commands and session search', exact: true });
+  const input = page.locator('#command-search');
+  await dialog.waitFor();
+  assert.equal(page.url(), route, 'Opening commands does not navigate away from the draft');
+  assert.equal(await input.getAttribute('role'), 'combobox');
+  assert.equal(await input.getAttribute('aria-controls'), 'command-results');
+  assert.equal(await input.evaluate(el => el === document.activeElement), true);
+  const bounds = await dialog.boundingBox();
+  assert.ok(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y + bounds.height <= 1001, JSON.stringify(bounds));
+  assert.equal(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth), true, 'Palette content fits its dialog');
+  const selected = await input.getAttribute('aria-activedescendant');
+  assert.ok(selected && await page.locator(`[id="${selected}"]`).getAttribute('role') === 'option');
+  await input.press('ArrowDown');
+  assert.notEqual(await input.getAttribute('aria-activedescendant'), selected);
+  await input.press('ArrowUp');
+  assert.equal(await input.getAttribute('aria-activedescendant'), selected);
+  for (let step = 0; step < 5; step++) {
+    await page.keyboard.press('Tab');
+    assert.equal(await dialog.evaluate(el => el.contains(document.activeElement)), true, 'Tab remains inside the modal');
+  }
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
+  await page.waitForFunction(() => document.activeElement?.id === 'prompt');
+  assert.equal(await prompt.evaluate(el => el.value), 'Keep my unsent session prompt');
+  assert.deepEqual(await page.locator('#session-list [data-run]').evaluateAll(rows => rows.map(row => row.dataset.run)), sidebar);
+  await prompt.press('Control+k');
+  await dialog.waitFor();
+  await input.press('Enter');
+  await dialog.waitFor({ state: 'detached' });
+  await page.waitForFunction(() => document.activeElement?.id === 'prompt');
+  assert.equal(await prompt.evaluate(el => el.value), 'Keep my unsent session prompt', 'Starting from the palette preserves the existing unsent draft');
+});
+
+test('palette session search isolates results, escapes message matches and discards delayed responses', async t => {
+  const page = await pageFor(t);
+  const input = page.locator('#command-search');
+  const dialog = page.getByRole('dialog', { name: 'Commands and session search', exact: true });
+  const releases = [];
+  t.after(() => releases.forEach(release => release()));
+  const gates = new Map(['old needle', 'closed needle'].map(query => [query, new Promise(resolve => releases.push(resolve))]));
+  const worker = 'b'.repeat(32), parent = 'a'.repeat(32);
+  let retries = 0;
+  await page.route('**/api/runs?*', async route => {
+    const query = new URL(route.request().url()).searchParams.get('search');
+    if (!query) return route.continue();
+    if (gates.has(query)) await gates.get(query);
+    if (query === 'retry needle' && retries++ === 0) return route.fulfill({ status: 503, json: { detail: 'Search temporarily unavailable' } });
+    const rows = query === 'absent needle' ? [] : [{ id: parent, display_title: query === 'current needle' ? 'Parent investigation' : query, status: 'idle', search_query: query, search_match: query !== 'current needle', children: query === 'current needle' ? [{ id: worker, parent_run_id: parent, agent_label: 'Matching worker', status: 'idle', search_query: query, search_match: true, search_snippet: 'Current needle <img src=x onerror=alert(1)> appears in a saved message' }] : [] }];
+    return route.fulfill({ json: rows });
+  });
+  const sidebar = await page.locator('#session-list [data-run]').evaluateAll(rows => rows.map(row => row.dataset.run));
+  await page.locator('#search-sessions').click();
+  await dialog.waitFor();
+  assert.equal(await input.getAttribute('placeholder'), 'Search titles and messages…');
+  const waitForQuery = query => page.waitForRequest(request => new URL(request.url()).searchParams.get('search') === query);
+  const oldRequest = waitForQuery('old needle');
+  await input.fill('old needle');
+  await oldRequest;
+  await input.fill('current needle');
+  const match = dialog.getByRole('option').filter({ hasText: 'Matching worker' });
+  await match.waitFor();
+  assert.match(await match.textContent(), /Current needle <img src=x onerror=alert\(1\)>/);
+  assert.equal(await match.locator('img,script').count(), 0, 'Saved message content is text, never markup');
+  const oldResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get('search') === 'old needle');
+  releases[0]();
+  await (await oldResponse).finished();
+  await page.waitForTimeout(50);
+  assert.equal(await match.count(), 1, 'The older result cannot replace the current query');
+  assert.deepEqual(await page.locator('#session-list [data-run]').evaluateAll(rows => rows.map(row => row.dataset.run)), sidebar, 'Palette searches do not filter the sidebar');
+  await match.click();
+  await dialog.waitFor({ state: 'detached' });
+  await page.waitForFunction(id => location.hash === '#run=' + id, worker);
+  await page.locator('#content h1').waitFor();
+  await page.locator('#search-sessions').click();
+  const closedRequest = waitForQuery('closed needle');
+  await input.fill('closed needle');
+  await closedRequest;
+  await input.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
+  const closedResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get('search') === 'closed needle');
+  releases[1]();
+  await (await closedResponse).finished();
+  await page.locator('#search-sessions').click();
+  assert.equal(await input.inputValue(), '');
+  assert.equal(await dialog.getByRole('option').filter({ hasText: 'closed needle' }).count(), 0);
+  await input.fill('retry needle');
+  await dialog.getByRole('button', { name: 'Retry search', exact: true }).click();
+  await dialog.getByRole('option').filter({ hasText: 'retry needle' }).waitFor();
+  assert.equal(retries, 2);
+  await input.fill('absent needle');
+  await dialog.getByRole('button', { name: 'Clear search', exact: true }).click();
+  assert.equal(await input.inputValue(), '');
+  assert.equal(await input.evaluate(el => el === document.activeElement), true);
+});
+
+test('palette invalidates admin search results on a real session demotion and uses the member scope', async t => {
+  const page = await pageFor(t);
+  await choose(page, page.locator('#session-scope'), 'all');
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const scopes = [];
+  await page.route('**/api/runs?*', async route => {
+    const params = new URL(route.request().url()).searchParams, query = params.get('search');
+    if (!query) return route.continue();
+    scopes.push(params.get('scope'));
+    if (query === 'admin needle') await gate;
+    return route.fulfill({ json: [{ id: 'c'.repeat(32), display_title: query, search_query: query, search_match: true, status: 'idle', children: [] }] });
+  });
+  await page.locator('#search-sessions').click();
+  const started = page.waitForRequest(request => new URL(request.url()).searchParams.get('search') === 'admin needle');
+  await page.locator('#command-search').fill('admin needle');
+  await started;
+  await page.evaluate(() => applyUserSession({ authenticated: true, local: true, role: 'member', user_id: state.userId, csrf: state.csrf, identity: state.identity }));
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  const response = page.waitForResponse(response => new URL(response.url()).searchParams.get('search') === 'admin needle');
+  release();
+  await (await response).finished();
+  await page.locator('#search-sessions').click();
+  await page.locator('#command-search').fill('member needle');
+  await page.getByRole('option').filter({ hasText: 'member needle' }).waitFor();
+  assert.equal(await page.getByRole('option').filter({ hasText: 'admin needle' }).count(), 0);
+  assert.deepEqual(scopes, ['all', 'mine']);
+  assert.equal(await page.locator('#session-scope').isDisabled(), true);
+});
+
+test('palette hands off to the existing folder dialog and new-session shortcuts respect modal ownership and authentication', async t => {
+  const page = await pageFor(t);
+  await page.locator('#command-menu').click();
+  await page.getByRole('option', { name: /^New folder/ }).click();
+  const folder = page.getByRole('dialog', { name: 'New folder', exact: true });
+  await folder.waitFor();
+  await page.waitForFunction(() => document.activeElement?.id === 'session-folder-name');
+  await page.keyboard.press('Meta+k');
+  await page.keyboard.press('Meta+Shift+o');
+  assert.equal(await page.getByRole('dialog').count(), 1);
+  assert.equal(await folder.isVisible(), true, 'Workspace shortcuts do not replace an active editor');
+  await page.keyboard.press('Escape');
+  await folder.waitFor({ state: 'detached' });
+  for (const shortcut of ['Meta+Shift+o', 'Control+Shift+o']) {
+    await page.evaluate(() => navigate('settings'));
+    await page.keyboard.press('Meta+k');
+    await page.locator('#command-search').waitFor();
+    await page.keyboard.press(shortcut);
+    await page.getByRole('dialog').waitFor({ state: 'detached' });
+    await page.locator('#prompt').waitFor();
+    await page.waitForFunction(() => document.activeElement?.id === 'prompt');
+    assert.equal(new URL(page.url()).hash, '#tasks');
+  }
+  await page.evaluate(() => { applyUserSession({ authenticated: false, role: 'member', user_id: '', csrf: '' }); });
+  const version = await page.evaluate(() => state.pageVersion);
+  await page.keyboard.press('Meta+k');
+  await page.keyboard.press('Control+Shift+o');
+  assert.equal(await page.getByRole('dialog').count(), 0);
+  assert.equal(await page.evaluate(() => state.pageVersion), version, 'Signed-out shortcuts do not navigate');
 });

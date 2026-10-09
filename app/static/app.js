@@ -3,6 +3,7 @@ const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&l
 const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsRefresh:0, config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{}};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 let workspacePanel;
+let commandPalette;
 const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,size:fileSize,onOpen:(file,ref)=>workspacePanel?(file?workspacePanel.openFile(file,ref):workspacePanel.open('files')):false});
 const computer = MoyaiComputer.create({api,escape:esc,onCaptures:()=>workspacePanel?.open('captures')});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
@@ -123,8 +124,6 @@ function harnessModels(harness){return state.config.models||[];}
 function providerLogo(model){const url=MoyaiProviderLogos.src(model);return `<img class="provider-logo" alt="" width="16" height="16" ${url?`src="${esc(url)}"`:'hidden'}>`;}
 function modelPicker(id,selected,disabled=false,harness=state.config.harness||'claude-agent-sdk'){return `<label class="model-picker" title="Model">${providerLogo(selected)}<span class="sr-only">Model for next message</span><select id="${id}" aria-label="Model for next message" ${disabled?'disabled':''}>${harnessModels(harness).map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(m.name)}</option>`).join('')}</select>${pickerChevron()}</label>`;}
 
-function openSessionSearch(){$('.session-search').hidden=false;$('#search-sessions').setAttribute('aria-expanded','true');$('#session-search').focus();}
-function closeSessionSearch(){if($('#session-search').value)return;$('.session-search').hidden=true;$('#search-sessions').setAttribute('aria-expanded','false');}
 function setSidebar(open){document.body.classList.toggle('sidebar-open',open);$('#sidebar-scrim').hidden=!open;$('#open-sidebar').setAttribute('aria-expanded',String(open));$('#sidebar').inert=matchMedia('(max-width:850px)').matches&&!open;}
 function sidebarGroups(runs,search){
   return runs.map(parent=>{
@@ -187,7 +186,7 @@ function renderSidebar(){
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncTitles?.(summaries);
   // Polling must not replace the source element during a native drag.
   if(state.draggedSessionId)return;
-  const search=($('#session-search').value||'').trim().toLowerCase();
+  const search='';
   const sections=sidebarSections(state.runs,state.folders,search);
   $('#task-count').textContent=state.runs.length;
   $('#workspace-name').textContent=state.organization.name||'Workspace';
@@ -206,10 +205,6 @@ function renderSidebar(){
     return `<section class="session-folder" data-region-key="folder:${esc(folder.id)}" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" data-region-key="folder-body:${esc(folder.id)}" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${expanded?(sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'):''}</div></section>`;
   }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section data-region-key="unfiled" class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search))));
   if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)MoyaiRegions.sync(list, `<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`);
-  if(search&&!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length){
-    MoyaiRegions.sync(list, '<p class="sidebar-empty" role="status">No matching folders, sessions or messages. <button class="quiet" data-search-clear>Clear search</button></p>');
-    list.querySelector('[data-search-clear]').onclick=()=>{$('#session-search').value='';changeSessionSearch();$('#session-search').focus();};
-  }
   if(state.sessionSearchError){
     const notice=`<p class="sidebar-empty" role="status">Sessions could not ${state.runs.length?'refresh':'load'}. <button class="quiet" data-search-retry>Retry</button></p>`;
     if(state.runs.length)MoyaiUI.insert(list, 'afterbegin', notice);else MoyaiRegions.sync(list, notice);
@@ -219,11 +214,12 @@ function renderSidebar(){
   if(focused)list.querySelector(`[${focused[0]}="${CSS.escape(focused[1])}"]`)?.focus();
 }
 function setView(view,title){
+  if(typeof commandPalette!=='undefined')commandPalette?.close();
   state.skillComposer?.destroy();state.skillComposer=null;
   state.attachments?.destroy();state.attachments=null;
   document.body.classList.toggle('chat-view',view==='chat');
   document.body.classList.toggle('home-view',view==='tasks');
-  document.body.classList.toggle('settings-view',settingsViews.has(view));
+  document.querySelectorAll('#sidebar, .workspace').forEach(root=>root.classList.toggle('settings-view',settingsViews.has(view)));
   $('#settings-navigation').hidden=!settingsViews.has(view);
   if(settingsViews.has(view))updateSettingsNavigation();
   document.title = title ? `${title} · Moyai` : 'Moyai';
@@ -273,27 +269,20 @@ async function navigate(view,initialConfig) {
   }
 }
 async function refreshRuns(){
-  const refresh=++state.runsRefresh,search=state.sessionSearch||'',focus=state.selected||parseSessionLink(location.hash)?.runId||'';
-  const params=new URLSearchParams({scope:state.role==='admin'&&state.sessionScope==='all'?'all':'mine'});
-  if(focus)params.set('focus',focus);if(search)params.set('search',search);
+  const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';
+  const params=new URLSearchParams({scope:sessionListScope()});
+  if(focus)params.set('focus',focus);
   try{
     const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);
-    if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
+    if(refresh!==state.runsRefresh)return;
     if(state.selected&&focus!==state.selected&&!sessionRows(runs).some(run=>run.id===state.selected))return refreshRuns();
     state.runs=runs;state.folders=folders.folders;state.sessionSearchLoading=false;state.sessionSearchError=false;state.revealSessionAncestors?.();renderSidebar();
   }catch(error){
-    if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
+    if(refresh!==state.runsRefresh)return;
     state.sessionSearchLoading=false;state.sessionSearchError=true;renderSidebar();throw error;
   }
 }
-function changeSessionSearch(){
-  const search=($('#session-search').value||'').trim().toLowerCase();
-  clearTimeout(state.sessionSearchTimer);
-  // Invalidate immediately: an old response can arrive during the debounce.
-  state.sessionSearch=search;state.runsRefresh++;state.runs=[];
-  state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
-  state.sessionSearchTimer=setTimeout(()=>refreshRuns().catch(()=>{}),search?200:0);
-}
+function sessionListScope(){return state.role==='admin'&&state.sessionScope==='all'?'all':'mine';}
 function restoreSessionScope(){
   const canViewAll=state.authenticated&&state.role==='admin';
   state.sessionScope='mine';
@@ -336,6 +325,7 @@ function renderPrWriteAccess(run){
 }
 
 async function changeSessionScope(){
+  if(typeof commandPalette!=='undefined')commandPalette?.close();
   state.sessionScope=state.role==='admin'&&$('#session-scope').value==='all'?'all':'mine';
   $('#session-scope').value=state.sessionScope;
   try{localStorage.setItem(state.sessionScopeKey,state.sessionScope);}catch{}
@@ -812,12 +802,25 @@ $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
 bindSessionFolderDragDrop($('#session-list'));
 $('#session-scope').onchange=changeSessionScope;
-$('#search-sessions').setAttribute('aria-controls','session-search-field');
+commandPalette=createCommandPalette();
+$('#new-task kbd').textContent=commandPalette.modifier+'⇧O';
+$('#new-task').setAttribute('aria-keyshortcuts','Meta+Shift+O Control+Shift+O');
+$('#command-menu kbd').textContent=commandPalette.modifier+'K';
+$('#command-menu').setAttribute('aria-keyshortcuts','Meta+K Control+K');
+$('#command-menu').onclick=()=>commandPalette.open();
+$('#search-sessions').setAttribute('aria-controls','command-palette');
+$('#search-sessions').setAttribute('aria-haspopup','dialog');
 $('#search-sessions').setAttribute('aria-expanded','false');
-$('#session-search').oninput=changeSessionSearch;
-$('#session-search').onkeydown=e=>{if(e.key==='Escape'){e.stopPropagation();$('#session-search').value='';changeSessionSearch();closeSessionSearch();$('#search-sessions').focus();}};
-const wideRail=()=>!matchMedia('(max-width:850px)').matches;$('#open-sidebar').onclick=()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);};$('#search-sessions').onclick=()=>{if(!wideRail())setSidebar(true);openSessionSearch();};$('#session-search').onblur=closeSessionSearch;$('#close-sidebar').onclick=()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);};$('#sidebar-scrim').onclick=()=>setSidebar(false);
-window.addEventListener('keydown',e=>{if(e.defaultPrevented)return;if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();$('#new-task').click();}});
+const wideRail=()=>!matchMedia('(max-width:850px)').matches;$('#open-sidebar').onclick=()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);};$('#search-sessions').addEventListener('click',()=>commandPalette.open('sessions'));$('#close-sidebar').onclick=()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);};$('#sidebar-scrim').onclick=()=>setSidebar(false);
+window.addEventListener('keydown',e=>{
+  if(e.defaultPrevented||e.isComposing||e.repeat)return;
+  const shortcut=(e.metaKey||e.ctrlKey)&&!e.altKey;
+  if(shortcut&&!e.shiftKey&&e.key.toLowerCase()==='k'&&state.csrf){e.preventDefault();commandPalette.toggle();return;}
+  const overlay=document.querySelector('[data-slot="dialog-content"]');
+  if(shortcut&&e.shiftKey&&e.key.toLowerCase()==='o'&&state.csrf&&(!overlay||overlay.dataset.dialogId==='command-palette')){e.preventDefault();commandPalette.close();$('#new-task').click();return;}
+  if(overlay)return;
+  if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}
+});
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
   if(!state.csrf)return;
