@@ -1,4 +1,5 @@
 """Exercise process reuse with pinned Codex, real MCP, and scripted inference."""
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -269,3 +270,63 @@ def test_entrypoint_always_closes_relay_without_changing_turn_outcome(monkeypatc
     else:
         assert agent.run(spec) == 0
     assert calls == (['turn'] if turn_failed else ['turn', 'final']) + ['lease', 'relay']
+
+
+@pytest.mark.parametrize('phase', ['unload', 'sdk_exit', 'lease_release'])
+def test_task_deadline_excludes_runtime_teardown(tmp_path, monkeypatch, runtime_root, phase):
+    from openai_codex.async_client import AsyncCodexClient
+    timeout, offload = asyncio.timeout, asyncio.to_thread
+    request, sdk_exit = AsyncCodexClient.request, AsyncCodexClient.__aexit__
+    deadlines, injected = [], []
+
+    def task_timeout(seconds):
+        scope = timeout(seconds)
+        if seconds and seconds > 5:
+            deadlines.append(scope)
+        return scope
+
+    async def expire_at_cleanup():
+        injected.append(phase)
+        assert deadlines, 'The real invocation deadline must be installed'
+        try:
+            deadlines[0].reschedule(asyncio.get_running_loop().time())
+        except RuntimeError:
+            pass  # Correct: the execution deadline has already left its scope.
+        # Deliver an active deadline before letting this teardown step finish.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    async def cleanup_request(self, method, *args, **kwargs):
+        if method == 'thread/unsubscribe':
+            if phase == 'unload':
+                await expire_at_cleanup()
+            if phase == 'lease_release':
+                raise OSError('Discard runtime to exercise lease release')
+        return await request(self, method, *args, **kwargs)
+
+    async def close_sdk(self, *args):
+        if phase == 'sdk_exit':
+            await expire_at_cleanup()
+        await sdk_exit(self, *args)
+
+    async def close_worker(function, *args, **kwargs):
+        if (phase == 'lease_release' and isinstance(getattr(function, '__self__', None), RuntimeLease)
+                and function.__name__ == 'close'):
+            await expire_at_cleanup()  # Before the worker actually owns cleanup.
+        return await offload(function, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(asyncio, 'timeout', task_timeout)
+        patch.setattr(asyncio, 'to_thread', close_worker)
+        patch.setattr(AsyncCodexClient, 'request', cleanup_request)
+        patch.setattr(AsyncCodexClient, '__aexit__', close_sdk)
+        proof, requests, result = reuse_case(tmp_path, patch, runtime_root)
+    assert injected == [phase]
+    assert result['completed'] and not result['failed'], result
+    assert result['final_response'] == 'Tools were ready before the first request.'
+    assert proof['tool_calls'] == ['echo'] and len(requests) == 2
+    assert not deadlines[0].expired()
+    replacement, _, outcome = reuse_case(tmp_path, monkeypatch, runtime_root)
+    assert replacement['completed'], outcome
+    assert (replacement['pid'] == proof['pid']) == (phase != 'lease_release')
+    print(f'PASS {phase}: execution deadline excludes teardown; answer preserved; lease released.')

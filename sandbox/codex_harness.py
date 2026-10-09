@@ -209,18 +209,34 @@ class CodexAgent(HarnessAgent):
                                 break
                             await asyncio.sleep(.01)
         finally:
-            clean = False
-            try:
-                await stack.aclose()
-                clean = unloaded
-            except Exception:
-                pass
-            finally:
-                lease.clean = clean
-                if not clean:
-                    self.context.relay.codex_runtime = None
-                    with suppress(Exception):
-                        await asyncio.to_thread(lease.close)
+            original_error, cancelled = sys.exception(), None
+
+            async def release():
+                clean = False
+                try:
+                    await stack.aclose()
+                    clean = unloaded and cancelled is None
+                except (Exception, asyncio.CancelledError):
+                    pass
+                finally:
+                    lease.clean = clean
+                    if not clean:
+                        with suppress(Exception):
+                            await asyncio.to_thread(lease.close)
+                            self.context.relay.codex_runtime = None
+
+            # Shield and join the owned cleanup, including repeated cancellation.
+            # Keep the lease attached until close finishes so a failed release
+            # still has the synchronous entrypoint as its final owner.
+            cleanup = asyncio.create_task(release())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            cleanup.result()
+            if cancelled is not None and original_error is None:
+                raise cancelled
 
     def record_item(self, item, *, completed):
         kind = item.get('type')
@@ -468,8 +484,11 @@ class CodexAgent(HarnessAgent):
         # journal crosses requester/model changes and filesystem checkpoints.
         try:
             with tempfile.TemporaryDirectory(prefix='moyai-codex-') as home:
-                async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
-                    async with self.native_client(home) as client:
+                # The task deadline covers startup and execution. Optional
+                # teardown runs after that deadline scope has exited.
+                async with AsyncExitStack() as clients:
+                    async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
+                        client = await clients.enter_async_context(self.native_client(home))
                         await client.initialize()
                         thread = await client.thread_start({
                             'model': self.context.spec['model'].removeprefix('openai/'), 'modelProvider': 'moyai',

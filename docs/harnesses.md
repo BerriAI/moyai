@@ -86,6 +86,9 @@ runtime failures after admission do not introduce an automatic turn replay.
 Unload, SDK shutdown and lease-release errors disable reuse without changing a
 completed answer or replacing the original execution error. Resource cleanup is
 independent, and lease cleanup cannot prevent the broker relay from closing.
+The task deadline covers startup and execution, then exits before teardown.
+Cancellation during teardown waits for owned SDK/lease cleanup before propagating;
+the lease remains attached until release succeeds, preserving the entrypoint fallback.
 Orphaned native files from filesystem snapshots are removed before workspace
 preparation, including on cold runs and delegated workers.
 `CODEX_RUNTIME_REUSE=false` disables prewarming and reuse.

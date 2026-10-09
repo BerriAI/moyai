@@ -138,7 +138,114 @@ def test_warm_teardown_preserves_original_execution_error(codex_agent, monkeypat
         asyncio.run(execute())
     assert caught.value is original
     assert closed == ['lease'] and observed.exits == [0]
-    assert not lease.clean and agent.context.relay.codex_runtime is None
+    assert not lease.clean and agent.context.relay.codex_runtime is lease
+
+
+@pytest.mark.parametrize('phase', ['sdk_exit', 'lease_release'])
+@pytest.mark.parametrize('error_type', [None, ValueError, asyncio.CancelledError])
+def test_cancellation_during_teardown_keeps_lease_owned_until_released(
+        codex_agent, monkeypatch, tmp_path, phase, error_type):
+    agent, _, _ = codex_agent
+    released = []
+
+    async def stream():
+        yield None
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    from openai_codex.async_client import AsyncCodexClient
+    sdk_exit, offload = AsyncCodexClient.__aexit__, asyncio.to_thread
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    async def pause():
+        entered.set()
+        await finish.wait()
+
+    async def close_sdk(self, *args):
+        if phase == 'sdk_exit':
+            await pause()
+        await sdk_exit(self, *args)
+
+    def close():
+        released.append('lease')
+
+    async def close_worker(function, *args, **kwargs):
+        if function is close and phase == 'lease_release':
+            await pause()  # Cancellation before the worker starts must not lose ownership.
+        return await offload(function, *args, **kwargs)
+
+    lease = SimpleNamespace(clean=False, close=close,
+        ready=lambda: {'socket': '/fixture/runtime.sock', 'catalog': '/fixture/models.json'})
+    agent.context.relay.codex_runtime = lease
+    monkeypatch.setattr(codex_harness, 'search_catalog', lambda *args, **kwargs: None)
+    monkeypatch.setattr(AsyncCodexClient, '__aexit__', close_sdk)
+    monkeypatch.setattr(asyncio, 'to_thread', close_worker)
+    original = error_type('Original execution error') if error_type else None
+
+    async def execute():
+        async with agent.native_client(tmp_path):
+            if original is not None:
+                raise original
+
+    async def exercise():
+        task = asyncio.create_task(execute())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            for _ in range(2):
+                task.cancel('External cancellation during teardown')
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+            assert agent.context.relay.codex_runtime is lease
+            assert not task.done(), 'Cleanup must finish before cancellation propagates'
+        finally:
+            finish.set()
+            with pytest.raises(error_type or asyncio.CancelledError) as caught:
+                await task
+        if original is not None:
+            assert caught.value is original
+        assert released == ['lease'] and observed.exits == [0]
+        assert agent.context.relay.codex_runtime is None
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('phase', ['initialize', 'turn'])
+def test_warm_execution_deadline_still_stops_active_work(codex_agent, monkeypatch, phase):
+    agent, _, _ = codex_agent
+    agent.context.spec['timeout'] = 10
+    timeout, scopes, released, reached = asyncio.timeout, [], [], []
+
+    def task_timeout(seconds):
+        scope = timeout(seconds)
+        if seconds == 10:
+            scopes.append(scope)
+        return scope
+
+    async def expire():
+        reached.append(phase)
+        scopes[0].reschedule(asyncio.get_running_loop().time())
+        await asyncio.Event().wait()
+
+    async def stream():
+        await expire()
+        yield None  # Never reached: execution must time out.
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    from openai_codex.async_client import AsyncCodexClient
+    if phase == 'initialize':
+        async def initialize(self):
+            await expire()
+        monkeypatch.setattr(AsyncCodexClient, 'initialize', initialize)
+    lease = SimpleNamespace(clean=False, close=lambda: released.append('lease'),
+        ready=lambda: {'socket': '/fixture/runtime.sock', 'catalog': '/fixture/models.json'})
+    agent.context.relay.codex_runtime = lease
+    monkeypatch.setattr(codex_harness, 'search_catalog', lambda *args, **kwargs: None)
+    monkeypatch.setattr(asyncio, 'timeout', task_timeout)
+    result = asyncio.run(agent._run('Work', 'Moyai'))
+    assert result['failed'] and not result['completed']
+    assert reached == [phase] and scopes[0].expired()
+    assert observed.exits == [int(phase == 'turn')]
+    assert released == ['lease'] and not lease.clean
+    assert agent.context.relay.codex_runtime is None
 
 
 @pytest.mark.parametrize('delivery', ['active', 'ended', 'accepted-at-finish', 'unknown-error'])
