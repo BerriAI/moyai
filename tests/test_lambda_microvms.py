@@ -115,6 +115,18 @@ async def test_sdk_contract_and_proxy_auth(settings, monkeypatch):
         stub.assert_no_pending_responses()
 
 
+async def test_checkpoint_upload_uses_sigv4_with_checksum_and_encryption_headers(settings):
+    from urllib.parse import parse_qs, urlsplit
+    backend = LambdaProvider(settings)
+    backend.session = boto3.Session(aws_access_key_id='test', aws_secret_access_key='test', region_name='us-east-1')
+    url = await backend.url('put_object', 'test/checkpoints/one.tar.gz',
+                            ChecksumSHA256='checksum', ServerSideEncryption='AES256')
+    query = parse_qs(urlsplit(url).query)
+    assert query['X-Amz-Algorithm'] == ['AWS4-HMAC-SHA256']
+    assert set(query['X-Amz-SignedHeaders'][0].split(';')) == {
+        'host', 'x-amz-checksum-sha256', 'x-amz-server-side-encryption'}
+
+
 @pytest.mark.parametrize('path', ['/start', '/computer', '/checkpoint', '/initialize'])
 @pytest.mark.parametrize('failure', ['connection', 'gateway'])
 async def test_uncertain_mutation_is_not_retried(settings, monkeypatch, path, failure):
