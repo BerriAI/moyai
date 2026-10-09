@@ -3,6 +3,7 @@ const vm = require('node:vm');
 // Controller tests use lightweight DOM doubles. Actual React/Radix behavior is
 // covered by tests/browser/shadcn_ui.cjs against the production bundle.
 function install(context) {
+  context.MoyaiRegions ||= {sync: (host, html) => { host.innerHTML = html; }};
   context.MoyaiUI ||= {
     render: (host, html) => { host.innerHTML = html; },
     replace: (host, html) => { host.outerHTML = html; },

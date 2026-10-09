@@ -5,7 +5,7 @@ const vm = require('./helpers/ui-vm.cjs');
 
 // Run the browser's stream controller with a transport that can permanently
 // close on a deployment's HTTP error, as native EventSource does.
-function browser() {
+function browser(run={id:'chat-a',events:[{id:10}]}) {
   const script = readFileSync('app/static/app.js', 'utf8');
   const sources = [], timers = new Map(), rendered = [], refreshes = [], live = [];
   const notice = {hidden: true}, content = {innerHTML:'Previous conversation'}, navigations = [], notices = [];
@@ -38,10 +38,31 @@ function browser() {
   vm.runInContext(
     script.slice(script.indexOf('function stopStream()'), script.indexOf('function sessionTitle(')) +
     script.slice(script.indexOf('function connectChatStream('), script.indexOf('function updateChatStatus(')), context);
-  context.connectChatStream({id: 'chat-a', events: [{id: 10}]});
+  context.connectChatStream(run);
   const retry = () => {const [id, fn] = timers.entries().next().value; timers.delete(id); fn();};
   return {context, state, sources, timers, rendered, refreshes, notice, retry, live, content, navigations, notices};
 }
+
+test('the first stream starts after the summary snapshot without refetching or replaying deferred history',()=>{
+  const b=browser({id:'chat-a',events:[{id:10}],activity_cursor:100});
+  assert.match(b.sources[0].url,/after=100$/);
+  b.sources[0].onopen();assert.deepEqual(b.refreshes,[]);
+  b.sources[0].onmessage({data:JSON.stringify({id:99,kind:'tool'})});
+  b.sources[0].onmessage({data:JSON.stringify({id:101,kind:'tool'})});
+  assert.deepEqual(b.live.filter(update=>update.event).map(update=>update.event.id),[101]);
+});
+
+test('reconnect replays from the last received event even when detail refresh has a newer snapshot cursor',()=>{
+  const b=browser({id:'chat-a',events:[{id:10}],activity_cursor:100});
+  b.sources[0].onopen();b.sources[0].onmessage({data:JSON.stringify({id:101,kind:'tool'})});
+  b.sources[0].onerror();b.retry();assert.match(b.sources[1].url,/after=101$/);
+  b.sources[1].onopen();assert.deepEqual(b.refreshes,['chat-a']);
+  b.state.chatRun={id:'chat-a',activity_cursor:500,events:[{id:500,kind:'chat'}]};
+  b.sources[1].onerror();b.retry();assert.match(b.sources[2].url,/after=101$/);
+  b.sources[2].onopen();b.sources[2].onmessage({data:JSON.stringify({id:102,kind:'tool'})});
+  assert.deepEqual(b.live.filter(update=>update.event).map(update=>update.event.id),[101,102]);
+  assert.deepEqual(b.refreshes,['chat-a','chat-a']);
+});
 
 test('recovers after repeated deployment errors, resumes the cursor, and preserves the draft', () => {
   const b = browser();

@@ -375,3 +375,5 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .skill-icon-field select {flex:1;min-width:0}
 .skill-title>.skill-symbol,.skill-choice strong>.skill-symbol {margin-right:6px}
 @media(max-width:850px){.composer .skill-editor-input {font-size:16px;max-height:min(200px,30dvh)}}
+
+.chat-loading{padding:40px;color:var(--muted)}

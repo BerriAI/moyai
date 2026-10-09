@@ -27,7 +27,7 @@ async function api(path, options = {}) {
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
-function stopStream(){ resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.sessionHeaderRun = null; savedFiles.reset(); }
+function stopStream(){ resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.revealSessionAncestors=null; state.sessionHeaderRun = null; savedFiles.reset(); }
 async function showUnavailableSession(id){
   if(state.selected!==id)return;
   MoyaiUI.render($('#content'), '<p role="status">This session is no longer available.</p>');
@@ -172,11 +172,11 @@ function sidebarSections(runs,folders,search){
 function sidebarPersonalSection(id,label,icon,groups,search){
   if(!groups.length)return '';
   const expanded=!!search||!state.closedFolders.has(id);
-  return `<section class="session-personal-section"><button class="session-section-heading" data-toggle-folder="${id}" aria-expanded="${expanded}" aria-controls="section-${id}">${globalThis.MoyaiIcon?.(icon,16)||''}<span>${label}</span><span class="session-section-count">${groups.length}</span>${globalThis.MoyaiIcon?.('chevron',12)||''}</button><div id="section-${id}" ${expanded?'':'hidden'}>${sidebarRenderSessions(groups,search)}</div></section>`;
+  return `<section class="session-personal-section" data-region-key="section:${esc(id)}"><button class="session-section-heading" data-toggle-folder="${id}" aria-expanded="${expanded}" aria-controls="section-${id}">${globalThis.MoyaiIcon?.(icon,16)||''}<span>${label}</span><span class="session-section-count">${groups.length}</span>${globalThis.MoyaiIcon?.('chevron',12)||''}</button><div id="section-${id}" data-region-key="body:${esc(id)}" ${expanded?'':'hidden'}>${expanded?sidebarRenderSessions(groups,search):''}</div></section>`;
 }
 function sidebarRenderSessions(groups,search,child=false){return groups.map(parent=>{
     const hasChildren=(parent.totalChildren??parent.children?.length??0)>0,expanded=!!search||state.expandedParents.has(parent.id);
-    return `<div class="session-group"><div class="parent-session">${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent,child)}${child?'':`<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button>`}</div>${hasChildren?`<div class="child-sessions" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${sidebarRenderSessions(parent.children,search,true)}</div>`:''}</div>`;
+    return `<div class="session-group" data-region-key="session:${esc(parent.id)}"><div class="parent-session" data-region-key="row:${esc(parent.id)}" data-region-leaf>${hasChildren?`<button class="agent-disclosure" data-toggle-agents="${esc(parent.id)}" aria-label="${expanded?'Collapse':'Expand'} agents for ${esc(sessionTitle(parent))}" aria-expanded="${expanded}" aria-controls="children-${esc(parent.id)}"><span aria-hidden="true">${expanded?'⌄':'›'}</span></button>`:'<span class="agent-disclosure-space"></span>'}${sidebarRow(parent,child)}${child?'':`<button class="session-move" data-session-actions="${esc(parent.id)}" title="Session actions" aria-label="Session actions for ${esc(sessionTitle(parent))}" aria-controls="session-actions">${globalThis.MoyaiIcon?.('more',16)||'⋯'}</button>`}</div>${hasChildren?`<div class="child-sessions" data-region-key="children:${esc(parent.id)}" id="children-${esc(parent.id)}" role="group" aria-label="Agents for ${esc(sessionTitle(parent))}" ${expanded?'':'hidden'}>${expanded?sidebarRenderSessions(parent.children,search,true):''}</div>`:''}</div>`;
   }).join('');}
 function renderSidebar(){
   const summaries=sessionRows(state.runs),selected=summaries.find(run=>run.id===state.selected);
@@ -198,21 +198,21 @@ function renderSidebar(){
   const focusAttrs=['data-toggle-agents','data-toggle-folder','data-edit-folder','data-session-actions','data-run'];
   const focused=focusAttrs.map(attr=>[attr,document.activeElement?.getAttribute(attr)]).find(([,value])=>value);
   if(state.sessionSearchLoading){
-    MoyaiUI.render(list, `<p class="sidebar-empty" role="status">${search?'Searching sessions and messages…':'Loading sessions…'}</p>`);
+    MoyaiRegions.sync(list, `<p class="sidebar-empty" role="status">${search?'Searching sessions and messages…':'Loading sessions…'}</p>`);
     return;
   }
-  MoyaiUI.render(list, sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
+  MoyaiRegions.sync(list, sidebarPersonalSection('pinned','Pinned','pin',sections.pinned,search)+sections.folders.map(folder=>{
     const expanded=!!search||!state.closedFolders.has(folder.id);
-    return `<section class="session-folder" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'}</div></section>`;
-  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search))));
-  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)MoyaiUI.render(list, `<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`);
+    return `<section class="session-folder" data-region-key="folder:${esc(folder.id)}" data-drop-folder="${esc(folder.id)}"><div class="folder-heading"><button class="folder-toggle" data-toggle-folder="${esc(folder.id)}" aria-expanded="${expanded}" aria-controls="folder-${esc(folder.id)}"><span class="folder-chevron" aria-hidden="true">${expanded?'⌄':'›'}</span>${sessionFolderIcon}<span class="folder-name">${esc(folder.name)}</span><span class="folder-count">${folder.groups.length}</span></button><button class="folder-menu" data-edit-folder="${esc(folder.id)}" title="Rename or remove folder" aria-label="Rename or remove ${esc(folder.name)}">⋯</button></div><div class="folder-sessions" data-region-key="folder-body:${esc(folder.id)}" id="folder-${esc(folder.id)}" ${expanded?'':'hidden'}>${expanded?(sidebarRenderSessions(folder.groups,search)||'<p class="folder-empty">Drop a session here or use its ⋯ menu.</p>'):''}</div></section>`;
+  }).join('')+sidebarPersonalSection('participated','Participated','participants',sections.participated,search)+(state.folders.length?`<section data-region-key="unfiled" class="unfiled-sessions ${sections.recent.length?'':'unfiled-empty'}" data-drop-folder=""><div class="unfiled-heading">Recent · not in a folder</div>${sidebarRenderSessions(sections.recent,search)||'<p class="folder-empty">Drop here to remove from folder.</p>'}</section>`:(sections.pinned.length||sections.participated.length?sidebarPersonalSection('recent','Recent','clock',sections.recent,search):sidebarRenderSessions(sections.recent,search))));
+  if(!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length)MoyaiRegions.sync(list, `<p class="sidebar-empty">${search?'No matching folders, sessions or agents.':'Your conversations will appear here.'}</p>`);
   if(search&&!sections.pinned.length&&!sections.participated.length&&!sections.folders.length&&!sections.recent.length){
-    MoyaiUI.render(list, '<p class="sidebar-empty" role="status">No matching folders, sessions or messages. <button class="quiet" data-search-clear>Clear search</button></p>');
+    MoyaiRegions.sync(list, '<p class="sidebar-empty" role="status">No matching folders, sessions or messages. <button class="quiet" data-search-clear>Clear search</button></p>');
     list.querySelector('[data-search-clear]').onclick=()=>{$('#session-search').value='';changeSessionSearch();$('#session-search').focus();};
   }
   if(state.sessionSearchError){
     const notice=`<p class="sidebar-empty" role="status">Sessions could not ${state.runs.length?'refresh':'load'}. <button class="quiet" data-search-retry>Retry</button></p>`;
-    if(state.runs.length)MoyaiUI.insert(list, 'afterbegin', notice);else MoyaiUI.render(list, notice);
+    if(state.runs.length)MoyaiUI.insert(list, 'afterbegin', notice);else MoyaiRegions.sync(list, notice);
     list.querySelector('[data-search-retry]').onclick=()=>refreshRuns().catch(()=>{});
   }
   list.scrollTop=scroll;
@@ -249,7 +249,7 @@ function bindComposer(input,form){
   input.addEventListener('keydown',e=>{if(form.inert)return;if(skills.keydown(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();const now=(e.ctrlKey||e.metaKey)&&input.id==='followup';if(now&&!input.value.trim()&&!state.attachments.hasFiles()){state.messageQueue?.sendFirst();return;}if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit(now?form.querySelector('[data-send-now]'):undefined);}});
   autoSize(input);
 }
-async function navigate(view) {
+async function navigate(view,initialConfig) {
   if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
@@ -260,7 +260,7 @@ async function navigate(view) {
     $('#content').scrollTop=0;
   }
   try {
-  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome();else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
+  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome(initialConfig);else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
   } catch(error) {
     if(version!==state.pageVersion)return;
     if(!settingsViews.has(view))throw error;
@@ -279,7 +279,8 @@ async function refreshRuns(){
   try{
     const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);
     if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
-    state.runs=runs;state.folders=folders.folders;state.sessionSearchLoading=false;state.sessionSearchError=false;renderSidebar();
+    if(state.selected&&focus!==state.selected&&!sessionRows(runs).some(run=>run.id===state.selected))return refreshRuns();
+    state.runs=runs;state.folders=folders.folders;state.sessionSearchLoading=false;state.sessionSearchError=false;state.revealSessionAncestors?.();renderSidebar();
   }catch(error){
     if(refresh!==state.runsRefresh||search!==(state.sessionSearch||''))return;
     state.sessionSearchLoading=false;state.sessionSearchError=true;renderSidebar();throw error;
@@ -341,10 +342,12 @@ async function changeSessionScope(){
   state.runs=[];state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
   try{await refreshRuns();}catch(error){showError(error);}
 }
-async function renderHome(){
+async function renderHome(initialConfig){
   const version=state.pageVersion;
   await modelPreferenceSave;
-  const [,connections,environments,config]=await Promise.all([refreshRuns(),api('/api/connections'),api('/api/environments'),api('/api/config')]);
+  if(version!==state.pageVersion)return;
+  if(!initialConfig)refreshRuns().catch(showError);
+  const [connections,environments,config]=await Promise.all([api('/api/connections'),api('/api/environments'),initialConfig||api('/api/config')]);
   if(version!==state.pageVersion)return;state.connections=connections;state.config=config;
   const apps=connections.filter(c=>c.connected&&c.enabled),draft=state.newDraft;
   MoyaiUI.render($('#content'), `<section class="new-conversation"><div class="welcome-mark"><img src="/static/favicon.svg?v=moyai-train-1" alt=""><span>Moyai</span></div><h1>What are we working on?</h1><p class="welcome-note">A teammate for your code, questions, and next steps.</p>
@@ -389,13 +392,34 @@ async function openRun(id,hash='#run='+id){
   if(link?.runId===id&&link.credentialId)state.credentialLink={...link,pageVersion:version};
   const targetHash=link?.runId===id?link.hash:'#run='+id;
   history.replaceState(null,'',targetHash);
+  const cachedTitle=sessionRows(state.runs).find(run=>run.id===id);
+  setView('chat',cachedTitle?sessionTitle(cachedTitle):'Loading conversation');
+  MoyaiUI.render($('#content'), '<div class="chat-loading" role="status">Loading conversation…</div>');
   let run;
-  try{run=await api(`/api/runs/${id}`);}catch(error){
+  try{[run]=await Promise.all([api(`/api/runs/${id}?activity=summary`),state.configReady]);}catch(error){
     if(version!==state.pageVersion)return;
     if(error.status===404){await showUnavailableSession(id);return;}
+    MoyaiUI.render($('#content'), '<div class="error-banner" role="alert">Could not load this conversation. <button data-retry-chat>Retry</button></div>');
+    $('#content [data-retry-chat]').onclick=()=>(state.configError?boot():openRun(id,hash)).catch(showError);
     throw error;
   }
-  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id?(run.workflow_root_id||run.parent_run_id):'';if(run.parent_run_id||run.agents?.groups?.length)state.expandedParents.add(run.parent_run_id||id);if(!state.runs.some(r=>r.id===(run.workflow_root_id||run.parent_run_id||id)))await refreshRuns();if(version!==state.pageVersion)return;let ancestor=run.parent_run_id;while(ancestor){state.expandedParents.add(ancestor);ancestor=sessionRows(state.runs).find(r=>r.id===ancestor)?.parent_run_id;}
+  if(version!==state.pageVersion)return;state.activeParentId=run.parent_run_id?(run.workflow_root_id||run.parent_run_id):'';
+  if(!run.parent_run_id&&run.agents?.groups?.length)state.expandedParents.add(id);
+  const revealed=new Set();
+  state.revealSessionAncestors=()=>{
+    if(version!==state.pageVersion||state.selected!==id)return;
+    const rows=new Map(sessionRows(state.runs).map(row=>[row.id,row])),visited=new Set();let ancestor=run.parent_run_id;
+    while(ancestor&&!visited.has(ancestor)){
+      visited.add(ancestor);
+      // Reveal each ancestor once for this route, including when its topology
+      // arrives later. A subsequent manual collapse remains the user's choice.
+      if(!revealed.has(ancestor)){state.expandedParents.add(ancestor);revealed.add(ancestor);}
+      const parent=rows.get(ancestor);if(!parent)return;ancestor=parent.parent_run_id;
+    }
+    state.revealSessionAncestors=null;
+  };
+  state.revealSessionAncestors();
+  if(!state.sessionSearchLoading&&!state.runs.some(r=>r.id===(run.workflow_root_id||run.parent_run_id||id)))refreshRuns().catch(showError);
   if(sessionEdits!==(state.sessionEdits||0))return openRun(id,hash);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
   if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',targetHash);
@@ -447,7 +471,7 @@ function renderChat(run){
   MoyaiUI.render($('#content'), `<div class="chat-layout"><section class="chat-panel"><div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div><button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button><div class="chat-bottom"><div id="approvals"></div><div id="pr-write-access"></div><div class="chat-working" id="chat-working" role="status"></div><section id="message-queue" class="message-queue" aria-label="Queued messages" hidden></section><form id="message-form" class="composer reply-composer"><label class="sr-only" for="followup">Message Moyai</label><textarea id="followup" maxlength="16000" required rows="1" placeholder="Respond to Moyai or ask something else"></textarea><div class="composer-toolbar"><button type="button" class="quiet skill-picker-button" data-skill-picker="followup" aria-label="Choose a skill" title="Skills · or type /">${icon('slash',16)}</button>${run.mode==='demo'?'<span class="composer-model">Demo session</span>':modelPicker('chat-model',state.modelDrafts[id]||run.model||state.config.model,false,run.harness)}<span id="connection-state" class="connection-notice" hidden>Reconnecting…</span><button id="stop-response" class="stop-button" type="button" aria-label="Stop response" title="Stop response"><span aria-hidden="true">■</span></button><button type="submit" class="send-button" aria-label="Send message" title="Send message">${icon('up',18)}</button><button type="submit" data-send-now hidden>Send now</button></div></form><div class="composer-caption"><span id="queue-note">Your conversation and files stay here.</span><span>Type / for skills · Shift + Enter for a new line</span></div></div></section>
   <aside class="session-side" id="session-details" aria-label="Session details" hidden><div class="details-heading"><h2>Session activity</h2><button id="close-details" class="icon-button" aria-label="Close session details">×</button></div><div class="session-facts">${run.owner?`<div class="detail-row"><span>Started by</span><span>${esc(run.owner.email||run.owner.name)}</span></div>`:''}${run.project_environment?.name?`<div class="detail-row"><span>Project environment</span><span>${esc(run.project_environment.name)} · ${esc(run.project_environment.commit_sha.slice(0,8))}</span></div>`:''}<div class="detail-row"><span>Connected apps</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None selected'}</span></div><div class="detail-row"><span>Workspace</span><span id="saved-workspace"></span></div><div id="artifact-area"></div></div><div id="slack-context"></div><div id="agent-details"></div><section class="activity-panel"><h3>Progress</h3><div class="timeline" id="timeline">${run.events.filter(e=>!['chat','result'].includes(e.kind)).map(eventHTML).join('')}</div></section></aside></div>`);
   bindSessionHeaderActions(run);
-  workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,statusFor:sessionStatus,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onCreated:()=>refreshRuns().catch(showError)});
+  workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,statusFor:sessionStatus,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onActivity:loadAllActivity,onCreated:()=>refreshRuns().catch(showError)});
   $('#workspace-panel-toggle').onclick=()=>workspacePanel.toggle();
   $('#pull-requests-button').onclick=()=>workspacePanel.open('pulls');
   $('#subagents-button').onclick=()=>workspacePanel.open('agents');
@@ -483,12 +507,14 @@ function renderChat(run){
   connectChatStream(run);
 }
 function connectChatStream(run){
-  const id=run.id;let cursor=run.events.at(-1)?.id||0;
+  const id=run.id;let cursor=Math.max(run.activity_cursor||0,run.events.at(-1)?.id||0);
+  let reconnect=false;
   const connect=()=>{
     if(state.selected!==id)return;
     const source=new EventSource(`/api/runs/${id}/events?after=${cursor}`);state.source=source;
     const current=()=>state.selected===id&&state.source===source;
-    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;renderLiveWork(null,false);refreshChat(id).catch(showError);}};
+    let opened=false;
+    source.onopen=()=>{if(current()){$('#connection-state').hidden=true;renderLiveWork(null,false);if(opened||reconnect)refreshChat(id).catch(showError);opened=true;}};
     source.onmessage=e=>{
       if(!current())return;
       const event=JSON.parse(e.data);if(event.id<=cursor)return;cursor=event.id;renderLiveWork(event,false);
@@ -503,7 +529,9 @@ function connectChatStream(run){
       $('#connection-state').hidden=false;renderLiveWork(null,true);
       // HTTP errors during a deploy can permanently close native EventSource.
       // Reopen from the last received event without replacing the composer.
-      source.close();clearTimeout(state.streamRetry);
+      reconnect=true;source.close();clearTimeout(state.streamRetry);
+      // Keep the last received cursor even if a detail refresh has a newer
+      // snapshot: the replay supplies events missed while disconnected.
       state.streamRetry=setTimeout(()=>{state.streamRetry=null;if(current())connect();},3000);
     };
   };
@@ -523,7 +551,7 @@ function syncChatComposer(run){
 }
 function updateChatStatus(run){
   syncChatComposer(run);
-  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
+  if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText,loadActivity});savedFiles.decorate($('#conversation'));}
   run=state.chatRun||run;
   if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').closest('.model-picker')?.querySelector('.provider-logo'),run.model);}
   MoyaiUI.render($('#run-status'), statusLabel(run.status));
@@ -576,7 +604,8 @@ function renderActivitySummary(run){
 function updateChat(run,initial=false){
   syncChatComposer(run);
   const previous=state.chatRun?.id===run.id?state.chatRun:null;
-  const snapshotCursor=run.events?.at(-1)?.id||0;
+  run.loaded_activity=[...new Set([...(run.loaded_activity||[]),...(previous?.loaded_activity||[])])];
+  const snapshotCursor=run.activity_cursor??run.events?.at(-1)?.id??0;
   run.events=[...new Map([...(run.events||[]),...(previous?.events||[])].map(event=>[event.id,event])).values()].sort((a,b)=>a.id-b.id);
   const goalEvent=run.events.findLast(event=>event.data?.phase==='goal'&&event.data.goal_version===1);
   if(goalEvent&&goalEvent.id>snapshotCursor)run.goal=goalEvent.data.goal;
@@ -587,10 +616,17 @@ function updateChat(run,initial=false){
   const signature=JSON.stringify(transcript);
   if(box.dataset.messages!==signature){
     box.dataset.messages=signature;
-    const activitySlots=new Map([...box.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-    MoyaiUI.render(box, `<div class="conversation-inner">${transcript.map((m,index)=>{const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;return `<article class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`;}).join('')}<div id="credential-requests"></div></div>`, { preserve: activitySlots.values() });
-    box.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=activitySlots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
-    MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText});
+    const previousTemplates=box.messageTemplates||new Map(),templates=new Map();
+    const messages=transcript.map((m,index)=>{
+      const failure=m.role==='assistant'&&['failed','cancelled','interrupted'].includes(m.status)?m.status:m.role==='assistant'&&['failed','cancelled','interrupted'].includes(transcript[index-1]?.status)?transcript[index-1].status:null;
+      const signature=JSON.stringify([m,failure,run.mode]),previous=previousTemplates.get(m.id);
+      const html=previous?.signature===signature?previous.html:`<article data-region-key="message:${esc(m.id)}" data-region-leaf class="chat-message ${m.role==='user'?'user':'assistant'} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?esc(m.user_name||'Earlier message'):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?esc(m.display_content??m.content):renderMarkdown(m.content)}</div>${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>`:''}</article>`;
+      templates.set(m.id,{signature,html});
+      return html+`${m.role==='user'?`<div data-region-key="activity:${esc(m.id)}" data-region-preserve data-activity-slot="${m.id}"></div>`:''}`;
+    }).join('');
+    box.messageTemplates=templates;
+    MoyaiRegions.sync(box, `<div class="conversation-inner" data-region-key="transcript">${messages}<div id="credential-requests" data-region-key="credentials" data-region-preserve></div></div>`);
+    MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText,loadActivity});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.copy-code').forEach(b=>b.onclick=()=>copyText(b.closest('.code-block').querySelector('code').textContent,b));
@@ -606,7 +642,7 @@ function renderLiveWork(event,disconnected){
   const run=state.chatRun;if(!run||run.id!==state.selected)return;
   run.activity_disconnected=disconnected;
   if(event&&!run.events.some(existing=>existing.id===event.id))run.events.push(event);
-  MoyaiActivity.sync($('#conversation'),run,{markdown:renderMarkdown,copy:copyText});
+  MoyaiActivity.sync($('#conversation'),run,{markdown:renderMarkdown,copy:copyText,loadActivity});
   savedFiles.decorate($('#conversation'));
   renderChatWorking(run);
 }
@@ -633,12 +669,46 @@ async function refreshChat(id){
   const page=state.pageVersion,version=state.chatRefresh=(state.chatRefresh||0)+1;
   const current=()=>page===state.pageVersion&&version===state.chatRefresh&&state.selected===id;
   let run;
-  try{run=await api(`/api/runs/${id}`);}catch(error){
+  try{run=await api(`/api/runs/${id}?activity=summary`);}catch(error){
     if(!current())return;
     if(error.status===404){await showUnavailableSession(id);return;}
     throw error;
   }
   if(current()&&$('#conversation'))updateChat(run);
+}
+async function loadActivity(turnId){
+  const id=state.selected,page=state.pageVersion,run=state.chatRun;
+  if(!run||run.id!==id)return;
+  if(run.loaded_activity?.includes(String(turnId)))return;
+  state.activityRequests??=new Map();
+  const key=page+':'+turnId;
+  if(state.activityRequests.has(key))return state.activityRequests.get(key);
+  const current=()=>page===state.pageVersion&&state.selected===id&&state.chatRun?.id===id;
+  const promise=(async()=>{
+    let after=0,until;const events=[];
+    do{
+      const params=new URLSearchParams({message_id:turnId,after});if(until!=null)params.set('until',until);
+      const result=await api(`/api/runs/${id}/activity?${params}`);
+      if(!current())return;
+      events.push(...result.events);until=result.until;
+      if(!result.has_more)break;
+      if(result.next_after<=after)throw new Error('Could not load work history. Please retry.');
+      after=result.next_after;
+    }while(current());
+    if(!current())return;
+    const updated=state.chatRun;
+    updated.events=[...new Map([...updated.events,...events].map(event=>[event.id,event])).values()].sort((a,b)=>a.id-b.id);
+    updated.loaded_activity=[...new Set([...(updated.loaded_activity||[]),String(turnId)])];
+    MoyaiActivity.sync($('#conversation'),updated,{markdown:renderMarkdown,copy:copyText,loadActivity});
+    savedFiles.decorate($('#conversation'));renderActivitySummary(updated);
+  })();
+  state.activityRequests.set(key,promise);
+  try{return await promise;}finally{state.activityRequests.delete(key);}
+}
+async function loadAllActivity(){
+  const run=state.chatRun,page=state.pageVersion;if(!run)return;
+  // One turn at a time keeps a large session from flooding the server.
+  for(const id of run.deferred_activity||[]){if(page!==state.pageVersion||state.chatRun?.id!==run.id)return;await loadActivity(id);}
 }
 function syncEventTimeline(target,events){
   const visible=MoyaiActivity.visibleEvents(events),ids=new Set(visible.map(event=>String(event.id)));
@@ -756,6 +826,7 @@ window.addEventListener('hashchange',()=>{
 });
 document.querySelector('.skip-link')?.addEventListener('click',event=>{event.preventDefault();$('#content').focus();});
 async function boot(){
+  let page=state.pageVersion,loadingChat=false;
   try{
     const session=await api('/api/session');applyUserSession(session);restoreSessionFolderView();
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
@@ -769,18 +840,33 @@ async function boot(){
       document.querySelectorAll('.rail button').forEach(b=>b.disabled=true);
       return;
     }
+    registerWebMCP();
     document.querySelectorAll('.rail button').forEach(b=>b.disabled=false);
-    [state.config,state.organization]=await Promise.all([api('/api/config'),api('/api/organization')]);await refreshRuns();
+    state.sessionSearchLoading=!state.runs.length;renderSidebar();
+    state.configError=null;
+    state.configReady=api('/api/config').then(config=>{state.config=config;}).catch(error=>{state.configError=error;throw error;});
+    api('/api/organization').then(value=>{state.organization=value;renderSidebar();}).catch(showError);
+    refreshRuns().catch(showError);
     $('#logout').hidden=!!session.local;
     if(!session.local){$('.rail-foot small').textContent=session.identity?session.identity.email:state.role==='admin'?'Organization admin':'Organization member';$('.rail-foot small').title=state.role==='admin'?'Organization admin':'Organization member';}
     $('#logout').onclick=async()=>{const button=$('#logout');button.disabled=true;try{const result=await api('/api/logout',{method:'POST'});if(result.logout_url==='/cdn-cgi/access/logout')location.assign(result.logout_url);else location.reload();}catch(error){button.disabled=false;showError(error);}};
-    const linkedRun=parseSessionLink(location.hash); if(linkedRun)await openRun(linkedRun.runId,linkedRun.hash);else await navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks');
+    // Navigation can supersede this route while authentication is pending,
+    // but identity, configuration and the sidebar still belong to the app.
+    if(page!==state.pageVersion){await state.configReady;return;}
+    const linkedRun=parseSessionLink(location.hash);
+    if(linkedRun){loadingChat=true;const opening=openRun(linkedRun.runId,linkedRun.hash);page=state.pageVersion;await opening;}
+    else {await state.configReady;if(page!==state.pageVersion)return;const navigation=navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks',state.config);page=state.pageVersion;await navigation;}
+    if(page!==state.pageVersion)return;
     if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');history.replaceState(null,'','/#connections');}
-    registerWebMCP();
-  }catch(e){MoyaiUI.render($('#content'), '<div class="error-banner">'+esc(e.message)+'</div>');}
+  }catch(e){
+    if(page!==state.pageVersion||loadingChat)return;
+    MoyaiUI.render($('#content'), '<div class="error-banner" role="alert">'+esc(e.message)+' <button data-retry-start>Retry</button></div>');
+    $('#content [data-retry-start]').onclick=()=>boot().catch(showError);
+  }
 }
 function registerWebMCP(){
-  if(!document.modelContext?.registerTool)return;
+  if(!state.authenticated||state.webMCPRegistered||!document.modelContext?.registerTool)return;
+  state.webMCPRegistered=true;
   const abort=new AbortController();window.addEventListener('pagehide',()=>abort.abort(),{once:true});
   const tools=[
     {name:'list_workspace_tasks',description:'List the latest tasks in this workspace.',inputSchema:{type:'object',properties:{},additionalProperties:false},annotations:{readOnlyHint:true},execute:async()=>api('/api/runs')},

@@ -170,7 +170,7 @@ function composerHarness(){
   const conversation=node('#conversation');conversation.dataset.messages='[]';conversation.scrollHeight=conversation.scrollTop=conversation.clientHeight=0;
   const state={selected:'one',sending:new Set(),modelDrafts:{},drafts:{one:input.value},config:{},pendingMessages:{},attachments:{ids:()=>[],clear(){},lock:value=>locks.push(value)},messageQueue:{render:run=>queue.push(run.status)},preferences:{}};
   const c={state,$:node,terminal:new Set(['idle','completed','failed','cancelled','interrupted']),document:{},statusLabel:status=>status,crypto:{randomUUID:()=> 'message-one'},toast(){},Event:class{},autoSize(){},refreshChat:async()=>{},refreshRuns:async()=>{},bottom(){},
-    MoyaiQueue:{presentation:()=>({transcript:[]})},MoyaiActivity:{sync(){}},savedFiles:{decorate(){},sync(){}},renderMarkdown(){},copyText(){},
+    loadActivity(){},MoyaiQueue:{presentation:()=>({transcript:[]})},MoyaiActivity:{sync(){}},savedFiles:{decorate(){},sync(){}},renderMarkdown(){},copyText(){},
     renderChatWorking(){},syncRunSummary(){},renderCredentialRequests(){},renderApprovals(){},renderPrWriteAccess(){},renderSlackContext(){},renderAgentDetails(){}};
   vm.createContext(c);
   const controls=app.indexOf('function syncChatComposer(');
@@ -230,7 +230,7 @@ test('ordinary status and new mounts remain editable while sending only locks su
 test('archive while opening a session rereads its metadata before rendering the header',async()=>{
   const app=readFileSync('app/static/app.js','utf8');let finish,rendered,reads=0;
   const state={runs:[{id:'one'}],pageVersion:0,expandedParents:new Set()};
-  const c={state,stopStream(){},refreshRuns:async()=>{},document:{hidden:true,querySelector:()=>null},
+  const c={state,$:()=>({}),sessionRows:rows=>rows,stopStream(){},refreshRuns:async()=>{},document:{hidden:true,querySelector:()=>null},
     setView(){},sessionTitle:()=>'',history:{replaceState(){}},renderChat:run=>rendered=run,
     api:async()=>{if(++reads===1)return new Promise(resolve=>finish=resolve);return {id:'one',chat_enabled:true,archived:true};}};
   vm.createContext(c);vm.runInContext(readFileSync('app/static/credentials.js','utf8'),c);
@@ -244,7 +244,7 @@ function availabilityHarness(){
   const h=harness(),c=h.context,app=readFileSync('app/static/app.js','utf8');
   const content={innerHTML:'Old conversation'},source={close(){this.closed=true;}};
   Object.assign(h.state,{pageVersion:1,selected:'one',source,drafts:{one:'Unsent reply'}});
-  Object.assign(c,{document:{querySelector:()=>null},history:{replaceState(){}},$:()=>content,computer:{close(){}},savedFiles:{reset(){}},clearTimeout(){},
+  Object.assign(c,{sessionRows:rows=>rows,setView(){},sessionTitle:()=>'',document:{querySelector:()=>null},history:{replaceState(){}},$:()=>content,computer:{close(){}},savedFiles:{reset(){}},clearTimeout(){},
     navigate:async view=>{c.stopStream();h.state.selected=null;h.state.pageVersion++;h.calls.push({navigate:view});}});
   vm.runInContext(app.slice(app.indexOf('function stopStream()'),app.indexOf('function sessionTitle('))+
     app.slice(app.indexOf('async function openRun('),app.indexOf('function renderChat('))+
@@ -277,7 +277,7 @@ for(const method of ['openRun','refreshChat']){
     const {context:c,content,calls}=availabilityHarness();
     c.api=async()=>{throw Object.assign(Error('Temporarily unavailable'),{status:503});};
     await assert.rejects(c[method]('one'),/Temporarily unavailable/);
-    assert.equal(content.innerHTML,'Old conversation');assert.deepEqual(calls,[]);
+    if(method==='openRun')assert.match(content.innerHTML,/Could not load this conversation.*data-retry-chat/);else assert.equal(content.innerHTML,'Old conversation');assert.deepEqual(calls,[]);
   });
 }
 

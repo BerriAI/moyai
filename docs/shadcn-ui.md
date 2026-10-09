@@ -33,6 +33,21 @@ SESSION_UI_URL=http://127.0.0.1:8830 node --test tests/browser/session_ui.cjs
 
 Install the test browser once with `npx playwright install chromium`.
 
+To reproduce loading and sidebar behavior with real local session APIs:
+
+```sh
+uv run python scripts/chat_loading_demo.py --port 8877
+```
+
+Open the printed login URL. This seeds SQLite with 100 synthetic sessions,
+60 child agents and 500 tool events, and adds controlled request delays.
+The diagnostic panel reports conversation/list readiness, group toggle timing,
+retained DOM nodes and history requests. Expand a completed turn to fetch its
+history, or send a message to exercise the local demo executor. It does not
+exercise production SSO, models or connected services. Use `--delay-scale 0`
+for local processing timings, or `--root /path/to/baseline --port 8878` to run
+the same data and delays against another checkout.
+
 ## Rendering contract
 
 Feature controllers keep their existing API calls, revisions, access checks,
@@ -53,11 +68,15 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   disposed before their parent, and a removal observer releases detached regions.
   A native `<template>` is only an inert parser, never a render host: mount streamed
   content on the element that joins the document so its root is released on removal.
-- When replacing a transcript while reusing its activity slots, pass those nodes
-  in `render(host, html, { preserve: slots.values() })` and reattach them
-  synchronously. Their nested roots and component state remain live; preserved
-  nodes that are not reattached are released by the removal observer. Do not
-  serialize rendered components back into templates to keep their content.
+- Repeated sidebar and transcript items use `MoyaiRegions.sync(host, html)`.
+  A `data-region-key` identifies a native, controller-owned container within its
+  parent. A `data-region-leaf` renders its content through `MoyaiUI` only when
+  that item's template changes, retaining other items and their component state.
+  A `data-region-preserve` container leaves independently updated activity or
+  credential content in place. Omit collapsed children until they are expanded.
+  Keep keys stable and unique within each parent; never reconcile controller
+  mutations through a parent React root or serialize rendered components back
+  into templates.
 - Inputs remain uncontrolled. Controllers can read and set `value`, run native
   validation, use `FormData`, and retain drafts while requests are in flight.
   The adapter explicitly strips controlled form props, independently of the HTML

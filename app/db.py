@@ -287,7 +287,9 @@ class Store:
         with self.connect() as conn:
             return conn.execute(sql, params).rowcount
 
-    def rows(self, sql, params=()):
+    def rows(self, sql, params=(), *, connection=None):
+        if connection is not None:
+            return [dict(row) for row in connection.execute(sql, params)]
         with self.connect() as conn:
             return [dict(row) for row in conn.execute(sql, params)]
 
@@ -421,8 +423,8 @@ class Store:
             ) SELECT r.*,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
         return rows
 
-    def run(self, run_id: str):
-        rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,))
+    def run(self, run_id: str, *, connection=None):
+        rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,), connection=connection)
         if not rows:
             return None
         row = rows[0]
@@ -528,7 +530,7 @@ class Store:
                            warning='Neighboring channel messages are excluded.')
         return {**context, **row}
 
-    def messages(self, run_id):
+    def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,
             COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
@@ -546,7 +548,7 @@ class Store:
             LEFT JOIN users linked ON linked.id=u.linked_user_id
             WHERE m.run_id=? AND m.status!='deleted'
             ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,
-                COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,))
+                COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,), connection=connection)
         for message in messages:
             slack_user = message.pop('slack_reply_user')
             name, email = message.pop('sender_name'), message.pop('sender_email')
@@ -819,8 +821,8 @@ class Store:
             (run_id, kind, message[:32000], json.dumps(data or {}), now()),
         )
 
-    def events(self, run_id: str, after: int = 0, limit: int = 200):
-        rows = self.rows("SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?", (run_id, after, limit))
+    def events(self, run_id: str, after: int = 0, limit: int = 200, *, connection=None):
+        rows = self.rows("SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?", (run_id, after, limit), connection=connection)
         for row in rows:
             row["data"] = json.loads(row["data"])
         return rows
