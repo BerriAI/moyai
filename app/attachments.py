@@ -31,9 +31,13 @@ def upload_limit(content_type):
 
 def filename(value):
     name = value.replace('\\', '/').rsplit('/', 1)[-1]
-    name = ''.join(c for c in name if not unicodedata.category(c).startswith('C')).strip(' .')[:180]
+    name = ''.join(c for c in name if not unicodedata.category(c).startswith('C')).strip(' .')
     if not name:
         raise ValueError('Choose a file with a name.')
+    if len(name) > 180:
+        stem, dot, extension = name.rpartition('.')
+        suffix = dot + extension if stem and 0 < len(extension) <= 20 else ''
+        name = name[:180 - len(suffix)] + suffix
     return name
 
 
