@@ -48,6 +48,20 @@ exercise production SSO, models or connected services. Use `--delay-scale 0`
 for local processing timings, or `--root /path/to/baseline --port 8878` to run
 the same data and delays against another checkout.
 
+To compare PR loading and panel section switching:
+
+```sh
+uv run python scripts/panel_loading_demo.py --port 8880
+```
+
+Open the printed localhost login URL and the first PR. This reuses the real
+session APIs and temporary SQLite with 40 synthetic changed files, 80 diff lines
+per file, and 250 ms per simulated GitHub read. No external GitHub request is
+made. The diagnostics measure section switching, mounted diff rows and retained
+content. `/demo/panel-measurements` records the actual upstream request sequence.
+Use `--source-root /path/to/baseline --port 8881` for an identical comparison,
+or `--github-delay-ms 0` to remove the injected delay.
+
 ## Rendering contract
 
 Feature controllers keep their existing API calls, revisions, access checks,

@@ -71,6 +71,72 @@ def test_native_pr_reads_confirmed_family_receipts_without_a_computer(native_pr)
     assert client.get(endpoint, params={'url': url}, headers={'Authorization': 'Bearer run-capability-only'}).status_code == 401
 
 
+def test_native_pr_permanent_identity_needs_only_pr_token_header_and_files(native_pr):
+    _, client, run_id, url, _, _, calls = native_pr
+    endpoint = f'/api/runs/{run_id}/pull-request'
+    assert client.get(endpoint, params={'url': url}).status_code == 200
+    reads = [('GET', '/repositories/202/pulls/100'), ('GET', '/repositories/202/pulls/100/files')]
+    assert calls == [('POST', '/app/installations/10/access_tokens'), *reads]
+    calls.clear()
+    assert client.get(endpoint, params={'url': url}).status_code == 200
+    assert calls == reads
+
+
+@pytest.mark.parametrize('arguments,refresh_metadata', [
+    ({'repository_id': 202}, False),
+    ({'repository': 'BerriAI/moyai'}, True),
+    ({'repository_id': 202, 'repository': 'BerriAI/moyai'}, True),
+    ({}, True),
+])
+def test_broker_pr_reader_preserves_repository_lookup_shapes(native_pr, arguments, refresh_metadata):
+    _, client, run_id, _, _, _, calls = native_pr
+    response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                           json={'name': 'github_pull_request', 'arguments': {'number': 100, **arguments}})
+    assert response.status_code == 200 and response.json()['repository_id'] == 202, response.text
+    assert (('GET', '/repositories/202') in calls) is refresh_metadata
+
+
+def test_broker_pr_reader_checks_name_agreement_and_selected_ids(native_pr):
+    from test_github import select
+    app, client, run_id, _, _, _, calls = native_pr
+    select(app, (101, 202))
+    for arguments in [{'repository_id': 202, 'repository': 'BerriAI/litellm'}, {'repository_id': 999}]:
+        calls.clear()
+        response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                               json={'name': 'github_pull_request', 'arguments': {'number': 100, **arguments}})
+        assert 'error' in response.json() and 'files' not in response.json(), response.text
+        assert not any('/pulls/' in path for _, path in calls)
+
+
+def test_native_pr_renamed_metadata_updates_existing_references_without_a_repository_read(native_pr):
+    app, client, run_id, url, _, state, calls = native_pr
+    github, store = app.state.connectors.github, app.state.store
+    store.execute('UPDATE runs SET github_repository_id=202,repo_url=? WHERE id=?',
+                  ('https://github.com/BerriAI/moyai', run_id))
+    state['pr']['base']['repo'] = {**state['pr']['base']['repo'], 'full_name': 'BerriAI/renamed',
+                                  'html_url': 'https://github.com/BerriAI/renamed'}
+    state['pr']['html_url'] = url.replace('BerriAI/moyai', 'BerriAI/renamed')
+    response = client.get(f'/api/runs/{run_id}/pull-request', params={'url': url})
+    assert response.status_code == 200 and response.json()['repository'] == 'BerriAI/renamed', response.text
+    assert github.target('BerriAI/moyai') == github.target('BerriAI/renamed') == 202
+    assert store.run(run_id)['repo_url'] == 'https://github.com/BerriAI/renamed'
+    assert ('GET', '/repositories/202') not in calls
+
+
+@pytest.mark.parametrize('wrong', ['number', 'repository', 'owner'])
+def test_native_pr_rejects_wrong_upstream_identity_before_reading_files(native_pr, wrong):
+    _, client, run_id, url, _, state, calls = native_pr
+    if wrong == 'number':
+        state['pr']['number'] = 999
+    elif wrong == 'repository':
+        state['pr']['base']['repo'] = {**state['pr']['base']['repo'], 'id': 999}
+    else:
+        state['pr']['base']['repo'] = {**state['pr']['base']['repo'], 'owner': {'id': 999}}
+    response = client.get(f'/api/runs/{run_id}/pull-request', params={'url': url})
+    assert response.status_code == 502 and 'files' not in response.json(), response.text
+    assert not any(path.endswith('/files') for _, path in calls)
+
+
 def test_native_pr_keeps_bounded_projection_and_permanent_identity_across_rename(native_pr):
     app, client, run_id, url, provider, state, _ = native_pr
     github = app.state.connectors.github
@@ -112,7 +178,7 @@ def test_broker_pr_reader_still_discovers_new_rename_after_legacy_migration(nati
 
 @pytest.mark.parametrize('phase,change,expected', [
     ('before', 'policy', 403), ('before', 'selection', 403),
-    ('/repositories/202', 'selection', 403), ('/app/installations/10/access_tokens', 'policy', 403),
+    ('/repositories/202/pulls/100', 'selection', 403), ('/app/installations/10/access_tokens', 'policy', 403),
     ('/repositories/202/pulls/100', 'policy', 403), ('/repositories/202/pulls/100/files', 'rotation', 403),
     ('/repositories/202/pulls/100/files', 'disconnect', 403), ('/repositories/202/pulls/100/files', 'delete', 404),
     ('/repositories/202/pulls/100/files', 'receipt', 404),
@@ -145,6 +211,19 @@ def test_native_pr_revalidates_access_and_receipt_scope(native_pr, phase, change
         assert calls == []
     elif not phase.endswith('/files'):
         assert not any(path.endswith('/files') for _, path in calls)
+
+
+def test_broker_pr_named_lookup_revalidates_selection_before_reading_pr(native_pr):
+    from test_github import select
+    app, client, run_id, _, _, state, calls = native_pr
+    def revoke(path):
+        if path == '/repositories/202':
+            select(app, (101,))
+    state['on_request'] = revoke
+    response = client.post(f'/broker/{run_id}/tools/call', headers={'Authorization': 'Bearer run-capability-only'},
+                           json={'name': 'github_pull_request', 'arguments': {'repository': 'BerriAI/moyai', 'number': 100}})
+    assert 'error' in response.json() and 'files' not in response.json(), response.text
+    assert not any('/pulls/' in path for _, path in calls)
 
 
 @pytest.mark.parametrize('upstream,expected', [(401, 403), (403, 403), (404, 404), (500, 502)])

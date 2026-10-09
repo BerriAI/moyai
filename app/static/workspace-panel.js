@@ -35,7 +35,7 @@
   function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated,onActivity=async()=>{},statusFor=()=>'Status unknown'}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
-    const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
+    const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true,tabSignature='';
     const activity=layout.querySelector('#session-details');
     const ico=(name,size=16)=>globalThis.MoyaiIcon?.(name,size)||'';const glyph={computer:'monitor',captures:'archive',files:'file',file:'file',chat:'chat',activity:'list',pulls:'pull',pr:'pull',agents:'participants'};
     const panel=document.createElement('aside');panel.className='workspace-panel';panel.id='workspace-panel';panel.setAttribute('aria-label','Session workspace');panel.hidden=true;
@@ -55,19 +55,34 @@
     function draw(){
       const host=q('.panel-tabs'),focused=host.contains(document.activeElement)?document.activeElement:null;
       const focusKey=focused?.dataset.tab||focused?.dataset.close,focusAttribute=focused?.dataset.tab?'data-tab':'data-close',scrollLeft=host.scrollLeft;
-      MoyaiUI.render(host, [...tabs.values()].map(t=>{
+      const markup=[...tabs.values()].map(t=>{
         const pr=t.kind==='pr'?MoyaiPullRequest.presentation(t.prStatus):null,label=pr?t.title+' · '+pr.label:t.title;
-        return `<div class="panel-tab ${t.id===active?'is-active':''}"><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="${t.id===active}" tabindex="${t.id===active?'0':'-1'}" data-tab="${esc(t.id)}" title="${esc(label)}" aria-label="${esc(label)}"><span class="panel-tab-icon${pr?' panel-pr-'+pr.state:''}">${ico(pr?.icon||glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`;
-      }).join(''));
-      // Tooltip rerenders can replace React's onclick property; native listeners stay attached.
-      host.querySelectorAll('[data-tab]').forEach(b=>b.addEventListener('click',()=>select(b.dataset.tab)));
-      host.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>remove(b.dataset.close));
-      // A background PR status read must not move keyboard focus or scroll the tab strip.
-      if(focusKey)[...host.querySelectorAll(`[${focusAttribute}]`)].find(b=>b.getAttribute(focusAttribute)===focusKey)?.focus({preventScroll:true});
-      host.scrollLeft=scrollLeft;
+        return `<div class="panel-tab ${t.id===active?'is-active':''}" data-region-key="${esc(t.id)}" data-region-leaf><button type="button" role="tab" id="tab-${t.uid}" aria-controls="view-${t.uid}" aria-selected="false" tabindex="-1" data-tab="${esc(t.id)}" title="${esc(label)}" aria-label="${esc(label)}"><span class="panel-tab-icon${pr?' panel-pr-'+pr.state:''}">${ico(pr?.icon||glyph[t.kind],15)}</span><span>${esc(t.title)}</span></button><button type="button" data-close="${esc(t.id)}" aria-label="Close ${esc(t.title)} tab" ${t.closing?'disabled':''}>${ico('x',13)}</button></div>`;
+      }).join('');
+      if(markup!==tabSignature){
+        MoyaiRegions.sync(host,markup);tabSignature=markup;
+        host.querySelectorAll('[data-tab]').forEach(b=>{
+          // Selection belongs to the controller, so changing it does not remount
+          // either shadcn button inside an otherwise unchanged tab.
+          b.setAttribute('aria-selected',String(b.dataset.tab===active));b.setAttribute('tabindex',b.dataset.tab===active?'0':'-1');
+        });
+        // A background PR status read must not move keyboard focus or scroll the tab strip.
+        if(focusKey&&!focused.isConnected)[...host.querySelectorAll(`[${focusAttribute}]`)].find(b=>b.getAttribute(focusAttribute)===focusKey)?.focus({preventScroll:true});
+        host.scrollLeft=scrollLeft;
+      }
       document.querySelector('#toggle-details')?.setAttribute('aria-expanded',String(visible&&tabs.get(active)?.kind==='activity'));
       const toggle=document.querySelector('#workspace-panel-toggle');if(toggle){toggle.setAttribute('aria-expanded',String(visible));toggle.setAttribute('aria-label',visible?'Hide workspace panel':'Show workspace panel');toggle.classList.toggle('is-active',visible);}
     }
+    const tabHost=q('.panel-tabs');
+    function tabClick(event){
+      if(disposed||event.defaultPrevented)return;
+      const close=event.target.closest('[data-close]');
+      if(close&&tabHost.contains(close)){if(!close.hasAttribute('disabled'))remove(close.dataset.close);return;}
+      const tab=event.target.closest('[data-tab]');if(tab&&tabHost.contains(tab))select(tab.dataset.tab);
+    }
+    // Tooltip updates own the leaf's React onClick slot; the persistent host
+    // independently owns application actions across focus and retained renders.
+    tabHost.addEventListener('click',tabClick);
     q('.panel-tabs').onkeydown=e=>{if(!e.target.matches('[role="tab"]'))return;const ids=[...tabs.values()].filter(t=>!t.closing).map(t=>t.id),idx=ids.indexOf(active);let next;if(e.key==='ArrowRight')next=ids[(idx+1)%ids.length];if(e.key==='ArrowLeft')next=ids[(idx+ids.length-1)%ids.length];if(e.key==='Home')next=ids[0];if(e.key==='End')next=ids.at(-1);if(next){e.preventDefault();select(next);q('[aria-selected="true"]')?.focus();}if(e.key==='Delete'){e.preventDefault();remove(active);}};
     function setVisible(value){
       visible=value;panel.hidden=!value;layout.classList.toggle('panel-open',value);layout.classList.toggle('panel-expanded',value&&expanded);menu(false);draw();save();
@@ -79,8 +94,16 @@
       MoyaiUI.render(q('[data-menu-items]'), renderMenuItems(items));
       q('[data-menu-items]').querySelectorAll('button').forEach(b=>b.onclick=()=>{const item=items[Number(b.dataset.item)];open(item.kind,item.chatId?{chatId:item.chatId,title:item.title}:{});menu(false);});
     }
-    q('.panel-menu input').oninput=drawMenu;q('[data-add]').onclick=()=>menu(q('.panel-menu').hidden);q('[data-hide]').onclick=hide;
-    q('[data-expand]').onclick=()=>{expanded=!expanded;layout.classList.toggle('panel-expanded',expanded);q('[data-expand]').setAttribute('aria-label',expanded?'Restore panel size':'Expand workspace panel');};
+    q('.panel-menu input').oninput=drawMenu;
+    const toolHost=q('.panel-tools');
+    function toolClick(event){
+      if(disposed||event.defaultPrevented)return;
+      const control=event.target.closest('button');if(!control||!toolHost.contains(control)||control.hasAttribute('disabled'))return;
+      if(control.hasAttribute('data-add'))menu(q('.panel-menu').hidden);
+      else if(control.hasAttribute('data-hide'))hide();
+      else if(control.hasAttribute('data-expand')){expanded=!expanded;layout.classList.toggle('panel-expanded',expanded);control.setAttribute('aria-label',expanded?'Restore panel size':'Expand workspace panel');}
+    }
+    toolHost.addEventListener('click',toolClick);
     function outside(e){if(!panel.contains(e.target))menu(false);}document.addEventListener('pointerdown',outside);
     panel.addEventListener('keydown',e=>{if(e.key==='Escape'&&!q('.panel-menu').hidden){menu(false);q('[data-add]').focus();}});
     function make(kind,data={}){
@@ -377,7 +400,7 @@
     if(initial.visible&&tabs.size)select(tabs.has(initial.active)?initial.active:tabs.keys().next().value);else{active=initial.active;draw();}
     restoring=false;save();
     api(`/api/runs/${run.id}/side-chats`).then(rows=>{if(!disposed){sideChats=rows;syncTitles(rows);}}).catch(()=>{});
-    return {open,openFile,openPullRequest,syncPullRequests,syncSession,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-session-tools');}};
+    return {open,openFile,openPullRequest,syncPullRequests,syncSession,hide,syncTitles,toggle(){if(visible)hide();else if(tabs.size)show();else open(run.mode==='modal'?'computer':'files');},dispose(){disposed=true;tabHost.removeEventListener('click',tabClick);toolHost.removeEventListener('click',toolClick);tabs.forEach(t=>{t.deactivate?.();t.dispose?.();});document.removeEventListener('pointerdown',outside);layout.removeEventListener('click',followPullRequest);card.remove();panel.remove();layout.classList.remove('panel-open','panel-expanded','has-session-tools');}};
   }
   return {create,restore,fileTree,renderFileTree,prUrl};
 });
