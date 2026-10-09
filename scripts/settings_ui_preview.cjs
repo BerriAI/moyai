@@ -21,6 +21,7 @@ const agentSessions=[
 const model='openai/gpt-6-astra';
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
 let fixture='populated';
+let accountLinkPolls=0;
 const skills=[
  ['review-pr','Review a pull request for correctness, regressions, and missing tests.','organization'],
  ['benchmark-report','Compare benchmark runs and summarize changes in latency, throughput, and cost.','organization'],
@@ -106,6 +107,7 @@ const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
  if(p==='/'){
   fixture=url.searchParams.get('fixture')||'populated';
+  accountLinkPolls=0;
   let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
   res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
  }
@@ -170,13 +172,19 @@ const server=http.createServer(async(req,res)=>{
  }
  if(p==='/api/spend'){
   const data=spendFixture(url.searchParams,role!=='admin',empty);
-  if(data&&fixture==='account-links'&&role==='admin'){
+  if(data&&['account-links','account-links-final'].includes(fixture)&&role==='admin'){
    data.identities=[...spendUsers.slice(0,2),{id:'slack:alex',kind:'slack',name:'Alex Morgan',email:'alex@example.com',link_status:'review'}];
-   data.total.pending_costs=1;
+   data.total.pending_costs=fixture==='account-links-final'&&++accountLinkPolls>1?0:1;
+   data.infrastructure.pending=false;
   }
   return json(res,data?200:422,data||{detail:'Choose a date range of up to 93 days, with start before end.'});
  }
- if(p==='/api/admin/identities/status')return json(res,200,{enabled:true,ready:true,missing_scopes:[]});
+ if(p==='/api/admin/identities/status'){
+  const updated=fixture==='account-links-final'&&accountLinkPolls>1;
+  // Leave time to open a menu after the cost poll, before its identity response.
+  if(updated)await new Promise(resolve=>setTimeout(resolve,2000));
+  return json(res,200,{enabled:!updated,ready:!updated,missing_scopes:[]});
+ }
  if(p==='/api/admin/adoption'){
   if(role!=='admin')return json(res,403,{detail:'Organization administrator access required.'});
   if(fixture==='activity-error')return json(res,503,{detail:'This preview simulates an activity report outage.'});

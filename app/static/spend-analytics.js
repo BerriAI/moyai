@@ -1,6 +1,24 @@
 /* Organization analytics; called only after /api/spend confirms organization scope. */
 const spendAnalyticsState={tab:'overall',model:'',sort:'spend',direction:-1,request:0};
 const spendIdentityPanels=new WeakMap();
+function cancelSpendIdentityUpdate(){
+  const host=$('#spend-identities'),panel=host&&spendIdentityPanels.get(host);
+  if(panel){clearTimeout(panel.timer);panel.timer=null;panel.version++;}
+}
+function updateSpendIdentities(host,panel,html,current,background){
+  // Own the completed response independently of cost polling. Check only the
+  // local interaction state while deferred; do not keep fetching the same data.
+  const paint=()=>{
+    panel.timer=null;
+    if(!current())return;
+    if(background&&(document.hidden||settingsInteractionActive())){
+      panel.timer=setTimeout(paint,250);return;
+    }
+    const restore=panel.html?preserveSpendView():()=>{};
+    MoyaiUI.render(host,html);bindSpendIdentities();restore();panel.html=html;
+  };
+  paint();
+}
 function isSpendPRTab(tab){return tab==='prs'||tab==='leaderboard';}
 function spendDailyBreakdown(data){
   return `<details class="analytics-breakdown" id="spend-daily-breakdown"><summary>Daily breakdown</summary><div class="spend-table-wrap" role="region" aria-label="Daily usage breakdown" tabindex="0"><table class="spend-table"><thead><tr><th>Date (UTC)</th><th>Active sessions</th><th>Active users</th><th>LLM requests</th><th>Tokens</th><th>Unpriced requests</th><th>LLM spend</th></tr></thead><tbody>${(data.daily||[]).map(d=>`<tr><td>${esc(d.date)}</td><td>${spendCount(d.sessions)}</td><td>${spendCount(d.active_users)}</td><td>${spendCount(d.requests)}</td><td>${spendCount(d.total_tokens)}</td><td>${spendCount(d.pending_costs+d.missing_costs)}</td><td>${dollars(d.spend)}</td></tr>`).join('')}</tbody></table></div></details>`;
@@ -57,6 +75,7 @@ function spendExport(data,activity=null){
 }
 async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,recent=false,background=false){
   clearTimeout(spendPRState.timer);
+  cancelSpendIdentityUpdate();
   prepareSpendPRReport(data);
   const version=state.pageVersion,spendVersion=spendState.version,request=++spendAnalyticsState.request;
   const current=()=>version===state.pageVersion&&spendVersion===spendState.version&&request===spendAnalyticsState.request;
@@ -85,19 +104,20 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,
   if(tab==='history')$('#spend-model').onchange=()=>{spendAnalyticsState.model=$('#spend-model').value;redraw('spend-model').catch(showError);};
   if(tab==='infrastructure'){
     bindInfrastructure(data);
-    const host=$('#spend-identities'),panel=retainedIdentities?spendIdentityPanels.get(host):{context:identityContext,html:null};
+    const host=$('#spend-identities'),panel=retainedIdentities?spendIdentityPanels.get(host):{context:identityContext,html:null,version:0,timer:null};
     spendIdentityPanels.set(host,panel);
+    const panelVersion=panel.version;
+    const identityCurrent=()=>current()&&state.view==='spend'&&host.isConnected&&panelVersion===panel.version&&
+      identityContext===[spendContext(),state.userId,spendState.scope].join('/');
     try{
       if(!identityStatus)identityStatus=await api('/api/admin/identities/status',{recent});
-      if(!current())return false;
+      if(!identityCurrent())return false;
       const html=identityPanel();
       if(panel.html!==html||refresh&&!background){
-        if(retainedIdentities&&background&&(document.hidden||settingsInteractionActive()))return true;
-        const restore=retainedIdentities?preserveSpendView():()=>{};
-        MoyaiUI.render(host,html);bindSpendIdentities();restore();panel.html=html;
+        updateSpendIdentities(host,panel,html,identityCurrent,!!retainedIdentities&&background);
       }
     }catch(error){
-      if(!current())return false;
+      if(!identityCurrent())return false;
       // Keep usable controls during a transient outage; access failures remove them.
       if(!panel.html||error.status===401||error.status===403){MoyaiUI.render(host,'');panel.html=null;}
       MoyaiUI.render($('#spend-identities-notice'),`<p role="alert">Could not load account links. ${esc(error.message)}</p><button id="spend-identities-retry">Retry</button>`);
@@ -124,6 +144,6 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false,
   return true;
 }
 function bindSpendIdentities(){
-  $('#refresh-identities').onclick=async()=>{const button=$('#refresh-identities');button.disabled=true;try{await api('/api/admin/identities/refresh',{method:'POST'});button.textContent='Profiles queued';toast('Profile refresh queued. Use Refresh above to see updated matches.');}catch(error){button.disabled=false;showError(error);}};
-  document.querySelectorAll('.spend-link-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');button.disabled=true;try{await api('/api/admin/spend/link-slack',{method:'POST',body:JSON.stringify({slack_user_id:form.dataset.slack,google_user_id:form.elements.google.value})});await renderSpend();toast('Slack usage linked to Google account.');}catch(error){button.disabled=false;showError(error);}});
+  $('#refresh-identities').onclick=async()=>{cancelSpendIdentityUpdate();const button=$('#refresh-identities');button.disabled=true;try{await api('/api/admin/identities/refresh',{method:'POST'});button.textContent='Profiles queued';toast('Profile refresh queued. Use Refresh above to see updated matches.');}catch(error){button.disabled=false;showError(error);}};
+  document.querySelectorAll('.spend-link-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();cancelSpendIdentityUpdate();const button=form.querySelector('[type=submit]');button.disabled=true;try{await api('/api/admin/spend/link-slack',{method:'POST',body:JSON.stringify({slack_user_id:form.dataset.slack,google_user_id:form.elements.google.value})});await renderSpend();toast('Slack usage linked to Google account.');}catch(error){button.disabled=false;showError(error);}});
 }

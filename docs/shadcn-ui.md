@@ -37,6 +37,22 @@ updated status independently. Transient lookup errors retain usable controls;
 authorization failures remove them. The navigation browser suite also covers
 changed account data, retries, an open Select and leaving the route mid-refresh.
 
+Completed account-link updates have their own deferred paint, independent of
+pending costs. While a menu is open or the tab is hidden, one local timer checks
+every 250 ms and retains the response without making more requests. Once the view is idle,
+it captures the current drafts and applies that response. New refreshes and
+account actions supersede older updates; route, account, role, scope, date and
+mounted-panel checks fence both in-flight responses and deferred paints. Access
+failures clear the controls immediately. The regression for the last cost poll
+fails against `0f579cf` and passes with this lifecycle.
+
+`?fixture=account-links-final#spend` settles costs on the first background poll
+and changes the identity status two seconds later. Open Infrastructure and
+Administrator overrides, then click the top bar. After the five-second refresh,
+open the account menu during that lookup delay. It stays open when the response
+arrives; choose an account and click the top bar to see the deferred status apply
+without another cost poll or network request. Reload to restart the fixture.
+
 The production bundle lives in `app/static/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.

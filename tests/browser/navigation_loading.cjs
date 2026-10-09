@@ -68,12 +68,13 @@ test('PR and activity hover reads are reused; reports survive leaving and return
   assert.equal(reads.filter(x=>x==='/api/admin/adoption').length,2,'explicit Refresh bypasses the cache');
 });
 
-async function accountLinks(t,width=1440){
-  const {page}=await setup(t);await page.setViewportSize({width,height:1000});
+async function accountLinks(t,width=1440,costs={pending:0}){
+  const {page,reads}=await setup(t);await page.setViewportSize({width,height:1000});
   await page.route('**/api/spend?*',async route=>{
     const response=await route.fetch(),data=await response.json();
     data.identities=[...data.users.slice(0,2).map(user=>({...user,kind:'google'})),
       {id:'slack:alex',kind:'slack',name:'Alex Morgan',email:'alex@example.com',link_status:'review'}];
+    data.total.pending_costs=costs.pending;data.infrastructure.pending=false;
     await route.fulfill({response,json:data});
   });
   await click(page,'a[href="#spend"]','#spend-tab-infrastructure');
@@ -86,8 +87,29 @@ async function accountLinks(t,width=1440){
   await page.waitForFunction(()=>document.activeElement.matches('.spend-link-form [role="combobox"]'));
   await page.evaluate(()=>document.activeElement.blur());
   assert.equal(await page.evaluate(()=>settingsInteractionActive()),false);
-  return {page,form};
+  return {page,form,reads};
 }
+test('the final cost poll applies deferred account updates after the menu closes without another fetch',async t=>{
+  const costs={pending:1},{page,form,reads}=await accountLinks(t,1440,costs);
+  costs.pending=0;
+  let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
+  await page.route('**/api/admin/identities/status',async route=>{await held;await route.fulfill({json:{enabled:false,ready:false,missing_scopes:[]}});});
+  const request=page.waitForRequest(r=>r.url().endsWith('/api/admin/identities/status'));
+  await page.evaluate(()=>{window.spendPolling=renderSpend(true);});await request;
+  await form.getByRole('combobox').click();release();await page.evaluate(()=>window.spendPolling);
+  assert.equal(await page.evaluate(()=>spendState.pending),false,'cost polling is finished');
+  assert.equal(await form.locator('[role="combobox"]').getAttribute('aria-expanded'),'true');
+  assert.match(await page.locator('#slack-identities').innerText(),/Automatic matching is on/);
+  const before=reads.length;
+  await page.getByRole('option',{name:'sam@example.com',exact:true}).click();
+  await page.getByRole('listbox').waitFor({state:'detached'});
+  await page.waitForFunction(()=>document.activeElement.matches('.spend-link-form [role="combobox"]'));
+  await page.locator('#page-title').click();
+  await page.waitForFunction(()=>document.querySelector('#slack-identities')?.textContent.includes('Automatic matching is disabled'),{},{timeout:2500});
+  assert.equal(await form.locator('select[name="google"]').inputValue(),'user-1');
+  assert.equal(await page.locator('.identity-overrides').evaluate(el=>el.open),true);
+  assert.equal(reads.length,before,'the completed update is applied without another API request');
+});
 for(const width of [1440,768,320])test(`background spend refresh retains account-link controls and drafts at ${width}px`,async t=>{
   const {page,form}=await accountLinks(t,width),original=await form.elementHandle();
   let release;const held=new Promise(resolve=>{release=resolve;});t.after(()=>release());
@@ -140,6 +162,10 @@ test('background account updates defer while a select is open and never repaint 
   await page.getByRole('listbox').waitFor({state:'detached'});
   await page.waitForFunction(()=>document.activeElement.matches('.spend-link-form [role="combobox"]'));
   assert.equal(await form.locator('select[name="google"]').inputValue(),'user-0');
+  await click(page,'#settings-navigation a[href="#settings"]','#title-model');
+  await page.waitForTimeout(600);
+  assert.equal(await page.locator('#slack-identities').count(),0,'a queued update cannot repaint a new route');
+  await click(page,'a[href="#spend"]','#slack-identities');
   let releaseNext;const heldNext=new Promise(resolve=>{releaseNext=resolve;});t.after(()=>releaseNext());
   await page.route('**/api/admin/identities/status',async route=>{await heldNext;await route.fulfill({json:{enabled:true,ready:true,missing_scopes:[]}});});
   const next=page.waitForRequest(r=>r.url().endsWith('/api/admin/identities/status'));
