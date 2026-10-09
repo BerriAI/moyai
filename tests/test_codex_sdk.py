@@ -1041,6 +1041,8 @@ def test_native_tool_receipts_are_paired_once_and_keep_failure(codex_agent, kind
 
 def test_private_mcp_tool_names_preserve_existing_redaction(codex_agent):
     agent, events, store = codex_agent
+    # Private trace payloads are configurable; this case exercises omission.
+    agent.context.activity.omit_private_tool_payloads = True
     item = {'id': 'memory-call', 'type': 'mcpToolCall', 'server': 'moyai', 'tool': 'memory_save',
             'arguments': {'content': 'requester-private-marker'}, 'status': 'inProgress'}
     agent.record_item(item, completed=False)
@@ -1049,6 +1051,7 @@ def test_private_mcp_tool_names_preserve_existing_redaction(codex_agent):
     saved = ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
     assert 'requester-private-marker' not in saved
     assert 'requester-private-marker' not in json.dumps(events)
+    assert next(event for event in events if event[0] == 'trace')[2]['input'] == '[private tool payload omitted]'
     assert not store.pending
 
 

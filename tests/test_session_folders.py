@@ -207,10 +207,14 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     item, removed = run(app), run(app, 'Delete after completion')
     store = app.state.store
     # Exercise the actual idempotent upgrade with a pre-field database.
+    # This later trigger could not exist before its deleted_at dependency.
+    store.execute('DROP TRIGGER revoke_github_write_access')
     store.execute('ALTER TABLE runs DROP COLUMN deleted_at')
     store.execute('DROP TABLE session_archives')
     reopened = Store(app.state.settings.data_dir)
     assert reopened.run(item['id'])['deleted_at'] == ''
+    # App startup initializes GitHub access after the Store schema upgrade.
+    app.state.connectors.github.init_write_access()
     checkpoints = app.state.session_folders.checkpoints
     checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
     async def commit():
