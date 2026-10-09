@@ -15,7 +15,7 @@ jobs:
       - name: Test startup and migration guards
         run: uv run --python 3.13 pytest -q --tb=line tests/test_docker_start.py tests/test_render.py tests/test_workspace_image.py tests/test_persistence.py
       - name: Test secure access recovery and broker transport
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py tests/test_mcp_bridge.py tests/test_workspace.py::test_every_broker_tool_has_an_audited_replay_classification tests/test_github_identity.py::test_repeatable_broker_metadata_preserves_selection_and_never_publishes
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_credentials.py tests/test_credential_discovery.py tests/test_credential_tools.py tests/test_broker_transport.py tests/test_mcp_bridge.py tests/test_skill_recovery.py tests/test_workspace.py::test_every_broker_tool_has_an_audited_replay_classification tests/test_github_identity.py::test_repeatable_broker_metadata_preserves_selection_and_never_publishes
       - name: Test Cloudflare identity gate and sandbox transport
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py
       - name: Test personal memory ownership, capture and privacy
