@@ -29,6 +29,15 @@ test('metadata rejects duplicate keys instead of silently overwriting a value',(
   const c=context(),form={querySelectorAll:selector=>selector.includes('key')?[{value:'team'},{value:' team '}]:[{value:'one'},{value:'two'}]};
   assert.throws(()=>c.readAutomationMetadata(form),/different key/);
 });
+test('metadata value validation counts Unicode characters and recovers after correction',()=>{
+  const input={value:'🚀'.repeat(16384),setCustomValidity(message){this.message=message;}},button={},add={};
+  const item={querySelector:s=>s==='button'?button:input},host={children:[],append(row){this.children.push(row);}};
+  const form={querySelector:s=>s==='[data-metadata]'?host:add};
+  const c=context({document:{createElement:()=>item}});c.automationMetadata(form,{notes:input.value});
+  assert.equal(input.message,'');input.value+='x';input.oninput();assert.match(input.message,/16,384/);
+  input.value='Corrected\nnotes';input.oninput();assert.equal(input.message,'');
+  assert.match(item.innerHTML,/<textarea name="metadata_value"/);assert.doesNotMatch(item.innerHTML,/maxlength="500"/);
+});
 function generatorContext({suggest=false,recent=true,description='Every Monday review tickets',fail=false}={}) {
   const requests=[],opened=[],errors={textContent:''},button={},form={elements:{description:{focus(){}}},querySelector:s=>s==='[type=submit]'?button:errors};
   const dialog={open:true,querySelector:()=>form,close(){this.open=false;}};

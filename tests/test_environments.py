@@ -199,7 +199,8 @@ def test_litellm_setup_persists_defaults_and_requires_prisma(
     binaries = tmp_path / '.venv/bin'
     binaries.mkdir(parents=True)
     for name, body in {
-        'python': 'exit 0', 'uv': 'exit 0',
+        'python': 'exit 0',
+        'uv': 'if test "$1" = sync; then printf "%s\\n" "${CARGO_BUILD_JOBS-}" "${CARGO_PROFILE_DEV_DEBUG-}" > cargo-settings; fi',
         'prisma': 'test -f "${2#--schema=}" || exit 9\nprintf generated > prisma-ran',
     }.items():
         executable = binaries / name
@@ -209,9 +210,12 @@ def test_litellm_setup_persists_defaults_and_requires_prisma(
         (tmp_path / 'schema.prisma').write_text('fixture schema')
     if existing_env:
         (tmp_path / '.env').write_text('DATABASE_URL=postgresql://custom.invalid/existing\n')
+    monkeypatch.delenv('CARGO_BUILD_JOBS', raising=False)
+    monkeypatch.delenv('CARGO_PROFILE_DEV_DEBUG', raising=False)
     monkeypatch.setenv('PATH', str(binaries) + os.pathsep + os.environ['PATH'])
     result = subprocess.run(['bash', '-euo', 'pipefail', '-c', TEMPLATES[0]['setup']], cwd=tmp_path, capture_output=True)
     assert result.returncode == (0 if has_schema else 9)
+    assert (tmp_path / 'cargo-settings').read_text() == '2\n0\n'
     assert (tmp_path / 'prisma-ran').exists() is has_schema
     saved = (tmp_path / '.env').read_text()
     assert saved == ('DATABASE_URL=postgresql://custom.invalid/existing\n' if existing_env else

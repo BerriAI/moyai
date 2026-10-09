@@ -18,7 +18,7 @@ AI generation requires the configured cloud runtime. In a local simulation it is
 
 Use **Mine / All**, the status filter, and search to find saved workflows. Search includes names, instructions, owners, repositories, and metadata. These filters preserve the existing shared-workspace visibility and owner-only editing permissions.
 
-**Queue overlapping event runs** defaults off, preserving independent parallel sessions. Turn it on to wait while a previous automation run is still active at dispatch. Scheduled runs remain independent. Hourly limits and capacity checks may still hold events. Metadata is descriptive only, with up to 20 key-value pairs; it does not change access or execution.
+**Queue overlapping event runs** defaults off, preserving independent parallel sessions. Turn it on to wait while a previous automation run is still active at dispatch. Scheduled runs remain independent. Hourly limits and capacity checks may still hold events. Metadata is descriptive only, with up to 20 key-value pairs, 80 characters per key, and 16,384 characters per value; it does not change access or execution. Keep reusable setup scripts in an environment or versioned skill and reference them from the instructions.
 
 The editor exposes Moyai's actual runtime capabilities. Runs start new sessions as the owner. Security and network access remain governed by the workspace and environment; this does not add Devin-style per-automation security profiles, domain allowlists, arbitrary run-as identities, or per-session dollar budgets.
 
@@ -48,6 +48,53 @@ existing ability to pause other owners’ work in Settings. Connection selection
 GitHub repository grants, runtime readiness and webhook requirements still apply;
 these tools cannot grant new access. Mutations check the active turn and revision
 and journal a stable `request_key`, so retries do not duplicate or replay changes.
+
+### Reusing database setup
+
+Keep PostgreSQL, Prisma and other reusable setup in a [project environment](environments.md).
+The **LiteLLM development** starter already installs the pinned project dependencies,
+initializes a local development database, generates Prisma for the checked-out
+source, and verifies real proxy key creation, lookup and deletion before publishing
+a stopped filesystem snapshot. Each worker restarts the saved service startup
+recipe. Automation prompts describe the work to do; metadata remains descriptive.
+
+An administrator creates a **LiteLLM development** environment in **Environments**,
+selects the repository and source ref, saves it, runs **Build environment**, and
+enables it after verification succeeds. Use a full commit SHA for an exact source
+version, or a branch with optional refresh for rolling updates. Existing saved
+recipes keep their saved commands until the administrator edits and rebuilds them.
+
+From a direct chat, call `automation_environments` to find the environment's `id`,
+`prepared_build` (build ID, recipe revision, source SHA and sandbox provider), and
+any setup blocker. Follow `next_offset` for another page. This reads the shared
+environment catalog without building, changing it, or returning installation
+scripts. A recipe's current `revision` can be newer than `prepared_build.revision`;
+the latter describes the validated snapshot available to runs. Repository access
+and sandbox-provider compatibility are still checked when preparing a session.
+
+Set the returned ID on the automation definition; no bootstrap script is needed:
+
+```json
+{
+  "name": "Nightly database checks",
+  "prompt": "Run the repository database checks using the prepared environment and report failures.",
+  "environment_id": "<id returned by automation_environments>",
+  "triggers": [{"id": "nightly", "schedule": {"frequency": "daily", "time": "23:30", "timezone": "America/Los_Angeles"}}]
+}
+```
+
+Supply the current `turn_id` and stable `request_key` to `automation_create`, then
+enable its returned revision when scheduling is authorized. An explicit environment
+can supply the repository even when `repo_url` is empty. `auto` with no repository
+uses the workspace default if one exists; it does not implicitly choose LiteLLM.
+If no suitable environment is listed, an administrator must prepare it first.
+
+Each occurrence selects and pins the active validated build when its new session
+is prepared. Descendants and restored workers retain that pinned build and their
+copied files. A later occurrence can adopt a refreshed build; the automation ID
+does not permanently pin one source SHA. The bundled database is local sandbox
+development data. Tests that require isolated base/head datasets should create
+their own disposable databases within that environment and clean them up.
 
 Local verification: `uv run pytest tests/test_automation_tools.py -q` includes a
 real Temporal schedule check. For a visible broker demo, run

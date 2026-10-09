@@ -198,7 +198,19 @@ def assert_public_messages(result, events, store, *, saved, commentary, response
 
 @pytest.mark.parametrize('items,saved,commentary,response', [
     pytest.param([('a', 'commentary', 'First.'), ('b', None, 'Second.')],
-                 ['First.', 'Second.'], ['First.', 'Second.'], 'First.\nSecond.', id='commentary-fallback'),
+                 ['First.', 'Second.'], ['First.'], 'Second.', id='commentary-fallback'),
+    pytest.param([('a', None, 'First.'), ('b', None, 'Second.')],
+                 ['First.', 'Second.'], ['First.'], 'Second.', id='missing-phases'),
+    pytest.param([('a', None, 'Long answer. ' * 400)],
+                 ['Long answer. ' * 400], [], 'Long answer. ' * 400, id='full-unclassified-answer'),
+    pytest.param([('a', None, 'Answer.'), ('a', None, 'Answer.')],
+                 ['Answer.'], [], 'Answer.', id='duplicate-unclassified-id'),
+    pytest.param([('a', None, 'Same.'), ('b', None, 'Same.')],
+                 ['Same.', 'Same.'], ['Same.'], 'Same.', id='equal-text-unclassified-ids'),
+    pytest.param([('a', None, 'Answer.'), ('b', None, '')],
+                 ['Answer.'], [], 'Answer.', id='empty-item-keeps-candidate'),
+    pytest.param([('a', None, 'Update.'), ('b', 'final_answer', 'Answer.')],
+                 ['Update.', 'Answer.'], ['Update.'], 'Answer.', id='unclassified-before-final'),
     pytest.param([('a', 'final_answer', 'Answer.')],
                  ['Answer.'], [], 'Answer.', id='final-only'),
     pytest.param([('a', 'commentary', 'Update.'), ('b', 'final_answer', 'Answer.')],
@@ -206,9 +218,9 @@ def assert_public_messages(result, events, store, *, saved, commentary, response
     pytest.param([('a', 'commentary', 'Same.'), ('b', 'final_answer', 'Same.')],
                  ['Same.', 'Same.'], ['Same.'], 'Same.', id='equal-text-distinct-phases'),
     pytest.param([('a', 'commentary', 'Same.'), ('b', 'commentary', 'Same.')],
-                 ['Same.', 'Same.'], ['Same.', 'Same.'], 'Same.\nSame.', id='equal-text-distinct-ids'),
+                 ['Same.', 'Same.'], ['Same.', 'Same.'], '', id='equal-text-distinct-ids'),
     pytest.param([('a', 'commentary', 'Update.'), ('a', 'commentary', 'Update.')],
-                 ['Update.'], ['Update.'], 'Update.', id='duplicate-commentary-id'),
+                 ['Update.'], ['Update.'], '', id='duplicate-commentary-id'),
     pytest.param([('a', 'final_answer', 'Answer.'), ('a', 'final_answer', 'Answer.')],
                  ['Answer.'], [], 'Answer.', id='duplicate-final-id'),
     pytest.param([('a', 'final_answer', 'First.'), ('b', 'final_answer', 'Second.')],
@@ -235,17 +247,63 @@ def test_completed_native_messages_project_once(codex_agent, monkeypatch, items,
     install_codex_client(monkeypatch, agent, stream)
     result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
     assert result['completed'] and not result['failed'] and not result['interrupted']
-    assert before_settle == [commentary]
+    assert before_settle == [[text for item_id, phase, text in dict(
+        (item[0], item) for item in items).values() if phase != 'final_answer' and text]]
     assert assistant_prose(result['messages']) == saved
     assert_public_messages(result, events, store, saved=saved, commentary=commentary, response=response)
 
 
-@pytest.mark.parametrize('outcome', ['failed-status', 'provider-error', 'interrupted', 'pending-tool', 'boundary-failed'])
-def test_unsettled_turn_discards_final_candidates_but_keeps_commentary(codex_agent, monkeypatch, outcome):
+def test_late_duplicate_tool_receipt_does_not_publish_answer_as_progress(codex_agent, monkeypatch):
+    agent, events, store = codex_agent
+    started, finished = native_item('commandExecution')
+
+    async def stream():
+        yield sdk_event('item/completed', {'item': {
+            'id': 'update', 'type': 'agentMessage', 'text': 'Checking.'}})
+        yield sdk_event('item/started', {'item': started})
+        assert [event[1] for event in events if event[0] == 'message'] == ['Checking.']
+        yield sdk_event('item/completed', {'item': finished})
+        yield sdk_event('item/completed', {'item': {
+            'id': 'answer', 'type': 'agentMessage', 'text': 'Confirmed.'}})
+        yield sdk_event('item/completed', {'item': finished})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    install_codex_client(monkeypatch, agent, stream)
+    result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
+    assert result['completed']
+    assert result['final_response'] == 'Confirmed.'
+    assert [event[1] for event in events if event[0] == 'message'] == ['Checking.']
+    assert agent.journal.completed_tools == 1
+
+
+@pytest.mark.parametrize('outcome', ['failed', 'interrupted', 'exception'])
+def test_unclassified_candidate_survives_unsuccessful_turn(codex_agent, monkeypatch, outcome):
     agent, events, store = codex_agent
 
     async def stream():
-        for item_id, phase, text in [('a', 'commentary', 'Saved update.'), ('b', 'final_answer', 'Unconfirmed final.')]:
+        yield sdk_event('item/completed', {'item': {
+            'id': 'candidate', 'type': 'agentMessage', 'text': 'Saved progress.'}})
+        if outcome == 'exception':
+            raise RuntimeError('Connection ended')
+        if outcome == 'interrupted':
+            agent.interrupt()
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
+
+    install_codex_client(monkeypatch, agent, stream)
+    result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
+    assert not result['completed']
+    assert saved_prose(store) == ['Saved progress.']
+    assert [event[1] for event in events if event[0] == 'message'] == ['Saved progress.']
+    assert result['final_response'] != 'Saved progress.'
+
+
+@pytest.mark.parametrize('progress_phase', ['commentary', None])
+@pytest.mark.parametrize('outcome', ['failed-status', 'provider-error', 'interrupted', 'pending-tool', 'boundary-failed'])
+def test_unsettled_turn_discards_final_candidates_but_keeps_commentary(codex_agent, monkeypatch, outcome, progress_phase):
+    agent, events, store = codex_agent
+
+    async def stream():
+        for item_id, phase, text in [('a', progress_phase, 'Saved update.'), ('b', 'final_answer', 'Unconfirmed final.')]:
             yield sdk_event('item/completed', {'item': {
                 'id': item_id, 'type': 'agentMessage', 'phase': phase, 'text': text}})
         if outcome == 'provider-error':

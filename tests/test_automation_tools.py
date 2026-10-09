@@ -1,5 +1,6 @@
 """Real broker requests: requester isolation, durable retries and schedule confirmation."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -18,7 +19,7 @@ def definition(**changes):
 
 
 def call(client, run, name, **arguments):
-    if name not in {'automation_list', 'automation_webhook_info'}:
+    if name not in {'automation_list', 'automation_webhook_info', 'automation_environments'}:
         arguments.setdefault('turn_id', run['active_message_id'])
     return client.post(f"/broker/{run['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
                        json={'name': name, 'arguments': arguments})
@@ -36,6 +37,26 @@ def runtime(app):
     app.state.settings.modal_token_secret = 'test-runtime-secret'
     app.state.settings.litellm_api_base = 'https://model.example/v1'
     app.state.settings.litellm_api_key = 'test-runtime-key'
+
+
+def test_full_capacity_metadata_round_trips_within_broker_response_limit(workspace):
+    from sandbox.broker_transport import MAX_BODY
+
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    metadata = {str(i): '\U0001f680' * 16384 for i in range(20)}
+    saved = create(client, run, metadata=metadata)
+    read = call(client, run, 'automation_list', automation_id=saved['id']).json()
+    assert read['automations'][0]['definition']['metadata'] == metadata
+    # The bridge may ASCII-escape supplementary Unicode; even that fits.
+    assert len(json.dumps(read, ensure_ascii=True).encode()) < MAX_BODY
+    summary = call(client, run, 'automation_list', limit=50).json()['automations'][0]
+    assert 'metadata' not in summary and 'definition' not in summary
+    changed = {**saved['definition'], 'metadata': {'notes': 'x' * 16384}}
+    updated = call(client, run, 'automation_update', automation_id=saved['id'], revision=1,
+                   request_key='update-large-metadata', definition=changed).json()
+    assert updated['definition']['metadata'] == changed['metadata']
 
 
 def test_tools_available_in_verified_chat_and_create_retries_are_atomic(workspace):
@@ -179,6 +200,59 @@ def test_requester_or_cancellation_during_access_check_prevents_write(workspace,
         return result
     monkeypatch.setattr(app.state.automation_tools, 'result', switch)
     assert call(client, run, 'automation_list', automation_id=saved['id']).status_code == 403
+
+
+def test_environment_discovery_exposes_reusable_build_not_setup_scripts(workspace):
+    from app.environments import Recipe, SaveRecipe
+    from test_environments import prepared
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    env = app.state.environments
+    build_id = prepared(env, default=False)
+    # Editing a recipe retains the previously validated version until rebuilt.
+    env.save_recipe('e' * 32, SaveRecipe(revision=1, recipe=Recipe(
+        name='Edited setup', repository='BerriAI/moyai', setup='private installation script', verify='true')), 'admin')
+    prepared(env, default=False, identity='f' * 32)
+    env.save_recipe('d' * 32, SaveRecipe(recipe=Recipe(
+        name='Disabled setup', repository='BerriAI/moyai', verify='true')), 'admin')
+    result = call(client, run, 'automation_environments', limit=1)
+    assert result.status_code == 200, result.text
+    assert result.json()['next_offset'] == 1
+    pages = [result.json(), call(client, run, 'automation_environments', offset=1, limit=1).json()]
+    assert pages[1]['next_offset'] is None
+    items = {item['id']: item for page in pages for item in page['environments']}
+    assert set(items) == {'e' * 32, 'f' * 32}
+    item = items['e' * 32]
+    assert item['revision'] == 2 and item['repository'] == 'BerriAI/litellm'
+    assert item['prepared_build'] == {'id': build_id, 'revision': 1, 'commit_sha': 'a' * 40, 'sandbox_provider': 'modal'}
+    assert item['setup_blocker'] == ''
+    assert not {'recipe', 'builds', 'setup', 'startup', 'verify', 'shutdown', 'instructions'} & item.keys()
+    assert 'private installation script' not in str(pages)
+    tools = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'}).json()
+    tool = next(tool for tool in tools if tool['name'] == 'automation_environments')
+    assert tool['annotations']['readOnlyHint'] is True
+    saved = create(client, run, environment_id=item['id'])
+    assert saved['definition']['environment_id'] == item['id']
+    assert saved['definition']['repo_url'] == '' and saved['definition']['metadata'] == {}
+    app.state.store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (run['id'], run['id']))
+    assert call(client, run, 'automation_environments').status_code == 403
+
+
+def test_environment_discovery_reports_unbuilt_setup_blocker(workspace):
+    from app.environments import Recipe, SaveRecipe
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    env = app.state.environments
+    env.save_recipe('e' * 32, SaveRecipe(recipe=Recipe(name='Database setup', repository='BerriAI/litellm', verify='true')), 'admin')
+    env.store.execute('UPDATE environments SET activate_on_ready=1')
+    build = env.enqueue('e' * 32, 1, 'admin')
+    env.update(build['id'], phase='failed')
+    item = call(client, run, 'automation_environments').json()['environments'][0]
+    assert item['prepared_build'] is None
+    assert 'Project setup failed' in item['setup_blocker']
+    assert len(env.store.rows('SELECT id FROM environment_builds')) == 1  # Discovery never retries setup.
 
 
 def test_list_paginates_without_exposing_saved_prompts(workspace):
