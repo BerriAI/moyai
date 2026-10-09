@@ -44,7 +44,10 @@ class LambdaProvider:
             # Handles are short-lived (including in the durable runner). Close
             # HTTP pools instead of accumulating one per poll/stream read.
             with closing(self.session.client(service, config=Config(connect_timeout=10, read_timeout=30,
-                    retries={'mode': 'standard', 'total_max_attempts': 3}))) as client:
+                    retries={'mode': 'standard', 'total_max_attempts': 3},
+                    # S3 otherwise presigns with SigV2 in us-east-1. Its implicit
+                    # Content-Type signature disagrees with urllib's PUT header.
+                    **({'signature_version': 's3v4'} if service == 's3' else {})))) as client:
                 return getattr(client, method)(**kwargs)
         try:
             return await asyncio.to_thread(call)
