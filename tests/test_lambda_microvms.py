@@ -134,6 +134,26 @@ async def test_uncertain_mutation_is_not_retried(settings, monkeypatch, path, fa
     assert len(calls) == 1
 
 
+async def test_endpoint_token_refreshes_after_host_suspension(settings, monkeypatch):
+    from app.sandboxes import lambda_microvm
+    backend = LambdaProvider(settings)
+    sandbox = Sandbox(backend, vm())
+    backend.aws = AsyncMock(side_effect=[{'authToken': {'X-aws-proxy-auth': value}} for value in ['first', 'fresh']])
+    wall = [1000]
+    monkeypatch.setattr(lambda_microvm.time, 'time', lambda: wall[0])
+    tokens = []
+    def response(request):
+        tokens.append(request.headers['X-aws-proxy-auth'])
+        return httpx.Response(200, json={'ready': True})
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: client(transport=httpx.MockTransport(response), **kw))
+    await sandbox.request('/health', {})
+    wall[0] += 3600  # Wall time advances while the host's monotonic clock pauses.
+    await sandbox.request('/health', {})
+    assert tokens == ['first', 'fresh']
+    assert backend.aws.await_count == 2
+
+
 @pytest.mark.parametrize('path', ['/health', '/job', '/read', '/file/read', '/file/stat', '/checkpoint/finish'])
 async def test_transient_gateway_failure_retries_only_the_same_observation(settings, monkeypatch, path):
     backend = LambdaProvider(settings)

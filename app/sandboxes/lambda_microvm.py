@@ -221,11 +221,12 @@ class Sandbox:
 
     async def _request(self, path, data):
         async with self.auth_lock:
-            if time.monotonic() >= self.auth_until:
+            # AWS tokens expire in wall time, including while the host sleeps.
+            if time.time() >= self.auth_until:
                 result = await self.provider.aws('lambda-microvms', 'create_microvm_auth_token',
                     microvmIdentifier=self.vm_id, expirationInMinutes=15, allowedPorts=[{'port': 80}])
                 self.auth = result['authToken']['X-aws-proxy-auth']
-                self.auth_until = time.monotonic() + 12 * 60
+                self.auth_until = time.time() + 12 * 60
         endpoint = self.vm['endpoint']
         url = urlsplit(endpoint if '://' in endpoint else 'https://' + endpoint)
         if (url.scheme != 'https' or url.username or url.password or url.port or
