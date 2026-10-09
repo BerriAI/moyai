@@ -10,8 +10,8 @@ aliases retain the Claude SDK fallback. An explicitly configured `AGENT_HARNESS`
 overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` setting
 to enable automatic pairing. The new-session picker shows the effective automatic
 choice and supports an explicit override. Explicitly
-selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents and
-Tool Loop. All configured models remain selectable with every harness. The configured
+selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents,
+Tool Loop and Pi. All configured models remain selectable with every harness. The configured
 `AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
 selected model and tool calls through the runtime's native API (Responses for
 Codex, Messages for Claude); selecting it does not establish provider compatibility.
@@ -126,7 +126,7 @@ wait for credentials/delegated work, or apply a correction at a complete tool
 boundary. In-flight redirect is a Hermes capability; Claude uses boundary
 steering. Stop revokes the capability and terminates the isolated machine.
 
-Claude and OpenCode can resume a compatible, successfully completed native
+Claude, OpenCode and Pi can resume a compatible, successfully completed native
 conversation on the next chat turn, including after the sandbox process exits.
 The SDK receives only the new request; it owns its existing conversation instead
 of receiving the public journal again inside a new user message. Completed
@@ -154,7 +154,7 @@ most 256 regular files for CLI runtimes; oversized state uses the public journal
 Native plaintext lives outside `/workspace` and is removed before attachments,
 project preparation or agent startup, including when starting a cloned child.
 Each SDK uses an isolated config/cache directory and fresh relay credentials.
-Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode uses
+Claude uses the pinned SDK's public `SessionStore` protocol; OpenCode and Pi use
 LiteLLM's public resume API and its persisted native files. Missing, corrupt or
 incompatible state selects a fresh session before inference. An ambiguous SDK
 failure never automatically retries the task. Interrupted turns, intermediate
@@ -395,7 +395,7 @@ Read the repository
 ```
 
 The task line is optional. A harness-only command starts no compute. Other IDs
-are `hermes`, `codex`, `opencode`, `deepagents` and `tool-loop`.
+are `hermes`, `codex`, `opencode`, `deepagents`, `tool-loop` and `pi`.
 
 ## Other runtimes and extension
 
@@ -405,8 +405,8 @@ choices, Slack selection and adapter creation. Each adapter implements
 `sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
 checkpointing and delivery.
 
-OpenCode, Deep Agents and Tool Loop use `litellm.aagent_session`, or
-`litellm.aagent_resume` for eligible OpenCode conversations, with the named
+OpenCode, Deep Agents, Tool Loop and Pi use `litellm.aagent_session`, or
+`litellm.aagent_resume` for eligible OpenCode and Pi conversations, with the named
 bindings in `sandbox/harness_bindings.py`. The pinned beta source
 is `2cee61626d9581bc22bbdeefb1924f854f50d427`; the tested PyPI wheel alone does not
 contain that API. Claude Agent SDK stays pinned at `0.2.163`; the native Codex

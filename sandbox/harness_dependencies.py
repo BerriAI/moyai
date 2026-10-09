@@ -22,14 +22,14 @@ def ensure_pip() -> None:
 
 
 def prepare_binary(binding):
-    packages = {'opencode': 'opencode-ai@1.18.35'}
+    packages = {'opencode': 'opencode-ai@1.18.35', 'pi': '@earendil-works/pi-coding-agent@1.1.0'}
     if binding in packages and not shutil.which(binding):
         subprocess.run(['npm', 'install', '-g', packages[binding]], check=True, timeout=300)
 
 
 def runtime_version(binding):
     """Fingerprint the installed CLI, including binaries from older snapshots."""
-    if binding != 'opencode':
+    if binding not in ('opencode', 'pi'):
         return ''
     try:
         result = subprocess.run([binding, '--version'], capture_output=True, text=True, timeout=10)
@@ -93,3 +93,4 @@ if __name__ == '__main__':
     prepare_codex()
     prepare_runtime()
     prepare_binary('opencode')
+    prepare_binary('pi')

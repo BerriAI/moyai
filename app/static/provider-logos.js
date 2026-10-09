@@ -7,7 +7,7 @@
     meta_llama:'meta_llama',moonshot:'moonshot',openrouter:'openrouter',together_ai:'togetherai',
     cohere:'cohere',minimax:'minimax',
   };
-  const harnesses={'claude-agent-sdk':'claude-code',codex:'codex'};
+  const harnesses={'claude-agent-sdk':'claude-code',codex:'codex',pi:'pi'};
   function src(model){const file=logos[String(model||'').split('/')[0].toLowerCase()];return file?`/static/provider-logos/${file}.svg`:null;}
   function harness(id){const file=harnesses[id];return file?`/static/harness-logos/${file}.svg`:null;}
   function sync(img,model,resolve=src){const url=resolve(model);img.hidden=!url;if(url)img.src=url;else img.removeAttribute('src');}

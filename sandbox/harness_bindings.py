@@ -94,8 +94,16 @@ def tool_loop_options(config):
     return ToolLoopOptions(completion_kwargs={'num_retries': 0})
 
 
+def pi_options(config):
+    from litellm import PiOptions
+    server = config['mcp_servers']['workspace']
+    return PiOptions(config={'mcpServers': {'moyai': {'command': server['command'],
+        'args': server.get('args', []), 'env': server.get('env', {}), 'exposure': 'direct'}}})
+
+
 RUNTIME_BINDINGS = {
     'opencode': RuntimeBinding(local_sandbox, opencode_options),
     'deepagents': RuntimeBinding(local_sandbox, deepagents_options, in_process=True),
     'tool-loop': RuntimeBinding(local_sandbox, tool_loop_options, in_process=True, native_file_tools=False),
+    'pi': RuntimeBinding(local_sandbox, pi_options),
 }
