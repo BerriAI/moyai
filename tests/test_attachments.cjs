@@ -112,6 +112,18 @@ test('draft audio inserts an editable transcript without replacing typed text',a
   f.controller.lock(false);f.controller.destroy();assert.equal(useTranscript(),false);
 });
 
+test('a locked attachment owner cancels recording and late uploads keep their controls locked',async()=>{
+  const f=fixture();let cancelled=0;
+  f.controller.destroy();
+  f.ctx.bindAudioRecorder=()=>({busy:()=>false,render(){},cancel(){cancelled++;},destroy(){}});
+  const controller=f.ctx.bindAttachments(f.input,f.form,'session-one');
+  f.paste();await flush();controller.lock(true);
+  const id='1'.padStart(32,'0');f.requests[0].resolve({id,name:f.file.name,size:123});await flush();
+  assert.equal(cancelled,1);assert.equal(f.form.toolbar.children[0].disabled,true);
+  assert.match(f.form.children[0].innerHTML,/data-remove="[^"]+"[^>]+disabled/);
+  f.paste();await flush();assert.equal(f.requests.length,1);assert.equal(f.input.value,'My unsent text');
+});
+
 
 for(const source of ['picker','paste','drop'])test(`${source} accepts eight, rejects ninth, and permits replacement`,async()=>{
   const f=fixture(),files=Array.from({length:9},(_,i)=>({...f.file,name:`file-${i}.png`}));

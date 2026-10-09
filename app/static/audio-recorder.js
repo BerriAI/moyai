@@ -55,5 +55,5 @@ function bindAudioRecorder(form, onFile, locked){
   };
   cancel.onclick=()=>stop(true);
   render();
-  return {busy,render,destroy(){disposed=true;stop(true);button.remove();cancel.remove();status.remove();}};
+  return {busy,render,cancel(){stop(true);},destroy(){disposed=true;stop(true);button.remove();cancel.remove();status.remove();}};
 }

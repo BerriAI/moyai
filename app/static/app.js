@@ -57,7 +57,7 @@ function sessionMatches(run,search){
   return (run.search_query===term&&run.search_match)||[sessionTitle(run),run.agent_label,run.display_title,run.prompt].some(value=>typeof value==='string'&&value.toLowerCase().includes(term));
 }
 function sessionStatus(run){
-  return ({idle:'Ready',completed:'Completed',running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
+  return ({idle:'Ready',completed:'Completed',running:'Working now',queued:'Queued',provisioning:'Starting',reconnecting:'Reconnecting',saving:'Saving',awaiting_approval:'Needs approval',waiting_credential:'Needs access',waiting_children:'Agents working',stopping:'Stopping',deleting:'Deleting',failed:'Failed',cancelled:'Stopped',interrupted:'Interrupted'})[run.status]||'Status unknown';
 }
 function sessionRepository(run){
   try{const url=new URL(run.repo_url);return url.protocol==='https:'&&url.hostname==='github.com'?url.pathname.split('/').filter(Boolean).slice(0,2).join('/').replace(/\.git$/,''):'';}catch{return '';}
@@ -95,7 +95,7 @@ function markSessionRead(run){
 }
 function sessionIndicator(run){
   const label=sessionStatus(run);
-  if(['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'].includes(run.status))return `<span class="session-indicator" title="${esc(label)}" aria-hidden="true"><span class="session-spinner"></span></span>`;
+  if(['running','queued','provisioning','reconnecting','saving','waiting_children','stopping','deleting'].includes(run.status))return `<span class="session-indicator" title="${esc(label)}" aria-hidden="true"><span class="session-spinner"></span></span>`;
   const marker=sessionCompletion(run),unread=marker&&sessionReadMarker(run)!==marker;
   const remaining=(state.sessionReadFade?.get(sessionReadKey(run))||0)-Date.now();
   if(unread||marker&&remaining>0)return `<span class="session-indicator" title="${unread?'Unread completion':'Read'}" aria-hidden="true"><span class="session-completion${unread?'':' is-read'}"${unread?'':` style="animation-delay:-${350-remaining}ms"`}></span></span>`;
@@ -245,7 +245,7 @@ function bindComposer(input,form){
   input.addEventListener('input',()=>autoSize(input));
   const skills=bindInlineSkillPicker(input,form);state.skillComposer=skills;
   state.attachments=bindAttachments(input,form,input.id==='prompt'?'new':state.selected);
-  input.addEventListener('keydown',e=>{if(skills.keydown(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();const now=(e.ctrlKey||e.metaKey)&&input.id==='followup';if(now&&!input.value.trim()&&!state.attachments.hasFiles()){state.messageQueue?.sendFirst();return;}if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit(now?form.querySelector('[data-send-now]'):undefined);}});
+  input.addEventListener('keydown',e=>{if(form.inert)return;if(skills.keydown(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();const now=(e.ctrlKey||e.metaKey)&&input.id==='followup';if(now&&!input.value.trim()&&!state.attachments.hasFiles()){state.messageQueue?.sendFirst();return;}if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit(now?form.querySelector('[data-send-now]'):undefined);}});
   autoSize(input);
 }
 async function navigate(view) {
@@ -465,16 +465,18 @@ function renderChat(run){
   $('#conversation').onscroll=()=>{const box=$('#conversation');$('#jump-latest').hidden=box.scrollHeight-box.scrollTop-box.clientHeight<120;};
   $('#stop-response').onclick=async()=>{try{await api(`/api/runs/${id}/cancel`,{method:'POST'});await refreshChat(id);}catch(e){toast(e.message);}};
   $('#message-form').onsubmit=async e=>{
-    e.preventDefault();if(state.sending.has(id))return;
+    e.preventDefault();const form=e.currentTarget||$('#message-form'),input=$('#followup');
+    const current=()=>state.selected===id&&$('#message-form')===form;
+    if(!current()||form.inert||state.sending.has(id)||state.chatRun?.status==='deleting')return;
     const send_now=e.submitter?.hasAttribute('data-send-now')||false;
     const files=state.attachments;let attachment_ids;
     try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
-    const original=$('#followup').value.trim(),content=original||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':'');if(!content)return;
-    const button=$('#message-form [type="submit"]');button.disabled=true;state.sending.add(id);files.lock(true);
+    const original=input.value.trim(),content=original||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':'');if(!content)return;
+    state.sending.add(id);syncChatComposer(state.chatRun);
     const model=$('#chat-model')?.value||run.model||state.config.model;
     let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model||pending.send_now!==send_now||JSON.stringify(pending.attachment_ids)!==JSON.stringify(attachment_ids))pending=state.pendingMessages[id]={content,model,attachment_ids,send_now,client_id:crypto.randomUUID()};
-    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});state.sessionEdits=(state.sessionEdits||0)+1;files.clear(attachment_ids);delete state.pendingMessages[id];if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(state.selected===id&&$('#followup')?.value.trim()===original){$('#followup').value='';$('#followup').dispatchEvent(new Event('input',{bubbles:true}));autoSize($('#followup'));}await Promise.all([refreshChat(id),refreshRuns()]);if(state.selected===id)bottom();}
-    catch(error){toast(error.message);}finally{state.sending.delete(id);files.lock(false);if(state.selected===id&&$('#message-form'))$('#message-form [type="submit"]').disabled=false;}
+    try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});state.sessionEdits=(state.sessionEdits||0)+1;files.clear(attachment_ids);delete state.pendingMessages[id];if(current()){if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(input.value.trim()===original){input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);}}await Promise.all([refreshChat(id),refreshRuns()]);if(current())bottom();}
+    catch(error){toast(error.message);}finally{state.sending.delete(id);if(state.selected===id)syncChatComposer(state.chatRun);}
   };
   updateChat(run,true);
   connectChatStream(run);
@@ -506,24 +508,41 @@ function connectChatStream(run){
   };
   connect();
 }
+function syncChatComposer(run){
+  const form=$('#message-form');if(!form||!run)return;
+  // Deletion is irreversible for this mount, including after an older response.
+  form.inert=!!form.inert||run.status==='deleting';
+  if(form.inert)run.status='deleting';
+  const deleting=form.inert,sending=state.sending.has(run.id||state.selected);
+  form.querySelectorAll('[type="submit"]').forEach(button=>button.disabled=deleting||sending);
+  for(const control of [$('#chat-model'),form.querySelector('[data-skill-picker]')])if(control)control.disabled=deleting;
+  $('#followup').contentEditable=String(!deleting);$('#followup').setAttribute('aria-disabled',String(deleting));
+  $('#stop-response').disabled=deleting||run.status==='stopping';
+  state.attachments?.lock(deleting||sending);
+}
 function updateChatStatus(run){
+  syncChatComposer(run);
   if(state.chatRun){Object.assign(state.chatRun,run);state.messageQueue?.render(state.chatRun);MoyaiActivity.sync($('#conversation'),state.chatRun,{markdown:renderMarkdown,copy:copyText});savedFiles.decorate($('#conversation'));}
   run=state.chatRun||run;
   if(run.model&&$('#chat-model')&&!state.modelDrafts[state.selected]){$('#chat-model').value=run.model;MoyaiProviderLogos.sync($('#chat-model').closest('.model-picker')?.querySelector('.provider-logo'),run.model);}
   MoyaiUI.render($('#run-status'), statusLabel(run.status));
-  const busy=!terminal.has(run.status)||run.active;
-  $('#stop-response').hidden=!busy;$('#stop-response').disabled=run.status==='stopping';
+  const busy=!terminal.has(run.status)||run.active,deleting=run.status==='deleting';
+  $('#stop-response').hidden=!busy;
   const immediate=state.preferences?.send_immediately===true;
   const send=$('#message-form .send-button');if(send){send.title=busy?(immediate?'Send now':'Queue message'):'Send message';send.setAttribute('aria-label',send.title);}if($('#followup'))$('#followup').placeholder=busy?(immediate?'Send a follow-up now…':'Queue a follow-up… (Ctrl/⌘ Enter to send now)'):'Respond to Moyai or ask something else';
   $('#queue-note').textContent=run.slack_mirroring==='active'?'Your messages and replies are shared with the connected Slack conversation.':run.slack_mirroring==='paused'?'Slack sharing is paused for this session.':busy?(immediate?'Enter to send now · Messages guide the active response.':'Enter to queue · Ctrl/⌘ Enter to send now.'):'Your conversation and files stay here.';
   if(state.activeParentId)$('#queue-note').textContent='Chatting with this agent directly. Results already sent to the parent stay saved.';
+  if(deleting){
+    $('#followup').placeholder='This session is being deleted…';
+    $('#queue-note').textContent='Deletion is in progress. Agents and sandboxes will close automatically.';
+  }
   renderChatWorking(run);
   syncRunSummary(run);
 }
 function renderChatWorking(run){
   const current=MoyaiActivity.current(run),node=$('#chat-working');
   node.classList.toggle('busy',current.pulse);
-  node.textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',reconnecting:'Reconnecting to workspace services. Your request will resume automatically…',running:current.headline,saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for access. Your work is saved and the sandbox is paused.',stopping:'Stopping…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
+  node.textContent=run.checkpoint_error&&terminal.has(run.status)?'The latest workspace files were not saved; see the warning above.':({idle:'',queued:'Waiting to start…',provisioning:'Opening your workspace…',reconnecting:'Reconnecting to workspace services. Your request will resume automatically…',running:current.headline,saving:'Saving your work…',awaiting_approval:'Waiting for administrator approval',waiting_children:'Parallel agents are working; this coordinator has released its sandbox.',waiting_credential:'Waiting for access. Your work is saved and the sandbox is paused.',stopping:'Stopping…',deleting:run.deletion_error?'Deleting session… '+run.deletion_error:'Deleting session…',failed:'This response failed. Details are shown above; your conversation is saved.',cancelled:'Response stopped. You can continue from here.',interrupted:'Response interrupted. Send a message to continue.'})[run.status]||'';
   node.hidden=!node.textContent;
   node.title=node.textContent;
   renderActivitySummary(run);
@@ -551,6 +570,7 @@ function renderActivitySummary(run){
   if(turns.length>shown.length){const more=MoyaiUI.createElement('button', document);more.className='quiet';more.dataset.moreHistory='';more.textContent='Show earlier turns';more.onclick=()=>{state.activityHistoryLimit+=5;target.dataset.signature='';renderActivitySummary(state.chatRun);};target.append(more);}
 }
 function updateChat(run,initial=false){
+  syncChatComposer(run);
   const previous=state.chatRun?.id===run.id?state.chatRun:null;
   const snapshotCursor=run.events?.at(-1)?.id||0;
   run.events=[...new Map([...(run.events||[]),...(previous?.events||[])].map(event=>[event.id,event])).values()].sort((a,b)=>a.id-b.id);
@@ -577,7 +597,6 @@ function updateChat(run,initial=false){
   $('#saved-workspace').textContent=run.mode==='demo'?'Simulated':run.checkpoint_error?(run.snapshot_id?'Latest save failed; earlier checkpoint retained':'Latest save failed; no saved checkpoint'):run.snapshot_id?'Saved for follow-ups':'Preparing';
   savedFiles.sync(run);
   if(typeof workspacePanel!=='undefined')workspacePanel?.syncSession(run);
-  $('#message-form [type="submit"]').disabled=state.sending.has(run.id);
 }
 function renderLiveWork(event,disconnected){
   const run=state.chatRun;if(!run||run.id!==state.selected)return;

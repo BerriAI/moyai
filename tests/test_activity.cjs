@@ -139,11 +139,12 @@ test('expanded commands survive incoming events and keep keyboard focus',()=>{
 test('chat rendering mounts inline work and a stale fetch cannot erase streamed events or drafts',()=>{
   const script=readFileSync('app/static/app.js','utf8');
   const nodes=new Map();const renders=[];
-  function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],value:'draft kept',innerHTML:''});return nodes.get(selector);}
+  function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],querySelector:node,setAttribute(name,value){this[name]=value;},value:'draft kept',innerHTML:''});return nodes.get(selector);}
   const data=run();data.mode='modal';data.messages[0].content='First request';data.messages[1].content='Next request';
   const state={selected:'chat',sending:new Set(),userId:'user',drafts:{chat:'draft kept'}};
   const context={savedFiles:{sync(){},decorate(){}},state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderChatWorking:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
-  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
+  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
+    script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
   assert.match(node('#conversation').innerHTML,/data-activity-slot="1"/);
   assert.doesNotMatch(node('#conversation').innerHTML,/Next request/);
@@ -170,10 +171,11 @@ test('steering inputs share the original work timeline and do not invent another
   data.events.push(event(2,'status','Your message is guiding the current task.',{turn_id:1,message_id:2,phase:'steering'}),tool(3,'a','started'));
   const turns=groups(data);assert.equal(turns.size,1);assert.equal(turns.get('1').live,true);assert.equal(turns.get('1').rows.length,2);
   const script=readFileSync('app/static/app.js','utf8');
-  const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],innerHTML:''});return nodes.get(selector);}
+  const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],querySelector:node,setAttribute(name,value){this[name]=value;},innerHTML:''});return nodes.get(selector);}
   data.messages[0].content='Original objective';
   const context={savedFiles:{sync(){},decorate(){}},state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
-  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
+  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
+    script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
   const markup=node('#conversation').innerHTML;
   assert.equal((markup.match(/data-activity-slot=/g)||[]).length,2);
@@ -288,7 +290,7 @@ test('focus scope follows offered inputs and receipt order, including an older i
 
 test('waits, stopping, disconnection and completion override a saved focus and stop its pulse',()=>{
   const data=run();data.events.push(focus(2,'Auditing UI and schema changes'));
-  for(const [status,label] of Object.entries({awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',reconnecting:'Reconnecting to workspace',stopping:'Stopping',cancelled:'Stopped',failed:'Response failed',idle:'Work finished'})){
+  for(const [status,label] of Object.entries({awaiting_approval:'Waiting for approval',waiting_children:'Waiting for agents',waiting_credential:'Waiting for access',reconnecting:'Reconnecting to workspace',stopping:'Stopping',deleting:'Deleting session',cancelled:'Stopped',failed:'Response failed',idle:'Work finished'})){
     data.status=status;assert.equal(current(data).headline,label);assert.equal(current(data).pulse,false);
   }
   data.status='running';data.activity_disconnected=true;
@@ -317,10 +319,10 @@ test('the composer follows live SSE focus, reconnects and lifecycle state withou
   const script=readFileSync('app/static/app.js','utf8'),nodes=new Map(),sources=[],refreshes=[];
   const node=selector=>{
     if(selector==='#activity-history'||selector==='#goal-status')return null;
-    if(!nodes.has(selector))nodes.set(selector,{dataset:{},textContent:'',classList:{toggle(name,value){this[name]=value;}},setAttribute(){},querySelectorAll:()=>[],insertAdjacentHTML(){}});
+    if(!nodes.has(selector))nodes.set(selector,{dataset:{},textContent:'',classList:{toggle(name,value){this[name]=value;}},setAttribute(name,value){this[name]=value;},querySelectorAll:()=>[],querySelector:node,insertAdjacentHTML(){}});
     return nodes.get(selector);
   };
-  const data=run(),state={selected:'chat',chatRun:data,modelDrafts:{},runs:[]};
+  const data=run(),state={selected:'chat',chatRun:data,modelDrafts:{},runs:[],sending:new Set()};
   const context={state,document:{hidden:false},$:node,MoyaiActivity,MoyaiGoal:require('../app/static/goal-status.js'),terminal:new Set(['completed','failed','cancelled','interrupted','idle']),savedFiles:{decorate(){}},
     renderMarkdown:text=>text,esc:text=>text,copyText(){},modelName:()=>'',statusLabel:text=>text,renderSidebar(){},
     refreshChat:async id=>refreshes.push(id),showError:error=>{throw error;},clearTimeout(){},setTimeout(){},
@@ -346,6 +348,19 @@ test('the composer follows live SSE focus, reconnects and lifecycle state withou
   source.onmessage({data:JSON.stringify(event(9,'chat','Response received',{message_id:1,response_complete:true}))});
   assert.equal(node('#chat-working').textContent,'Saving workspace');assert.equal(node('#chat-working').classList.busy,false);
   source.handlers['run-status']({data:JSON.stringify({status:'idle'})});assert.equal(node('#chat-working').textContent,'');
+  const controls=['#stop-response','#message-form .send-button','#message-form [data-send-now]','#chat-model'].map(node);
+  node('#message-form').querySelectorAll=()=>controls;
+  node('#followup').value='Unsent reply';let locked=false;state.attachments={lock:value=>locked=value};
+  source.handlers['run-status']({data:JSON.stringify({status:'deleting'})});
+  assert.equal(node('#chat-working').textContent,'Deleting session…');assert.equal(controls.every(control=>control.disabled),true);
+  assert.equal(node('#followup').contentEditable,'false');assert.equal(node('#followup')['aria-disabled'],'true');
+  assert.equal(node('#followup').value,'Unsent reply');assert.equal(locked,true);
+  assert.match(node('#queue-note').textContent,/close automatically/);
+  source.handlers['run-status']({data:JSON.stringify({status:'deleting',deletion_error:'Cleanup will retry automatically.'})});
+  assert.match(node('#chat-working').textContent,/Cleanup will retry automatically/);
+  source.handlers['run-status']({data:JSON.stringify({status:'idle'})});
+  assert.match(node('#chat-working').textContent,/Cleanup will retry automatically/);
+  assert.equal(controls.every(control=>control.disabled),true);
 });
 
 test('side-chat polls replace focus while retaining expanded activity through status and transcript updates',()=>{
@@ -353,10 +368,11 @@ test('side-chat polls replace focus while retaining expanded activity through st
   const log={slots:[],scrollHeight:1000,scrollTop:50,clientHeight:400,querySelectorAll:()=>log.slots,
     set innerHTML(markup){writes++;this.slots=[...markup.matchAll(/data-activity-slot="(\d+)"/g)].map(([,id])=>({dataset:{activitySlot:id},
       details:{open:false},replaceWith(previous){log.slots[log.slots.indexOf(this)]=previous;}}));}};
-  const context={current:null,signature:'',log,status:{},stop:{},send:{},link:{},t:{chatId:'side-chat'},MoyaiQueue,syncTitles(){},
+  const context={current:null,signature:'',deleting:false,deletionError:'',sending:false,stopping:false,unavailable:false,form:{},input:{},model:{},log,status:{},stop:{},send:{},link:{},t:{chatId:'side-chat'},MoyaiQueue,syncTitles(){},
     MoyaiActivity:{...MoyaiActivity,sync(container,data){syncs++;container.slots[0].headline=current(data).headline;},tick(){}},
     markdown:text=>text,esc:text=>text,toast(){}};
-  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function drawChat(data)'),script.indexOf('async function poll()')),context);
+  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncControls()'),script.indexOf('model.onchange='))+
+    script.slice(script.indexOf('function drawChat(data)'),script.indexOf('async function poll()')),context);
   const data=run();data.messages=[{...data.messages[0],content:'Explain the UI change'}];
   context.drawChat(data);const slot=log.slots[0];slot.details.open=true;
   data.events.push(focus(2,'Auditing the side-chat changes'));context.drawChat(data);

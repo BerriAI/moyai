@@ -66,12 +66,13 @@ test('sidebar escapes titles and exposes real status, timestamps, repository, se
 
 test('active states use an icon by the title with no visible status text next to the timestamp',()=>{
   const {context:h}=harness();
-  for(const status of ['running','queued','provisioning','reconnecting','saving','waiting_children','stopping'])for(const child of [false,true]){
+  for(const status of ['running','queued','provisioning','reconnecting','saving','waiting_children','stopping','deleting'])for(const child of [false,true]){
     const row=h.sidebarRow({id:'parent',prompt:'Task',status,updated_at:'2026-10-06T12:00:00Z'},child);
     assert.match(row,/session-title-row.*session-spinner.*session-link-meta/);
     assert.match(row,/2m ago/);
     assert.doesNotMatch(row,/session-state|session-dot|session-completion/);
-    assert.doesNotMatch(row.replace(/<[^>]*>/g,''),/Working|Queued|Starting|Saving|Stopping|Reconnecting/);
+    assert.doesNotMatch(row.replace(/<[^>]*>/g,''),/Working|Queued|Starting|Saving|Stopping|Reconnecting|Deleting/);
+    if(status==='deleting')assert.match(row,/title="Deleting"/);
   }
   for(const status of ['idle','completed','failed','cancelled','interrupted','waiting_credential','awaiting_approval','unknown']){
     const row=h.sidebarRow({id:'parent',status});

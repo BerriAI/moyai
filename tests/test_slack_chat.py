@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sqlite3
 import time
 
 import pytest
@@ -406,12 +407,44 @@ def test_slack_access_choices_are_ordered_and_cas_preserves_changes_during_deliv
 
     async def delayed(method, url, **kwargs):
         result = await original(method, url, **kwargs)
-        choose('session', '1790720001.000001')
+        await asyncio.to_thread(choose, 'session', '1790720001.000001')
         return result
 
     choose('personal', '1790720000.000001')
     monkeypatch.setattr(app.state.connectors, 'request', delayed)
-    deliver()
+    chat = app.state.slack.chat
+    flush = chat.owner.checkpoints.flush
+
+    async def concurrent_delivery():
+        checkpoint, release = asyncio.Event(), asyncio.Event()
+
+        async def paused_flush():
+            await flush()
+            if asyncio.current_task() is sender:
+                card = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key=?", ('credential:' + request_id,))[0]
+                if card['status'] == 'pending':
+                    checkpoint.set()
+                    await release.wait()
+
+        monkeypatch.setattr(chat.owner.checkpoints, 'flush', paused_flush)
+        chat.last_post.clear()
+        sender = asyncio.create_task(chat.deliver_one())
+        try:
+            await asyncio.wait_for(checkpoint.wait(), 2)
+            card = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key=?", ('credential:' + request_id,))[0]
+            assert card['id'] in chat.delivering
+            monkeypatch.setattr(app.state.connectors, 'request', original)
+            chat.last_post.clear()
+            await chat.deliver_one()
+            assert [method for method, _ in calls] == ['chat.postMessage', 'chat.update']
+            assert card['id'] in chat.delivering
+        finally:
+            release.set()
+            await sender
+            monkeypatch.setattr(chat.owner.checkpoints, 'flush', flush)
+        assert not chat.delivering
+
+    client.portal.call(concurrent_delivery)
     card = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key=?", ('credential:' + request_id,))[0]
     assert card['status'] == 'pending' and card['slack_ts'] == '1790719999.123456'
     monkeypatch.setattr(app.state.connectors, 'request', original)
@@ -745,6 +778,137 @@ def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app,
     app.state.slack.chat.last_post.clear()
     asyncio.run(app.state.slack.chat.deliver_one())
     assert attempts == [1]
+
+
+@pytest.mark.parametrize('outcome', ['sent', 'timeout', 'cancelled'])
+def test_live_slack_delivery_remains_a_deletion_barrier_during_recovery(slack_app, monkeypatch, outcome):
+    app, client, _, _ = slack_app
+    chat, lifecycle, store = app.state.slack.chat, app.state.session_lifecycle, app.state.store
+    client.portal.call(chat.shutdown)
+    _, _, run_id = start(slack_app)
+    finish(app, run_id, 'A delivery already in flight')
+    original_request = app.state.connectors.request
+    calls = []
+
+    async def verify():
+        started, release = asyncio.Event(), asyncio.Event()
+        active = False
+
+        async def request(method, url, **kwargs):
+            nonlocal active
+            if not url.endswith('/chat.postMessage'):
+                return await original_request(method, url, **kwargs)
+            calls.append(kwargs['json'])
+            active = True
+            started.set()
+            try:
+                await release.wait()
+                if outcome == 'timeout':
+                    raise TimeoutError('Slack response was lost')
+                return await original_request(method, url, **kwargs)
+            finally:
+                active = False
+
+        monkeypatch.setattr(app.state.connectors, 'request', request)
+        delivery = asyncio.create_task(chat.deliver_one())
+        try:
+            await started.wait()
+            chat.recover()
+            await chat.deliver_one()  # A second poll must preserve the live owner.
+            assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer'") == [{'status': 'sending'}]
+            lifecycle.request_delete(run_id, '', True)
+            deletion = lifecycle.schedule_delete(run_id)
+            await asyncio.sleep(0.05)
+            assert active and not delivery.done()
+            assert store.run(run_id)['deleted_at'] == ''
+            if outcome == 'cancelled':
+                delivery.cancel()
+            else:
+                release.set()
+            await asyncio.gather(delivery, return_exceptions=True)
+            assert not active
+            assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer'") == [
+                {'status': 'sent' if outcome == 'sent' else 'uncertain'}]
+            await asyncio.wait_for(asyncio.shield(deletion), timeout=3)
+            assert store.run(run_id)['deleted_at']
+            assert len(calls) == 1
+        finally:
+            release.set()
+            delivery.cancel()
+            await asyncio.gather(delivery, return_exceptions=True)
+            await chat.shutdown()
+            await lifecycle.close()
+
+    client.portal.call(verify)
+
+
+def test_orphaned_slack_receipt_recovers_in_process_and_allows_deletion_without_resending(slack_app, monkeypatch):
+    app, client, _, _ = slack_app
+    chat, lifecycle, store = app.state.slack.chat, app.state.session_lifecycle, app.state.store
+    client.portal.call(chat.shutdown)
+    _, _, run_id = start(slack_app)
+    finish(app, run_id, 'An answer with an ambiguous delivery')
+    original_request, original_execute = app.state.connectors.request, store.execute
+    attempts = []
+
+    async def request(method, url, **kwargs):
+        if not url.endswith('/chat.postMessage'):
+            return await original_request(method, url, **kwargs)
+        attempts.append(kwargs['json'])
+        raise TimeoutError('Slack response was lost')
+
+    def failed_receipt(sql, params=()):
+        if "UPDATE slack_outbox SET status='uncertain' WHERE id=?" in sql:
+            raise sqlite3.OperationalError('Temporary receipt write failure')
+        return original_execute(sql, params)
+
+    async def verify():
+        monkeypatch.setattr(app.state.connectors, 'request', request)
+        monkeypatch.setattr(store, 'execute', failed_receipt)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match='receipt write failure'):
+                await chat.deliver_one()
+            assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer'") == [{'status': 'sending'}]
+            monkeypatch.setattr(store, 'execute', original_execute)
+            lifecycle.request_delete(run_id, '', True)
+            deletion = lifecycle.schedule_delete(run_id)
+            await asyncio.sleep(0.05)
+            assert store.run(run_id)['deleted_at'] == ''
+            await chat.deliver_one()
+            assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer'") == [{'status': 'uncertain'}]
+            await asyncio.wait_for(asyncio.shield(deletion), timeout=3)
+            assert store.run(run_id)['deleted_at']
+            assert len(attempts) == 1
+        finally:
+            monkeypatch.setattr(store, 'execute', original_execute)
+            await lifecycle.close()
+
+    client.portal.call(verify)
+
+
+def test_pending_deletion_with_sending_receipt_recovers_on_actual_app_restart(tmp_path):
+    from fastapi.testclient import TestClient
+    from app.config import Settings
+    from app.main import create_app
+
+    settings = Settings(_env_file=None, data_dir=tmp_path, public_url='http://127.0.0.1:8787',
+                        litellm_api_key='', modal_token_id='', modal_token_secret='',
+                        slack_bot_enabled=False, session_titles_enabled=False)
+    original = create_app(settings)
+    store = original.state.store
+    run_id = store.create_run('Retain an uncertain Slack outcome', '', 'demo', [], chat_enabled=True)['id']
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (run_id,))
+    store.update_run(run_id, status='idle')
+    store.execute("INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,status,created_at) VALUES(?,'restart-proof','answer','Retained answer','sending',?)", (run_id, now()))
+    original.state.session_lifecycle.request_delete(run_id, '', True)
+    recovered = create_app(settings)
+    try:
+        with TestClient(recovered, base_url=settings.public_url, client=('127.0.0.1', 50000)):
+            wait_for(lambda: recovered.state.store.run(run_id)['deleted_at'])
+            assert recovered.state.slack.status()['enabled'] is False
+            assert recovered.state.store.rows('SELECT status FROM slack_outbox') == [{'status': 'uncertain'}]
+    finally:
+        store.objects.close()
 
 
 def test_paused_connection_discards_pending_replies_and_cannot_send_to_new_team(slack_app):
@@ -1239,3 +1403,62 @@ def test_answer_delivers_native_table_in_thread_with_session_link(slack_app):
     assert posted['blocks'][-1]['type'] == 'context'
     assert f'/#run={run_id}' in posted['text']
     assert 'ASGI entry' in posted['text']
+
+
+@pytest.mark.parametrize('direct', [False, True])
+def test_forwarded_only_messages_and_followups_keep_quoted_body(slack_app, monkeypatch, direct):
+    from test_slack import forwarded_attachment
+    from sandbox.agent import conversation_prompt
+    app, client, submitted, sent = slack_app
+    kwargs = {'type': 'message', 'channel_type': 'im', 'channel': 'D12345678'} if direct else {}
+    payload = event(text='' if direct else '<@U99999999>', **kwargs,
+                    attachments=[forwarded_attachment('first forwarded question')])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    run_id = submitted[0]['id']
+    assert 'first forwarded question' in app.state.store.messages(run_id)[0]['content']
+    finish(app, run_id, 'Ready')
+    followup = event('EvForward2', type='message', channel_type='im' if direct else 'channel',
+                     channel='D12345678' if direct else 'C12345678', ts='1790719002.123456',
+                     thread_ts=ROOT, text='', attachments=[forwarded_attachment('stop\n<@U33333333>')])
+    assert client.post('/hooks/slack/events', **signed(followup)).status_code == 200
+    assert client.post('/hooks/slack/events', **signed(followup)).status_code == 200
+    messages = [m for m in app.state.store.messages(run_id) if m['role'] == 'user']
+    assert len(messages) == 2
+    assert 'stop' in conversation_prompt({'prompt': messages[-1]['content']}, has_history=True)
+    receipt = app.state.store.rows("SELECT command FROM slack_receipts WHERE event_id='EvForward2'")[0]
+    assert receipt['command'] == ''
+    with app.state.store.connect() as conn:
+        assert 'U33333333' not in app.state.slack.chat.mentionable_in(conn, run_id)
+    assert not app.state.store.rows("SELECT * FROM slack_message_mentions WHERE user_id='U33333333'")
+    if direct:
+        wait_for(lambda: bool(sent))
+        async def no_history(*args, **kwargs):
+            raise AssertionError('DM history must not be fetched')
+        monkeypatch.setattr(app.state.connectors, 'request', no_history)
+        asyncio.run(app.state.slack.prepare(run_id))
+        source = app.state.store.slack_source(run_id)
+        assert source['kind'] == 'dm' and 'first forwarded question' in source['messages'][0]['text']
+
+
+def test_forwarded_mentions_do_not_start_unaddressed_channel_sessions(slack_app):
+    from test_slack import forwarded_attachment
+    app, client, submitted, _ = slack_app
+    payload = event(type='message', text='', attachments=[forwarded_attachment('<@U99999999> help')])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert submitted == []
+
+
+def test_authored_control_still_works_with_forward(slack_app):
+    from test_slack import forwarded_attachment
+    app, client, run_id = start(slack_app)
+    send(client, 2, 'stop', attachments=[forwarded_attachment('model unrecognized')])
+    assert app.state.store.rows("SELECT command FROM slack_receipts WHERE event_id='EvChat2'")[0]['command'] == 'stop'
+
+
+def test_legacy_channel_sessions_preserve_forwarded_body(slack_app):
+    from test_slack import forwarded_attachment
+    app, client, submitted, _ = slack_app
+    app.state.settings.slack_thread_chat_enabled = False
+    payload = event(text='<@U99999999> explain', attachments=[forwarded_attachment('legacy body')])
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert 'legacy body' in submitted[0]['prompt']

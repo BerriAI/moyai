@@ -37,6 +37,11 @@ def test_side_chat_is_durable_isolated_and_attributed_to_its_requester(workspace
     assert client.post('/api/runs/'+side['id']+'/messages', json={'content':'Clarify required fields', 'client_id':'side-followup-one'}).status_code == 202
     assert store.messages(parent['id']) == before
     assert store.messages(side['id'])[-1]['user_id'] == 'google:bob'
+    original = store.run(parent['id'])
+    app.state.session_lifecycle.request_delete(side['id'], '', True)
+    listed = client.get('/api/runs/' + parent['id'] + '/side-chats').json()[0]
+    assert listed['status'] == client.get('/api/runs/' + side['id']).json()['status'] == 'deleting'
+    assert store.run(parent['id']) == original
 
 
 def test_side_chat_security_and_retry_scope(workspace, monkeypatch):

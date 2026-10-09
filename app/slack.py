@@ -15,6 +15,7 @@ from .db import now
 from .slack_chat import SlackChat
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 from .slack_credentials import SlackCredentials
+from .slack_references import attachment_reference
 
 
 class SlackSessions:
@@ -111,6 +112,9 @@ class SlackSessions:
             return {'ok': True}
         prompt = text.replace(mention, "").strip()
         file_ids = slack_file_ids(event.get('files'))
+        reference, _ = attachment_reference(event)
+        if not prompt and reference:
+            prompt = 'Please respond to the quoted Slack attachment.'
         if not prompt and not file_ids:
             return {"ok": True}
         if file_ids and not prompt:
@@ -122,16 +126,16 @@ class SlackSessions:
             return {'ok': True}
         await self.channel.handle_validated_event(team=bot['team_id'], event_id=event_id, channel=channel,
             ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
-            direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids)
+            direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids, reference=reference)
         return {'ok': True}
 
     async def accept_message(self, *, team, event_id, channel, ts, root, user, prompt,
-                             mentioned, direct_message, missing_cloud, file_ids=()):
+                             mentioned, direct_message, missing_cloud, file_ids=(), reference=''):
         if self.settings.slack_thread_chat_enabled:
             try:
                 run = self.chat.accept(team=team, event_id=event_id, channel=channel, ts=ts,
                                        root=root, user=user, prompt=prompt, mentioned=mentioned,
-                                       direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids)
+                                       direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids, reference=reference)
             except ValueError as exc:
                 raise HTTPException(503, str(exc))
             await self.checkpoints.flush()
@@ -148,7 +152,7 @@ class SlackSessions:
             raise HTTPException(503, 'Cloud sessions are not configured.')
         plugins = [x['id'] for x in self.connectors.list() if x['connected'] and x['enabled']]
         try:
-            run = self.store.create_slack_run(event_id, prompt, plugins, channel, root, user, ts, team, file_ids=file_ids,
+            run = self.store.create_slack_run(event_id, prompt + reference, plugins, channel, root, user, ts, team, file_ids=file_ids,
                                             harness=self.settings.default_harness(), model=self.settings.resolve_model())
         except ValueError:
             raise HTTPException(503, 'The session queue is full.')
@@ -248,8 +252,11 @@ class SlackSessions:
                     continue
                 if ts != source["thread_ts"] and item.get("thread_ts") != source["thread_ts"]:
                     continue
-                text = item.get("text") or "[Message has no text]"
-                clipped = len(text) > 3000
+                text = item.get("text")
+                text = text if isinstance(text, str) else ""
+                reference, clipped = attachment_reference(item)
+                text = text + reference or "[Message has no text]"
+                clipped = clipped or len(text) > 3000
                 messages[ts] = {"ts": ts, "user": item.get("user") or item.get("bot_id") or "unknown",
                                 "text": text[:3000], "text_truncated": clipped,
                                 "has_attachments": bool(item.get("files") or item.get("attachments")),
@@ -280,7 +287,7 @@ class SlackSessions:
         if not root:
             warnings.append("The thread's root message was not returned.")
         if any(m["has_attachments"] for m in selected):
-            warnings.append("Attached files are available only when listed under USER ATTACHMENTS; other files and rich attachments were not read.")
+            warnings.append("Attached files are available only when listed under USER ATTACHMENTS; embedded attachment text is quoted when available; attachment media and linked source messages were not fetched.")
         return {"messages": selected, "truncated": truncated, "warning": " ".join(warnings)}
 
     def submit_reply(self, run_id):

@@ -221,7 +221,7 @@ class Store:
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
-            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at', 'deleted_at'):
+            for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at', 'deleted_at', 'deletion_requested_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_owner ON runs(owner_id,id)')
@@ -439,9 +439,9 @@ class Store:
         with self.connect() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if client_id:
-                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
+                previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at,r.deletion_requested_at FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
-                    if previous['deleted_at']:
+                    if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
                     if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
@@ -450,7 +450,7 @@ class Store:
                     return self.run(previous['run_id'])
             context = ''
             if side_chat_of:
-                parent = conn.execute("SELECT prompt,summary FROM runs WHERE id=? AND deleted_at=''", (side_chat_of,)).fetchone()
+                parent = conn.execute("SELECT prompt,summary FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()
                 if not parent:
                     raise ValueError('The original session no longer exists.')
                 recent = conn.execute("SELECT role,content FROM messages WHERE run_id=? AND status NOT IN ('queued','deleted') ORDER BY id DESC LIMIT 30", (side_chat_of,)).fetchall()
@@ -580,7 +580,7 @@ class Store:
     def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, restore_archived):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-        if row and row['deleted_at']:
+        if row and (row['deleted_at'] or row['deletion_requested_at']):
             raise ValueError('This session was deleted. Start a new session.')
         if not row or not row["chat_enabled"]:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
@@ -635,8 +635,8 @@ class Store:
     def claim_message(self, run_id):
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            run = conn.execute("SELECT status,steer_message_id,deleted_at FROM runs WHERE id=?", (run_id,)).fetchone()
-            if not run or run['deleted_at'] or run["status"] in {"stopping", "cancelled", "interrupted"}:
+            run = conn.execute("SELECT status,steer_message_id,deleted_at,deletion_requested_at FROM runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run['deleted_at'] or run['deletion_requested_at'] or run["status"] in {"stopping", "cancelled", "interrupted"}:
                 return None
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone():
                 return None

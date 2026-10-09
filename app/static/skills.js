@@ -51,19 +51,20 @@ async function openSkillEditor(id=''){
   };
   dialog.showModal();
 }
-function insertSkill(skill,inputId){
-  const input=document.getElementById(inputId);if(!input)return;
+function insertSkill(skill,inputId,input=document.getElementById(inputId)){
+  if(!input?.isConnected||document.getElementById(inputId)!==input||input.closest('form')?.inert)return;
   input.setSkillCatalog?.([skill]);
   if(input.maxLength>0&&input.value.length+skillToken(skill).length+1>input.maxLength){toast('Shorten your message before adding this skill.');return;}
   if(!input.value.split(/\s+/).includes(skillToken(skill)))input.value=skillToken(skill)+' '+input.value;
   input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);input.focus();
 }
 async function openSkillPicker(inputId){
-  const version=state.pageVersion,data=await api('/api/skills');if(version!==state.pageVersion)return;
+  const input=document.getElementById(inputId);if(!input?.isConnected||input.closest('form')?.inert)return;
+  const version=state.pageVersion,data=await api('/api/skills');if(version!==state.pageVersion||!input.isConnected||document.getElementById(inputId)!==input||input.closest('form')?.inert)return;
   const dialog=$('#skill-dialog');
   MoyaiUI.render(dialog, `<div class="skill-picker"><button type="button" class="dialog-close" aria-label="Close skill picker">×</button><h2>Use a skill</h2><p class="subtext">Choose a workflow for your next message.</p><div class="skill-picker-list">${data.skills.map(s=>`<button class="skill-choice" data-pick-skill="${esc(s.id)}"><strong>${skillIcon(s)}${esc(s.name)} <small>${s.scope==='personal'?'Personal':'Organization'}</small></strong><span>${esc(s.description)}</span></button>`).join('')||'<p>No skills yet. Add one in the Skills library.</p>'}</div><button class="quiet" id="manage-skills">Open Skills library</button></div>`);
   dialog.onclose=()=>{MoyaiUI.render(dialog, '');};dialog.querySelector('[aria-label="Close skill picker"]').onclick=()=>dialog.close();
-  dialog.querySelectorAll('[data-pick-skill]').forEach(b=>b.onclick=()=>{const skill=data.skills.find(s=>s.id===b.dataset.pickSkill);dialog.close();insertSkill(skill,inputId);});
+  dialog.querySelectorAll('[data-pick-skill]').forEach(b=>b.onclick=()=>{const skill=data.skills.find(s=>s.id===b.dataset.pickSkill);dialog.close();insertSkill(skill,inputId,input);});
   $('#manage-skills').onclick=()=>{dialog.close();navigate('skills').catch(showError);};dialog.showModal();
 }
 document.addEventListener('click',e=>{const button=e.target.closest('[data-skill-picker]');if(button)openSkillPicker(button.dataset.skillPicker).catch(showError);});

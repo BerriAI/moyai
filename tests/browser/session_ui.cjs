@@ -110,6 +110,46 @@ async function renameDialog(page){
   return page.locator('#session-folder-dialog');
 }
 
+test('session deletion dialog preserves cancellation, errors and locked shadcn controls during cleanup',async t=>{
+  const page=await setup(t);
+  await send(page,'Verify deletion through the migrated controls');
+  const id=await page.evaluate(()=>state.selected);
+  const dialog=page.getByRole('dialog',{name:'Delete session?'});
+  const openDelete=async()=>{
+    await page.getByRole('button',{name:'Session actions',exact:true}).click();
+    await page.locator('[data-delete-session]').click();
+    await dialog.waitFor();
+  };
+  const requests=[];
+  let allow=false;
+  await page.route(`**/api/runs/${id}`,route=>{
+    if(route.request().method()!=='DELETE')return route.continue();
+    requests.push(route.request());
+    return allow?route.fulfill({status:202,json:{deleted:false}}):route.fulfill({status:503,json:{detail:'Synthetic cleanup rejection'}});
+  });
+  await openDelete();
+  assert.equal(await dialog.getByRole('button',{name:'Cancel',exact:true}).evaluate(el=>el===document.activeElement),true);
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({state:'detached'});
+  assert.equal(requests.length,0);
+  await openDelete();
+  await dialog.getByRole('button',{name:'Delete session',exact:true}).click();
+  await dialog.getByText('Synthetic cleanup rejection',{exact:true}).waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'Delete session',exact:true}).isEnabled(),true);
+  allow=true;
+  await dialog.getByRole('button',{name:'Delete session',exact:true}).click();
+  await dialog.waitFor({state:'detached'});
+  await page.waitForFunction(()=>document.querySelector('#message-form').inert);
+  const picker=page.locator('#message-form [data-skill-picker]');
+  await page.waitForFunction(el=>el.disabled,await picker.elementHandle());
+  assert.equal(await page.locator('#followup').getAttribute('contenteditable'),'false');
+  assert.equal(await page.locator('#message-form [type=submit]').first().isDisabled(),true);
+  await page.evaluate(()=>updateChatStatus({...state.chatRun,status:'idle'}));
+  assert.equal(await picker.isDisabled(),true,'An older response cannot unlock a deleting session');
+  assert.equal(await page.locator('#message-form').evaluate(el=>el.inert),true);
+  assert.equal(requests.length,2);
+});
+
 test('rename persists after reload, preserves messages and drafts, and rejects stale reads',async t=>{
   const page=await setup(t);
   await send(page,'Original rename request');

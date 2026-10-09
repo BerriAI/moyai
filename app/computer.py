@@ -183,7 +183,8 @@ class Computer:
     def shutting_down(self, run_id, sandbox_id, lifecycle=None):
         if lifecycle is None:
             lifecycle = self.manager.computer_state(run_id) if hasattr(self.manager, 'computer_state') else {}
-        return (lifecycle.get('shutting_down', False) or self.store.run(run_id)['status'] == 'stopping' or
+        run = self.store.run(run_id)
+        return (lifecycle.get('shutting_down', False) or bool(run.get('deletion_requested_at')) or run['status'] == 'stopping' or
                 bool(sandbox_id and self.releasing.get(run_id) == sandbox_id))
 
     def authorize(self, request, run_id, mutation=False):

@@ -89,8 +89,11 @@ async function inspectMenus(page, width) {
     await page.keyboard.press('End');
     const last = menu.locator('[role=option]:not([aria-disabled=true])').last();
     await page.waitForFunction(el => el === document.activeElement, await last.elementHandle());
-    const lastBounds = await last.boundingBox();
-    assert.ok(lastBounds.y >= bounds.y && lastBounds.y + lastBounds.height <= bounds.y + bounds.height + 1, 'Keyboard navigation scrolls the last option into view');
+    await page.waitForFunction(el => {
+      const item = el.getBoundingClientRect();
+      const menu = el.closest('[role=listbox]').getBoundingClientRect();
+      return item.top >= menu.top && item.bottom <= menu.bottom + 1;
+    }, await last.elementHandle());
     await page.keyboard.press('Escape');
     await menu.waitFor({ state: 'detached' });
     await page.waitForFunction(el => el === document.activeElement, await trigger.elementHandle());

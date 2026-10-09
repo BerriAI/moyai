@@ -123,3 +123,32 @@ test('provider failure is visible and untrusted descriptions stay text',async()=
   assert.doesNotMatch(b.popup.innerHTML,/<img/);
   assert.match(b.popup.innerHTML,/&lt;img/);
 });
+
+function pickerFixture(){
+  const form={inert:false},input={id:'followup',isConnected:true,value:'Keep draft',maxLength:16000,closest:()=>form,dispatchEvent(){},focus(){}},choice={dataset:{pickSkill:'org'}};
+  let current=input,finish;
+  const dialog={open:false,querySelector:()=>({}),querySelectorAll:()=>[choice],showModal(){this.open=true;},close(){this.open=false;this.onclose?.();}};
+  const c={state:{pageVersion:1},document:{getElementById:()=>current,addEventListener(){}},$:selector=>selector==='#skill-dialog'?dialog:{},
+    api:()=>new Promise(resolve=>finish=resolve),skillToken:skill=>'/'+skill.reference,skillIcon:()=>'',esc:value=>value,autoSize(){},Event:class{}};
+  vm.createContext(c);const source=readFileSync('app/static/skills.js','utf8');vm.runInContext(source.slice(source.indexOf('function insertSkill(')),c);
+  return {c,form,input,dialog,choice,finish:()=>finish({skills:catalog}),replace(){input.isConnected=false;current={...input,isConnected:true};return current;}};
+}
+
+for(const transition of ['deletion','replacement'])test(`a late global skill picker cannot open after ${transition}`,async()=>{
+  const b=pickerFixture(),pending=b.c.openSkillPicker('followup');
+  if(transition==='deletion')b.form.inert=true;else b.replace();
+  b.finish();await pending;assert.equal(b.dialog.open,false);assert.equal(b.input.value,'Keep draft');
+});
+
+for(const transition of ['deletion','replacement'])test(`a global skill selection cannot edit the composer after ${transition}`,async()=>{
+  const b=pickerFixture(),pending=b.c.openSkillPicker('followup');b.finish();await pending;
+  assert.equal(b.dialog.open,true);let replacement;
+  if(transition==='deletion')b.form.inert=true;else replacement=b.replace();
+  b.choice.onclick();assert.equal(b.input.value,'Keep draft');assert.equal(b.dialog.open,false);
+  if(replacement)assert.equal(replacement.value,'Keep draft');
+});
+
+test('global skill selection still inserts into the original editable composer',async()=>{
+  const b=pickerFixture(),pending=b.c.openSkillPicker('followup');b.finish();await pending;b.choice.onclick();
+  assert.equal(b.input.value,'/org:benchmark-review Keep draft');assert.equal(b.dialog.open,false);
+});

@@ -73,7 +73,7 @@ test('dispatch priority matches Send now, while active work retains all genuine 
     assert.deepEqual(queue.queued(working),[priority,first]);
     const b=controller();b.setRun(working);assert.match(b.element.html,/2 queued/);assert.match(b.element.html,/Edit queued message/);
   }
-  for(const status of ['stopping','cancelled','interrupted'])assert.deepEqual(queue.queued({...run,status}),[priority,first]);
+  for(const status of ['stopping','deleting','cancelled','interrupted'])assert.deepEqual(queue.queued({...run,status}),[priority,first]);
 });
 
 test('a queued edit survives promotion into the conversation before worker claim',async()=>{
@@ -99,6 +99,25 @@ test('edits preserve revision and draft, and save-now submits the saved revision
   await b.ctrl.act(2,'save-now');
   assert.deepEqual(b.requests.map(r=>r.body),[{action:'edit',content:'Changed text',revision:0},{action:'steer',revision:1}]);
   assert.equal(b.drafts.size,0);
+});
+
+test('deletion locks queued editors and every direct action despite a stale status refresh',async()=>{
+  const b=controller();await b.ctrl.act(2,'edit');b.drafts.get(2).content='Keep this correction';
+  b.setRun({status:'deleting',messages:[active,message]});b.setRun({status:'running',messages:[active,message]});
+  for(const action of ['edit','save','save-now','steer','delete','followup','discard'])await b.ctrl.act(2,action);
+  await b.ctrl.sendFirst();
+  assert.equal(b.element.inert,true);assert.equal(b.requests.length,0);assert.equal(b.used.length,0);
+  assert.equal(b.drafts.get(2).content,'Keep this correction');
+  assert.match(b.element.html,/<textarea[^>]+disabled/);
+  assert.match(b.element.html,/data-queue-action="steer"[^>]+disabled/);
+});
+
+test('deletion during an awaited queue edit cannot dispatch its follow-on steer',async()=>{
+  const b=controller(),requests=[];let finish;
+  const c=queue.create({...b.options,api:async(url,options)=>{requests.push(JSON.parse(options.body));await new Promise(resolve=>finish=resolve);return {revision:1};},refresh:async()=>{}});
+  c.render({status:'running',messages:[active,message]});await c.act(2,'edit');
+  const pending=c.act(2,'save-now');c.render({status:'deleting',messages:[active,message]});finish();await pending;
+  assert.deepEqual(requests.map(body=>body.action),['edit']);assert.equal(b.element.inert,true);
 });
 
 test('picked-up message keeps an unsaved edit available as a follow-up without mutating history',async()=>{
@@ -129,6 +148,8 @@ test('composer shortcuts distinguish queue/send-now and leave Shift+Enter, IME, 
   assert.deepEqual(sent,['queue','now','now']);input.value='';key({ctrlKey:true});assert.equal(first,1);
   hasFiles=true;key({metaKey:true});assert.equal(sent.at(-1),'now');assert.equal(first,1);
   skillHandles=true;key({ctrlKey:true});assert.equal(sent.length,4);
+  form.inert=true;hasFiles=false;skillHandles=false;key({ctrlKey:true});input.value='Draft';key({});
+  assert.equal(first,1);assert.equal(sent.length,4);
 });
 
 test('automatic follow-ups appear in the conversation while ordinary messages retain queue controls',()=>{
