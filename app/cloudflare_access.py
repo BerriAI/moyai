@@ -28,6 +28,7 @@ class CloudflareAccess:
         self.keys = {}
         self.expires = 0
         self.last_fetch = float('-inf')
+        self.fetch_failed = False
         self.lock = asyncio.Lock()
 
     async def signing_key(self, kid: str):
@@ -41,7 +42,7 @@ class CloudflareAccess:
             # Unknown key IDs must not turn anonymous requests into an unbounded
             # stream of requests to the identity provider. Rotation retries later.
             if now - self.last_fetch < 10:
-                if now >= self.expires:
+                if self.fetch_failed or now >= self.expires:
                     raise AccessUnavailable()
                 raise jwt.InvalidTokenError()
             self.last_fetch = now
@@ -52,14 +53,25 @@ class CloudflareAccess:
                 if len(response.content) > 65536:
                     raise ValueError()
                 keys = response.json()['keys']
-                self.keys = {key['kid']: jwt.PyJWK.from_dict(key).key for key in keys
-                             if key.get('kty') == 'RSA' and key.get('alg') == 'RS256'
-                             and key.get('use') == 'sig' and isinstance(key.get('kid'), str)}
-                if not self.keys:
+                if not isinstance(keys, list) or any(not isinstance(key, dict) for key in keys):
                     raise ValueError()
-                self.expires = now + 3600
+                candidate = {}
+                for key in keys:
+                    if key.get('kty') != 'RSA' or key.get('alg') != 'RS256' or key.get('use') != 'sig':
+                        continue
+                    key_id = key.get('kid')
+                    if not isinstance(key_id, str) or not key_id or key_id in candidate:
+                        raise ValueError()
+                    candidate[key_id] = jwt.PyJWK.from_dict(key).key
+                if not candidate:
+                    raise ValueError()
             except (httpx.HTTPError, jwt.PyJWTError, ValueError, KeyError, TypeError):
+                self.fetch_failed = True
                 raise AccessUnavailable() from None
+            # Publish only a complete, usable set. A failed refresh must neither
+            # erase known keys nor extend their original validity window.
+            self.keys, self.expires = candidate, time.monotonic() + 3600
+            self.fetch_failed = False
             if kid not in self.keys:
                 raise jwt.InvalidTokenError()
             return self.keys[kid]

@@ -98,8 +98,12 @@ def hermes_config(spec, broker_url, workspace):
         "tools": {"tool_search": {"enabled": "on", "defer": [],
                                    "listing": "auto", "listing_max_tokens": 600}},
         "mcp_servers": {"workspace": {"command": "/usr/local/bin/python", "args": ["/opt/workspace-runner/mcp_bridge.py"],
-                                      "env": {"WORKSPACE_BROKER_URL": broker_url, "WORKSPACE_GIT_BROKER_URL": spec['broker_url'],
-                                              "WORKSPACE_RUN_TOKEN": os.environ["WORKSPACE_RUN_TOKEN"]}, "timeout": 930}},
+                                      # SDKs may sanitize env or serialize it to argv.
+                                      # Keep edge secrets in the relay process only.
+                                      "env": {"WORKSPACE_BROKER_URL": broker_url, "WORKSPACE_GIT_BROKER_URL": broker_url,
+                                              "WORKSPACE_RUN_TOKEN": os.environ["WORKSPACE_RUN_TOKEN"],
+                                              "WORKSPACE_ACCESS_ORIGIN": "", "WORKSPACE_ACCESS_CLIENT_ID": "",
+                                              "WORKSPACE_ACCESS_CLIENT_SECRET": ""}, "timeout": 930}},
     }
 
 

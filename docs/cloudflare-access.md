@@ -86,6 +86,8 @@ Plan a short maintenance window. Do not run two production app/Temporal workers 
 - Broker requires both the broker Access identity and an active run's bearer token. The machine assertion cannot enter `/api/credentials` or the dashboard, and an employee assertion cannot substitute for the broker identity.
 - An unsigned Slack event fails; signed Slack delivery succeeds. Unconfigured webhook paths remain blocked.
 - Broker relay, attachments and Git send Access headers only to the configured HTTPS broker and refuse redirects. SSE/long-running requests work through the actual tunnel.
+- MCP checkout and post-publication fetch use the loopback relay, including when an SDK sanitizes the tool environment. Cloudflare secrets are cleared from MCP configuration; only the parent relay attaches them outbound. Git forwarding allows authenticated, size-limited upload-pack reads of numeric repository IDs; repository policy and active-run checks remain at the origin.
+- Signing-key refresh replaces the cache only after validating the complete usable key set. A failed refresh retains still-valid keys without extending their lifetime; expired or unavailable keys return 503, and a successfully refreshed set replaces retired keys.
 - Public origin cannot be reached independently of the tunnel. Existing history, saved credentials, file downloads and a resumed task still work.
 
 ## Rollback and operation

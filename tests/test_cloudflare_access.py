@@ -171,3 +171,34 @@ def test_runtime_credentials_are_not_in_settings_repr_and_clear_stale_environmen
     plain = Settings(_env_file=None).broker_environment('new-run')
     assert plain['WORKSPACE_RUN_TOKEN'] == 'new-run'
     assert plain['WORKSPACE_ACCESS_CLIENT_SECRET'] == ''
+
+
+@pytest.mark.parametrize('broken_keys', [[], [None], {'not': 'a-list'},
+    [{'kid': 'unsupported', 'kty': 'EC', 'alg': 'ES256', 'use': 'sig'}],
+    [{'kid': 'invalid-rsa', 'kty': 'RSA', 'alg': 'RS256', 'use': 'sig'}]])
+def test_bad_refresh_preserves_valid_cache_and_recovers(guarded, access_key, broken_keys):
+    app, client, upstream = guarded
+    access = app.state.cloudflare_access
+    valid = {'Cf-Access-Jwt-Assertion': assertion(access_key[0])}
+    assert client.get('/api/session', headers=valid).status_code == 200
+    keys, expires = access.keys.copy(), access.expires
+    unknown_token = jwt.encode(jwt.decode(valid['Cf-Access-Jwt-Assertion'], options={'verify_signature': False}),
+        access_key[0], algorithm='RS256', headers={'kid': 'rotated'})
+    unknown = {'Cf-Access-Jwt-Assertion': unknown_token}
+    upstream['keys'] = broken_keys
+    access.last_fetch -= 11
+    assert client.get('/api/session', headers=unknown).status_code == 503
+    assert access.keys == keys and access.expires == expires
+    # A still-valid cached key survives a failed rotation lookup. Unknown keys
+    # fail closed with an availability error until a usable set is obtained.
+    assert client.get('/api/session', headers=valid).status_code == 200
+    assert client.get('/api/session', headers=unknown).status_code == 503
+    assert upstream['calls'] == 2
+    access.expires = 0
+    assert client.get('/api/session', headers=valid).status_code == 503
+    upstream['keys'] = [{**access_key[1], 'kid': 'rotated'}]
+    access.last_fetch -= 11
+    assert client.get('/api/session', headers=unknown).status_code == 200
+    assert 'test-access-key' not in access.keys
+    assert client.get('/api/session', headers=valid).status_code == 401
+    assert upstream['calls'] == 3

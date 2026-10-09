@@ -207,6 +207,9 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     item, removed = run(app), run(app, 'Delete after completion')
     store = app.state.store
     # Exercise the actual idempotent upgrade with a pre-field database.
+    # This newer trigger also references deleted_at and did not exist in that
+    # legacy schema. Remove it before reconstructing the old database.
+    store.execute('DROP TRIGGER revoke_github_write_access')
     store.execute('ALTER TABLE runs DROP COLUMN deleted_at')
     store.execute('DROP TABLE session_archives')
     reopened = Store(app.state.settings.data_dir)
