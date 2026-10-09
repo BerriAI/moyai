@@ -1,10 +1,12 @@
 """File-only MicroVM checkpoints. This module runs in the guest, never the web host."""
 import base64
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import os
 import io
+from itertools import islice
 from pathlib import Path
 import stat
 import subprocess
@@ -67,8 +69,37 @@ def baseline(root=Path('/'), target=BASELINE):
 def digest(path):
     value = hashlib.sha256()
     with path.open('rb') as stream:
-        while chunk := stream.read(1024 * 1024):
-            value.update(chunk)
+        size = os.fstat(stream.fileno()).st_size
+        if size < 16 * 1024 * 1024:
+            while chunk := stream.read(1024 * 1024):
+                value.update(chunk)
+        else:
+            # Large executables dominate cold AWS image reads. Fetch bounded
+            # ranges concurrently, then hash their bytes in the original order.
+            # Four 4 MiB ranges per file bound memory even with eight files in
+            # flight. The caller quiesces commands before scanning the image.
+            chunk_size = 4 * 1024 * 1024
+            def read(offset):
+                remaining = min(chunk_size, size - offset)
+                chunks = []
+                while remaining:
+                    chunk = os.pread(stream.fileno(), remaining, offset)
+                    if not chunk:
+                        raise RuntimeError('File changed while hashing checkpoint')
+                    chunks.append(chunk)
+                    offset += len(chunk)
+                    remaining -= len(chunk)
+                return b''.join(chunks)
+            offsets = iter(range(0, size, chunk_size))
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                pending = deque(pool.submit(read, offset) for offset in islice(offsets, 4))
+                while pending:
+                    value.update(pending.popleft().result())
+                    offset = next(offsets, None)
+                    if offset is not None:
+                        pending.append(pool.submit(read, offset))
+            if os.fstat(stream.fileno()).st_size != size:
+                raise RuntimeError('File changed while hashing checkpoint')
     return value
 
 

@@ -49,6 +49,16 @@ def test_configuration_is_provider_specific(settings):
     assert settings.sandbox_rotation_for() == 300
 
 
+def test_large_checkpoint_hash_preserves_byte_order_and_handles_short_reads(tmp_path, monkeypatch):
+    import hashlib
+    data = b''.join(bytes([part]) * (3 * 1024 * 1024) for part in range(7))
+    path = tmp_path / 'large-executable'
+    path.write_bytes(data)
+    pread = os.pread
+    monkeypatch.setattr(checkpoint.os, 'pread', lambda fd, size, offset: pread(fd, min(size, 1024 * 1024), offset))
+    assert checkpoint.digest(path).digest() == hashlib.sha256(data).digest()
+
+
 def test_cold_checkpoint_budget_reaches_the_guest_watchdog(tmp_path, monkeypatch):
     from sandbox import lambda_guest as guest
     settings = Settings(_env_file=None, snapshot_timeout_seconds=900)
