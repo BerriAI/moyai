@@ -427,7 +427,8 @@ class Credentials:
     def tools(self, run):
         if not self.settings.temporal_enabled or not run['chat_enabled']:
             return []
-        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema()}
+        return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
+                 'annotations': {'readOnlyHint': name == 'credentials_list', 'idempotentHint': name == 'credentials_list'}}
                 for name, (schema, description) in TOOLS.items()]
 
     def setup(self, row):

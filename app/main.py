@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
-from .connectors import Connectors, ConnectorError, TOOLS
+from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
 from .db import Store, now
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
@@ -887,7 +887,7 @@ def create_app(settings: Settings | None = None):
         return {'steer_message_id': target}
 
     def workspace_catalog(run):
-        return [DIAGNOSTIC_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1]}}
+        return [DIAGNOSTIC_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": spec[2].model_json_schema(), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")

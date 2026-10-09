@@ -16,6 +16,7 @@ from sandbox.codex_harness import CodexAgent
 from sandbox.broker_relay import BrokerRelay
 from sandbox.context_store import ContextStore, ContextUnavailable
 from test_workspace import workspace as broker_workspace
+from test_workspace import recovery_catalog  # noqa: F401 -- actual broker declarations
 
 
 def send_response(handler, output, sequence, input_tokens=500, *, interrupted=None):
@@ -625,8 +626,10 @@ def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypa
     assert proof['final_response'] == 'yield-test-complete'
 
 
-def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path, monkeypatch):
-    proof = native_yield_case(tmp_path, monkeypatch, 2000, 'read-outage')
+@pytest.mark.parametrize('read_status', [502, 524])
+def test_native_safe_read_reconnects_without_replaying_completed_write(tmp_path, monkeypatch, recovery_catalog, read_status):
+    proof = native_yield_case(tmp_path, monkeypatch, 2000, 'read-outage',
+                             tool_catalog=recovery_catalog, read_status=read_status)
     assert proof['completed'] and not proof['pending_tools'], proof
     assert not proof['faults'] and not proof['transport_errors']
     assert proof['native_clients'] == proof['native_threads'] == 1
@@ -670,7 +673,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
                       context_rounds=1, compact_rejections=0,
                       outage_seconds=0, interrupted=None, on_outage=lambda: None,
-                      on_status=lambda kind, message, data: None):
+                      on_status=lambda kind, message, data: None, tool_catalog=None, read_status=502):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
     The tool waits for the next model request to reach the upstream server.
@@ -694,6 +697,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     context_case = outcome.startswith('settle-context')
     finish_during_compaction = outcome == 'settle-context-during-compaction'
     read_outage = outcome == 'read-outage'
+    tool_name = 'github_repositories' if read_outage else 'slow_echo'
     receipt_during_compaction = threading.Event()
     compactions = []
     corrections = []
@@ -795,9 +799,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             if self.path == '/context/window':
                 return self.reply({'input_budget': 200000})
             assert self.path == '/tools'
-            self.reply([{'name': 'slow_echo', 'description': 'Wait for a local fixture signal.',
-                **({'annotations': {'readOnlyHint': True, 'idempotentHint': True}} if read_outage else {}),
-                'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
+            self.reply([next(tool for tool in tool_catalog if tool['name'] == tool_name)] if read_outage else [
+                {'name': tool_name, 'description': 'Wait for a local fixture signal.',
+                 'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}}])
 
         def do_POST(self):
             nonlocal outage_started, outage_until, observer, settlement_sent
@@ -815,7 +819,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             if self.path == '/tools/call':
                 read_attempts.append(body)
                 if read_outage and len(read_attempts) == 1:
-                    return self.reply({}, 502)
+                    return self.reply({}, read_status)
                 calls.append(body)
                 progress('Tool started; it waits for an admitted model poll')
                 if not release.wait(timeout=50):
@@ -858,7 +862,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 code = ('text(await tools.exec_command(' + json.dumps({
                     'cmd': shlex.quote(sys.executable) + ' command.py', 'tty': True,
                     'login': False, 'yield_time_ms': 1000}) + '));' if settlement else
-                    'text(await tools.mcp__moyai__slow_echo({}));')
+                    'text(await tools.mcp__moyai__' + tool_name + '({}));')
                 if read_outage:
                     code = 'text(await tools.exec_command({cmd: "printf \'once\\n\' >> writes; printf write-receipt", login: false}));' + code
                 if yield_ms is not None and not settlement:
@@ -985,7 +989,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
         except ContextUnavailable as exc:
             result = {'completed': False, 'interrupted': False, 'failed': True,
                       'messages': agent.journal.messages, 'final_response': str(exc)}
-        assert calls == ([] if settlement else [{'name': 'slow_echo', 'arguments': {}}])
+        assert calls == ([] if settlement else [{'name': tool_name, 'arguments': {}}])
         receipts = [m for m in result['messages'] if m['role'] == 'tool']
         assert all('slow-tool-complete' in receipt['content'] or
                    (read_outage and 'write-receipt' in receipt['content']) for receipt in receipts)

@@ -18,7 +18,7 @@ DIAGNOSTIC_TOOL = {
     'name': 'workspace_diagnostics',
     'description': 'Inspect this session’s tool registration, connection policies and sanitized runtime failure records. Read-only; no arguments. Does not expose credentials, raw server logs, source files or other sessions. Use before claiming tools or repository access are unavailable.',
     'inputSchema': DiagnosticArgs.model_json_schema(),
-    'annotations': {'readOnlyHint': True},
+    'annotations': {'readOnlyHint': True, 'idempotentHint': True},
 }
 
 

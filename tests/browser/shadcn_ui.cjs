@@ -1112,6 +1112,96 @@ test('preserved roots survive synchronous moves and release when not reattached'
   await page.waitForFunction(() => !window.droppedActivity.childNodes.length);
 });
 
+test('retained workspace tabs and toolbar actions survive focus updates and repeated clicks', async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => {
+    const run = {
+      id: '77777777777777777777777777777777', mode: 'demo', status: 'completed',
+      prompt: 'Verify workspace visibility', plugins: [], approvals: [], artifacts: [],
+      credential_requests: [], messages: [], events: [],
+    };
+    state.selected = run.id;
+    renderChat(run);
+    state.source?.close(); state.source = null;
+    workspacePanel.open('pulls');
+    workspacePanel.open('agents');
+    window.retainedPanelView = document.querySelector('.panel-agents');
+    window.retainedPanelTabs = [...document.querySelectorAll('.panel-tabs [data-tab]')];
+  });
+  const panel = page.locator('#workspace-panel');
+  const toggle = page.locator('#workspace-panel-toggle');
+  const focusedClick = async control => {
+    await control.focus();
+    await control.press('Shift');
+    // Let React process focus changes even when the tooltip remains closed.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await control.click();
+  };
+  const selectedAgents = panel.getByRole('tab', { name: 'Subagents', exact: true });
+  const assertSelected = async tab => {
+    assert.equal(await tab.getAttribute('aria-selected'), 'true');
+    assert.equal(await tab.getAttribute('tabindex'), '0');
+    assert.equal(await panel.getByRole('tab').evaluateAll((tabs, selectedId) => tabs.every(item =>
+      item.getAttribute('aria-selected') === String(item.id === selectedId) &&
+      item.getAttribute('tabindex') === (item.id === selectedId ? '0' : '-1')),
+    await tab.getAttribute('id')), true, 'Exactly the selected tab has aria-selected=true and tabindex=0');
+  };
+  // A selected tab must keep the controller's attributes through actual React
+  // tooltip updates, including a click whose select() is intentionally a no-op.
+  await page.locator('#followup').focus();
+  await selectedAgents.focus();
+  const selectedTooltip = page.getByRole('tooltip', { name: 'Subagents', exact: true });
+  await selectedTooltip.waitFor({ state: 'visible' });
+  assert.equal(await selectedAgents.getAttribute('data-state'), 'instant-open');
+  await assertSelected(selectedAgents);
+  await selectedAgents.click();
+  await selectedTooltip.waitFor({ state: 'detached' });
+  assert.equal(await selectedAgents.getAttribute('data-state'), 'closed');
+  await assertSelected(selectedAgents);
+  // First empty receipt sync reaches draw() with an unchanged tab template.
+  await page.evaluate(() => workspacePanel.syncPullRequests({
+    id: '77777777777777777777777777777777', pull_requests: [],
+  }));
+  await assertSelected(selectedAgents);
+  assert.equal(await selectedAgents.evaluate(el => el === window.retainedPanelTabs[1]), true);
+  for (const name of ['Pull requests', 'Subagents', 'Pull requests', 'Subagents']) {
+    const tab = panel.getByRole('tab', { name, exact: true });
+    await focusedClick(tab);
+    await assertSelected(tab);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('.panel-tabs [data-tab]')].every((node, index) => node === window.retainedPanelTabs[index])), true);
+  }
+  const agents = panel.getByRole('tab', { name: 'Subagents', exact: true });
+  await agents.press('Home');
+  assert.equal(await panel.getByRole('tab', { name: 'Pull requests', exact: true }).getAttribute('aria-selected'), 'true');
+  await panel.getByRole('tab', { name: 'Pull requests', exact: true }).press('End');
+  assert.equal(await agents.getAttribute('aria-selected'), 'true');
+  await focusedClick(panel.getByRole('button', { name: 'Close Pull requests tab', exact: true }));
+  assert.equal(await panel.getByRole('tab', { name: 'Pull requests', exact: true }).count(), 0);
+  assert.equal(await agents.getAttribute('aria-selected'), 'true');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await focusedClick(panel.locator('[data-add]'));
+    assert.equal(await panel.locator('.panel-menu').isVisible(), true);
+    await focusedClick(panel.locator('[data-add]'));
+    assert.equal(await panel.locator('.panel-menu').isVisible(), false);
+    assert.equal(await panel.isVisible(), true);
+    await focusedClick(panel.locator('[data-expand]'));
+    assert.equal(await page.locator('.chat-layout').evaluate(el => el.classList.contains('panel-expanded')), true);
+    await focusedClick(panel.locator('[data-expand]'));
+    assert.equal(await page.locator('.chat-layout').evaluate(el => el.classList.contains('panel-expanded')), false);
+    await focusedClick(panel.locator('[data-hide]'));
+    assert.equal(await panel.isVisible(), false);
+    assert.equal(await toggle.evaluate(el => el === document.activeElement), true);
+    await focusedClick(toggle);
+    assert.equal(await panel.isVisible(), true);
+    assert.equal(await toggle.getAttribute('aria-expanded'), 'true');
+    assert.equal(await panel.locator('.panel-agents').evaluate(el => el === window.retainedPanelView), true);
+  }
+  await toggle.press('Enter');
+  assert.equal(await panel.isVisible(), false, 'One keyboard activation runs one toggle');
+  assert.equal(await toggle.getAttribute('aria-expanded'), 'false');
+  await page.evaluate(() => navigate('tasks'));
+});
+
 for (const surface of ['main', 'side']) test(`${surface} transcript replacement retains rendered activity and releases removed controls`, async t => {
   const page = await pageFor(t);
   await page.evaluate(surface => {

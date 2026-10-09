@@ -56,6 +56,30 @@ def test_rename_updates_labels_without_changing_selection_or_authorization(ident
     assert not any(path.startswith('/repos/') for _, path, _ in provider.calls)
 
 
+@pytest.mark.parametrize('name,arguments', [
+    ('github_repositories', {}),
+    ('github_repository', {'repository_id': 202}),
+    ('github_checkout', {'repository_id': 202}),
+])
+def test_repeatable_broker_metadata_preserves_selection_and_never_publishes(identity, name, arguments):
+    app, client, run, headers, github, provider = identity
+    select(app, (101, 202))
+    app.state.store.execute('UPDATE runs SET github_repository_id=101,repo_url=? WHERE id=?',
+                            ('https://github.com/BerriAI/litellm', run))
+    tool = next(t for t in client.get(f'/broker/{run}/tools', headers=headers).json() if t['name'] == name)
+    assert tool['annotations']['readOnlyHint'] is tool['annotations']['idempotentHint'] is True
+    first = call(client, run, headers, name, **arguments)
+    assert 'error' not in first
+    assert call(client, run, headers, name, **arguments) == first
+    assert app.state.store.run(run)['github_repository_id'] == 101
+    assert app.state.store.run(run)['repo_url'] == 'https://github.com/BerriAI/litellm'
+    assert github.saved_credentials()['repository_ids'] == [101, 202]
+    assert all(method == 'GET' or (method == 'POST' and path.endswith('/access_tokens'))
+               for method, path, _ in provider.calls)
+    assert not app.state.store.rows('SELECT 1 FROM github_publications')
+    assert not app.state.store.rows('SELECT 1 FROM github_followups')
+
+
 def test_legacy_migration_preserves_subset_and_resolves_redirect_once(identity):
     app, client, run, headers, github, provider = identity
     github.save_app({'id': 123, 'slug': 'fixture', 'pem': 'fixture-key'})

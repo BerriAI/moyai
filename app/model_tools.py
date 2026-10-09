@@ -51,7 +51,7 @@ class ModelTools:
             except HTTPException:
                 return []
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name == 'model_list'}}
+                 'annotations': {'readOnlyHint': name == 'model_list', 'idempotentHint': name == 'model_list'}}
                 for name, (schema, description) in SPECS.items()]
 
     def state(self, run):

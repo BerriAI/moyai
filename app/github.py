@@ -316,10 +316,15 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
         read_version = None
         if name == 'github_pull_request':
             self.ensure_read_allowed(run.get('github_connection_version'))
-            await self.ensure_connection()
+            credentials = await self.ensure_connection()
             read_version = run.get('github_connection_version', self.connection_version())
             self.ensure_read_allowed(read_version)
-        target = await self.selected_target(run, arguments.get('repository', ''), arguments.get('repository_id'))
+        if name == 'github_pull_request' and arguments.get('repository_id') is not None and not arguments.get('repository'):
+            # Permanent IDs need no metadata lookup: the PR response verifies
+            # its base repository and supplies its current name and owner.
+            target = self.target(arguments['repository_id'], credentials)
+        else:
+            target = await self.selected_target(run, arguments.get('repository', ''), arguments.get('repository_id'))
         if read_version:
             self.ensure_read_allowed(read_version, target)
         if name in {'github_rulesets', 'github_ruleset'}:
@@ -360,7 +365,9 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
         self.ensure_read_allowed(read_version, target)
         if pr['number'] != number or pr['base']['repo']['id'] != target:
             raise ConnectorError('GitHub returned a different pull request or repository.')
-        self.remember_repository(pr['base']['repo'], self.saved_credentials())
+        self.remember_repository(pr['base']['repo'], credentials)
+        if self.references_dirty:
+            self.migrate_references(credentials)
         files = await self.request('GET', prefix + '/files', token=token, params={'per_page': 100})
         self.ensure_read_allowed(read_version, target)
         remaining = 160000

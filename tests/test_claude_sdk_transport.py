@@ -25,6 +25,13 @@ def broker_workspace(tmp_path, monkeypatch):
     yield from workspace.__wrapped__(tmp_path, monkeypatch)
 
 
+@pytest.fixture
+def recovery_catalog(tmp_path, monkeypatch):
+    # Keep the copied guest-conformance module independent of the web app.
+    from test_workspace import recovery_catalog as catalog
+    return catalog.__wrapped__(tmp_path, monkeypatch)
+
+
 def test_claude_background_compaction_keeps_running_sdk_and_new_tail(tmp_path, monkeypatch, broker_workspace):
     from test_codex_sdk_transport import native_background_case
     native_background_case(tmp_path, monkeypatch, broker_workspace, 'claude-agent-sdk', progress=print)
@@ -214,6 +221,91 @@ def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
 
 def test_real_sdk_recovers_broker_failure_from_cold_tool_receipts(tmp_path, monkeypatch):
     broker_recovery_case(tmp_path, monkeypatch)
+
+
+def test_real_claude_safe_read_recovers_without_replaying_write(tmp_path, monkeypatch, recovery_catalog):
+    """Bundled SDK, Bash and MCP are real; provider replies inject one tool 524."""
+    import shlex
+    from claude_agent_sdk import ClaudeSDKClient, ResultMessage
+    from sandbox.activity import ActivityReporter
+    from sandbox.broker_transport import unseal
+    from test_broker_transport import diagnostic_relay
+    from test_claude_native_compaction import send_message
+    directory = tmp_path / 'native-read'
+    directory.mkdir()
+    effects = directory / 'writes'
+    reads, clients, sessions, requests = [], [], [], []
+    original_init, original_receive = ClaudeSDKClient.__init__, ClaudeSDKClient.receive_messages
+    def initialize(client, *args, **kwargs):
+        clients.append(client)
+        original_init(client, *args, **kwargs)
+    async def receive(client):
+        async for message in original_receive(client):
+            if isinstance(message, ResultMessage):
+                sessions.append(message.session_id)
+            yield message
+    monkeypatch.setattr(ClaudeSDKClient, '__init__', initialize)
+    monkeypatch.setattr(ClaudeSDKClient, 'receive_messages', receive)
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def reply(self, value, status=200):
+            raw = json.dumps(value).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        def do_GET(self):
+            self.reply(recovery_catalog if self.path == '/tools' else {'input_budget': 200000})
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path.startswith('/context/'):
+                return self.reply({})
+            if self.path == '/tools/call':
+                assert body == {'name': 'github_repositories', 'arguments': {}}
+                reads.append(body)
+                return self.reply({'repositories': [], 'receipt': 'read-receipt'}, 524 if len(reads) == 1 else 200)
+            assert self.path == '/v1/messages'
+            requests.append(body)
+            if not effects.exists():
+                block = {'type': 'tool_use', 'id': 'write_once', 'name': 'Bash', 'input': {
+                    'command': "printf 'once\\n' >> " + shlex.quote(str(effects)) + '; printf write-receipt',
+                    'description': 'Write the local fixture receipt once'}}
+            elif reads:
+                text = 'claude-read-recovered' if len(reads) == 2 and 'read-receipt' in json.dumps(body) else 'read-unrecovered'
+                block = {'type': 'text', 'text': text}
+            elif any(tool['name'] == 'mcp__moyai__github_repositories' for tool in body['tools']):
+                block = {'type': 'tool_use', 'id': 'repositories', 'name': 'mcp__moyai__github_repositories', 'input': {}}
+            else:
+                block = {'type': 'tool_use', 'id': 'discover_read', 'name': 'ToolSearch',
+                    'input': {'query': 'select:mcp__moyai__github_repositories', 'max_results': 1}}
+            send_message(self, body, block, {'input_tokens': 100, 'output_tokens': 20})
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'private-capability')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'sdk-config'))
+    store = ContextStore(tmp_path / 'native-read.sqlite3', 'claude-read')
+    store.initialize([])
+    with diagnostic_relay(Edge) as (relay, _, diagnostics):
+        agent = ClaudeAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 45, 'max_iterations': 8},
+            relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
+                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'private-capability'}}}},
+            activity=ActivityReporter(lambda *args: None), step=lambda: None,
+            cwd=str(directory), definition=None, context_store=store)
+        try:
+            result = agent.run_conversation('Write one local receipt, then list repositories.',
+                conversation_history=[], system_message='Read recovery verification; never repeat the write.')
+            assert result['completed'] and result['final_response'] == 'claude-read-recovered', result['final_response']
+            assert effects.read_text().splitlines() == ['once'] and len(reads) == 2
+            assert len(clients) == 1 and sessions and len(set(sessions)) == 1
+            assert not diagnostics and not relay.last_error and not relay.uncertain_tool
+            assert not agent.journal.pending and not store.pending
+            assert sum('write-receipt' in message['content'] for message in agent.journal.messages
+                       if message['role'] == 'tool') == 1
+            assert 'read-receipt' in json.dumps(requests[-1])
+        finally:
+            agent.close()
+            store.close()
 
 
 @pytest.mark.parametrize('resumed', [False, True, 'durable', 'pressure', 'pending', 'native', 'native-pressure', 'native-corrupt',

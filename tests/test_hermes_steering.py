@@ -9,7 +9,7 @@ import pytest
 
 from app.config import Settings
 from sandbox.hermes_compat import apply_hermes_patches
-from test_workspace import workspace  # noqa: F401
+from test_workspace import workspace, recovery_catalog  # noqa: F401
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -111,6 +111,85 @@ def test_real_hermes_background_compaction_preserves_tools(runtime, workspace, t
         assert not proof['private_summary_visible']
         print(f'Hermes: {len(state.requests)} foreground calls, {state.held_calls} while summary held, '
               f'{len(state.projections)} projected calls, {BACKGROUND_STEPS} tool receipts, one native process')
+
+
+def test_real_hermes_tool_read_recovers_and_continues_without_replaying_write(runtime, recovery_catalog, tmp_path, monkeypatch):
+    import shlex
+    from http.server import BaseHTTPRequestHandler
+    from sandbox.agent import hermes_config
+    from sandbox.broker_transport import unseal
+    from test_broker_transport import diagnostic_relay
+    from test_harnesses import background_chat_response
+
+    _, source, python = runtime
+    models, reads = [], []
+    tool = 'mcp__workspace__github_repositories'
+    script = 'from pathlib import Path; Path("executions.txt").open("a").write("completed-once\\n")'
+    steps = [('terminal', {'command': shlex.quote(python) + ' -c ' + shlex.quote(script)}),
+             ('tool_search', {'queries': ['github repositories']}),
+             ('tool_describe', {'names': [tool]}),
+             ('tool_call', {'calls': [{'name': tool, 'arguments': {}}]})]
+
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def reply(self, status, body, content_type='application/json'):
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def do_GET(self):
+            if self.path == '/v1/models':
+                self.reply(200, json.dumps({'object': 'list', 'data': [
+                    {'id': 'openai/gpt-6-astra', 'object': 'model', 'owned_by': 'fixture'}]}).encode())
+                return
+            assert self.path == '/tools'
+            self.reply(200, json.dumps(recovery_catalog).encode())
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path == '/tools/call':
+                assert body == {'name': 'github_repositories', 'arguments': {}}
+                reads.append(body)
+                self.reply(524 if len(reads) == 1 else 200,
+                           b'{}' if len(reads) == 1 else b'{"repositories":[],"receipt":"fixture-read-recovered"}')
+                return
+            assert self.path == '/v1/chat/completions'
+            assert len(models) <= len(steps)
+            if models:
+                assert (tmp_path / 'executions.txt').read_text() == 'completed-once\n'
+            message = {'role': 'assistant', 'content': 'read-recovery-complete'}
+            if len(models) < len(steps):
+                name, arguments = steps[len(models)]
+                message.update(content=None, tool_calls=[{'id': f'recovery-{len(models)}', 'type': 'function',
+                    'function': {'name': name, 'arguments': json.dumps(arguments)}}])
+            models.append(body)
+            response = background_chat_response(body, message, len(models))
+            self.reply(response.status_code, response.content, response.headers.get('Content-Type'))
+
+    with diagnostic_relay(Edge) as (relay, _, diagnostics):
+        profile = tmp_path / 'profile'
+        profile.mkdir()
+        monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'private-capability')
+        config = hermes_config({'model': 'openai/gpt-6-astra'}, relay.url, tmp_path)
+        config['mcp_servers']['workspace'].update(command=python, args=[str(ROOT / 'sandbox/mcp_bridge.py')])
+        config['agent'] = {'auto_recovery_cycles': 0}
+        (profile / 'config.yaml').write_text(json.dumps(config))
+        env = {key: os.environ[key] for key in ('PATH', 'HOME', 'TMPDIR') if key in os.environ}
+        env.update(HERMES_HOME=str(profile), PYTHONPATH=source, HERMES_RUNTIME_DIR=str(tmp_path / 'runtimes'),
+                   WORKSPACE_RUN_TOKEN='private-capability')
+        result = subprocess.run([python, str(ROOT / 'tests/hermes_steering_probe.py'), 'read-recovery',
+            '--broker-url', relay.url, '--model', config['model']['default']], env=env, cwd=tmp_path,
+            text=True, capture_output=True, timeout=90)
+        assert result.returncode == 0, result.stdout + result.stderr
+        proof = json.loads(next(line.removeprefix('READ_RECOVERY_PROOF ') for line in result.stdout.splitlines()
+                               if line.startswith('READ_RECOVERY_PROOF ')))
+        assert proof['completed'] and proof['final_response'] == 'read-recovery-complete'
+        assert len(models) == 5 and len(reads) == 2
+        assert 'fixture-read-recovered' in json.dumps(models[-1]['messages'])
+        assert (tmp_path / 'executions.txt').read_text() == 'completed-once\n'
+        assert proof['completed_tools'].count('terminal') == proof['completed_tools'].count(tool) == 1
+        assert not relay.last_error and relay.last_failure is None and not relay.uncertain_tool and not diagnostics
 
 
 def test_incompatible_snapshot_is_rejected_before_any_patch_is_applied(runtime, tmp_path):

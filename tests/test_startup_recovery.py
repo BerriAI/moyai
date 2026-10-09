@@ -54,15 +54,16 @@ def error(code):
     return urllib.error.HTTPError('https://workspace.example/tools', code, 'private body', {}, BytesIO(b'private'))
 
 
-def test_bootstrap_waits_through_http_and_connection_outage():
-    fault = Outage([error(503), http.client.RemoteDisconnected(), b'{"tools":[]}'])
+@pytest.mark.parametrize('code', [503, 524])
+def test_bootstrap_waits_through_http_and_connection_outage(code):
+    fault = Outage([error(code), http.client.RemoteDisconnected(), b'{"tools":[]}'])
     assert fault.read() == b'{"tools":[]}'
     assert fault.calls == 3 and fault.now == 3
     assert len(fault.notifications) == 2
     assert 'reconnected' in fault.notifications[-1]
 
 
-@pytest.mark.parametrize('code', [401, 403, 404, 422])
+@pytest.mark.parametrize('code', [401, 403, 404, 422, 525, 526])
 def test_permanent_bootstrap_errors_are_not_retried(code):
     fault = Outage([error(code)])
     with pytest.raises(urllib.error.HTTPError):
@@ -70,11 +71,12 @@ def test_permanent_bootstrap_errors_are_not_retried(code):
     assert fault.calls == 1 and not fault.notifications
 
 
-def test_exhaustion_returns_only_safe_typed_diagnostics():
-    fault = Outage([error(502)] * 10)
+@pytest.mark.parametrize('code', [502, 524])
+def test_exhaustion_returns_only_safe_typed_diagnostics(code):
+    fault = Outage([error(code)] * 10)
     with pytest.raises(StartupUnavailable) as result:
         fault.read(budget=4)
-    assert result.value.stage == 'workspace_tools' and result.value.reason == 'HTTP 502'
+    assert result.value.stage == 'workspace_tools' and result.value.reason == f'HTTP {code}'
     assert 'private' not in str(result.value)
     assert fault.calls == 3 and fault.now == 4
 

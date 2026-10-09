@@ -142,7 +142,7 @@ class MediaShares:
 
     def tools(self):
         return [{'name': name, 'description': spec[1], 'inputSchema': spec[0].model_json_schema(),
-                 'annotations': {'readOnlyHint': name == 'media_list'}} for name, spec in TOOLS.items()]
+                 'annotations': {'readOnlyHint': name == 'media_list', 'idempotentHint': name == 'media_list'}} for name, spec in TOOLS.items()]
 
     def call(self, run, name, arguments):
         args = TOOLS[name][0].model_validate(arguments)

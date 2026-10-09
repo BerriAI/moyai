@@ -230,34 +230,214 @@ const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 const details={number:145,title:'Native review',state:'open',draft:false,merged:false,base:'main',head:'abcdef0',head_ref:'feature',author:'alex',
   additions:2,deletions:1,changed_files:2,body:'Description',files:[{filename:'src/view.js',status:'modified',additions:2,deletions:1,patch:'@@ -4,2 +4,3 @@\n-old\n+new\n+added\n context'},
   {filename:'logo.png',status:'added',additions:0,deletions:0,patch:''}]};
-function nativePanel(){
-  const nodes=new Map(),requests=[],statuses=[];
-  function node(selector){
-    if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',className:'',disabled:false,scrollTop:0,dataset:{},setAttribute(){},querySelector:node,querySelectorAll(){return [];}});
-    return nodes.get(selector);
+const assertSame=(actual,expected,message)=>assert.ok(actual===expected,message||'Expected the value or retained node to stay identical');
+// A small DOM double parses the controller's templates and runs the real keyed
+// region owner. It tracks identity/disposal; React, layout and toggle events are
+// verified separately against the production bundle in the browser suite.
+function controllerDOM(){
+  const document={activeElement:null},calls=[],disposed=[],roots=new Map();
+  const encode=value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;');
+  const decode=value=>value.replace(/&(amp|lt|gt|quot|#39);/g,(_,name)=>({amp:'&',lt:'<',gt:'>',quot:'"','#39':"'"}[name]));
+  class Node{
+    [require('node:util').inspect.custom](){return this.nodeType===3?this.text:`<${this.tagName.toLowerCase()} ${JSON.stringify(Object.fromEntries(this.attrs))}>`;}
+    constructor(tag,text=''){this.tagName=tag?.toUpperCase();this.nodeType=tag?1:3;this.text=text;this.ownerDocument=document;this.parentNode=null;this.childNodes=[];this.attrs=new Map();this.style={};this.scrollTop=0;this.listeners=new Map();}
+    get children(){return this.childNodes.filter(node=>node.nodeType===1);}
+    get attributes(){return [...this.attrs].map(([name,value])=>({name,value}));}
+    get dataset(){return Object.fromEntries([...this.attrs].filter(([name])=>name.startsWith('data-')).map(([name,value])=>[name.slice(5).replace(/-([a-z])/g,(_,c)=>c.toUpperCase()),value]));}
+    get isConnected(){return this===document.body||!!this.parentNode?.isConnected;}
+    getAttribute(name){return this.attrs.get(name)??null;}
+    hasAttribute(name){return this.attrs.has(name);}
+    setAttribute(name,value){this.attrs.set(name,String(value));}
+    removeAttribute(name){this.attrs.delete(name);}
+    get className(){return this.getAttribute('class')||'';}
+    set className(value){this.setAttribute('class',value);}
+    get classList(){return {remove:(...names)=>{for(const name of names)this.classList.toggle(name,false);},toggle:(name,value)=>{const classes=new Set(this.className.split(/\s+/).filter(Boolean));if(value)classes.add(name);else classes.delete(name);this.className=[...classes].join(' ');}};}
+    get hidden(){return this.hasAttribute('hidden');}set hidden(value){if(value)this.setAttribute('hidden','');else this.removeAttribute('hidden');}
+    get open(){return this.hasAttribute('open');}set open(value){if(value)this.setAttribute('open','');else this.removeAttribute('open');}
+    contains(node){return this===node||this.childNodes.some(child=>child.contains(node));}
+    insertBefore(node,before){if(node===before)return;node.remove();const index=before?this.childNodes.indexOf(before):this.childNodes.length;assert.notEqual(index,-1);this.childNodes.splice(index,0,node);node.parentNode=this;}
+    append(...nodes){nodes.forEach(node=>this.insertBefore(node,null));}
+    remove(){if(!this.parentNode)return;if(this.contains(document.activeElement))document.activeElement=null;this.parentNode.childNodes.splice(this.parentNode.childNodes.indexOf(this),1);this.parentNode=null;}
+    replaceChildren(...nodes){[...this.childNodes].forEach(node=>node.remove());this.append(...nodes);}
+    get textContent(){return this.nodeType===3?this.text:this.childNodes.map(node=>node.textContent).join('');}
+    set textContent(value){this.replaceChildren(new Node(null,String(value)));}
+    get innerHTML(){return this.childNodes.map(node=>node.outerHTML).join('');}
+    set innerHTML(value){this.replaceChildren(...parse(value));}
+    get outerHTML(){return this.nodeType===3?encode(this.text):`<${this.tagName.toLowerCase()}${[...this.attrs].map(([key,value])=>` ${key}="${encode(value)}"`).join('')}>${this.innerHTML}</${this.tagName.toLowerCase()}>`;}
+    matches(selector){if(selector.includes(','))return selector.split(',').some(part=>this.matches(part.trim()));if(selector.startsWith('.'))return this.className.split(/\s+/).includes(selector.slice(1));if(selector.startsWith('#'))return this.getAttribute('id')===selector.slice(1);const attr=/^\[([^=\]]+)(?:="([^"]*)")?\]$/.exec(selector);return attr?this.hasAttribute(attr[1])&&(attr[2]===undefined||this.getAttribute(attr[1])===attr[2]):this.tagName===selector.toUpperCase();}
+    querySelectorAll(selector){return this.children.flatMap(child=>[...(child.matches(selector)?[child]:[]),...child.querySelectorAll(selector)]);}
+    querySelector(selector){return this.querySelectorAll(selector)[0]||null;}
+    closest(selector){for(let node=this;node;node=node.parentNode)if(node.matches(selector))return node;return null;}
+    addEventListener(type,listener){if(!this.listeners.has(type))this.listeners.set(type,new Set());this.listeners.get(type).add(listener);}
+    removeEventListener(type,listener){this.listeners.get(type)?.delete(listener);}
+    click(){const event={target:this,defaultPrevented:false};for(let node=this;node;node=node.parentNode){event.currentTarget=node;node.onclick?.(event);for(const listener of node.listeners.get('click')||[])listener(event);}}
+    focus(options){document.activeElement=this;this.focusOptions=options;}
+    scrollIntoView(){}
   }
-  const lifecycle=native.mount({element:node('root'),url,escape,markdown:escape,
+  function parse(html){
+    const root=new Node('fragment'),stack=[root];
+    for(const token of html.match(/<\/?[\w-]+(?:\s(?:[^>"']|"[^"]*"|'[^']*')*)?\s*\/?>|[^<]+/g)||[]){
+      if(token.startsWith('</')){stack.pop();continue;}
+      if(!token.startsWith('<')){stack.at(-1).append(new Node(null,decode(token)));continue;}
+      const [,tag,attrs]=/^<([\w-]+)([\s\S]*?)\/?\s*>$/.exec(token),node=new Node(tag);
+      for(const [,key,quoted,single,bare] of attrs.matchAll(/([^\s=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g))node.setAttribute(key,decode(quoted??single??bare??''));
+      stack.at(-1).append(node);if(!['input','img','br','hr'].includes(tag)&&!token.endsWith('/>'))stack.push(node);
+    }
+    return [...root.childNodes];
+  }
+  document.body=new Node('body');document.querySelector=selector=>document.body.querySelector(selector);
+  document.createElement=tag=>tag==='template'?{content:new Node('fragment'),set innerHTML(value){this.content.innerHTML=value;}}:new Node(tag);
+  const context={document,MoyaiUI:{render(host,html){calls.push({host,html});for(const mounted of [...roots.keys()])if(host.contains(mounted)){disposed.push(mounted);roots.delete(mounted);}host.innerHTML=html;if(html)roots.set(host,Symbol('root'));}}};
+  vm.createContext(context);vm.runInContext(fs.readFileSync('app/static/regions.js','utf8'),context);
+  const element=new Node('main');document.body.append(element);
+  return {context,element,document,calls,disposed,roots,node:selector=>element.querySelector(selector)};
+}
+function tabStrip(){
+  const dom=controllerDOM(),source=fs.readFileSync(panelPath,'utf8'),ctx=dom.context;
+  dom.element.innerHTML='<aside><div class="panel-tabs"></div><div class="panel-tools"><button data-add><span>Add</span></button><button data-expand><span>Expand</span></button><button data-hide><span>Hide</span></button></div><div class="panel-menu" hidden></div></aside><button id="workspace-panel-toggle"></button><button id="toggle-details"></button>';
+  const panel=dom.node('aside'),tabs=new Map(['changes','files','activity'].map((id,index)=>[id,{id,uid:String(index),kind:id==='changes'?'pr':id,title:id,loaded:true,element:ctx.document.createElement('section')}]));
+  Object.assign(ctx,{tabs,panel,active:'changes',visible:true,disposed:false,expanded:false,tabSignature:'',closingStatus:{},layout:dom.element,
+    q:selector=>panel.querySelector(selector),esc:escape,ico:()=>'',glyph:{},MoyaiPullRequest:native,menu(value){panel.querySelector('.panel-menu').hidden=!value;},save(){},mount(){throw Error('Retained tab must not mount again');},
+    card:ctx.document.createElement('aside'),outside(){},followPullRequest(){}});
+  ctx.document.removeEventListener=()=>{};
+  vm.runInContext(source.slice(source.indexOf('    function draw('),source.indexOf('    function hide(')),ctx);
+  vm.runInContext(source.slice(source.indexOf('    function select('),source.indexOf('    function error(')),ctx);
+  vm.runInContext(source.slice(source.indexOf("    const toolHost="),source.indexOf('    function outside(')),ctx);
+  vm.runInContext(source.slice(source.indexOf('    function hide('),source.indexOf('    function menu(')),ctx);
+  const dispose=source.slice(source.lastIndexOf('dispose(){')+'dispose(){'.length,source.lastIndexOf('}};'));
+  vm.runInContext('function disposePanel(){'+dispose+'}',ctx);
+  ctx.draw();dom.calls.length=0;return {...dom,ctx,tabs};
+}
+test('workspace tab switches retain controls and avoid duplicate strip rebuilds',()=>{
+  const f=tabStrip(),unchanged=f.node('[data-tab="activity"]'),close=f.node('[data-close="activity"]'),old=f.node('[data-tab="changes"]');
+  unchanged.focus();f.ctx.select('files');
+  assertSame(f.node('[data-tab="activity"]'),unchanged);assertSame(f.node('[data-close="activity"]'),close);
+  assertSame(f.node('[data-tab="changes"]'),old);assertSame(f.document.activeElement,unchanged);
+  assertSame(old.getAttribute('aria-selected'),'false');assertSame(f.node('[data-tab="files"]').getAttribute('aria-selected'),'true');
+  assertSame(f.calls.length,0,'Selection only changes controller-owned attributes');
+  f.ctx.setVisible(false);assertSame(f.calls.length,0);assertSame(f.node('#workspace-panel-toggle').getAttribute('aria-expanded'),'false');
+  f.tabs.get('activity').title='Latest activity';f.ctx.draw();
+  assertSame(f.node('[data-tab="activity"]').getAttribute('title'),'Latest activity');assertSame(f.node('[data-tab="changes"]'),old);
+});
+test('retained tab clicks survive component click-slot changes without duplicate host handlers',()=>{
+  const f=tabStrip(),strip=f.node('.panel-tabs'),first=f.node('[data-tab="changes"]');
+  for(const id of ['activity','files','changes','activity']){
+    const control=f.node(`[data-tab="${id}"]`);control.focus();control.onclick=()=>{};
+    control.querySelector('span').click();assert.equal(f.ctx.active,id,'A nested label click reaches its persistent tab owner');
+    assertSame(f.node('[data-tab="changes"]'),first);
+  }
+  assert.equal(strip.listeners.get('click')?.size,1,'Repeated draws retain one delegated listener');
+  const close=f.node('[data-close="changes"]');close.innerHTML='<span>Close icon</span>';close.onclick=()=>{};close.querySelector('span').click();
+  assert.equal(f.tabs.has('changes'),false);assert.equal(f.ctx.active,'activity');
+  f.tabs.get('files').closing=true;f.ctx.draw();f.node('[data-close="files"]').click();assert.equal(f.tabs.has('files'),true,'Disabled close cannot remove a tab');
+  f.ctx.disposed=true;f.node('[data-tab="files"]').click();assert.equal(f.ctx.active,'activity','Disposed owners reject later events');
+});
+test('panel toolbar actions retain independent click ownership and both delegates detach on disposal',()=>{
+  const f=tabStrip(),tools=f.node('.panel-tools'),tabs=f.node('.panel-tabs');
+  const click=selector=>{const button=f.node(selector);button.focus();button.onclick=()=>{};button.querySelector('span').click();};
+  for(let i=0;i<3;i++){
+    click('[data-add]');assert.equal(f.node('.panel-menu').hidden,false);click('[data-add]');assert.equal(f.node('.panel-menu').hidden,true);
+    click('[data-expand]');assert.equal(f.ctx.expanded,true);click('[data-expand]');assert.equal(f.ctx.expanded,false);
+    click('[data-hide]');assert.equal(f.ctx.visible,false);assertSame(f.document.activeElement,f.node('#workspace-panel-toggle'));f.ctx.select('activity');assert.equal(f.ctx.visible,true);
+  }
+  assert.equal(tools.listeners.get('click').size,1);assert.equal(tabs.listeners.get('click').size,1);
+  f.ctx.disposePanel();assert.equal(tools.listeners.get('click').size,0);assert.equal(tabs.listeners.get('click').size,0);
+  assert.equal(f.ctx.disposed,true);assert.equal(tools.isConnected,false);
+});
+test('workspace tab keyboard navigation and close states retain the surviving controls',async()=>{
+  const f=tabStrip(),strip=f.node('.panel-tabs'),first=f.node('[data-tab="changes"]');
+  const key=value=>strip.onkeydown({target:f.node('[aria-selected="true"]'),key:value,preventDefault(){}});
+  key('End');assertSame(f.ctx.active,'activity');assertSame(f.document.activeElement,f.node('[data-tab="activity"]'));
+  key('ArrowLeft');assertSame(f.ctx.active,'files');key('Home');assertSame(f.ctx.active,'changes');
+  f.tabs.get('files').closing=true;f.ctx.draw();assertSame(f.node('[data-close="files"]').hasAttribute('disabled'),true);
+  key('ArrowRight');assertSame(f.ctx.active,'activity');
+  await f.ctx.remove('changes');assertSame(f.node('[data-tab="changes"]'),null);assertSame(first.isConnected,false);
+  assertSame(f.ctx.active,'activity');
+});
+function nativePanel(){
+  const dom=controllerDOM(),requests=[],markdownCalls=[],statuses=[];
+  vm.runInContext(fs.readFileSync('app/static/pull-request.js','utf8'),dom.context);
+  const lifecycle=dom.context.MoyaiPullRequest.mount({element:dom.element,url,escape,markdown:value=>{markdownCalls.push(value);return escape(value);},
     onStatus:data=>statuses.push(native.presentation(data).state),
     load:()=>new Promise((resolve,reject)=>requests.push({resolve,reject}))});
-  return {node,requests,statuses,...lifecycle};
+  return {...dom,requests,markdownCalls,statuses,...lifecycle};
 }
-test('native diffs show source line numbers, missing patches and truncation without interpreting code as HTML',()=>{
-  assert.deepEqual(native.diffRows(details.files[0].patch).map(r=>[r.old,r.next]),[['',''],[4,''],['',4],['',5],[5,6]]);
-  const html=native.changes({...details,files_truncated:true,files:[{...details.files[0],filename:'<script>.js',patch:'+<img onerror=x>',patch_truncated:true},details.files[1]]},escape,new Set());
-  assert.match(html,/&lt;script&gt;\.js/);assert.match(html,/&lt;img onerror=x&gt;/);assert.doesNotMatch(html,/<img/);
-  assert.match(html,/first 100 files/);assert.match(html,/diff is truncated/);assert.match(html,/did not provide a text diff/);
+async function initialPR(data=details){const f=nativePanel(),first=f.activate();f.requests[0].resolve(data);await first;f.calls.length=0;return f;}
+async function refreshPR(f,data=details){const read=f.node('[data-refresh]').onclick();f.requests.at(-1).resolve(data);await read;}
+function toggleFile(f,index,open){const detail=f.element.querySelectorAll('[data-file]')[index];detail.open=open;detail.ontoggle();return detail;}
+test('PR refresh revalidates but an identical payload preserves mounted headings and diff rows',async()=>{
+  const f=await initialPR(),heading=f.node('[data-heading]').children[0],row=f.node('.pr-diff').children[0];
+  f.deactivate();const reload=f.activate();assertSame(f.requests.length,2);assertSame(f.node('.pr-diff').children[0],row);
+  f.requests[1].resolve(structuredClone(details));await reload;
+  assertSame(f.node('[data-heading]').children[0],heading);assertSame(f.node('.pr-diff').children[0],row);assertSame(f.calls.length,0);
 });
-test('native PR refresh keeps prior data on temporary failure and clears it on access denial',async()=>{
-  const f=nativePanel(),first=f.activate();f.requests[0].resolve(details);await first;
-  const body=f.node('[data-content]').innerHTML;assert.match(body,/src\/view.js/);assert.match(f.node('[data-heading]').innerHTML,/Native review/);
+test('PR sections retain their mounted controls, diff identity and individual scroll positions',async()=>{
+  const f=await initialPR(),content=f.node('[data-content]'),diff=f.node('.pr-diff');content.scrollTop=240;
+  f.node('[data-section="description"]').onclick();const description=f.node('.pr-description');content.scrollTop=75;
+  f.node('[data-section="changes"]').onclick();assertSame(content.scrollTop,240);assertSame(f.node('.pr-diff'),diff);
+  assertSame(f.node('[data-pr-section="description"]').hidden,true);
+  f.node('[data-section="description"]').onclick();assertSame(content.scrollTop,75);assertSame(f.node('.pr-description'),description);
+  assert.deepEqual(f.markdownCalls,['Description']);f.calls.length=0;f.node('[data-section="description"]').onclick();assertSame(f.calls.length,0);
+});
+test('unopened files mount no diff rows and expanding one preserves every other file',async()=>{
+  const files=[details.files[0],{...details.files[0],filename:'second.js',patch:'@@ -1 +1 @@\n-old two\n+new two'},{...details.files[0],filename:'third.js',patch:'+<script>third</script>'}];
+  const f=await initialPR({...details,files}),first=f.element.querySelectorAll('[data-file]')[0],firstTable=first.querySelector('.pr-diff');
+  assertSame(f.element.querySelectorAll('.pr-diff').length,1);assert.doesNotMatch(f.node('[data-content]').textContent,/new two|third<\/script>/);
+  const second=toggleFile(f,1,true),secondTable=second.querySelector('.pr-diff');assert.match(secondTable.textContent,/new two/);
+  assertSame(first.querySelector('.pr-diff'),firstTable);assertSame(f.element.querySelectorAll('.pr-diff').length,2);
+  toggleFile(f,1,false);f.calls.length=0;toggleFile(f,1,true);assertSame(second.querySelector('.pr-diff'),secondTable);assertSame(f.calls.length,0);
+  toggleFile(f,0,false);await refreshPR(f,{...details,files});assertSame(first.open,false,'Manual collapse survives fresh unchanged data');
+});
+test('PR refresh updates one file, defers changed closed bodies and disposes removed files',async()=>{
+  const files=[details.files[0],{...details.files[0],filename:'second.js',patch:'+old second'}],f=await initialPR({...details,files});
+  const first=f.element.querySelectorAll('[data-file]')[0],firstTable=first.querySelector('.pr-diff'),second=toggleFile(f,1,true),oldBody=second.querySelector('.pr-diff');
+  toggleFile(f,1,false);await refreshPR(f,{...details,files:[files[0],{...files[1],patch:'+new second',additions:7}]});
+  assertSame(first.querySelector('.pr-diff'),firstTable);assertSame(second.querySelector('.pr-diff'),null);assertSame(oldBody.isConnected,false);
+  assert.match(second.querySelector('.pr-additions').textContent,/7/);toggleFile(f,1,true);assert.match(second.querySelector('.pr-diff').textContent,/new second/);
+  const wrapper=second.parentNode;f.disposed.length=0;await refreshPR(f,{...details,files:[files[0]]});
+  assertSame(second.isConnected,false);assert.ok(f.disposed.includes(wrapper),'Removing a file releases its disclosure root');assertSame(first.querySelector('.pr-diff'),firstTable);
+});
+test('native diffs show source line numbers, missing patches and truncation without interpreting code as HTML',async()=>{
+  assert.deepEqual(native.diffRows(details.files[0].patch).map(r=>[r.old,r.next]),[['',''],[4,''],['',4],['',5],[5,6]]);
+  const f=await initialPR({...details,files_truncated:true,files:[{...details.files[0],filename:'<script>.js',patch:'+<img onerror=x>',patch_truncated:true},details.files[1]]});
+  assert.match(f.node('[data-content]').textContent,/<script>\.js/);assert.match(f.node('.pr-diff').textContent,/<img onerror=x>/);
+  assert.equal(f.node('img'),null);assert.equal(f.node('script'),null);
+  assert.match(f.node('[data-content]').textContent,/first 100 files/);assert.match(f.node('[data-content]').textContent,/diff is truncated/);
+  toggleFile(f,1,true);assert.match(f.node('[data-content]').textContent,/did not provide a text diff/);
+});
+test('native PR refresh keeps prior data on temporary failure and retries successfully',async()=>{
+  const f=await initialPR(),body=f.node('[data-content]').innerHTML,table=f.node('.pr-diff');
   const refresh=f.node('[data-refresh]').onclick();f.requests[1].reject(Object.assign(Error('Offline'),{status:502}));await refresh;
-  assert.equal(f.node('[data-content]').innerHTML,body);assert.match(f.node('[data-status]').textContent,/previous version/);
+  assert.equal(f.node('[data-content]').innerHTML,body);assertSame(f.node('.pr-diff'),table);assert.match(f.node('[data-status]').textContent,/previous version/);
   assert.deepEqual(f.statuses,['open'],'Temporary failures preserve the last confirmed tab status');
-  const denied=f.node('[data-refresh]').onclick();f.requests[2].reject(Object.assign(Error('Access removed'),{status:403}));await denied;
-  assert.equal(f.node('[data-content]').innerHTML,'');assert.equal(f.node('[data-heading]').innerHTML,'');assert.equal(f.node('[data-state]').textContent,'Unavailable');
-  assert.deepEqual(f.statuses,['open','unknown'],'Access denial also clears the tab status');
-  const retry=f.node('[data-refresh]').onclick();f.requests[3].resolve(details);await retry;
-  assert.match(f.node('[data-content]').innerHTML,/src\/view.js/);assert.equal(f.node('[data-status]').textContent,'');
+  await refreshPR(f,{...details,title:'Recovered'});assert.match(f.node('[data-heading]').textContent,/Recovered/);
+  assertSame(f.node('.pr-diff'),table);assert.equal(f.node('[data-status]').textContent,'');
+});
+test('every access-invalidating response clears visible and hidden PR sections and permits a fresh retry',async()=>{
+  for(const status of [401,403,404,409])for(const selected of ['changes','description']){
+    const f=await initialPR();f.node('[data-section="description"]').onclick();
+    if(selected==='changes')f.node('[data-section="changes"]').onclick();
+    const table=f.node('.pr-diff'),description=f.node('.pr-description');
+    const denied=f.node('[data-refresh]').onclick();f.requests[1].reject(Object.assign(Error('Access removed'),{status}));await denied;
+    assert.equal(f.node('[data-content]').textContent,'');assert.equal(f.node('[data-heading]').textContent,'');assert.equal(f.node('[data-state]').textContent,'Unavailable');
+    assert.equal(table.isConnected,false);assert.equal(description.isConnected,false);assert.ok(f.disposed.length>0);
+    assert.deepEqual(f.statuses,['open','unknown'],'Access denial also clears the tab status');
+    await refreshPR(f);assert.match(f.node('[data-content]').textContent,/src\/view.js/);assert.equal(f.node('[data-status]').textContent,'');
+    assert.deepEqual(f.statuses,['open','unknown','open'],'A fresh retry restores the confirmed status');
+    f.node('[data-section="description"]').onclick();assert.match(f.node('.pr-description').textContent,/Description/);
+  }
+});
+test('description refresh invalidates only changed Markdown and updates open diffs without reopening collapsed files',async()=>{
+  const f=await initialPR();f.node('[data-section="description"]').onclick();const oldDescription=f.node('.pr-description');
+  f.node('[data-section="changes"]').onclick();const detail=toggleFile(f,0,false);
+  await refreshPR(f,{...details,title:'New title',body:'Updated description'});
+  assert.equal(detail.open,false);assert.equal(oldDescription.isConnected,false);assert.deepEqual(f.markdownCalls,['Description']);
+  f.node('[data-section="description"]').onclick();assert.deepEqual(f.markdownCalls,['Description','Updated description']);
+  const description=f.node('.pr-description');f.node('[data-section="changes"]').onclick();toggleFile(f,0,true);
+  const oldTable=f.node('.pr-diff');await refreshPR(f,{...details,body:'Updated description',files:[{...details.files[0],patch:'+Updated patch'},details.files[1]]});
+  assert.equal(oldTable.isConnected,false);assert.match(f.node('.pr-diff').textContent,/Updated patch/);assertSame(f.node('.pr-description'),description);
+  const mounted=[...f.roots.keys()];f.dispose();assert.equal(f.node('[data-content]').textContent,'');
+  assert.ok(mounted.filter(host=>host!==f.element).every(host=>!f.roots.has(host)),'Disposal releases all nested content roots');
 });
 test('hidden, closed and reactivated PR tabs reject stale detail responses',async()=>{
   for(const ending of ['deactivate','dispose']){
