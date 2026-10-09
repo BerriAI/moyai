@@ -26,6 +26,35 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+for (const width of [1440, 768, 320]) test(`folder headings keep their leading alignment at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  const folders = ['hello', 'A very long folder name that must truncate within the sidebar'].map((name, i) => ({ id: String(i + 1).repeat(32), name, revision: 1 }));
+  await page.route('**/api/session-folders', route => route.fulfill({ json: { folders } }));
+  await page.evaluate(() => refreshRuns());
+  if (width < 850) await page.locator('#open-sidebar').click();
+  for (const folder of folders) {
+    const toggle = page.locator(`[data-toggle-folder="${folder.id}"]`);
+    for (const expanded of [true, false]) {
+      assert.equal(await toggle.getAttribute('aria-expanded'), String(expanded));
+      const bounds = await toggle.evaluate(el => {
+        const rect = el.getBoundingClientRect(), chevron = el.querySelector('.folder-chevron').getBoundingClientRect();
+        const menu = el.parentElement.querySelector('.folder-menu').getBoundingClientRect();
+        return { leading: chevron.left - rect.left, padding: parseFloat(getComputedStyle(el).paddingLeft), right: rect.right, menuLeft: menu.left };
+      });
+      assert.ok(Math.abs(bounds.leading - bounds.padding) <= 1, 'Folder contents start at the leading padding');
+      assert.ok(bounds.right <= bounds.menuLeft, 'The folder menu remains outside the toggle');
+      await toggle.focus();
+      await page.keyboard.press('Enter');
+    }
+  }
+  const longName = page.locator(`[data-toggle-folder="${folders[1].id}"] .folder-name`);
+  assert.equal(await longName.evaluate(el => el.scrollWidth > el.clientWidth), true, 'Long names remain truncated');
+  await page.getByRole('button', { name: 'Rename or remove hello', exact: true }).click();
+  await page.getByRole('dialog', { name: 'Rename folder', exact: true }).waitFor();
+  assert.equal(await page.getByLabel('Folder name', { exact: true }).inputValue(), 'hello');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+});
+
 for (const width of [1440, 768, 320]) test(`PR tab status refresh owns its tooltip and survives focused redraws and closure at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'populated', width);
   const title = 'Review <PR> "safely"', url = 'https://github.com/example/workspace/pull/101';
