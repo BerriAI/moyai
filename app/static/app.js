@@ -18,7 +18,14 @@ async function api(path, options = {}) {
       response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
       `Upload failed (HTTP ${response.status}). Retry this file.`
     ) : `The request could not be completed (HTTP ${response.status}).`;
-    const error = new Error(typeof body.detail === 'string' ? body.detail : fallback);
+    const labels = {repo_url:'GitHub repository', prompt:'Message', content:'Message', name:'Name'};
+    const validation = response.status === 422 && Array.isArray(body.detail) ? body.detail
+      .filter(item => item && typeof item.msg === 'string' && Array.isArray(item.loc))
+      .slice(0, 3).map(item => {
+        const field = item.loc.filter(part => !['body','query','path'].includes(part)).join('.');
+        return `${labels[field] || field || 'Request'}: ${item.msg}`;
+      }).join(' ') : '';
+    const error = new Error(typeof body.detail === 'string' ? body.detail : validation || fallback);
     error.status = response.status;
     throw error;
   }
