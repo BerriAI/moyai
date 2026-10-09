@@ -1,5 +1,6 @@
 .sessions-label #session-scope{width:auto;min-width:0;max-width:175px;padding:4px 22px 4px 0;border:0;background-color:transparent;color:inherit;font:inherit;cursor:pointer}.sessions-label #session-scope:focus-visible{outline:2px solid #9680b7;outline-offset:2px}
-.sessions-label #session-scope:disabled{appearance:none;opacity:1;padding-right:0;cursor:default}
+.sessions-label #session-scope:disabled{appearance:none;padding-right:0;cursor:default}
+.sessions-label [data-slot="select-trigger"][data-disabled] [data-slot="native-select-icon"]{display:none}
 .sessions-label{align-items:center;gap:4px;flex-wrap:wrap}.sessions-label>span:first-child{font-size:inherit}.sessions-label #task-count{margin-left:auto}
 .folder-add{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;min-height:36px;padding:6px 4px;border:0;border-radius:6px;background:transparent;font-size:13px;font-weight:400;line-height:1.4;white-space:nowrap}
 .folder-add:focus-visible{outline:2px solid var(--purple);outline-offset:2px}

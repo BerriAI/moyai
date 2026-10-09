@@ -79,10 +79,9 @@
 [data-slot="switch-thumb"] { display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
 [data-slot="table-container"] { overflow-x: auto; max-width: 100%; }
 /* The native select retains the existing layout and form API, but never opens
-   a platform menu. Its sibling is the only visible, focusable control.
-   Keep opacity authoritative so legacy disabled-state rules cannot reveal it. */
+   a platform menu. Its sibling is the only visible, focusable control. */
 [data-slot="native-select-wrapper"][data-styled] { position: relative; }
-[data-styled] > select[data-slot="native-select"] { opacity: 0 !important; pointer-events: none; }
+[data-styled] > select[data-slot="native-select"] { opacity: 0; pointer-events: none; }
 [data-styled] [data-slot="select-trigger"] {
   position: absolute; inset: 0; width: 100%; height: 100%; min-width: 0;
   padding: 9px 12px; border: 1px solid var(--settings-control-border, var(--ui-muted));
@@ -110,7 +109,6 @@
 .model-picker [data-slot="native-select-wrapper"][data-styled] { display: block; width: auto; flex: 1; min-width: 0; }
 .model-picker [data-styled] [data-slot="select-trigger"] { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; font: inherit; }
 .sessions-label [data-styled] [data-slot="select-trigger"] { min-height: 0; padding: 2px 0; border: 0; background: transparent; box-shadow: none; font: inherit; }
-.sessions-label [data-slot="select-trigger"][data-disabled] [data-slot="native-select-icon"] { display: none; }
 @media (max-width: 850px) {
   [data-styled] [data-slot="select-trigger"] { font-size: 16px; }
   [data-slot="select-item"] { min-height: 44px; }
