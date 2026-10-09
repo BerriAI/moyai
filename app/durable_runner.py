@@ -24,6 +24,13 @@ class LostExecution(Exception):
     pass
 
 
+# Use one predicate for the partial index and its readers. Historical sessions
+# and durable waits that released their machine must not add admission work.
+OCCUPIED_SESSION = """(json_extract(state, '$.phase')
+    NOT IN ('idle', 'waiting_children', 'waiting_credential', 'waiting_environment')
+    OR json_type(state, '$.phase') = 'null')"""
+
+
 class DurableRunner(RunManager):
     def __init__(self, store, settings):
         super().__init__(store, settings)
@@ -32,6 +39,8 @@ class DurableRunner(RunManager):
         store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
             run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
             revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
+        store.execute(f"""CREATE INDEX IF NOT EXISTS idx_durable_sessions_occupied
+            ON durable_sessions(run_id) WHERE {OCCUPIED_SESSION}""")
 
     def state(self, run_id):
         rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
@@ -359,10 +368,12 @@ class DurableRunner(RunManager):
     async def make_capacity(self, run_id):
         # Caller holds admission_lock until its own slot is persisted. Skip
         # busy per-session locks rather than deadlocking competing admissions.
-        candidates = [(r['run_id'], json.loads(r['state'])) for r in self.store.rows('SELECT run_id,state FROM durable_sessions')]
+        if self.has_capacity():
+            return True
+        candidates = [(r['run_id'], json.loads(r['state'])) for r in self.store.rows(f"""
+            SELECT run_id,state FROM durable_sessions WHERE {OCCUPIED_SESSION}
+            AND json_extract(state, '$.phase') IN ('warm', 'warm_cleanup')""")]
         for other, state in sorted(candidates, key=lambda entry: entry[1].get('idle_until') or float('inf')):
-            if self.has_capacity():
-                return True
             lock = self.locks.setdefault(other, asyncio.Lock())
             if other == run_id or lock.locked() or state.get('phase') not in {'warm', 'warm_cleanup'}:
                 continue
@@ -370,11 +381,13 @@ class DurableRunner(RunManager):
                 if self.store.has_queued_messages(other):
                     continue
                 await self.release_warm(other, state, 'capacity needed by another session')
-        return self.has_capacity()
+                if self.has_capacity():
+                    return True
+        return False
 
     def has_capacity(self):
-        active = sum(json.loads(r['state']).get('phase', 'idle') not in {'idle', 'waiting_children', 'waiting_credential', 'waiting_environment'}
-                     for r in self.store.rows('SELECT state FROM durable_sessions'))
+        active = self.store.rows(f"""SELECT COUNT(*) AS occupied
+            FROM durable_sessions WHERE {OCCUPIED_SESSION}""")[0]['occupied']
         return active < self.settings.max_concurrent_runs
 
     async def snapshot_for_children(self, run):
