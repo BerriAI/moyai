@@ -62,6 +62,11 @@ async function inspectMenus(page, width) {
     await page.keyboard.press('ArrowDown');
     const menu = page.getByRole('listbox');
     await menu.waitFor();
+    // Radix collision placement follows the portal's first visible frame.
+    await page.waitForFunction(el => {
+      const bounds = el.getBoundingClientRect();
+      return bounds.left >= 0 && bounds.right <= innerWidth + 1 && bounds.top >= 0 && bounds.bottom <= innerHeight + 1;
+    }, await menu.elementHandle());
     const field = await trigger.boundingBox();
     const bounds = await menu.boundingBox();
     assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y >= 0 && bounds.y + bounds.height <= 1001, JSON.stringify(bounds));
@@ -564,6 +569,143 @@ for (const width of [1440, 768, 320]) {
     }
   });
 }
+
+test('incremental assistant updates render, preserve reading state and retain copy actions', async t => {
+  const page = await pageFor(t);
+  await page.evaluate(() => {
+    MoyaiUI.render(document.querySelector('#content'), '<div id="activity-test"><div data-activity-slot="1"></div></div>');
+    window.activityRun = {
+      id: 'activity-test', status: 'running', active_message_id: 1,
+      messages: [{ id: 1, role: 'user', status: 'running' }],
+      events: [
+        { id: 1, kind: 'chat', message: 'Response started', data: { message_id: 1 }, created_at: '2026-10-08T12:00:00Z' },
+        { id: 2, kind: 'message', message: 'Checking the [release](https://example.com/release).\n\n```sh\nnpm test\n```', data: { turn_id: 1 }, created_at: '2026-10-08T12:00:01Z' },
+      ],
+    };
+    window.copiedUpdates = [];
+    window.syncActivityTest = () => MoyaiActivity.sync(document.querySelector('#activity-test'), window.activityRun, {
+      markdown: renderMarkdown, copy: text => window.copiedUpdates.push(text),
+    });
+    window.syncActivityTest();
+    window.firstUpdate = document.querySelector('.assistant-update');
+  });
+  const update = page.locator('.assistant-update').first();
+  assert.equal(await update.locator('.copy-update').getAttribute('data-slot'), 'tooltip-trigger');
+  await update.locator('.copy-update').click();
+  await update.locator('.copy-code').click();
+  assert.deepEqual(await page.evaluate(() => window.copiedUpdates), [
+    'Checking the [release](https://example.com/release).\n\n```sh\nnpm test\n```', 'npm test\n',
+  ]);
+  await update.getByRole('link').focus();
+  await page.evaluate(() => {
+    const range = document.createRange();
+    range.selectNodeContents(window.firstUpdate.querySelector('.message-content p'));
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    window.activityRun.events.push(
+      { id: 3, kind: 'tool', message: 'Run tests', data: { turn_id: 1, activity_version: 1, call_id: 'test', phase: 'started', category: 'command', command: 'npm test' }, created_at: '2026-10-08T12:00:02Z' },
+      { id: 4, kind: 'message', message: 'Tests are passing.', data: { turn_id: 1 }, created_at: '2026-10-08T12:00:03Z' },
+    );
+    window.syncActivityTest();
+  });
+  assert.deepEqual(await page.locator('[data-activity-slot] > *').evaluateAll(nodes => nodes.map(node => node.dataset.timelineKey.split(':')[0])), ['update', 'work', 'update', 'work']);
+  assert.equal(await page.evaluate(() => document.querySelector('.assistant-update') === window.firstUpdate), true);
+  assert.equal(await update.getByRole('link').evaluate(el => el === document.activeElement), true);
+  assert.equal(await page.evaluate(() => getSelection().toString()), 'Checking the release.');
+  await page.evaluate(() => {
+    window.activityRun.events[1].message = 'Release checks are complete.';
+    window.syncActivityTest();
+  });
+  assert.equal(await page.evaluate(() => window.firstUpdate.isConnected), false);
+  assert.equal(await update.locator('.message-content').textContent(), 'Release checks are complete.\n');
+  await update.locator('.copy-update').click();
+  assert.equal(await page.evaluate(() => window.copiedUpdates.at(-1)), 'Release checks are complete.');
+  await page.mouse.move(0, 0);
+  await update.locator('.copy-update').hover();
+  await page.getByRole('tooltip').waitFor();
+  await page.evaluate(() => { window.activityRun.events = []; window.activityRun.messages = []; window.syncActivityTest(); });
+  assert.equal(await page.locator('[data-activity-slot] > *').count(), 0);
+  await page.getByRole('tooltip').waitFor({ state: 'detached' });
+  await page.evaluate(() => navigate('tasks'));
+});
+
+test('session connection selections survive navigation and reach the submit payload', async t => {
+  const page = await pageFor(t);
+  await page.route('**/api/runs', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 503, json: { detail: 'Session test: keep the draft' } }) : route.continue());
+  await page.getByLabel('Session options', { exact: true }).click();
+  await page.getByRole('checkbox', { name: 'GitHub', exact: true }).click();
+  const selected = ['linear', 'notion', 'slack'];
+  assert.deepEqual(await page.evaluate(() => [...state.newDraft.plugins].sort()), selected);
+  await page.evaluate(() => navigate('connections'));
+  await page.evaluate(() => navigate('tasks'));
+  await page.getByLabel('Session options', { exact: true }).click();
+  assert.equal(await page.getByRole('checkbox', { name: 'GitHub', exact: true }).isChecked(), false);
+  await page.locator('#prompt').fill('Check the selected connections.');
+  for (const expected of [selected, []]) {
+    if (!expected.length) {
+      for (const checkbox of await page.locator('#plugin-options').getByRole('checkbox').all()) if (await checkbox.isChecked()) await checkbox.click();
+    }
+    assert.deepEqual(await page.evaluate(() => [...state.newDraft.plugins].sort()), expected);
+    const request = page.waitForRequest(request => new URL(request.url()).pathname === '/api/runs' && request.method() === 'POST');
+    await page.getByRole('button', { name: 'Start session', exact: true }).click();
+    assert.deepEqual((await request).postDataJSON().plugins.sort(), expected);
+    await page.waitForFunction(() => !state.sending.has('new'));
+  }
+});
+
+test('repository checkboxes save selected IDs and reject an empty selection', async t => {
+  const page = await pageFor(t, 'connections');
+  const writes = [];
+  await page.route('**/api/connections/github/repositories', route => {
+    if (route.request().method() === 'POST') {
+      writes.push(route.request().postDataJSON());
+      return route.fulfill({ json: { ok: true } });
+    }
+    return route.fulfill({ json: { repositories: [{ id: 101, full_name: 'example/first' }, { id: 202, full_name: 'example/second' }], selected_ids: [101], installation_url: 'https://example.com/install' } });
+  });
+  await page.locator('[data-manage="github"]').click();
+  await page.getByRole('button', { name: 'Choose repositories', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'example/first', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repositories', exact: true }).click();
+  assert.match(await page.locator('#connection-error').textContent(), /Select at least one repository/);
+  assert.deepEqual(writes, []);
+  await page.getByRole('checkbox', { name: 'example/second', exact: true }).click();
+  await page.getByRole('button', { name: 'Save repositories', exact: true }).click();
+  await page.getByRole('dialog').waitFor({ state: 'detached' });
+  assert.deepEqual(writes, [{ repository_ids: [202] }]);
+});
+
+test('automation connection count follows checkbox changes and saved values', async t => {
+  const page = await pageFor(t, 'automations');
+  await page.route('**/api/automations', route => route.request().method() === 'POST'
+    ? route.fulfill({ status: 503, json: { detail: 'Automation test: keep the draft' } }) : route.continue());
+  await page.locator('.automation-create summary').click();
+  await page.getByRole('button', { name: 'Create', exact: true }).click();
+  const connections = page.locator('.automation-connections');
+  const count = connections.locator('[data-selected-connections]');
+  let selected = await connections.getByRole('checkbox', { checked: true }).count();
+  assert.equal(await count.textContent(), `${selected} selected`);
+  for (const checkbox of await connections.getByRole('checkbox').all()) {
+    if (!await checkbox.isChecked()) continue;
+    await checkbox.click();
+    assert.equal(await count.textContent(), `${--selected} selected`);
+  }
+  for (const id of ['github', 'slack']) {
+    await connections.locator(`[data-connection="${id}"]`).getByRole('checkbox').click();
+    assert.equal(await count.textContent(), `${++selected} selected`);
+  }
+  await page.getByLabel('Search connections and tools', { exact: true }).fill('GitHub');
+  assert.equal(await connections.getByRole('checkbox').count(), 1);
+  assert.equal(await count.textContent(), '2 selected', 'Filtering does not change the selection');
+  await page.getByLabel('Automation name', { exact: true }).fill('Connection regression');
+  await page.getByLabel('Instructions', { exact: true }).fill('Review the release and report results.');
+  const request = page.waitForRequest(request => new URL(request.url()).pathname === '/api/automations' && request.method() === 'POST');
+  await page.getByRole('button', { name: 'Save paused', exact: true }).click();
+  assert.deepEqual((await request).postDataJSON().definition.plugins.sort(), ['github', 'slack']);
+  await page.getByText('Automation test: keep the draft', { exact: true }).waitFor();
+  assert.equal(await count.textContent(), '2 selected');
+});
 
 test('checkboxes, switches and select updates preserve native form values and server writes', async t => {
   const page = await pageFor(t);

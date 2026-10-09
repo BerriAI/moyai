@@ -61,7 +61,7 @@ function automationConnections(connections,selected) {
 function bindAutomationConnections(form) {
   const box=form.querySelector('.automation-connections');
   const update=()=>{box.querySelector('[data-selected-connections]').textContent=`${box.querySelectorAll('[name=plugin]:checked').length} selected`;};
-  box.querySelectorAll('[name=plugin]').forEach(input=>input.onchange=update);
+  box.onchange=update;
   box.querySelector('input[type=search]').oninput=e=>{
     let count=0;box.querySelectorAll('[data-connection]').forEach(row=>{row.hidden=!row.textContent.toLowerCase().includes(e.target.value.trim().toLowerCase());if(!row.hidden)count++;});
     box.querySelector('[data-connection-empty]').hidden=count>0;

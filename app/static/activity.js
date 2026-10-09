@@ -151,8 +151,11 @@
         // Only new/changed updates get new DOM. Incoming tools must not erase
         // a selected passage, focused link, or copied update the user is reading.
         const template=slot.ownerDocument.createElement('template');
-        MoyaiUI.render(template, updateHTML(update,markdown));
+        template.innerHTML=updateHTML(update,markdown);
         const fresh=template.content.firstElementChild;
+        // Mount controls on the article itself; React roots cannot populate a
+        // template's inert content, and this owner follows the visible update.
+        MoyaiUI.render(fresh, fresh.innerHTML);
         fresh.dataset.updateContent=update.content;
         fresh.dataset.timelineKey=key;
         if(node)node.replaceWith(fresh);

@@ -51,6 +51,8 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
 - Regions are replaced in full, matching the former `innerHTML` behavior. Do not
   call `root.render` to reconcile DOM owned by a controller. Nested roots are
   disposed before their parent, and a removal observer releases detached regions.
+  A native `<template>` is only an inert parser, never a render host: mount streamed
+  content on the element that joins the document so its root is released on removal.
 - Inputs remain uncontrolled. Controllers can read and set `value`, run native
   validation, use `FormData`, and retain drafts while requests are in flight.
   The Checkbox/Switch adapter preserves the existing `checked` and native
