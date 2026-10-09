@@ -256,23 +256,34 @@ function transcriptFixture(){
   const context={state,$:node,syncChatComposer(){},MoyaiQueue:{presentation:run=>({transcript:run.messages})},MoyaiActivity:{sync(){}},
     savedFiles:{sync(){}},esc:String,messageAttachments:()=>'',renderMarkdown:text=>{markdown.push(text);return text;},copyText(){},loadActivity(){},
     modelName:String,updateChatStatus(){},renderCredentialRequests(){},renderApprovals(){},renderPrWriteAccess(){},renderSlackContext(){},renderAgentDetails(){}};
-  vm.createContext(context);load(context,'function updateChat(run','function renderLiveWork(');
+  vm.createContext(context);
+  for(const file of ['icons','skill-icons','skill-composer'])vm.runInContext(readFileSync(`app/static/${file}.js`,'utf8'),context);
+  load(context,'function updateChat(run','function renderLiveWork(');
   return {context,state,markdown,node};
 }
 
 test('appending a message reuses existing Markdown templates and active turn history stays loaded after completion',()=>{
   const f=transcriptFixture();
-  const run={id:runId,mode:'modal',events:[],messages:[{id:1,role:'user',status:'running',content:'First question'},
+  const skill={reference:'personal:team',name:'team',scope:'personal',icon:'team'};
+  const run={id:runId,mode:'modal',events:[],messages:[{id:1,role:'user',status:'running',content:'First /personal:team question',skill_mentions:[skill]},
     {id:2,role:'assistant',status:'completed',content:'First answer'}],loaded_activity:['1']};
   f.context.updateChat(structuredClone(run),true);assert.deepEqual(f.markdown,['First answer']);
+  assert.match(f.node('#conversation').innerHTML,/data-skill-reference="personal:team"/);
+  assert.match(f.node('#conversation').innerHTML,/data-skill-icon="team"/);
   run.messages[0].status='completed';run.messages.push({id:3,role:'user',status:'running',content:'Next question'},
     {id:4,role:'assistant',status:'completed',content:'Next answer'});
   run.deferred_activity=['1'];run.loaded_activity=['3'];f.context.updateChat(structuredClone(run));
   assert.deepEqual(f.markdown,['First answer','Next answer'],'unchanged assistant content is not parsed again');
+  assert.match(f.node('#conversation').innerHTML,/data-skill-icon="team"/);
   assert.deepEqual(Array.from(f.state.chatRun.loaded_activity).sort(),['1','3'],'finishing a previously loaded live turn cannot create a lazy placeholder');
   run.messages[3].content='Updated next answer';f.context.updateChat(structuredClone(run));
   assert.deepEqual(f.markdown,['First answer','Next answer','Updated next answer']);
   assert.match(f.node('#conversation').innerHTML,/Updated next answer/);
+  skill.icon='video';f.context.updateChat(structuredClone(run));
+  assert.match(f.node('#conversation').innerHTML,/data-skill-icon="video"/);
+  assert.doesNotMatch(f.node('#conversation').innerHTML,/data-skill-icon="team"/);
+  assert.deepEqual(f.markdown,['First answer','Next answer','Updated next answer'],'metadata-only changes invalidate user templates without reparsing assistant Markdown');
+  assert.equal(run.messages[0].content,'First /personal:team question');
 });
 
 test('the summary cursor keeps earlier streamed goal events from overriding an authoritative detail goal',()=>{

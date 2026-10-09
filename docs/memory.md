@@ -22,6 +22,12 @@ You do not need to say “remember this.” Preferences, corrections, decisions 
 references can become notes; one-off instructions and temporary status do not.
 An empty review is a normal result, not a reason to invent a memory.
 
+General working preferences default to personal scope across repositories, even
+when the session has a repository selected. Only repository-specific notes use
+the `selected_repository_url` supplied in the memory context. Mentioning or
+checking out a repository does not select it for memory. A current-task constraint
+such as “do not merge this PR without my permission” stays in the conversation.
+
 User preferences, corrections and decisions require an exact quote from the
 requester's message. Corrections preserve the mistaken assumption, desired
 alternative and future rule when supported, without broadening what the user said.
@@ -65,6 +71,12 @@ identity or a fresh, eligible Slack email match, never an accounting link or a
 model-supplied user ID. Each model call rechecks requester, settings, expiry,
 repository scope and current note revisions. Subagents and automation runs can
 recall authorized notes, but cannot automatically write personal memories.
+
+Rejected memory tool arguments, scope, permission or revision checks return an
+error receipt so the agent can correct supported arguments or continue without
+saving. A rejection never counts as a saved note and must not be bypassed by
+broadening its scope. Broker authentication and storage/connection failures keep
+their failure behavior; manual Settings API error statuses are unchanged.
 
 Slack profile verification refreshes automatically every 30 minutes, ahead of
 its one-hour authorization limit; users do not need to sign in again. The worker
@@ -128,6 +140,11 @@ It tests model choices with the production memory prompt and tools;
 it does not run a complete SDK or cloud sandbox, and is not a guarantee that
 every future preference will be captured. Use `--model` to test another model
 and `--report path.json` to save the evidence.
+
+Add `--scope-only` for five focused cases: a general preference with a selected
+repository, recall from another repository, a one-task approval constraint, a
+mentioned repository with no selection, and an explicit repository-specific
+decision. The same live-model limitations apply.
 
 To exercise the background path with a live model, run
 `uv run python -m scripts.memory_review_smoke --model openai/gpt-6-astra --report report.json`

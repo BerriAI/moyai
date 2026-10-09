@@ -606,6 +606,7 @@ def create_app(settings: Settings | None = None):
         project = environments.context(run)
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
+        messages = skills.message_mentions(messages, actor)
         sidebar_id = store.root_id(run_id)
         run['workflow_root_id'] = sidebar_id
         pr_summary = session_pull_requests.summaries([run_id])[run_id]
@@ -945,7 +946,13 @@ def create_app(settings: Settings | None = None):
             try:
                 result = memory.call(run, body.name, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Invalid memory arguments. Check the current turn, text limits and tool schema.') from None
+                result = {'error': 'Invalid memory arguments. Check the current turn, text limits and tool schema.', 'status_code': 422}
+            except HTTPException as exc:
+                if exc.status_code not in {403, 404, 409, 422}:
+                    raise
+                # A definite rejection is a tool receipt, not an uncertain
+                # transport failure that prevents the runtime from continuing.
+                result = {'error': exc.detail, 'status_code': exc.status_code}
             await checkpoints.flush()
             return result
         if body.name == 'automation_claim_item':

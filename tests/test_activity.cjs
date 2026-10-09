@@ -10,6 +10,9 @@ const event=(id,kind,message,data={})=>({id,kind,message,data,created_at:stamp(i
 function run(){return {id:'chat',chat_enabled:1,status:'running',active_message_id:1,messages:[{id:1,role:'user',status:'running'},{id:2,role:'user',status:'queued'}],events:[event(1,'chat','Response started',{message_id:1})]};}
 const tool=(id,call,phase,extra={})=>event(id,'tool','Run command',{turn_id:1,activity_version:1,call_id:call,phase,category:'command',command:'pytest -q',...extra});
 const focus=(id,message,input=1,extra={})=>event(id,'status',message,{turn_id:1,input_id:input,activity_version:1,phase:'focus',live_status:true,activity_id:`focus-${id}`,...extra});
+function loadSkillText(context){
+  for(const file of ['icons','skill-icons','skill-composer'])vm.runInContext(readFileSync(`app/static/${file}.js`,'utf8'),context);
+}
 
 test('queued follow-ups never capture work from the current response; restored turns retain history',()=>{
   const data=run();data.events.push(event(2,'chat','Message queued',{message_id:2}),tool(3,'a','started'),tool(4,'a','completed'),event(5,'chat','Response saved',{message_id:1}),event(6,'chat','Response started',{message_id:2}),event(7,'message','Now inspecting the follow-up',{turn_id:2}));
@@ -143,7 +146,7 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   const data=run();data.mode='modal';data.messages[0].content='First request';data.messages[1].content='Next request';
   const state={selected:'chat',sending:new Set(),userId:'user',drafts:{chat:'draft kept'}};
   const context={loadActivity(){},savedFiles:{sync(){},decorate(){}},state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderChatWorking:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
-  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
+  vm.createContext(context);loadSkillText(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
     script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
   assert.match(node('#conversation').innerHTML,/data-activity-slot="1"/);
@@ -174,7 +177,7 @@ test('steering inputs share the original work timeline and do not invent another
   const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],querySelector:node,setAttribute(name,value){this[name]=value;},innerHTML:''});return nodes.get(selector);}
   data.messages[0].content='Original objective';
   const context={loadActivity(){},savedFiles:{sync(){},decorate(){}},state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
-  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
+  vm.createContext(context);loadSkillText(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
     script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
   const markup=node('#conversation').innerHTML;
@@ -374,15 +377,17 @@ test('the composer follows live SSE focus, reconnects and lifecycle state withou
 test('side-chat polls replace focus while retaining expanded activity through status and transcript updates',()=>{
   const script=readFileSync('app/static/workspace-panel.js','utf8');let writes=0,syncs=0;
   const log={slots:[],scrollHeight:1000,scrollTop:50,clientHeight:400,querySelectorAll:()=>log.slots,
-    set innerHTML(markup){writes++;this.slots=[...markup.matchAll(/data-activity-slot="(\d+)"/g)].map(([,id])=>({dataset:{activitySlot:id},
+    set innerHTML(markup){writes++;this.html=markup;this.slots=[...markup.matchAll(/data-activity-slot="(\d+)"/g)].map(([,id])=>({dataset:{activitySlot:id},
       details:{open:false},replaceWith(previous){log.slots[log.slots.indexOf(this)]=previous;}}));}};
   const context={current:null,signature:'',deleting:false,deletionError:'',sending:false,stopping:false,unavailable:false,form:{},input:{},model:{},log,status:{},stop:{},send:{},link:{},t:{chatId:'side-chat'},MoyaiQueue,syncTitles(){},
     MoyaiActivity:{...MoyaiActivity,sync(container,data){syncs++;container.slots[0].headline=current(data).headline;},tick(){}},
     markdown:text=>text,esc:text=>text,toast(){}};
-  vm.createContext(context);vm.runInContext(script.slice(script.indexOf('function syncControls()'),script.indexOf('model.onchange='))+
+  vm.createContext(context);loadSkillText(context);vm.runInContext(script.slice(script.indexOf('function syncControls()'),script.indexOf('model.onchange='))+
     script.slice(script.indexOf('function drawChat(data)'),script.indexOf('async function poll()')),context);
-  const data=run();data.messages=[{...data.messages[0],content:'Explain the UI change'}];data.error='Old 422 validation error';
+  const skill={reference:'personal:team',name:'team',scope:'personal',icon:'team'};
+  const data=run();data.messages=[{...data.messages[0],content:'Explain the UI change /personal:team',skill_mentions:[skill]}];data.error='Old 422 validation error';
   context.drawChat(data);const slot=log.slots[0];slot.details.open=true;
+  assert.match(log.html,/data-skill-reference="personal:team"/);assert.match(log.html,/data-skill-icon="team"/);
   data.events.push(focus(2,'Auditing the side-chat changes'));context.drawChat(data);
   assert.equal(context.status.textContent,'Auditing the side-chat changes');assert.equal(slot.headline,context.status.textContent);
   assert.equal(writes,1);assert.equal(syncs,2);assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);
@@ -401,6 +406,12 @@ test('side-chat polls replace focus while retaining expanded activity through st
   data.messages.push({id:5,role:'user',status:'interrupted',content:'Try again'});
   data.status='interrupted';data.error='The workspace restarted before the next response.';data.checkpoint_error='Previous workspace save warning';context.drawChat(data);
   assert.equal(context.status.textContent,data.error);
+  assert.match(log.html,/data-skill-icon="team"/);
+  const priorWrites=writes;skill.icon='video';context.drawChat(data);
+  assert.equal(writes,priorWrites+1,'metadata-only changes invalidate side-chat history');
+  assert.match(log.html,/data-skill-icon="video"/);assert.doesNotMatch(log.html,/data-skill-icon="team"/);
+  assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);assert.equal(log.scrollTop,50);
+  assert.equal(data.messages[0].content,'Explain the UI change /personal:team');
 });
 
 test('runtime compaction notices render as quiet disclosures while ordinary prose stays intact',()=>{

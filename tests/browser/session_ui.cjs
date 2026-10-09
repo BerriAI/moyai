@@ -25,6 +25,63 @@ async function send(page,text,method='Enter'){
   await page.locator('#followup').waitFor();
 }
 
+test('skill icons survive sending, queueing, side chats and history reloads',async t=>{
+  const page=await setup(t),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  const skills=await page.evaluate(async()=>Promise.all(['personal','organization'].map(scope=>
+    api('/api/skills',{method:'POST',body:JSON.stringify({name:'history-team',scope,
+      icon:scope==='personal'?'team':'video',description:'Verify skill history',instructions:'Use the local demo.',
+      client_id:crypto.randomUUID()})}))));
+  await page.reload();await page.locator('#prompt').waitFor();
+  await page.locator('#prompt').fill('Please use /personal:history-te');
+  await page.locator('.skill-inline-option').waitFor();
+  await page.locator('#prompt').press('Enter');
+  await page.locator('#prompt .composer-skill').waitFor();
+  const artwork=await page.locator('#prompt [data-skill-icon="team"]').innerHTML();
+  await page.locator('#prompt').press('Enter');
+  await page.locator('#followup').waitFor();
+  const first=page.locator('.chat-message.user .message-content').first();
+  await first.locator('[data-skill-icon="team"]').waitFor();
+  assert.equal(await first.textContent(),'Please use history-team');
+  assert.equal(await first.locator('[data-skill-icon="team"]').innerHTML(),artwork);
+  const text='Then /org:history-team verify it.\n`/personal:history-team` <b>literal</b>';
+  await page.locator('#followup').fill(text);await page.locator('#followup').press('Enter');
+  await page.locator('.chat-message.user [data-skill-icon="video"]').waitFor();
+  const id=await page.evaluate(()=>state.selected);
+  const messages=await page.evaluate(id=>api('/api/runs/'+id),id);
+  assert.equal(messages.messages.filter(m=>m.role==='user')[1].content,text);
+  await page.reload();await first.locator('[data-skill-icon="team"]').waitFor();
+  assert.equal(await page.locator('.chat-message.user .composer-skill').count(),2);
+  assert.equal(await page.locator('.chat-message.user .message-content b').count(),0);
+  assert.match(await page.locator('.chat-message.user .message-content').nth(1).textContent(),/`\/personal:history-team` <b>literal<\/b>/);
+  for(const width of [1440,768,320]){
+    await page.setViewportSize({width,height:900});
+    assert.equal(await first.locator('[data-skill-icon="team"]').isVisible(),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  }
+  await page.setViewportSize({width:1440,height:900});
+  // Hold just execution at the API boundary to inspect the real queue renderer.
+  const held=structuredClone(messages);held.status='running';
+  held.messages=held.messages.filter(m=>m.role==='user');
+  held.messages[0].status='running';held.messages[1].status='queued';
+  await page.route(`**/api/runs/${id}*`,route=>route.fulfill({json:held}));
+  await page.evaluate(()=>refreshChat(state.selected));
+  await page.locator('.queued-content [data-skill-icon="video"]').waitFor();
+  await page.getByRole('button',{name:'Edit queued message',exact:true}).click();
+  assert.equal(await page.locator('[data-queue-edit]').inputValue(),text);
+  await page.unroute(`**/api/runs/${id}*`);await page.reload();await page.locator('#followup').waitFor();
+  // Side chat uses its real create/read APIs and separate transcript renderer.
+  await page.evaluate(()=>workspacePanel.open('chat'));
+  await page.getByRole('textbox',{name:'Message side chat',exact:true}).fill('/personal:history-team Check this separately');
+  await page.getByRole('button',{name:'Send side chat message',exact:true}).click();
+  await page.locator('.side-chat-messages [data-skill-icon="team"]').waitFor();
+  // Archiving preserves historical recognition without adding it to the picker.
+  await page.evaluate(skill=>api('/api/skills/'+skill.id+'/archive',{method:'POST',body:JSON.stringify({archived:true,revision:1})}),skills[0]);
+  await page.reload();await first.locator('[data-skill-icon="team"]').waitFor();
+  await page.locator('.side-chat-messages [data-skill-icon="team"]').waitFor();
+  assert.deepEqual(errors,[]);
+});
+
 test('sender emails are visible for self and teammates, on desktop and mobile',async t=>{
   const page=await setup(t);
   await send(page,'Verify my sender email');
