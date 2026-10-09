@@ -26,6 +26,59 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+for (const width of [1440, 768, 320]) for (const composer of ['new', 'reply']) test(`skill picker rows stay aligned in the ${composer} composer at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'skill-picker', width);
+  if (composer === 'reply') await page.goto(`${base}/?fixture=skill-picker#run=${'a'.repeat(32)}`);
+  const input = page.getByRole('textbox', { name: 'Message Moyai', exact: true });
+  await input.fill('/team');
+  await page.waitForFunction(() => document.querySelectorAll('.skill-inline-option').length === 5);
+  await page.evaluate(() => document.fonts.ready);
+  const popup = page.locator('.skill-inline');
+  const geometry = await popup.evaluate(el => {
+    const rect = node => node.getBoundingClientRect().toJSON();
+    return {
+      popup: rect(el), overflow: el.scrollWidth - el.clientWidth,
+      rows: [...el.querySelectorAll('[role=option]')].map(row => ({
+        box: rect(row), icon: rect(row.querySelector('.skill-inline-icon')),
+        name: rect(row.querySelector('.skill-inline-label')),
+        badge: rect(row.querySelector('[data-slot=badge]')),
+        description: rect(row.querySelector('.skill-inline-description')),
+        padding: parseFloat(getComputedStyle(row).paddingTop),
+        shadow: getComputedStyle(row).boxShadow,
+      })),
+    };
+  });
+  assert.equal(geometry.overflow, 0, 'The picker does not scroll horizontally');
+  assert.ok(geometry.popup.left >= 0 && geometry.popup.right <= width, 'The picker stays inside the viewport');
+  assert.ok(geometry.popup.top >= 0 && geometry.popup.bottom <= 1000, 'The picker fits vertically');
+  for (const [index, row] of geometry.rows.entries()) {
+    assert.ok(row.box.height >= 64, 'Two-line choices have room for their content and padding');
+    assert.ok(row.name.top >= row.box.top + row.padding - 1);
+    assert.ok(row.description.bottom <= row.box.bottom - row.padding + 1, 'Descriptions remain inside their own row');
+    assert.ok(row.name.bottom + 3 <= row.description.top, 'Wrapped names do not overlap descriptions');
+    assert.ok(row.name.right + 7 <= row.badge.left, 'Names cannot push into scope badges');
+    assert.ok(Math.abs(row.name.top - row.badge.top) <= 1, 'Scope badges align with the first title line');
+    assert.ok(Math.abs(row.name.left - row.description.left) <= 1, 'Names and descriptions share a leading edge');
+    assert.ok(Math.abs(row.badge.right - geometry.rows[0].badge.right) <= 1, 'Scope badges share a trailing edge');
+    assert.ok(row.icon.right < row.name.left, 'Icons remain in their own column');
+    assert.equal(row.shadow, 'none', 'Choices have a flat menu surface');
+    if (index) assert.ok(geometry.rows[index - 1].box.bottom <= row.box.top, 'Adjacent rows cannot overlap');
+  }
+  await input.press('ArrowDown');
+  assert.match(await popup.locator('[aria-selected=true]').innerText(), /Organization/);
+  await input.press('Enter');
+  assert.equal(await input.evaluate(el => el.value), '/org:team ');
+  assert.equal(await popup.isVisible(), false);
+  await input.fill('/team');
+  await popup.locator('[role=option]').first().click();
+  assert.equal(await input.evaluate(el => el.value), '/personal:team ');
+  await input.fill('/no-matching-command');
+  await popup.getByRole('status').waitFor();
+  assert.match(await popup.getByRole('status').innerText(), /No matching skills/);
+  await input.press('Escape');
+  assert.equal(await popup.isVisible(), false);
+});
+
 for (const width of [1440, 768, 320]) test(`folder headings keep their leading alignment at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'populated', width);
   const folders = ['hello', 'A very long folder name that must truncate within the sidebar'].map((name, i) => ({ id: String(i + 1).repeat(32), name, revision: 1 }));

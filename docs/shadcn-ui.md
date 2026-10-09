@@ -20,6 +20,11 @@ API fixtures and cannot call models or modify connected services. `?fixture=empt
 `?fixture=error` and `?fixture=member` select alternate states. Use `npm run dev` in
 another terminal to rebuild on source changes, then refresh the browser.
 
+`?fixture=skill-picker` provides personal and organization skills with duplicate
+and long names. Type `/team` in the new-session composer, or open
+`?fixture=skill-picker#run=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa` to check the reply
+composer. Both use the production picker against synthetic data.
+
 The production bundle lives in `app/static/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.

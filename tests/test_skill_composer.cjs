@@ -106,7 +106,7 @@ test('built-in goal works without skills and only at the start of the request',a
   await flush();
   assert.equal(b.popup.hidden,true);
   b.type('Please /go');
-  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/small>/);
+  assert.doesNotMatch(b.popup.innerHTML,/Built-in<\/span>/);
   b.type('/goal verify the suite');
   assert.equal(b.popup.hidden,true);
   assert.match(b.hint.textContent,/Not running yet/);
