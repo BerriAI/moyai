@@ -80,7 +80,8 @@ def test_tools_available_in_verified_chat_and_create_retries_are_atomic(workspac
     assert detail['definition']['triggers'][0]['schedule']['frequency'] == 'weekly'
     assert detail['revision'] == 1
     # Owner supplied by the model cannot override server identity.
-    assert call(client, run, 'automation_create', request_key='forged-owner', definition=definition(), owner_id='google:bob').status_code == 422
+    forged = call(client, run, 'automation_create', request_key='forged-owner', definition=definition(), owner_id='google:bob')
+    assert forged.status_code == 200 and forged.json()['status_code'] == 422
 
 
 def test_other_requester_cannot_read_edit_enable_or_pause_even_as_admin(workspace):
@@ -421,7 +422,8 @@ def test_webhook_catalog_and_storage_failure_are_safe(workspace, monkeypatch):
     args = dict(automation_id=saved['id'], revision=1, provider='webhook',
                 credential_request_id=handle, request_key='rollback-webhook')
     response = call(client, run, 'automation_webhook_setup', **args, secret='canary-never-echo')
-    assert response.status_code == 422 and 'canary-never-echo' not in response.text
+    assert response.status_code == 200 and response.json()['status_code'] == 422
+    assert 'canary-never-echo' not in response.text
     def fail_encrypt(value):
         raise RuntimeError('synthetic encryption failure')
     monkeypatch.setattr(app.state.security, 'encrypt', fail_encrypt)
@@ -475,3 +477,44 @@ def test_webhook_setup_does_not_extend_credential_expiration(workspace):
                     provider='webhook', credential_request_id=handle, request_key='expiring-secret')
     assert response.status_code == 422
     assert not app.state.store.rows('SELECT * FROM automation_webhooks')
+
+
+def test_argument_errors_identify_fields_without_rejected_values_and_allow_correction(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    rejected = call(client, run, 'automation_create', request_key='correct-fields', definition=definition(
+        name='x', metadata={'bootstrap_source': 'private-value-marker' + 'x' * (16385 - len('private-value-marker'))},
+        timing={'time': 'private-time-marker', 'timezone': 'private-zone-marker'}))
+    assert rejected.status_code == 200
+    result = rejected.json()
+    assert result['status_code'] == 422 and result['error']
+    errors = {error['field']: error for error in result['validation_errors']}
+    assert errors['definition.name']['type'] == 'string_too_short'
+    assert 'definition.triggers.0.schedule.time' in errors
+    assert 'definition.triggers.0.schedule.timezone' in errors
+    assert errors['definition.metadata.bootstrap_source']['type'] == 'string_too_long'
+    assert '16384 characters' in errors['definition.metadata.bootstrap_source']['message']
+    assert 'IANA timezone' in errors['definition.triggers.0.schedule.timezone']['message']
+    assert 'private-' not in rejected.text
+    assert all(set(error) == {'field', 'type', 'message'} for error in errors.values())
+    assert not app.state.store.rows('SELECT * FROM automations')
+    assert not app.state.store.rows('SELECT * FROM automation_operations')
+    corrected = call(client, run, 'automation_create', request_key='correct-fields', definition=definition())
+    assert corrected.status_code == 200 and corrected.json()['status'] == 'paused'
+    assert len(app.state.store.rows('SELECT * FROM automations')) == 1
+    assert call(client, run, 'automation_create', request_key='correct-fields', definition=definition()).json() == corrected.json()
+    assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
+
+
+def test_invalid_saved_state_is_not_reported_as_rejected_tool_arguments(workspace):
+    app, client = workspace
+    sign_in(app, client)
+    run = active(app)
+    saved = create(client, run)
+    app.state.store.execute('UPDATE automations SET definition=? WHERE id=?',
+                            ('{"private-saved-marker": "invalid"}', saved['id']))
+    response = call(client, run, 'automation_list', automation_id=saved['id'])
+    assert response.status_code == 500
+    assert response.json() == {'detail': 'The saved automation could not be validated.'}
+    assert 'private-saved-marker' not in response.text
