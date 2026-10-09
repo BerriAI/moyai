@@ -137,6 +137,14 @@
     return new Map([...timeline(run,turns)].map(([id,items])=>[id,items.filter(item=>item.type==='update').map(({id,content})=>({id,content}))]).filter(([,items])=>items.length));
   }
   function updateHTML(update,markdown=esc){
+    // Exact legacy runtime notices only; ordinary assistant prose (including
+    // quotations of these notices) must keep its normal Markdown rendering.
+    const compaction={
+      'Compacting saved context before continuing. Completed tool receipts are preserved.':'Context compaction',
+      'The agent compacted its context and is continuing. Completed tool receipts remain saved.':'Context compacted',
+    };
+    const label=Object.hasOwn(compaction,update.content)?compaction[update.content]:null;
+    if(label)return `<details class="context-compaction" data-update-id="${esc(update.id)}"><summary><span class="context-compaction-icon" aria-hidden="true">${root.MoyaiIcon?.('list',16)||'≡'}</span><span>${label}</span><span class="context-compaction-rule" aria-hidden="true"></span><span class="context-compaction-chevron" aria-hidden="true">›</span></summary><div class="context-compaction-detail"><p>Making room to continue the conversation. Saved progress and completed tool results stay available.</p><p class="context-compaction-source">${esc(update.content)}</p></div></details>`;
     return `<article class="chat-message assistant assistant-update" data-update-id="${esc(update.id)}" aria-label="Moyai update"><div class="message-label"><img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai<small>Update</small></div><div class="message-content markdown">${markdown(update.content)}</div><button type="button" class="copy-update quiet" aria-label="Copy update" title="Copy update">${root.MoyaiIcon?.('copy',16)||'Copy'}</button></article>`;
   }
   function syncItems(slot,items,{markdown,copy}){
@@ -158,7 +166,7 @@
         if(node)node.replaceWith(fresh);
         node=fresh;
         const button=node.querySelector('.copy-update');
-        button.onclick=()=>copy?.(update.content,button);
+        if(button)button.onclick=()=>copy?.(update.content,button);
         node.querySelectorAll('.copy-code').forEach(button=>button.onclick=()=>copy?.(button.closest('.code-block').querySelector('code').textContent,button));
       }
       if(slot.children[index]!==node)slot.insertBefore(node,slot.children[index]||null);

@@ -354,3 +354,21 @@ test('side-chat polls replace focus while retaining expanded activity through st
   assert.equal(writes,2);assert.equal(log.slots[0],slot);assert.equal(slot.details.open,true);assert.equal(log.scrollTop,50);
   data.status='idle';context.drawChat(data);assert.equal(context.status.textContent,'');
 });
+
+test('runtime compaction notices render as quiet disclosures while ordinary prose stays intact',()=>{
+  const notices=[
+    ['Compacting saved context before continuing. Completed tool receipts are preserved.','Context compaction'],
+    ['The agent compacted its context and is continuing. Completed tool receipts remain saved.','Context compacted'],
+  ];
+  for(const [content,label] of notices){
+    const rendered=MoyaiActivity.updateHTML({id:'a"b',content},()=>{throw new Error('Runtime notice is not Markdown');});
+    assert.match(rendered,/<details class="context-compaction"/);
+    assert.ok(rendered.includes(label));
+    assert.ok(rendered.includes(content));
+    assert.match(rendered,/data-update-id="a&quot;b"/);
+    assert.doesNotMatch(rendered,/copy-update|assistant-update|animation/);
+  }
+  for(const content of ['I am compacting the context.', '> '+notices[0][0], 'toString']){
+    assert.match(MoyaiActivity.updateHTML({id:1,content}),/assistant-update/);
+  }
+});

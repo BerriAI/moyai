@@ -241,6 +241,17 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .panel-menu { border-color: #e6e6e6; border-radius: 12px; box-shadow: 0 10px 30px #0000001a; }
 
 /* Conversation */
+.context-compaction { margin: 8px 0 24px; color: #666; font-size: 13px; line-height: 1.5; }
+.context-compaction > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; list-style: none; }
+.context-compaction > summary::-webkit-details-marker { display: none; }
+.context-compaction > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 4px; border-radius: 4px; }
+.context-compaction-icon { display: flex; flex-shrink: 0; }
+.context-compaction-rule { height: 1px; flex: 1; min-width: 12px; margin-left: 8px; background: #e6e6e6; }
+.context-compaction-chevron { font-size: 18px; }
+.context-compaction[open] .context-compaction-chevron { transform: rotate(90deg); }
+.context-compaction-detail { margin: 0 24px; max-width: 60ch; overflow-wrap: anywhere; }
+.context-compaction-detail p { margin: 0 0 12px; }
+.context-compaction-source { border-left: 2px solid #e6e6e6; padding-left: 12px; }
 .conversation { padding: 8px 20px 12px; }
 .conversation-inner { max-width: 720px; }
 .chat-message.user { background: #f4f4f4; border-radius: 22px; padding: 10px 16px; max-width: 78%; margin: 6px 0 22px auto; }
