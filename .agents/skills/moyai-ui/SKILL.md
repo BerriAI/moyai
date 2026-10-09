@@ -31,7 +31,7 @@ Use the existing React/shadcn stack and do not restyle chat for a Settings-only 
 | Spacing | Use 4, 8, 12, 16, 20, 24, 32, 40px steps. Related labels/controls are close; separate sections by at least twice that space. Preserve shared leading edges. |
 | Surfaces | Flat white surfaces; 12px cards, 8px controls. Borders organize tables and groups. Shadows are reserved for dialogs and overlays. Do not nest a card inside every card. |
 | Lists | Repeated library objects use compact rows with identity first, supporting copy next, actions last. Search/filter before a large library. Preserve full labels and identifiers or provide an explicit expansion. |
-| Controls | One filled purple primary action; secondary buttons neutral, quiet actions in consistent action areas. Use the shared shadcn Button, Label, Input, NativeSelect, Checkbox, Switch and Collapsible through the component renderer. 36–40px desktop controls; touch controls at least 44px when space permits. |
+| Controls | One filled purple primary action; secondary buttons neutral, quiet actions in consistent action areas. Use the shared shadcn Button, Label, Input, Select, Checkbox, Switch and Collapsible through the component renderer. Single-choice menus anchor outside their field; do not reintroduce platform popups. 36–40px desktop controls; touch controls at least 44px when space permits. |
 | State | Pair status text with a semantic treatment. Green = ready, amber = incomplete/needs attention, red = destructive/error. Purple is selection and primary action, not a generic status signal. |
 | Details | Use `<details><summary>` for longer explanations, automation instructions, billing methodology, and history. The summary names the hidden content. Never clamp essential text without a way to read all of it. |
 | Tables | Quiet header surface, clear row rules, tabular numbers, numeric totals at the trailing edge. Keep exact costs in request detail; round summary amounts to cents. At narrow widths, scroll the table’s own labelled, keyboard-focusable container. |
@@ -63,6 +63,14 @@ node scripts/settings_ui_preview.cjs --port 8840
 The preview serves the real frontend against synthetic API fixtures. `/?fixture=empty`, `/?fixture=error`, and `/?fixture=member` exercise alternate states. It binds only to localhost and does not exercise production authentication, cloud builds, or provider writes. For a matched baseline, use `--root /path/to/baseline/app/static --port 8841`.
 
 Inspect the changed route at 1440px, 768px, and 320px; open affected dialogs, filter a populated list, clear an empty result, tab through controls, and check reduced motion. Browser reload is required after editing static files. Use the browser tooling available in the current environment; do not assume one automation driver is installed.
+
+For migration-wide work, apply all six `better-interface` domains across the
+workspace and every Settings route, not just the last reported page. Include
+representative editors, nested menus, empty/error/member fixtures, enlarged text,
+and keyboard-only paths. Verify shared geometry in the rendered app: component
+defaults must not add a second layer of spacing to legacy layouts. Measure
+contrast against the actual surface and reuse existing role tokens for fixes.
+Report untested screen-reader, browser, provider, and production flows explicitly.
 
 Capture real rendered before/after images with the same viewport and data. Label synthetic previews honestly. Keep production account data out of public repository screenshots. Document checks that could not be run instead of claiming accessibility or interaction coverage from a screenshot alone.
 

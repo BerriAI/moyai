@@ -44,6 +44,202 @@ async function assertTableTextContained(page) {
   assert.deepEqual(overlaps, [], 'Table text stays inside its own column');
 }
 
+async function choose(page, source, value) {
+  const label = await source.evaluate((select, value) => [...select.options].find(option => option.value === value).label, value);
+  await source.locator('..').getByRole('combobox').click();
+  await page.getByRole('option', { name: label, exact: true }).click();
+}
+
+async function inspectMenus(page, width) {
+  const triggers = page.locator('[data-slot="select-trigger"]');
+  for (const trigger of await triggers.all()) {
+    if (!await trigger.isVisible() || await trigger.evaluate(el => !!el.closest('[aria-hidden=true],[inert]') || el.getBoundingClientRect().right <= 0)) continue;
+    if (await trigger.isDisabled()) continue;
+    assert.ok(await trigger.getAttribute('aria-label'), 'Dropdowns have a name, including dynamically inserted controls');
+    await page.keyboard.press('Tab');
+    await trigger.focus();
+    assert.equal(await trigger.evaluate(el => getComputedStyle(el).outlineStyle), 'solid', `Keyboard focus is visible: ${await trigger.getAttribute('aria-label')}`);
+    await page.keyboard.press('ArrowDown');
+    const menu = page.getByRole('listbox');
+    await menu.waitFor();
+    const field = await trigger.boundingBox();
+    const bounds = await menu.boundingBox();
+    assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= width + 1 && bounds.y >= 0 && bounds.y + bounds.height <= 1001, JSON.stringify(bounds));
+    assert.ok(bounds.y >= field.y + field.height || bounds.y + bounds.height <= field.y, 'Menus never cover their field');
+    const overflow = await menu.getByRole('option').evaluateAll(items => items.some(item => {
+      const range = document.createRange();
+      range.selectNodeContents(item);
+      const bounds = item.getBoundingClientRect();
+      return [...range.getClientRects()].some(rect => rect.width && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1));
+    }));
+    assert.equal(overflow, false, 'Long option text wraps within the menu');
+    await page.keyboard.press('End');
+    const last = menu.locator('[role=option]:not([aria-disabled=true])').last();
+    await page.waitForFunction(el => el === document.activeElement, await last.elementHandle());
+    const lastBounds = await last.boundingBox();
+    assert.ok(lastBounds.y >= bounds.y && lastBounds.y + lastBounds.height <= bounds.y + bounds.height + 1, 'Keyboard navigation scrolls the last option into view');
+    await page.keyboard.press('Escape');
+    await menu.waitFor({ state: 'detached' });
+    await page.waitForFunction(el => el === document.activeElement, await trigger.elementHandle());
+    assert.equal(await trigger.evaluate(el => el === document.activeElement), true, 'Escape restores the trigger');
+  }
+}
+
+for (const width of [1440, 768, 320]) {
+  test(`styled dropdowns fit every page and editor at ${width}px`, async t => {
+    const page = await pageFor(t, 'tasks', 'populated', width);
+    await page.getByLabel('Session options', { exact: true }).click();
+    await inspectMenus(page, width);
+    const editors = { skills: 'Add skill', memory: 'Add memory', automations: 'Create', secrets: 'Add credential', users: 'Add user', environments: 'New environment' };
+    for (const route of ['memory', 'secrets', 'runtime', 'environments', 'users', 'automations', 'skills', 'connections', 'spend']) {
+      await page.evaluate(view => navigate(view), route);
+      await inspectMenus(page, width);
+      if (route === 'spend') {
+        await page.locator('.analytics-range > summary').click();
+        await inspectMenus(page, width);
+        await page.locator('.analytics-range > summary').click();
+        for (const tab of ['prs', 'users', 'history', 'infrastructure']) {
+          await page.locator(`#spend-tab-${tab}`).click();
+          if (tab === 'infrastructure') await page.getByRole('button', { name: 'Add monthly bill', exact: true }).click();
+          await inspectMenus(page, width);
+        }
+      }
+      if (route === 'connections') {
+        await page.locator('[data-manage="github"]').click();
+        await inspectMenus(page, width);
+        await page.keyboard.press('Escape');
+        await page.getByRole('dialog').waitFor({ state: 'detached' });
+      }
+      if (editors[route]) {
+        if (route === 'automations') await page.locator('.automation-create summary').click();
+        await page.getByRole('button', { name: editors[route], exact: true }).click();
+        await page.getByRole('dialog').waitFor();
+        await inspectMenus(page, width);
+        if (route === 'automations') {
+          const dialog = page.getByRole('dialog');
+          await choose(page, dialog.locator('select[name=frequency]'), 'weekly');
+          await inspectMenus(page, width);
+          await choose(page, dialog.locator('select[name=weekday]'), '2');
+          assert.equal(await dialog.locator('select[name=weekday]').inputValue(), '2');
+          await choose(page, dialog.locator('select[name=source]'), 'github');
+          await inspectMenus(page, width);
+          await choose(page, dialog.locator('select[name=event]'), 'check_run.completed');
+          assert.equal(await dialog.locator('input[name=conclusion]').isVisible(), true);
+          assert.equal(await dialog.locator('input[name=label]').isVisible(), false);
+          await page.getByRole('listbox').waitFor({ state: 'detached' });
+          await page.waitForFunction(el => el === document.activeElement, await dialog.getByRole('combobox', { name: 'Event', exact: true }).elementHandle());
+        }
+        await page.keyboard.press('Escape');
+        await page.getByRole('dialog').waitFor({ state: 'detached' });
+      }
+    }
+  });
+}
+
+test('select adapter preserves values, validation, reset, disabled options and dynamic choices without unsolicited writes', async t => {
+  const page = await pageFor(t);
+  const writes = [];
+  page.on('request', request => { if (!['GET', 'HEAD'].includes(request.method())) writes.push(request.url()); });
+  await page.reload();
+  await page.locator('#new-model').waitFor();
+  await page.waitForTimeout(100);
+  assert.deepEqual(writes, [], 'Mounting and synchronizing dropdowns never saves a preference');
+  await page.evaluate(() => {
+    MoyaiUI.render(document.querySelector('#content'), '<form id="select-test"><label for="choice">Choice</label><select id="choice" name="choice" required><option value="" selected disabled>Choose a value</option><optgroup label="Available"><option value="one">First option</option><option value="two">Second option</option><option value="blocked" disabled>Unavailable option</option></optgroup></select><button type="submit">Save</button></form>');
+    window.selectEvents = [];
+    for (const type of ['input', 'change']) document.querySelector('#select-test').addEventListener(type, event => window.selectEvents.push([type, event.target.id]));
+    document.querySelector('#select-test').onsubmit = event => event.preventDefault();
+  });
+  const source = page.locator('#choice');
+  const trigger = page.getByRole('combobox', { name: 'Choice', exact: true });
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  assert.equal(await trigger.getAttribute('aria-invalid'), 'true');
+  assert.equal(await trigger.evaluate(el => el === document.activeElement), true);
+  const invalidField = await trigger.boundingBox();
+  const error = await page.locator('[data-slot="select-error"]').boundingBox();
+  assert.ok(error.y >= invalidField.y + invalidField.height, 'Validation messages stay below the dropdown, outside its control');
+  await trigger.click();
+  assert.equal(await page.getByRole('option', { name: 'Unavailable option' }).getAttribute('aria-disabled'), 'true');
+  await page.getByRole('option', { name: 'Second option', exact: true }).click();
+  assert.equal(await source.inputValue(), 'two');
+  assert.equal(await source.evaluate(el => new FormData(el.form).get('choice')), 'two');
+  assert.deepEqual(await page.evaluate(() => window.selectEvents), [['input', 'choice'], ['change', 'choice']]);
+  await source.evaluate(el => { el.value = 'one'; });
+  await page.waitForFunction(() => document.querySelector('#choice').parentElement.querySelector('[data-slot="select-trigger"]').textContent.includes('First option'));
+  await source.evaluate(el => { el.disabled = true; });
+  await page.waitForFunction(() => document.querySelector('#choice').parentElement.querySelector('[data-slot="select-trigger"]').disabled);
+  assert.equal(await trigger.isDisabled(), true);
+  await source.evaluate(el => { el.disabled = false; el.form.reset(); });
+  await page.waitForFunction(() => document.querySelector('#choice').parentElement.querySelector('[data-slot="select-trigger"]').textContent.includes('Choose a value'));
+  await source.evaluate(el => MoyaiUI.render(el, '<option value="long">A long option label that remains readable in the styled dropdown</option><option value="new" selected>New choice</option>'));
+  await page.waitForFunction(() => document.querySelector('#choice').parentElement.querySelector('[data-slot="select-trigger"]').textContent.includes('New choice'));
+  await trigger.focus();
+  await page.keyboard.press('ArrowDown');
+  await page.getByRole('listbox').waitFor();
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'option' && document.activeElement.textContent.includes('A long option'));
+  await page.keyboard.press('Enter');
+  assert.equal(await source.inputValue(), 'long');
+  await page.locator('label[for=choice]').click();
+  assert.equal(await trigger.evaluate(el => el === document.activeElement), true, 'Labels focus the styled control');
+});
+
+test('read-only settings content remains keyboard scrollable', async t => {
+  const page = await pageFor(t, 'runtime', 'member', 320);
+  const content = page.locator('#content');
+  assert.equal(await content.getAttribute('tabindex'), '0');
+  await content.focus();
+  await page.keyboard.press('PageDown');
+  await page.waitForFunction(() => document.querySelector('#content').scrollTop > 0);
+});
+
+test('library cards do not stack shadcn spacing over existing page spacing', async t => {
+  const page = await pageFor(t);
+  for (const [route, card, first, next] of [
+    ['memory', '.memory-card', '.memory-card-top', 'h2'],
+    ['connections', '.connection-card', '.connection-top', ':scope > p'],
+    ['environments', '.environment-card', '.environment-card-top', '.environment-card-state'],
+  ]) {
+    await page.evaluate(view => navigate(view), route);
+    const gaps = await page.locator(card).evaluateAll((cards, { first, next }) => cards.map(card => card.querySelector(next).getBoundingClientRect().top - card.querySelector(first).getBoundingClientRect().bottom), { first, next });
+    assert.ok(gaps.every(gap => gap >= 0 && gap <= 24), `${route}: related content retains one spacing step: ${gaps}`);
+  }
+});
+
+test('identity linking disables its submit action, not the new dropdown trigger', async t => {
+  const page = await pageFor(t, 'spend');
+  await page.route('**/api/spend?*', async route => {
+    const response = await route.fetch();
+    const data = await response.json();
+    data.identities = [
+      { id: 'google-one', kind: 'google', name: 'Alex', email: 'alex@example.com' },
+      { id: 'slack-one', kind: 'slack', name: 'Alex in Slack', email: 'alex@example.com' },
+    ];
+    await route.fulfill({ response, json: data });
+  });
+  await page.reload();
+  await page.locator('#spend-tab-infrastructure').click();
+  await page.locator('.identity-overrides > summary').click();
+  const form = page.locator('.spend-link-form');
+  await choose(page, form.locator('select[name=google]'), 'google-one');
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  t.after(() => release());
+  const request = page.waitForRequest('**/api/admin/spend/link-slack');
+  await page.route('**/api/admin/spend/link-slack', async route => {
+    await gate;
+    await route.fulfill({ status: 503, json: { detail: 'Link not saved. Try again.' } });
+  });
+  const save = form.getByRole('button', { name: 'Save manual link', exact: true });
+  await save.click();
+  assert.deepEqual((await request).postDataJSON(), { slack_user_id: 'slack-one', google_user_id: 'google-one' });
+  assert.equal(await save.isDisabled(), true);
+  assert.equal(await form.getByRole('combobox').isDisabled(), false);
+  release();
+  await page.locator('#toast').filter({ hasText: 'Link not saved. Try again.' }).waitFor();
+  assert.equal(await save.isDisabled(), false);
+});
+
 for (const width of [1440, 1024, 768, 320]) {
   test(`analytics headings and metric summaries have clear spacing at ${width}px`, async t => {
     const page = await pageFor(t, 'spend', 'populated', width);
@@ -88,7 +284,7 @@ for (const width of [1440, 1024, 768, 320]) {
 
   test(`memory preference label, field and arrow stay aligned at ${width}px`, async t => {
     const page = await pageFor(t, 'memory', 'populated', width);
-    const control = page.getByLabel('How new memories are saved', { exact: true });
+    const control = page.locator('#memory-learning');
     const aligned = async () => {
       const boxes = await page.locator('.memory-learning').evaluate(row => {
         const box = el => el.getBoundingClientRect().toJSON();
@@ -117,7 +313,7 @@ for (const width of [1440, 1024, 768, 320]) {
       }
     };
     await aligned();
-    await control.selectOption('manual');
+    await choose(page, control, 'manual');
     await page.waitForFunction(() => document.querySelector('#memory-learning')?.disabled === false && document.querySelector('#memory-learning').value === 'manual');
     await page.reload();
     await control.waitFor();
@@ -129,7 +325,7 @@ for (const width of [1440, 1024, 768, 320]) {
     await aligned();
     await page.getByRole('button', { name: 'Resume memory', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('#memory-learning')?.disabled === false);
-    await control.selectOption('auto');
+    await choose(page, control, 'auto');
     await page.waitForFunction(() => document.querySelector('#memory-learning')?.disabled === false && document.querySelector('#memory-learning').value === 'auto');
     await aligned();
   });
@@ -140,6 +336,31 @@ for (const width of [1440, 1024, 768, 320]) {
       if (route !== 'skills') await page.evaluate(view => navigate(view), route);
       const rows = page.locator('.skill-card, .secret-card');
       await rows.first().waitFor();
+      if (route === 'skills') {
+        const skills = await rows.evaluateAll(rows => rows.map(row => {
+          const box = el => el.getBoundingClientRect().toJSON();
+          return { row: box(row), info: box(row.firstElementChild), title: box(row.querySelector('.skill-title')),
+            reference: box(row.querySelector('code')), description: box(row.querySelector('p')),
+            actions: box(row.lastElementChild), buttons: [...row.querySelectorAll('button')].map(box) };
+        }));
+        for (const { row, info, title, reference, description, actions, buttons } of skills) {
+          assert.ok(reference.top >= title.top && reference.bottom <= title.bottom + 1, 'Skill references belong to the title line');
+          assert.ok(Math.abs(description.top - title.bottom - 4) <= 1, 'Skill descriptions stay close to their title');
+          if (width > 650) {
+            assert.ok(row.height <= Math.max(info.height, actions.height) + 18, 'Skill rows have compact vertical padding');
+            assert.ok(Math.abs(actions.top + actions.height / 2 - info.top - info.height / 2) <= 1, 'Skill actions are centered with their details');
+            if (width === 1440) assert.ok(row.height <= 72, 'Desktop skills fit in compact two-line rows');
+          } else {
+            assert.ok(Math.abs(actions.top - info.bottom - 8) <= 1, 'Mobile skill actions stay close to their details');
+            assert.ok(buttons.every(button => button.height >= 44), 'Mobile skill actions retain touch-sized targets');
+          }
+        }
+        if (width >= 768) {
+          const search = await page.locator('#skill-search').boundingBox();
+          const count = await page.locator('#skill-count').boundingBox();
+          assert.ok(Math.abs(search.y + search.height / 2 - count.y - count.height / 2) <= 1, 'Skill counts share the search toolbar');
+        }
+      }
       if (route === 'secrets') {
         const select = await page.locator('#secret-scope-filter').boundingBox();
         const icon = await page.locator('.settings-toolbar [data-slot="native-select-icon"]').boundingBox();
@@ -194,15 +415,49 @@ for (const width of [1440, 1024, 768, 320]) {
       for (const { row, info, actions } of geometry) {
         assert.ok(Math.abs(info.x - row.x - 4) <= 1, `${route}: details align with the row's leading edge`);
         assert.ok(actions.right <= row.right + 1, `${route}: actions stay inside the row`);
-        if (width > 1150) {
+        if (width > 650) {
           assert.ok(actions.x >= info.right, `${route}: desktop actions follow the details horizontally`);
           assert.ok(row.height <= Math.max(info.height, actions.height) + 46, `${route}: row remains compact`);
-        } else if (route === 'skills' || width <= 650) {
+        } else {
           assert.ok(actions.y >= info.bottom, `${route}: narrow actions wrap below details`);
           assert.ok(Math.abs(actions.x - info.x) <= 1, `${route}: wrapped actions stay left-aligned`);
         }
       }
     }
+  });
+
+  test(`automation filters stay grouped at the right edge at ${width}px`, async t => {
+    const page = await pageFor(t, 'automations', 'populated', width);
+    await page.locator('[data-automation-scope][aria-pressed=true]').waitFor();
+    for (const [value, expected] of [['all', 2], ['paused', 1], ['enabled', 1]]) {
+      await page.locator('#automation-status').selectOption(value);
+      assert.equal(await page.locator('.automation-card:visible').count(), expected);
+      const { toolbar, scopes, search, status, count, arrow } = await page.locator('.automation-toolbar').evaluate(toolbar => {
+        const box = el => el.getBoundingClientRect().toJSON();
+        return { toolbar: box(toolbar), scopes: box(toolbar.querySelector('.automation-scopes')),
+          search: box(toolbar.querySelector('input')), status: box(toolbar.querySelector('select')),
+          count: box(toolbar.querySelector('[data-automation-count]')), arrow: box(toolbar.querySelector('[data-slot="native-select-icon"]')) };
+      });
+      assert.ok(Math.abs(scopes.left - toolbar.left) <= 1, 'Ownership controls remain left-aligned');
+      assert.ok(Math.abs(count.right - toolbar.right) <= 1, 'The result count anchors the filter group to the right edge');
+      assert.ok(arrow.left >= status.left && arrow.right <= status.right, 'The status arrow stays within its field');
+      if (width > 768) {
+        assert.ok(Math.abs(search.top - status.top) <= 1, 'Desktop search and status share a row');
+        assert.ok(Math.abs(status.left - search.right - 12) <= 1, 'Search and status stay together');
+        assert.ok(Math.abs(count.left - status.right - 12) <= 1, 'No spare space separates the status and count');
+      } else {
+        assert.ok(search.top >= scopes.bottom, 'Narrow search wraps below ownership');
+        assert.ok(Math.abs(search.width - toolbar.width) <= 1, 'Narrow search fills its row');
+        assert.ok(status.top >= search.bottom, 'Narrow status follows search');
+      }
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    }
+    await page.locator('#automation-search').fill('no matching automation');
+    assert.equal(await page.locator('.automation-card:visible').count(), 0);
+    await page.getByRole('button', { name: 'Clear filters', exact: true }).click();
+    assert.equal(await page.locator('.automation-card:visible').count(), 2);
+    await page.locator('[data-automation-scope="mine"]').click();
+    assert.equal(await page.locator('[data-automation-scope="mine"]').getAttribute('aria-pressed'), 'true');
   });
 
   test(`pull request columns wrap and remain reachable at ${width}px`, async t => {
@@ -264,7 +519,7 @@ for (const width of [1440, 768, 320]) {
     for (const route of ['tasks', 'settings', 'skills', 'memory', 'automations', 'connections', 'secrets', 'runtime', 'environments', 'users', 'spend']) {
       await page.evaluate(view => navigate(view), route);
       assert.equal(await page.locator('#content h1').count(), 1, route);
-      const missing = await page.locator('#content button:not([data-slot]), #content select:not([data-slot]), #content textarea:not([data-slot]), #content table:not([data-slot])').count();
+      const missing = await page.locator('#content button:not([data-slot]), #content select:not([data-slot]):not([aria-hidden=true]), #content textarea:not([data-slot]), #content table:not([data-slot])').count();
       assert.equal(missing, 0, `${route}: every base control comes from shadcn`);
       assert.ok(await page.locator('#content [data-slot]').count(), `${route}: components rendered`);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${route}: no page overflow`);
@@ -327,6 +582,45 @@ for (const width of [1440, 768, 320]) {
     await page.waitForFunction(() => document.activeElement?.hasAttribute('data-session-actions'));
   });
 }
+
+test('compact skills preserve long descriptions, references and archived actions', async t => {
+  for (const width of [1440, 768, 320]) {
+    const page = await pageFor(t, 'skills', 'populated', width);
+    const name = 'review-cross-platform-production-integration-and-release-changes';
+    const description = 'Review integration results, reproduction steps, and release readiness. '.repeat(4).trim();
+    await page.route('**/api/skills?archived=true', async route => {
+      const response = await route.fetch();
+      const data = await response.json();
+      data.skills[0] = { ...data.skills[0], name, description, reference: `org:${name}`, can_manage: false };
+      data.skills[1].archived = true;
+      await route.fulfill({ response, json: data });
+    });
+    await page.reload();
+    const row = page.locator('.skill-card').first();
+    await row.waitFor();
+    assert.equal(await page.locator('.skill-card').count(), 4);
+    assert.equal(await row.locator('strong').textContent(), name);
+    assert.equal(await row.locator('code').textContent(), `/org:${name}`);
+    assert.equal(await row.locator('p').textContent(), description);
+    assert.equal(await row.getByRole('button', { name: 'View', exact: true }).count(), 1);
+    assert.equal(await row.locator('[data-archive-skill]').count(), 0);
+    const contained = await row.evaluate(row => {
+      const bounds = row.getBoundingClientRect();
+      return [...row.querySelectorAll('strong, code, p')].every(element => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return [...range.getClientRects()].every(rect => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 && rect.bottom <= bounds.bottom);
+      });
+    });
+    assert.equal(contained, true, `Long skill content stays readable at ${width}px`);
+    await page.getByRole('checkbox', { name: 'Show archived', exact: true }).click();
+    assert.equal(await page.locator('.skill-card').count(), 5);
+    const archived = page.locator('.skill-card').filter({ hasText: 'benchmark-report' });
+    assert.equal(await archived.getByRole('button', { name: 'Restore', exact: true }).count(), 1);
+    assert.equal(await archived.locator('[data-use-skill]').count(), 0);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  }
+});
 
 test('compact secrets preserve long identifiers, file metadata and managed access', async t => {
   for (const width of [1440, 768, 320]) {

@@ -34,7 +34,8 @@
   --ui-foreground: #28282b;
   --ui-primary: #7155ba;
   --ui-secondary: #f3effa;
-  --ui-muted: #73717b;
+  --ui-muted: #68636f;
+  --ui-control-border: #908996;
   --ui-border: #e4dfea;
 }
 
@@ -50,6 +51,7 @@
   background: var(--ui-background); color: var(--ui-foreground); padding: 24px;
   border: 1px solid var(--ui-border); border-radius: 8px; box-shadow: 0 16px 64px #28202f29;
   animation: none;
+  overscroll-behavior: contain;
 }
 [data-slot="popover-content"] { background: var(--ui-background); z-index: 1002; }
 [data-slot="tooltip-content"] { z-index: 1003; max-width: min(320px, calc(100vw - 24px)); }
@@ -57,6 +59,7 @@
 [data-slot="tooltip-content"][data-state="closed"] { animation: none; }
 [data-slot="native-select-wrapper"] { min-width: 0; width: 100%; }
 [data-slot="input"], [data-slot="native-select"] { height: 40px; }
+.settings-view :is([data-slot="input"], [data-slot="native-select"]) { height: auto; min-height: 40px; }
 .settings-view [data-slot="button"] { height: auto; white-space: normal; }
 [data-slot="native-select-icon"] { width: 16px; height: 16px; }
 .model-picker [data-slot="native-select-wrapper"] { display: contents; }
@@ -69,11 +72,51 @@
 [data-slot="checkbox"], [data-slot="switch"] { flex: none; }
 [data-slot="checkbox"], .settings-view [data-slot="checkbox"] { width: 16px; height: 16px; min-height: 16px; padding: 0; border-radius: 4px; }
 [data-slot="checkbox-indicator"] { display: grid; place-items: center; }
+[data-slot="checkbox"] { border-color: var(--ui-control-border); }
 [data-slot="checkbox-indicator"] svg { width: 14px; height: 14px; }
-[data-slot="switch"], .settings-view [data-slot="switch"] { width: 36px; height: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 999px; background: #b2acba; display: inline-flex; align-items: center; }
+[data-slot="switch"], .settings-view [data-slot="switch"] { width: 36px; height: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 999px; background: var(--ui-control-border); display: inline-flex; align-items: center; }
 .settings-view [data-slot="checkbox"][data-state="checked"], .settings-view [data-slot="switch"][data-state="checked"], [data-slot="checkbox"][data-state="checked"], [data-slot="switch"][data-state="checked"] { background: var(--ui-primary); color: #fff; border-color: var(--ui-primary); }
 [data-slot="switch-thumb"] { display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff; }
 [data-slot="table-container"] { overflow-x: auto; max-width: 100%; }
+/* The native select retains the existing layout and form API, but never opens
+   a platform menu. Its sibling is the only visible, focusable control. */
+[data-slot="native-select-wrapper"][data-styled] { position: relative; }
+[data-styled] > select[data-slot="native-select"] { opacity: 0; pointer-events: none; }
+[data-styled] [data-slot="select-trigger"] {
+  position: absolute; inset: 0; width: 100%; height: 100%; min-width: 0;
+  padding: 9px 12px; border: 1px solid var(--settings-control-border, var(--ui-muted));
+  border-radius: 8px; background: var(--ui-background); color: var(--ui-foreground);
+  font-size: .933333rem; font-weight: 400; line-height: 1.45; text-align: start;
+}
+[data-slot="select-trigger"] > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-slot="select-trigger"] [data-slot="native-select-icon"] { position: static; transform: none; opacity: 1; color: var(--ui-muted); }
+[data-slot="select-trigger"]:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 3px; box-shadow: none; }
+[data-slot="select-content"] {
+  z-index: 1010; min-width: var(--radix-select-trigger-width); max-width: calc(100vw - 16px);
+  max-height: min(320px, var(--radix-select-content-available-height));
+  border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-background);
+  color: var(--ui-foreground); box-shadow: 0 4px 16px #28202f1f; animation: none;
+  overscroll-behavior: contain;
+}
+[data-slot="select-viewport"] { padding: 4px; overscroll-behavior: contain; }
+[data-slot="select-item"] {
+  box-sizing: border-box; min-height: 32px; padding: 6px 32px 6px 8px;
+  font-size: .933333rem; line-height: 1.45; white-space: normal; overflow-wrap: anywhere;
+}
+[data-slot="select-item"][data-highlighted] { background: var(--ui-secondary); color: var(--ui-foreground); }
+[data-slot="select-item"][data-state="checked"] { font-weight: 500; }
+[data-slot="select-error"] { display: block; margin-block-start: 4px; color: var(--settings-danger, #b42332); font-size: .866667rem; }
+.model-picker [data-slot="native-select-wrapper"][data-styled] { display: block; width: auto; flex: 1; min-width: 0; }
+.model-picker [data-styled] [data-slot="select-trigger"] { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; font: inherit; }
+.sessions-label [data-styled] [data-slot="select-trigger"] { min-height: 0; padding: 2px 0; border: 0; background: transparent; box-shadow: none; font: inherit; }
+@media (max-width: 850px) {
+  [data-styled] [data-slot="select-trigger"] { font-size: 16px; }
+  [data-slot="select-item"] { min-height: 44px; }
+}
+@media (forced-colors: active) {
+  [data-slot="select-trigger"]:focus-visible { outline-color: Highlight; }
+  [data-slot="select-item"][data-highlighted] { outline: 2px solid Highlight; outline-offset: -2px; }
+}
 @media (prefers-reduced-motion: reduce) {
   [data-slot] { animation: none !important; transition: none !important; }
 }

@@ -98,5 +98,5 @@ async function renderAdminSpend(data,identityStatus,activity=null,refresh=false)
 }
 function bindSpendIdentities(){
   $('#refresh-identities').onclick=async()=>{const button=$('#refresh-identities');button.disabled=true;try{await api('/api/admin/identities/refresh',{method:'POST'});button.textContent='Profiles queued';toast('Profile refresh queued. Use Refresh above to see updated matches.');}catch(error){button.disabled=false;showError(error);}};
-  document.querySelectorAll('.spend-link-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('button');button.disabled=true;try{await api('/api/admin/spend/link-slack',{method:'POST',body:JSON.stringify({slack_user_id:form.dataset.slack,google_user_id:form.elements.google.value})});await renderSpend();toast('Slack usage linked to Google account.');}catch(error){button.disabled=false;showError(error);}});
+  document.querySelectorAll('.spend-link-form').forEach(form=>form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');button.disabled=true;try{await api('/api/admin/spend/link-slack',{method:'POST',body:JSON.stringify({slack_user_id:form.dataset.slack,google_user_id:form.elements.google.value})});await renderSpend();toast('Slack usage linked to Google account.');}catch(error){button.disabled=false;showError(error);}});
 }

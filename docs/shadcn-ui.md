@@ -38,7 +38,7 @@ Install the test browser once with `npx playwright install chromium`.
 Feature controllers keep their existing API calls, revisions, access checks,
 stream handling and escaped templates. `MoyaiUI.render(element, html)` converts
 each template into a React tree composed of shadcn Button, Input, Textarea,
-NativeSelect, Checkbox, Switch, Label, Badge, Table, Card, Alert, Collapsible and
+Select, Checkbox, Switch, Label, Badge, Table, Card, Alert, Collapsible and
 Tooltip components. The initial workspace shell uses the same renderer.
 
 This is a component migration, not a rewrite of the application state into React
@@ -60,6 +60,17 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   shadcn Dialog; Radix provides the portal, focus trap, Escape, outside dismissal
   and return focus. The host remains queryable while closed, and sensitive forms
   keep their existing close/cancel cleanup.
+- Single-choice dropdowns use shadcn Select with an anchored, viewport-aware
+  menu, not the operating system popup. `FormSelect` retains an invisible native
+  select for controller queries, sizing, validation, reset, and `FormData`.
+  Only the styled trigger is exposed to keyboard and assistive technology.
+  Per-element value/selectedIndex setters and an option/attribute observer keep
+  controller updates in sync; they never replace controller-owned DOM or patch
+  global prototypes. Selection emits one native input/change pair. Synchronizing
+  values must not emit writes. Multi-select/listbox templates retain NativeSelect.
+- Nested Select menus consume Escape before the enclosing dialog or workspace.
+  Keep this guard in the overlay adapter: feature forms can have independent React
+  roots even when they appear inside a Dialog portal.
 - Session actions use shadcn Popover anchored to the invoking control, with Radix
   viewport collision handling. The existing menu commands and arrow-key handlers
   remain in their controller.
@@ -82,6 +93,11 @@ target `[data-slot="dialog-content"]`; per-dialog sizing uses `data-dialog-id`.
 The content host uses `display: contents`, so measure or focus the visible dialog
 via its dialog role or `data-dialog-id`, not the inner host.
 
+The template adapter removes Card's default flex layout and gap. Existing page
+styles already space the card contents; applying both doubles the gaps in
+Connections, Memory, and Environments. New React-only cards can use the normal
+shadcn CardHeader/CardContent structure.
+
 ## Verification
 
 Controller tests use a renderer double in `tests/helpers/ui-vm.cjs`; their API,
@@ -89,3 +105,6 @@ escaping, race and permission assertions remain independent of React. Browser
 tests exercise the built components, actual form values, dialog focus/cancellation,
 saved preferences, filters, role restrictions, errors and 1440/768/320px layouts.
 Menu placement is verified in Chromium rather than by mocking Radix geometry.
+The dropdown suite opens every rendered single-choice menu across the primary
+pages and editors at 1440/768/320px, checks field/menu separation, wrapping,
+keyboard focus, Escape, and the native form bridge.

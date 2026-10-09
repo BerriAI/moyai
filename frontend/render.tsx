@@ -14,6 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Card } from "@/components/ui/card"
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip"
 import { FormCheckbox } from "./form-checkbox"
+import { FormSelect } from "./form-select"
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible"
 
 type MountedRegion = { root: Root; nodes: ChildNode[]; connected: boolean }
@@ -81,7 +82,8 @@ const options: HTMLReactParserOptions = {
       case "select": {
         const selected = (node.children as Element[]).flatMap(child => child.name === "optgroup" ? child.children as Element[] : [child])
           .filter(child => child.attribs && "selected" in child.attribs).map(child => child.attribs.value ?? (child.children[0]?.type === "text" ? child.children[0].data : ""))
-        return <NativeSelect {...props} defaultValue={props.multiple ? selected : selected[0]}>{children()}</NativeSelect>
+        const Component = props.multiple || Number(node.attribs.size) > 1 ? NativeSelect : FormSelect
+        return <Component {...props} defaultValue={props.multiple ? selected : selected[0]}>{children()}</Component>
       }
       case "option": {
         delete props.selected
@@ -102,7 +104,7 @@ const options: HTMLReactParserOptions = {
         if (hasClass(node, ["status", "badge", "settings-badge", "scope-badge", "secret-scope", "skill-scope", "memory-kind", "connection-state", "environment-status"])) return <Badge {...props} variant="secondary">{children()}</Badge>
         break
       case "article":
-        if (hasClass(node, ["automation-card", "environment-card", "memory-card", "skill-card", "connection-card"])) return <Card {...props}>{children()}</Card>
+        if (hasClass(node, ["automation-card", "environment-card", "memory-card", "skill-card", "connection-card"])) return <Card {...props} className={`${props.className || ""} block gap-0`}>{children()}</Card>
         break
       case "div":
         if (node.attribs.id === "toast") return <Alert {...props} className="block">{children()}</Alert>

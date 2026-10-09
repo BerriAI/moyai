@@ -2,11 +2,11 @@
    Keep these rules scoped: session chrome and the composer have their own density. */
 .settings-view {
   --settings-text: var(--text);
-  --settings-muted: #68636f;
+  --settings-muted: var(--ui-muted, #68636f);
   --settings-surface: #fff;
   --settings-subtle: #faf9fc;
   --settings-line: var(--line);
-  --settings-control-border: #908996;
+  --settings-control-border: var(--ui-control-border, #908996);
   --settings-accent: var(--purple);
   --settings-selected: var(--soft);
   --settings-danger: #a33946;
@@ -41,9 +41,9 @@
 .settings-view #content { padding: 40px max(32px, calc((100% - 1056px)/2)) 64px; overflow-y: auto; scroll-padding-block: 24px; color: var(--settings-text); font-size: var(--settings-body); line-height: 1.55; }
 .settings-view #content > :is(section,div,form,p,details) { max-width: 1056px; margin-inline: auto; }
 .settings-view #content > :is(.settings-page,.automations-page,.skills-page,.secrets-page,.memory-page,.users-page,.environments-page) { width: 100%; margin-block: 0; padding: 0; }
-.settings-view #content h1 { font-size: var(--settings-title); line-height: 1.25; font-weight: 600; letter-spacing: -.025em; margin: 0 0 8px; text-wrap: balance; }
+.settings-view #content h1 { font-size: var(--settings-title); line-height: 1.25; font-weight: 600; letter-spacing: 0; margin: 0 0 8px; text-wrap: balance; }
 .settings-view #content h1:focus { outline: none; }
-.settings-view #content h2 { font-size: var(--settings-heading); line-height: 1.4; font-weight: 550; letter-spacing: -.01em; }
+.settings-view #content h2 { font-size: var(--settings-heading); line-height: 1.4; font-weight: 550; letter-spacing: 0; }
 .settings-view #content h3 { font-size: var(--settings-body); line-height: 1.4; font-weight: 550; }
 .settings-view #content p { line-height: 1.6; text-wrap: pretty; }
 .settings-view #content :is(.subtext,small) { color: var(--settings-muted); font-size: var(--settings-caption); line-height: 1.6; }
@@ -110,17 +110,26 @@
 .settings-hint p { margin: 12px 0 0; max-width: 75ch; }
 .settings-empty { padding: 40px 24px; text-align: center; border: 1px dashed var(--settings-line); border-radius: var(--settings-radius); }
 .settings-empty p { color: var(--settings-muted); margin: 8px auto 16px; max-width: 55ch; }
+.settings-view :is(.environment-empty > p, .users-empty) { color: var(--settings-muted); }
 .settings-view #content .secret-sharing { padding: 16px 20px; border: 0; background: var(--settings-subtle); border-radius: 8px; margin: 0 0 24px; max-width: 100%; font-size: var(--settings-caption); color: var(--settings-muted); }
 .settings-view .skills-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-block-end: 16px; }
-.settings-view .skills-filters>input { width: min(100%,340px); }
+.settings-view .skills-filters>input { flex: 0 1 340px; width: min(100%,340px); }
 .settings-view .skills-filters label { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; font-size: var(--settings-caption); }
+.settings-view #skill-count { margin: 0; margin-inline-start: auto; flex-shrink: 0; }
 .settings-view :is(#skill-library,.secret-list) { border-block-start: 1px solid var(--settings-line); }
 .settings-view #content :is(.skill-card,.secret-card) { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 24px; padding: 22px 4px; margin: 0; border: 0; border-bottom: 1px solid var(--settings-line); border-radius: 0; background: var(--settings-surface); box-shadow: none; }
 .settings-view :is(.skill-card,.secret-card)>div:first-child { min-width: 0; flex: 1; }
 .settings-view :is(.skill-card,.secret-card) strong { font-size: var(--settings-body); font-weight: 550; overflow-wrap: anywhere; }
-.settings-view .skill-card p { max-width: 70ch; margin: 8px 0; color: var(--settings-muted); font-size: var(--settings-caption); }
-.settings-view .skill-title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-.settings-view .skill-card code { font-size: .733333rem; color: var(--settings-muted); background: var(--settings-subtle); padding: 3px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.settings-view #content .skill-card { padding-block: 8px; gap: 16px; }
+.settings-view .skill-info { display: grid; gap: 4px; }
+.settings-view .skill-card p { max-width: 70ch; margin: 0; color: var(--settings-muted); font-size: var(--settings-caption); }
+.settings-view .skill-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.settings-view .skill-identity { display: inline-flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.settings-view .skill-identity .skill-symbol { flex-shrink: 0; }
+.settings-view .skill-card .secret-scope { margin: 0; }
+.settings-view .skill-card code { min-width: 0; max-width: 100%; font-size: .733333rem; color: var(--settings-muted); background: var(--settings-subtle); padding: 3px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.settings-view .skill-card .skill-card-actions { gap: 4px; }
+.settings-view .skill-card-actions button { white-space: nowrap; }
 .settings-view :is(.skill-card-actions,.credential-actions,.environment-card-actions) { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .settings-view .secret-list { gap: 0; }
 .settings-view #content .secret-card { padding-block: 12px; gap: 16px; }
@@ -148,6 +157,7 @@
 .settings-view .memory-learning label { line-height: 1.5; }
 .settings-view .memory-learning>[data-slot="native-select-wrapper"] { width: min(100%,320px); flex-shrink: 0; }
 .settings-view .memory-privacy { margin-bottom: 24px; color: var(--settings-muted); }
+.settings-view :is(p,li) > a { text-decoration: underline; text-underline-offset: 3px; }
 .settings-view .memory-review { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-block: 16px; }
 .settings-view .memory-review p { flex: 1 1 240px; margin: 0; }
 .settings-view .memory-filter { margin-block: 24px 16px; flex-wrap: wrap; }
@@ -192,7 +202,7 @@
 .settings-view .environment-card-top { gap: 12px; align-items: flex-start; }
 .settings-view .environment-card-top h2 { margin: 0 0 6px; }
 .settings-view .environment-card-top p { margin-bottom: 0; font: .733333rem/1.6 var(--mono); overflow-wrap: anywhere; color: var(--settings-muted); }
-.settings-view .environment-card-state { padding-block: 12px 0; flex-wrap: wrap; font-size: var(--settings-caption); gap: 8px 16px; margin-block: 16px; }
+.settings-view .environment-card-state { padding-block: 12px 0; flex-wrap: wrap; font-size: var(--settings-caption); color: var(--settings-muted); gap: 8px 16px; margin-block: 16px; }
 .settings-view .environment-fallback,.settings-view .environment-footnote { font-size: var(--settings-caption); line-height: 1.6; color: var(--settings-muted); }
 .settings-view .environment-build-state { padding: 12px; margin-block: 16px; border-radius: 8px; min-width: 0; }
 .settings-view .environment-build-state.env-failed { background: var(--settings-danger-bg); color: var(--settings-danger); }
@@ -215,6 +225,7 @@
 .settings-view .user-role-guide { margin-block: 24px; padding: 0; gap: 32px; }
 .settings-view .user-role-guide p { font-size: var(--settings-caption); color: var(--settings-muted); }
 .settings-view .user-history { border-top: 1px solid var(--settings-line); padding-block: 12px; }
+.settings-view .user-history summary > span { color: var(--settings-muted); }
 .settings-view :is(.users-table-scroll,.spend-table-wrap) { overflow-x: auto; scrollbar-width: auto; }
 /* Keep scrolling on the labelled, focusable region used by the controllers. */
 .settings-view :is(.users-table-scroll,.spend-table-wrap)>[data-slot="table-container"] { overflow: visible; }
@@ -257,6 +268,7 @@
 .settings-view [data-slot="dialog-content"] .field { margin-block-end: 20px; }
 .settings-view [data-slot="dialog-content"] .field>label { display: block; margin-block-end: 8px; }
 .settings-view [data-slot="dialog-content"] :is(.subtext,small,.automation-policy) { color: var(--settings-muted); font-size: var(--settings-caption); line-height: 1.6; }
+.settings-view .environment-dialog-header p { color: var(--settings-muted); }
 .settings-view [data-slot="dialog-content"] :is(.credential-actions,.role-actions,.environment-dialog-actions) { gap: 12px; margin-block-start: 24px; padding-block-start: 20px; border-top: 1px solid var(--settings-line); }
 .settings-view [data-slot="dialog-content"] [type=submit] { background: var(--settings-accent); color: #fff; border-color: var(--settings-accent); }
 .settings-view [data-slot="dialog-content"] .field :is(input,select,textarea) { width: 100%; }
@@ -282,7 +294,6 @@
 @media (max-width:1150px) {
   .settings-view #content { padding-inline: 28px; }
   .settings-view :is(.skill-card,.secret-card) { flex-wrap: wrap; }
-  .settings-view .skill-card-actions { flex-basis: 100%; }
   .settings-view .setup-grid { grid-template-columns: 1fr; }
   .settings-view .spend-section .section-header { flex-wrap: wrap; }
   .settings-view .spend-cards strong { font-size: 1.666667rem; }
@@ -308,6 +319,9 @@
   .settings-view .memory-learning select { max-width: 100%; }
   .settings-view .memory-filter input { width: 100%; }
   .settings-view .environment-explainer { grid-template-columns: 1fr; }
+  .settings-view #content .skill-card { gap: 8px; }
+  .settings-view .skill-card>:is(.skill-info,.skill-card-actions) { flex-basis: 100%; }
+  .settings-view .skill-card-actions button { min-height: 44px; }
   .settings-view #content .secret-card { gap: 8px; }
   .settings-view .secret-card>.secret-info { flex-basis: 100%; }
   .settings-view .secret-card .credential-actions { flex-basis: 100%; }
@@ -535,6 +549,7 @@
 .settings-view .automation-scopes button[aria-pressed=true] { color: var(--settings-accent); background: var(--settings-selected); }
 .automation-scopes span { font-variant-numeric: tabular-nums; margin-inline-start: 4px; }
 .automation-toolbar input[type=search] { width: 240px; }
+.automation-toolbar .settings-result-count { margin-inline-start: 0; }
 .automation-template-list { display: grid; gap: 12px; }
 .settings-view .automation-template-list button { padding: 20px; text-align: start; border: 1px solid var(--settings-line); background: var(--settings-surface); }
 .automation-template-list :is(strong,span,small) { display: block; }
@@ -577,6 +592,7 @@
 @media(max-width:768px) {
   .automation-discover { align-items: start; flex-direction: column; gap: 16px; padding: 20px; }
   .automation-toolbar input[type=search] { width: 100%; }
+  .automation-toolbar .settings-result-count { margin-inline-start: auto; }
   .automation-editor-body { padding: 16px; }
   .automation-editor > header { padding: 16px; flex-wrap: wrap; }
   .automation-editor > header > div { margin-inline-start: auto; }

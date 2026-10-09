@@ -81,6 +81,12 @@ export function createDialog(): DialogHost {
     const [visible, setVisible] = useState(false)
     changeOpen = setVisible
     const cancel = (event: Event) => {
+      // A controller's Select has its own React root. During portal mount,
+      // Escape/outside clicks still belong to that menu, not the form beneath it.
+      if (host.querySelector('[data-slot="select-trigger"][data-state="open"]')) {
+        event.preventDefault()
+        return
+      }
       if (!host.dispatchEvent(new Event("cancel", { cancelable: true }))) event.preventDefault()
     }
     const label = host.getAttribute("aria-label") || host.querySelector("h1,h2,h3,strong")?.textContent || "Dialog"
