@@ -1456,3 +1456,34 @@ for (const width of [1440, 768, 320]) {
     assert.equal(await page.locator('[data-slot="dialog-overlay"]').count(), 0);
   });
 }
+
+for (const width of [1440, 768, 320]) {
+  for (const fixture of ['member', 'populated']) {
+    test(`session filter paints only its styled label for ${fixture} at ${width}px`, async t => {
+      const page = await pageFor(t, 'tasks', fixture, width);
+      if (width < 850) await page.getByRole('button', { name: 'Open sidebar', exact: true }).click();
+      const source = page.locator('#session-scope');
+      const trigger = source.locator('..').getByRole('combobox');
+      await trigger.waitFor({ state: 'visible' });
+      assert.equal(await source.evaluate(node => {
+        const style = getComputedStyle(node);
+        return style.visibility === 'hidden' || Number(style.opacity) === 0;
+      }), true, 'Native label must not paint beneath the styled label');
+      assert.equal(await trigger.innerText(), 'My sessions');
+      assert.equal(await trigger.locator('span').first().evaluate(node => node.scrollWidth <= node.clientWidth), true, 'Session label is not truncated');
+      assert.ok((await source.boundingBox()).width > 0, 'Native select retains layout sizing');
+      if (fixture === 'member') {
+        assert.equal(await source.isDisabled(), true);
+        assert.equal(await trigger.getAttribute('data-disabled'), '');
+        await trigger.click({ force: true });
+        assert.equal(await page.getByRole('listbox').count(), 0);
+      } else {
+        await choose(page, source, 'all');
+        assert.equal(await source.inputValue(), 'all');
+        assert.equal(await trigger.innerText(), 'All sessions');
+        await choose(page, source, 'mine');
+        assert.equal(await source.inputValue(), 'mine');
+      }
+    });
+  }
+}
