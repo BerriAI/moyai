@@ -3,6 +3,7 @@ import asyncio
 import base64
 import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -86,19 +87,38 @@ async def test_sdk_contract_and_proxy_auth(settings, monkeypatch):
         stub.assert_no_pending_responses()
 
 
-async def test_uncertain_mutation_is_not_retried(settings, monkeypatch):
+@pytest.mark.parametrize('path', ['/start', '/computer', '/checkpoint', '/initialize'])
+@pytest.mark.parametrize('failure', ['connection', 'gateway'])
+async def test_uncertain_mutation_is_not_retried(settings, monkeypatch, path, failure):
     backend = LambdaProvider(settings)
     sandbox = Sandbox(backend, vm())
     backend.aws = AsyncMock(return_value={'authToken': {'X-aws-proxy-auth': 'jwe'}})
     calls = []
     def response(request):
         calls.append(request)
+        if failure == 'gateway':
+            return httpx.Response(502)
         raise httpx.ReadError('lost acknowledgement')
     client = httpx.AsyncClient
     monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: client(transport=httpx.MockTransport(response), **kw))
-    with pytest.raises(httpx.ReadError):
-        await sandbox.exec.aio('sh', '-c', 'external-action')
+    with pytest.raises(httpx.ReadError if failure == 'connection' else RuntimeError):
+        await sandbox.request(path, {'id': 'uncertain-action'})
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('path', ['/health', '/job', '/read', '/file/read', '/file/stat'])
+async def test_transient_gateway_failure_retries_only_the_same_observation(settings, monkeypatch, path):
+    backend = LambdaProvider(settings)
+    sandbox = Sandbox(backend, vm())
+    backend.aws = AsyncMock(return_value={'authToken': {'X-aws-proxy-auth': 'jwe'}})
+    calls = []
+    def response(request):
+        calls.append(request.content)
+        return httpx.Response(502) if len(calls) == 1 else httpx.Response(200, json={'state': 'done'})
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kw: client(transport=httpx.MockTransport(response), **kw))
+    assert await sandbox.request(path, {'id': 'existing-job', 'stdout': 128}) == {'state': 'done'}
+    assert calls == [calls[0], calls[0]]
 
 
 @pytest.mark.parametrize('endpoint', ['https://evil.test', 'http://mvm-test.lambda-microvm.us-east-1.on.aws',
@@ -365,6 +385,39 @@ async def test_checkpoint_serializes_other_handles_for_same_vm(settings):
     await task
     await pending
     reader._request.assert_awaited_once()
+
+
+def test_checkpoint_hashes_shared_data_once_and_detects_same_metadata_edits(tmp_path, monkeypatch):
+    source, target, work = (tmp_path / name for name in ('source', 'target', 'work'))
+    for root in (source, target, work):
+        root.mkdir()
+    for root in (source, target):
+        (root / 'file').write_text('old-data')
+        (root / 'linked').hardlink_to(root / 'file')
+    base = work / 'base.json'
+    checkpoint.baseline(source, base)
+    before = (source / 'file').stat()
+    (source / 'file').write_text('new-data')
+    os.utime(source / 'file', ns=(before.st_atime_ns, before.st_mtime_ns))
+    original_digest, reads = checkpoint.digest, []
+    def digest(path):
+        if path.parent == source:
+            reads.append(path)
+        return original_digest(path)
+    monkeypatch.setattr(checkpoint, 'digest', digest)
+    archive = work / 'checkpoint.tar.gz'
+    result = checkpoint.pack(archive, root=source, baseline_path=base, max_bytes=MAX_ARCHIVE)
+    assert len(reads) == 1
+    checkpoint.restore(archive, root=target, expected_sha256=result['sha256'])
+    assert (target / 'file').read_text() == (target / 'linked').read_text() == 'new-data'
+    assert (target / 'file').stat().st_ino == (target / 'linked').stat().st_ino
+    # A later checkpoint must hash again even with unchanged size and mtime.
+    (source / 'file').write_text('next-one')
+    os.utime(source / 'file', ns=(before.st_atime_ns, before.st_mtime_ns))
+    result = checkpoint.pack(archive, root=source, baseline_path=base, max_bytes=MAX_ARCHIVE)
+    assert len(reads) == 2
+    checkpoint.restore(archive, root=target, expected_sha256=result['sha256'])
+    assert (target / 'linked').read_text() == 'next-one'
 
 
 def test_delta_restores_changed_file_types_and_new_hardlinks(tmp_path):

@@ -228,20 +228,32 @@ class Sandbox:
                 not url.hostname.endswith('.lambda-microvm.' + self.provider.settings.lambda_region + '.on.aws')
                 or url.path not in {'', '/'} or url.query or url.fragment):
             raise ValueError('Unexpected AWS MicroVM endpoint')
-        # Never retry execution/Computer input after ambiguous transport errors.
+        # Observations can be retried at the same cursor/job ID. Execution,
+        # checkpoint submission and Computer input may have taken effect even
+        # when AWS loses the reply, so they always get exactly one attempt.
+        attempts = 3 if path in {'/health', '/job', '/read', '/file/read', '/file/stat'} else 1
         async with httpx.AsyncClient(timeout=530 if path == '/computer' else 60, follow_redirects=False) as client:
-            async with client.stream('POST', 'https://' + url.netloc + path,
-                    json=data, headers={'X-aws-proxy-auth': self.auth, 'X-aws-proxy-port': '80'}) as response:
-                if response.status_code == 404:
-                    raise FileNotFoundError('AWS sandbox file or execution not found')
-                if response.status_code != 200:
-                    raise RuntimeError(f'AWS sandbox returned HTTP {response.status_code}')
-                result = bytearray()
-                async for chunk in response.aiter_bytes():
-                    result.extend(chunk)
-                    if len(result) > 2 * 1024 * 1024:
-                        raise ValueError('AWS sandbox response exceeds 2 MiB')
-                return json.loads(result)
+            for attempt in range(attempts):
+                if attempt:
+                    await asyncio.sleep(.5 * attempt)
+                try:
+                    async with client.stream('POST', 'https://' + url.netloc + path,
+                            json=data, headers={'X-aws-proxy-auth': self.auth, 'X-aws-proxy-port': '80'}) as response:
+                        if response.status_code in {429, 500, 502, 503, 504} and attempt + 1 < attempts:
+                            continue
+                        if response.status_code == 404:
+                            raise FileNotFoundError('AWS sandbox file or execution not found')
+                        if response.status_code != 200:
+                            raise RuntimeError(f'AWS sandbox returned HTTP {response.status_code}')
+                        result = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            result.extend(chunk)
+                            if len(result) > 2 * 1024 * 1024:
+                                raise ValueError('AWS sandbox response exceeds 2 MiB')
+                        return json.loads(result)
+                except httpx.TransportError:
+                    if attempt + 1 == attempts:
+                        raise
 
     async def job(self, path, body, *, timeout):
         # The guest journals before executing. An uncertain POST can be polled

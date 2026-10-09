@@ -1,6 +1,6 @@
 """File-only MicroVM checkpoints. This module runs in the guest, never the web host."""
 import base64
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -9,6 +9,7 @@ from pathlib import Path
 import stat
 import subprocess
 import tarfile
+import threading
 
 # Runtime machinery, kernel mounts, host-injected networking, and per-exec
 # credentials do not belong to another VM. Everything else is included, even
@@ -46,12 +47,16 @@ def attributes(path):
             for key in (os.listxattr(path, follow_symlinks=False) if hasattr(os, 'listxattr') else [])}
 
 
-def signature(path):
+def signature(path, hash_file=None):
     info = path.lstat()
+    content = ''
+    if stat.S_ISLNK(info.st_mode):
+        content = os.readlink(path)
+    elif stat.S_ISREG(info.st_mode):
+        content = (hash_file(path, info) if hash_file else digest(path)).hexdigest()
     return [info.st_mode, info.st_uid, info.st_gid, info.st_nlink,
             # Container/image layers normalize file timestamps to whole seconds.
-            os.readlink(path) if path.is_symlink() else digest(path).hexdigest() if path.is_file() else '',
-            attributes(path), int(info.st_mtime) if not path.is_dir() else 0]
+            content, attributes(path), int(info.st_mtime) if not stat.S_ISDIR(info.st_mode) else 0]
 
 
 def baseline(root=Path('/'), target=BASELINE):
@@ -80,10 +85,30 @@ def pack(destination, *, root=Path('/'), baseline_path=BASELINE, max_bytes):
     # exhaust the checkpoint deadline even when very few files changed. Keep
     # full content hashing, with bounded parallel reads and deterministic order.
     changed = []
+    hashes, hashes_lock = {}, threading.Lock()
+    def hash_file(path, info):
+        if info.st_nlink == 1:
+            return digest(path)
+        # Installed packages can share data with package-manager caches. The
+        # guest is quiesced, so each inode needs one full read per checkpoint.
+        # Never reuse this cache across checkpoints or restored VMs.
+        key = (info.st_dev, info.st_ino)
+        with hashes_lock:
+            pending = hashes.get(key)
+            owner = pending is None
+            if owner:
+                pending = hashes[key] = Future()
+        if owner:
+            try:
+                pending.set_result(digest(path))
+            except BaseException as exc:
+                pending.set_exception(exc)
+                raise
+        return pending.result()
     with ThreadPoolExecutor(max_workers=8) as pool:
         for offset in range(0, len(names), 1024):
             batch = names[offset:offset + 1024]
-            signatures = pool.map(signature, (root / name for name in batch))
+            signatures = pool.map(lambda name: signature(root / name, hash_file), batch)
             changed.extend(name for name, value in zip(batch, signatures) if previous.get(name) != value)
     metadata = json.dumps({'version': 1, 'deleted': deleted}).encode()
     with tarfile.open(destination, 'w:gz', format=tarfile.PAX_FORMAT) as archive:
