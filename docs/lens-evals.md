@@ -3,17 +3,30 @@
 Lens owns the regression dataset, scorers, and pass/fail gates. GitHub Actions runs the checked-out Moyai Python code, gives it each saved input, and sends the actual outputs and traces to Lens. No deployed Moyai URL or workspace password is needed.
 
 ```python
+import json
+import os
+
 from lens import Lens
 from evals.agent import MoyaiAgent
+from evals.test_moyai import verification_for, verify_solution
 
-lens = Lens(base_url=LENS_BASE_URL, api_key=LENS_API_KEY)
-with lens.evals.test("moyai-python-coding-regressions") as evaluation:
-    for index, case in enumerate(evaluation.cases):
-        agent = MoyaiAgent.from_env(workspace=work_dir / f"case-{index}")
-        result = agent.run(input=case.input)
-        evaluation.record(case, output=result.output, trace_id=result.trace_id)
-    evaluation.assert_passed()
+
+def test_moyai(tmp_path):
+    lens = Lens(base_url=os.environ["LENS_BASE_URL"], api_key=os.environ["LENS_API_KEY"])
+    with lens.evals.test("moyai-python-coding-regressions") as evaluation:
+        for index, case in enumerate(evaluation.cases):
+            workspace = tmp_path / f"case-{index}"
+            result = MoyaiAgent.from_env(workspace=workspace).run(input=case.input)
+            checks = verify_solution(workspace, verification_for(case.input))
+            evaluation.record(
+                case,
+                output=json.dumps({"answer": result.output, "verification": checks}),
+                trace_id=result.trace_id,
+            )
+        evaluation.assert_passed()
 ```
+
+The repository's [test driver](../evals/test_moyai.py) also records independent case errors, explicit base/head metadata, and the report artifact. `evaluation.assert_passed()` finishes scoring and fails pytest if a saved gate fails.
 
 The SDK executes inside the runner. The runner calls the model gateway for inference and Lens for the dataset, trace ingestion, and scoring. Lens does not execute arbitrary Python or start another GitHub runner.
 
@@ -36,7 +49,22 @@ Configure the saved scorer to require `verification.passed` to be `true`, and ju
 
 ## 2. Configure the runner
 
-The workflow installs the pinned Lens SDK from GitHub and Moyai's existing Codex SDK runtime. Set the Lens origin as a repository variable and model/Lens credentials as repository secrets. The workflow maps them to these runtime variables:
+The workflow installs the pinned Lens SDK from GitHub and Moyai's existing Codex SDK runtime. In **GitHub → Settings → Secrets and variables → Actions**, configure these exact names:
+
+| Kind | GitHub name | Value |
+| --- | --- | --- |
+| Variable | `LENS_BASE_URL` | Lens origin, for example `https://litellm-lens.onrender.com` |
+| Variable | `LENS_TRACE_ENDPOINT` | Lens origin plus `/v1/traces` |
+| Variable | `MOYAI_EVAL_GATEWAY_URL` | Model gateway origin |
+| Variable | `MOYAI_EVAL_MODEL` | Gateway model, for example `openai/gpt-6.1-sol` |
+| Variable | `MOYAI_EVAL_NAME` | Optional; defaults to `moyai-python-coding-regressions` |
+| Secret | `LENS_API_KEY` | Lens evaluation API key |
+| Secret | `LENS_TRACE_API_KEY` | Lens trace ingestion key |
+| Secret | `MOYAI_EVAL_GATEWAY_KEY` | Model inference credential |
+
+GitHub supplies the workflow's `GITHUB_TOKEN`; no personal access token is needed for the Lens PR comment. The workflow grants it check and PR-write permissions only for the evaluation job.
+
+The workflow maps those values to the following runtime variables. For a local run, set these runtime names directly:
 
 | Variable | Purpose |
 | --- | --- |
@@ -75,6 +103,19 @@ The PR report should identify the dataset revision, source SHAs, scorer, case co
 The test uses Moyai's real `create_agent` / `run_conversation` seam, native Codex or Claude adapter, context journal, broker model handling, tool activity, and OTLP tracing. It is a single-turn coding-harness regression test. Its concise coding-system instructions are fixed by the evaluation driver.
 
 It does **not** start the production Modal/Substrate/Lambda lifecycle, Temporal scheduling, Slack, multi-agent coordination, or the full production session prompt. Those still need their own integration tests. The separate [deployment readiness checker](../evals/preflight.py) remains available for testing a deployed Moyai service; it is not required by the Python-in-CI flow.
+
+## Require Lens before merging
+
+The workflow runs on every PR targeting `main`, including documentation-only changes. The **Lens agent regression check** job fails before checkout for fork or Dependabot PRs, so a skipped job cannot satisfy the Lens requirement. A maintainer must review those changes and evaluate them on a trusted same-repository branch. No untrusted PR code runs with model or Lens secrets.
+
+[lens-evals.json](../.github/rulesets/lens-evals.json) defines a separate active ruleset for `main`: require **Lens agent regression check** from the GitHub Actions app, require the branch to be up to date, and allow no bypass actors. Committing this file does not activate branch protection. First deploy this workflow and confirm a real before/after Lens evaluation passes, then an administrator can create the ruleset:
+
+```sh
+gh api --method POST repos/BerriAI/moyai/rulesets \
+  --input .github/rulesets/lens-evals.json
+```
+
+Keep the existing `protect-main` ruleset unchanged. This additional rule adds Lens to the existing merge requirements. If the Lens ruleset already exists, update its resolved ruleset ID instead of creating a duplicate. See [GitHub's ruleset documentation](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets#require-status-checks-to-pass-before-merging) for strict checks and expected source apps.
 
 ## Troubleshooting
 

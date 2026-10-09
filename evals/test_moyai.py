@@ -64,7 +64,7 @@ def test_moyai(tmp_path):
             try:
                 result = MoyaiAgent.from_env(workspace=workspace).run(input=case.input)
             except AgentRunError as exc:
-                evaluation.record_error(case, str(exc))
+                evaluation.record_error(case, exc)
                 continue
             verification = verify_solution(workspace, verification_code)
             evaluation.record(case, output=json.dumps({'answer': result.output, 'verification': verification}),

@@ -2,16 +2,7 @@ name: Lens evals
 
 on:
   pull_request:
-    paths:
-      - 'app/**'
-      - 'sandbox/**'
-      - 'evals/**'
-      - 'tests/test_lens_evals.py'
-      - 'tests/test_python_evals.py'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - '.github/workflows/lens-evals.yml'
-  workflow_dispatch:
+    branches: [main]
 
 permissions:
   contents: read
@@ -22,10 +13,7 @@ concurrency:
 
 jobs:
   python-regressions:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]'
+    name: Lens agent regression check
     runs-on: ubuntu-24.04
     container:
       image: rust:1.99-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
@@ -46,6 +34,19 @@ jobs:
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - name: Require a trusted pull request for Lens evaluation
+        env:
+          EVAL_EVENT: ${{ github.event_name }}
+          EVAL_SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          EVAL_TARGET_REPOSITORY: ${{ github.repository }}
+          EVAL_ACTOR: ${{ github.actor }}
+        run: |
+          if [ "$EVAL_EVENT" != pull_request ] ||
+             [ "$EVAL_SOURCE_REPOSITORY" != "$EVAL_TARGET_REPOSITORY" ] ||
+             [ "$EVAL_ACTOR" = 'dependabot[bot]' ]; then
+            echo '::error::Lens requires a trusted same-repository PR. A maintainer must review and move this change to a trusted branch before evaluation. No PR code has been checked out.'
+            exit 1
+          fi
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.pull_request.head.sha }}
@@ -64,7 +65,7 @@ jobs:
         id: announce
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: uv run --frozen --group eval python -m lens.cli report-start --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
+        run: GITHUB_SHA="$HEAD_SHA" uv run --frozen --group eval python -m lens.cli report-start --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
       - name: Prepare the same eval driver for before and after
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -108,7 +109,7 @@ jobs:
           if [ -f lens-results/after.json ] && [ -f lens-results/before.json ]; then
             uv run --frozen --group eval python -m lens.github lens-results/after.json
           else
-            uv run --frozen --group eval python -m lens.cli report-failed --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
+            GITHUB_SHA="$HEAD_SHA" uv run --frozen --group eval python -m lens.cli report-failed --name "$MOYAI_EVAL_NAME" --pr "$PR_NUMBER"
             exit 1
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
