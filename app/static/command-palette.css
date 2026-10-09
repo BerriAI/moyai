@@ -1,0 +1,38 @@
+[data-slot="dialog-content"][data-dialog-id="command-palette"] {
+  width: min(720px, calc(100vw - 32px)); padding: 0; border-radius: 16px;
+  max-height: min(720px, calc(100dvh - 32px)); overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.command-search-bar { display: flex; align-items: center; gap: 12px; padding: 20px; border-bottom: 1px solid var(--ui-border); }
+.command-search-icon, .command-icon { color: var(--ui-muted); flex-shrink: 0; display: grid; place-items: center; }
+#command-search { flex: 1; min-width: 0; height: 40px; padding: 4px; border: 0; box-shadow: none; background: transparent; font-size: 20px; }
+#command-search:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 4px; }
+.command-close { flex-shrink: 0; padding: 6px; border: 0; background: transparent; color: var(--ui-muted); }
+.command-body { overflow-y: auto; min-height: 0; padding: 8px; overscroll-behavior: contain; }
+#command-scope { margin: 8px 12px 12px; font-size: 12px; color: var(--ui-muted); }
+.command-group-title { margin: 16px 12px 6px; font-size: 13px; color: var(--ui-muted); }
+.command-option { display: flex; align-items: center; gap: 14px; padding: 12px; min-height: 48px; border-radius: 8px; cursor: pointer; }
+.command-option[aria-selected="true"] { background: var(--ui-secondary); color: var(--ui-foreground); }
+.command-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.command-label { font-size: 15px; line-height: 1.4; overflow-wrap: anywhere; }
+.command-description, .command-snippet { color: var(--ui-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.command-snippet { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+#command-status { padding: 12px; font-size: 13px; color: var(--ui-muted); }
+#command-status:empty { display: none; }
+#command-status button { display: inline-flex; margin-top: 8px; }
+.command-footer { display: flex; flex-wrap: wrap; gap: 16px; padding: 14px 20px; border-top: 1px solid var(--ui-border); color: var(--ui-muted); font-size: 12px; }
+.command-footer span { display: flex; align-items: center; gap: 6px; }
+.command-footer span:last-child { margin-left: auto; }
+#command-palette kbd, #command-menu kbd, #new-task kbd { font-family: inherit; font-size: 12px; line-height: 1.5; white-space: nowrap; color: var(--ui-muted); }
+.command-footer kbd, .command-close kbd { background: var(--ui-secondary); border: 1px solid var(--ui-border); padding: 1px 4px; border-radius: 4px; }
+#command-menu { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; }
+#command-menu kbd { margin-left: auto; }
+@media (max-width: 600px) {
+  .command-search-bar { padding: 12px; gap: 8px; }
+  #command-search { font-size: 16px; }
+  .command-option { gap: 10px; }
+  .command-footer { gap: 8px; padding: 12px; }
+  .command-option > kbd { display: none; }
+}
+
+#new-task kbd { display: inline-block; margin-left: auto; opacity: 1; }

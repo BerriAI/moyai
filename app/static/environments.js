@@ -47,7 +47,7 @@ async function renderEnvironments(background = false) {
 }
 function editEnvironment(data,item) {
   clearTimeout(environmentRefresh);
-  const dialog=MoyaiUI.createDialog();dialog.className='environment-dialog';dialog.setAttribute('aria-label',item?'Edit environment recipe':'New environment');
+  const dialog=MoyaiUI.createDialog();dialog.dataset.dialogScope='settings';dialog.className='environment-dialog';dialog.setAttribute('aria-label',item?'Edit environment recipe':'New environment');
   MoyaiUI.render(dialog, `<form><div class="environment-dialog-header"><div><h2>${item?'Edit recipe':'New environment'}</h2><p>Shared with your organization after a successful build.</p></div><button type="button" class="icon-button" data-close aria-label="Close">×</button></div>
     ${!item?`<div class="field"><label for="env-template">Start from a template</label><select id="env-template">${data.templates.map((t,i)=>`<option value="${i}">${esc(t.name)}</option>`).join('')}</select></div>`:''}
     <div class="environment-form-grid"><div class="field"><label for="env-name">Name</label><input id="env-name" required maxlength="80"></div><div class="field"><label for="env-repository">GitHub repository</label><input id="env-repository" required placeholder="owner/repository"></div><div class="field"><label for="env-ref">Branch, tag, or commit</label><input id="env-ref" required></div><div class="field"><label for="env-access">Repository access</label><select id="env-access"><option value="public">Public repository</option><option value="github">Shared GitHub connection</option></select></div></div>
@@ -74,7 +74,7 @@ function editEnvironment(data,item) {
   dialog.showModal();
 }
 async function showEnvironmentLog(id) {
-  const dialog=MoyaiUI.createDialog();dialog.className='environment-dialog environment-log';dialog.setAttribute('aria-label','Environment build log');
+  const dialog=MoyaiUI.createDialog();dialog.dataset.dialogScope='settings';dialog.className='environment-dialog environment-log';dialog.setAttribute('aria-label','Environment build log');
   MoyaiUI.render(dialog, '<div class="environment-dialog-header"><h2>Build log</h2><button class="icon-button" aria-label="Close">×</button></div><p role="status"></p><pre tabindex="0"></pre>');
   document.body.append(dialog);dialog.querySelector('button').onclick=()=>dialog.close();let timer;
   dialog.addEventListener('close',()=>{clearTimeout(timer);dialog.remove();if(state.view==='environments')renderEnvironments().catch(showError);});dialog.showModal();
