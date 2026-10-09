@@ -356,6 +356,16 @@ class CodexAgent(HarnessAgent):
         self.journal.call_namespace = uuid4().hex
         self.inputs = HarnessInputs(self.journal)
         message_items = {}
+        pending_message = None
+
+        def publish_pending():
+            # Providers may omit phase. The newest unclassified item could be
+            # the answer; only subsequent work proves it was an interim update.
+            nonlocal pending_message
+            if pending_message is not None:
+                self.context.activity.commentary(pending_message['text'])
+                pending_message = None
+
         finished, answer = False, ''
         failure = {}
         settlement_started = False
@@ -414,16 +424,25 @@ class CodexAgent(HarnessAgent):
                                 if item['type'] == 'userMessage':
                                     # Native incorporation, rather than arrival time,
                                     # fences final candidates from before a correction.
+                                    publish_pending()
                                     message_items.clear()
                                 elif item['type'] == 'agentMessage' and event.method == 'item/completed':
                                     if item['id'] in message_items:
                                         continue
                                     message_items[item['id']] = item
                                     text = item.get('text', '')
+                                    if text:
+                                        publish_pending()
                                     if text and item.get('phase') != 'final_answer':
                                         self.journal.finish(text)
-                                        self.context.activity.commentary(text)
+                                        if item.get('phase') == 'commentary':
+                                            self.context.activity.commentary(text)
+                                        else:
+                                            pending_message = item
                                 else:
+                                    if (item['type'] in {'commandExecution', 'fileChange', 'mcpToolCall', 'imageView'}
+                                            and item['id'] not in self.calls):
+                                        publish_pending()
                                     self.record_item(item, completed=event.method == 'item/completed')
                             elif event.method == 'error':
                                 failure.update(codex_details(payload.get('error'), will_retry=payload.get('willRetry')))
@@ -456,6 +475,7 @@ class CodexAgent(HarnessAgent):
                                         self.context.activity.emit('status', 'Connection restored. Continuing the task.',
                                             {'activity_version': 1, 'phase': 'recovered', 'stage': 'model_transport'})
                                         prior_turns.add(turn.turn.id)
+                                        publish_pending()
                                         message_items.clear()
                                         failure.clear()
                                         late_inputs.extend(self.inputs.take())
@@ -478,6 +498,7 @@ class CodexAgent(HarnessAgent):
                                     prior_turns.add(turn.turn.id)
                                     if compaction_attempts <= 3 and await self.compact_context(client, thread.thread.id, prior_turns):
                                         self.context.relay.context_required = None
+                                        publish_pending()
                                         message_items.clear()
                                         failure.clear()
                                         late_inputs.extend(self.inputs.take())
@@ -500,6 +521,7 @@ class CodexAgent(HarnessAgent):
                                     # answer that preceded its tool results.
                                     settlement_started = True
                                     prior_turns.add(turn.turn.id)
+                                    publish_pending()
                                     message_items.clear()
                                     turn = await self.await_with_tool_events(client, prior_turns,
                                         client.turn_start(thread.thread.id,
@@ -520,6 +542,7 @@ class CodexAgent(HarnessAgent):
                                     # A racing accepted message stays in this SDK session.
                                     if late_inputs or awaiting_answer or not self.inputs.close_if_empty():
                                         late_inputs.extend(self.inputs.take())
+                                        publish_pending()
                                         message_items.clear()
                                         turn = await self.await_with_tool_events(client, prior_turns,
                                             client.turn_start(thread.thread.id, '\n\n'.join(late_inputs) or
@@ -547,7 +570,13 @@ class CodexAgent(HarnessAgent):
             # Presentation is derived from native items, never another event.
             # Commentary already belongs to the journal; only confirmed final
             # items are committed here, once per native identity, not per text.
-            answer = '\n'.join(final_text or [item['text'] for item in message_items.values() if item.get('text')])
+            answer = '\n'.join(final_text) if final_text else (pending_message or {}).get('text', '')
+            if final_text:
+                publish_pending()
+        else:
+            # Failed/interrupted candidates remain saved public progress, never
+            # a confirmed final answer. Retries must not silently drop them.
+            publish_pending()
         diagnostic = failure_diagnostic(self, 'codex', failure) if not completed and not interrupted else None
         return {'completed': bool(completed), 'interrupted': interrupted,
                 'failed': not completed and not interrupted, 'messages': self.journal.messages,
