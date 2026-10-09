@@ -580,6 +580,10 @@ class DurableRunner(RunManager):
             if run.get('sandbox_provider') == 'lambda':
                 spec['rotation_at'] = state['machine_started'] + self.rotation_seconds(state)
             spec['chat_enabled'] = True
+            if (run['harness'] == 'codex' and self.settings.codex_runtime_reuse
+                    and self.settings.sandbox_idle_seconds and not run['parent_run_id']):
+                spec['codex_runtime_idle_seconds'] = min(300, self.settings.sandbox_idle_seconds)
+                spec['codex_runtime_scope'] = [run_id, run['active_user_id'], spec['model']]
             spec['transport_attempt'] = state.get('transport_attempt', 0)
             if state.get('resume_transport'):
                 spec['transport_recovery'] = state['resume_transport']

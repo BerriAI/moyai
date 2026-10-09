@@ -4,12 +4,15 @@ from pathlib import Path
 import subprocess
 
 
-def search_catalog(binary, home, model, env):
+def search_catalog(binary, home, model, env, *, cached=None):
     # Read the exact pinned binary's bundled metadata, without network discovery
     # or a copy of its model prompts in Moyai's source tree.
-    result = subprocess.run([str(binary), 'debug', 'models', '--bundled'],
-                            env=env, capture_output=True, text=True, check=True, timeout=10)
-    catalog = json.loads(result.stdout)
+    if cached is not None:
+        catalog = json.loads(Path(cached).read_text())
+    else:
+        result = subprocess.run([str(binary), 'debug', 'models', '--bundled'],
+                                env=env, capture_output=True, text=True, check=True, timeout=10)
+        catalog = json.loads(result.stdout)
     for descriptor in catalog['models']:
         if descriptor['slug'] != model:
             continue

@@ -1,10 +1,14 @@
 """Native Codex SDK execution within Moyai's existing sandbox and lifecycle."""
 import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
+import sys
+import tomllib
 from uuid import uuid4
 
 try:
@@ -142,9 +146,12 @@ class CodexAgent(HarnessAgent):
         env.update(CODEX_HOME=str(home), WORKSPACE_RUN_TOKEN=os.environ['WORKSPACE_RUN_TOKEN'])
         if bundled_path_dir():
             env['PATH'] = str(bundled_path_dir()) + os.pathsep + os.environ.get('PATH', '')
+        lease = getattr(ctx.relay, 'codex_runtime', None)
+        self.runtime_info = lease.ready() if lease else None
         catalog = search_catalog(bundled_codex_path(), home,
             ctx.spec['model'].removeprefix('openai/'),
-            {key: value for key, value in env.items() if key in keep | {'CODEX_HOME'}})
+            {key: value for key, value in env.items() if key in keep | {'CODEX_HOME'}},
+            **({'cached': self.runtime_info['catalog']} if self.runtime_info else {}))
         if catalog:
             settings['model_catalog_json'] = catalog
         settings_args = tuple(name + '=' + toml_value(value) for name, value in settings.items())
@@ -157,6 +164,50 @@ class CodexAgent(HarnessAgent):
         return CodexConfig(cwd=str(home), env=env,
                            launch_args_override=tuple(launch), config_overrides=settings_args,
                            client_name='moyai', client_title='Moyai', experimental_api=True)
+
+    @asynccontextmanager
+    async def native_client(self, home):
+        from openai_codex.async_client import AsyncCodexClient
+        from pydantic import RootModel
+        config = self.sdk_config(home)
+        self.runtime_config, self.runtime_thread, self.runtime_clean = None, None, False
+        lease = getattr(self.context.relay, 'codex_runtime', None)
+        if self.runtime_info:
+            self.runtime_config = tomllib.loads('\n'.join(config.config_overrides))
+            provider = self.runtime_config['model_providers']['moyai']
+            # The reusable process has no capability in its environment. Each
+            # ephemeral thread receives this invocation's relay and token only.
+            provider.pop('env_key', None)
+            provider['http_headers'] = {'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN']}
+            proxy = Path(__file__).with_name('codex_runtime.py')
+            config = replace(config, launch_args_override=(sys.executable, str(proxy),
+                             'proxy', self.runtime_info['socket']))
+            lease.clean = False
+        async with AsyncCodexClient(config) as client:
+            try:
+                yield client
+            finally:
+                if self.runtime_info:
+                    clean = False
+                    try:
+                        if self.runtime_clean and self.runtime_thread:
+                            async with asyncio.timeout(5):
+                                await client.request('thread/backgroundTerminals/clean',
+                                    {'threadId': self.runtime_thread}, response_model=RootModel[dict])
+                                await client.request('thread/unsubscribe', {'threadId': self.runtime_thread},
+                                                     response_model=RootModel[dict])
+                                while True:
+                                    loaded = await client.request('thread/loaded/list', {}, response_model=RootModel[dict])
+                                    if not loaded.root['data']:
+                                        clean = True
+                                        break
+                                    await asyncio.sleep(.01)
+                    except Exception:
+                        pass  # Cleanup failure discards reuse, never a completed answer.
+                    lease.clean = clean
+                    if not clean:
+                        await asyncio.to_thread(lease.close)
+                        self.context.relay.codex_runtime = None
 
     def record_item(self, item, *, completed):
         kind = item.get('type')
@@ -372,7 +423,6 @@ class CodexAgent(HarnessAgent):
                 await asyncio.gather(probe, return_exceptions=True)
 
     async def _run(self, prompt, system_message):
-        from openai_codex.async_client import AsyncCodexClient
         from openai_codex.errors import InvalidRequestError
         # Each fresh SDK invocation has its own local ceiling. The gateway and
         # shared recovery loop retain the whole task's request cap and deadline.
@@ -406,7 +456,7 @@ class CodexAgent(HarnessAgent):
         try:
             with tempfile.TemporaryDirectory(prefix='moyai-codex-') as home:
                 async with asyncio.timeout(getattr(self, 'context_timeout', self.context.spec.get('timeout')) or None):
-                    async with AsyncCodexClient(self.sdk_config(home)) as client:
+                    async with self.native_client(home) as client:
                         await client.initialize()
                         thread = await client.thread_start({
                             'model': self.context.spec['model'].removeprefix('openai/'), 'modelProvider': 'moyai',
@@ -417,7 +467,9 @@ class CodexAgent(HarnessAgent):
                             # The pinned SDK exposes this native app-server field
                             # through dict params. Consume output IDs and native
                             # search receipts, never private reasoning/response text.
-                            'experimentalRawEvents': True})
+                            'experimentalRawEvents': True,
+                            **({'config': self.runtime_config} if self.runtime_config else {})})
+                        self.runtime_thread = thread.thread.id
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
                             notification = asyncio.create_task(client.next_turn_notification(turn.turn.id))
@@ -580,6 +632,8 @@ class CodexAgent(HarnessAgent):
                                         late_inputs.clear()
                                         continue
                                 break
+                        self.runtime_clean = (finished and not self.stopped.is_set()
+                                              and not self.boundary_failed and not self.journal.pending)
         except Exception as exc:
             finished = False
             failure.update(exception_details(exc))

@@ -207,6 +207,20 @@ async def test_live_transport_window_reaches_launched_agent(durable: tuple[Tempo
     assert cloud.machines[0].spec['timeout'] is None
 
 
+@pytest.mark.parametrize(('enabled', 'idle', 'expected'), [
+    (False, 100, None), (True, 0, None), (True, 100, 100), (True, 3600, 300)])
+async def test_codex_warm_runtime_uses_current_actor_and_idle_bound(durable, enabled, idle, expected):
+    manager, cloud, run_id = durable
+    manager.settings.codex_runtime_reuse = enabled
+    manager.settings.sandbox_idle_seconds = idle
+    manager.store.execute("UPDATE runs SET harness='codex' WHERE id=?", (run_id,))
+    await drive(manager, run_id, phase='monitor')
+    spec = cloud.machines[0].spec
+    assert spec.get('codex_runtime_idle_seconds') == expected
+    if expected:
+        assert spec['codex_runtime_scope'] == [run_id, manager.store.run(run_id)['active_user_id'], spec['model']]
+
+
 @pytest.mark.parametrize(('kind', 'phase', 'stage', 'initial', 'expected'), [
     ('status', 'reconnecting', 'model_transport', 'running', 'reconnecting'),
     ('status', 'recovered', 'model_transport', 'reconnecting', 'running'),

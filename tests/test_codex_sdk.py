@@ -1414,11 +1414,13 @@ def test_stop_wakes_a_missing_output_notification_wait(codex_agent):
 
 
 @pytest.mark.parametrize('installed', [None, '0.1.0', '0.161.0'])
-def test_snapshot_repair_installs_only_pinned_codex_sdk(monkeypatch, installed):
+def test_snapshot_repair_installs_pinned_codex_transport(monkeypatch, installed):
     from importlib.metadata import PackageNotFoundError
     from sandbox import harness_dependencies
     calls = []
     def version(package):
+        if package == 'websockets':
+            return '16.1.1'
         assert package == 'openai-codex'
         if installed is None:
             raise PackageNotFoundError(package)
@@ -1429,7 +1431,7 @@ def test_snapshot_repair_installs_only_pinned_codex_sdk(monkeypatch, installed):
     harness_dependencies.prepare_codex()
     assert len(calls) == (installed != '0.161.0')
     if calls:
-        assert calls[0][1:] == ['-m', 'pip', 'install', 'openai-codex==0.161.0']
+        assert calls[0][1:] == ['-m', 'pip', 'install', 'openai-codex==0.161.0', 'websockets==16.1.1']
 
 
 @pytest.mark.parametrize('source', ['notification', 'turn', 'exception'])

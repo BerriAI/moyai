@@ -16,6 +16,7 @@ import tempfile
 LITELLM_REVISION = '36f96259f08d449bdc996ed36919c47b39ce527f'
 LITELLM_SOURCE = Path('/opt/litellm-harness')
 CODEX_SDK_VERSION = '0.161.0'
+CODEX_WEBSOCKETS_VERSION = '16.1.1'
 MCP_VERSION = '2.2.0'
 PI_VERSION = '1.1.0'
 PI_NODE_VERSION = '22.23.3'
@@ -73,12 +74,14 @@ def prepare_codex():
     from importlib.metadata import PackageNotFoundError, version
     try:
         installed = version('openai-codex')
+        websocket_version = version('websockets')
     except PackageNotFoundError:
-        installed = ''
-    if installed != CODEX_SDK_VERSION:
+        installed = websocket_version = ''
+    if installed != CODEX_SDK_VERSION or websocket_version != CODEX_WEBSOCKETS_VERSION:
         ensure_pip()
         subprocess.run([sys.executable, '-m', 'pip', 'install',
-                        'openai-codex==' + CODEX_SDK_VERSION], check=True, timeout=300)
+                        'openai-codex==' + CODEX_SDK_VERSION,
+                        'websockets==' + CODEX_WEBSOCKETS_VERSION], check=True, timeout=300)
 
 
 def prepare_runtime():

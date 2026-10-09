@@ -71,6 +71,13 @@ def run(spec):
             {'activity_version': 1, 'phase': 'broker_failure', **failure})).start()
     os.environ['MOYAI_CREDENTIAL_PROXY_URL'] = relay.url + '/credentials'
     try:
+        if spec.get('harness') == 'codex' and spec.get('codex_runtime_idle_seconds'):
+            try:
+                from .codex_runtime import RuntimeLease
+            except ImportError:
+                from codex_runtime import RuntimeLease
+            relay.codex_runtime = RuntimeLease(spec['codex_runtime_scope'], spec['codex_runtime_idle_seconds'],
+                                              model=spec['model'])
         return run_agent(spec, relay)
     except StartupUnavailable as exc:
         # This typed result is produced only before journal/model work. Never
@@ -82,6 +89,8 @@ def run(spec):
         emit('final', str(exc), completed=False)
         return 1
     finally:
+        if getattr(relay, 'codex_runtime', None):
+            relay.codex_runtime.close()
         relay.close()
 
 

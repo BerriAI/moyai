@@ -556,7 +556,7 @@ def test_native_validation_and_image_entrypoint_require_codex(installed_litellm_
         else:
             invoke()
         installs = [args[1:] for args in calls if args[1:4] == ['-m', 'pip', 'install']]
-        assert installs == [['-m', 'pip', 'install', 'openai-codex==0.161.0']]
+        assert installs == [['-m', 'pip', 'install', 'openai-codex==0.161.0', 'websockets==16.1.1']]
     finally:
         if agent is not None:
             agent.close()

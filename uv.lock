@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -758,6 +758,7 @@ dev = [
     { name = "openai-codex" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "websockets" },
 ]
 eval = [
     { name = "lens-evals" },
@@ -792,6 +793,7 @@ dev = [
     { name = "openai-codex", specifier = "==0.161.0" },
     { name = "pytest", specifier = ">=8,<10" },
     { name = "pytest-asyncio", specifier = ">=0.25,<2" },
+    { name = "websockets", specifier = "==16.1.1" },
 ]
 eval = [
     { name = "lens-evals", git = "https://github.com/BerriAI/lens.git?subdirectory=src%2Fsdk&rev=0054665e59200d72b969c4e10c999e5044b7a608" },

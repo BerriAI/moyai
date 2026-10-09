@@ -15,8 +15,8 @@ from test_codex_sdk_transport import send_response
 
 
 def readiness_case(tmp_path, monkeypatch, *, delay=2, fail_tools=False, progress=lambda value: None,
-                   agent_class=CodexAgent):
-    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'readiness-fixture')
+                   agent_class=CodexAgent, capability='readiness-fixture', tool_name='echo'):
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', capability)
     requests, calls, events = [], [], []
     catalog_ready = threading.Event()
     relay = SimpleNamespace()
@@ -37,13 +37,14 @@ def readiness_case(tmp_path, monkeypatch, *, delay=2, fail_tools=False, progress
 
         def do_GET(self):
             assert self.path == '/tools'
+            assert self.headers['Authorization'] == 'Bearer ' + capability
             progress('MCP is loading the workspace catalog...')
             time.sleep(delay)
             if fail_tools:
                 self.send_error(503)
                 return
             catalog_ready.set()
-            self.reply([{'name': 'echo', 'description': 'Echo a verification marker.',
+            self.reply([{'name': tool_name, 'description': 'Echo a verification marker.',
                 'inputSchema': {'type': 'object', 'properties': {'text': {'type': 'string'}},
                                 'required': ['text'], 'additionalProperties': False}}])
             progress('Workspace catalog loaded.')
@@ -51,8 +52,9 @@ def readiness_case(tmp_path, monkeypatch, *, delay=2, fail_tools=False, progress
         def do_POST(self):
             raw = self.rfile.read(int(self.headers['Content-Length']))
             body = json.loads(raw)
-            assert self.headers['Authorization'] == 'Bearer readiness-fixture'
+            assert self.headers['Authorization'] == 'Bearer ' + capability
             if self.path == '/tools/call':
+                assert body['name'] == tool_name
                 calls.append(body['name'])
                 progress('Real MCP tool executed: ' + body['name'])
                 return self.reply({'text': body['arguments']['text']})
@@ -63,7 +65,7 @@ def readiness_case(tmp_path, monkeypatch, *, delay=2, fail_tools=False, progress
             if len(requests) == 1:
                 output = {'type': 'custom_tool_call', 'id': 'item_1', 'call_id': 'call_1',
                     'name': 'exec', 'namespace': 'functions',
-                    'input': 'text(await tools.mcp__moyai__echo({text: "ready-before-inference"}));'}
+                    'input': 'text(await tools.mcp__moyai__' + tool_name + '({text: "ready-before-inference"}));'}
             else:
                 output = {'type': 'message', 'id': 'msg_2', 'role': 'assistant',
                     'phase': 'final_answer', 'status': 'completed',
@@ -77,7 +79,7 @@ def readiness_case(tmp_path, monkeypatch, *, delay=2, fail_tools=False, progress
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': 3},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
-            'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'readiness-fixture'}}}},
+            'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
             complete=lambda *args: events.append(('complete', args)),
             commentary=lambda text: events.append(('commentary', text))),

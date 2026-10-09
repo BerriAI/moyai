@@ -19,7 +19,7 @@ def request_tools(body):
         for tool in item['tools']]]
 
 
-def search_case(tmp_path, monkeypatch, broker_workspace, progress=print):
+def search_case(tmp_path, monkeypatch, broker_workspace, progress=print, *, agent_class=CodexAgent):
     events, proof = [], {}
 
     def upstream(body, state):
@@ -73,7 +73,7 @@ def search_case(tmp_path, monkeypatch, broker_workspace, progress=print):
         return httpx.Response(200, content=pipe.wfile.getvalue(), headers={'Content-Type': 'text/event-stream'})
 
     with background_gateway(tmp_path, monkeypatch, broker_workspace, 'codex', upstream, progress) as state:
-        agent = CodexAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': 5},
+        agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': 5},
             relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
                 'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
