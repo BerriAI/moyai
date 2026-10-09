@@ -238,14 +238,14 @@ def test_admin_override_survives_refresh_and_existing_links_migrate(profiles):
         response = client.post('/api/admin/spend/link-slack', json={'slack_user_id': actor, 'google_user_id': 'google:bob'})
         assert response.status_code == 200
         assert account(app)['link_method'] == 'manual'
-    refresh(app)
-    assert account(app)['linked_user_id'] == 'google:bob'
-    assert account(app)['link_status'] == 'manual'
-    app.state.store.execute("UPDATE users SET link_method='',link_status='' WHERE id=?", (actor,))
-    Store(app.state.settings.data_dir)
-    assert account(app)['link_method'] == 'manual'
-    audit = app.state.store.rows("SELECT * FROM identity_audit WHERE reason='admin_override'")
-    assert len(audit) == 1 and audit[0]['actor_id'] == 'google:alice'
+        refresh(app)
+        assert account(app)['linked_user_id'] == 'google:bob'
+        assert account(app)['link_status'] == 'manual'
+        app.state.store.execute("UPDATE users SET link_method='',link_status='' WHERE id=?", (actor,))
+        Store(app.state.settings.data_dir)
+        assert account(app)['link_method'] == 'manual'
+        audit = app.state.store.rows("SELECT * FROM identity_audit WHERE reason='admin_override'")
+        assert len(audit) == 1 and audit[0]['actor_id'] == 'google:alice'
 
 
 def test_admin_routes_require_login_role_and_csrf_but_slack_never_grants_login(profiles):
@@ -300,6 +300,7 @@ def test_oauth_requests_profile_scopes_only_when_enabled(profiles):
     assert 'users:read' not in scopes and 'users:read.email' not in scopes
 
 
+@pytest.mark.sqlite_only
 def test_existing_database_gains_columns_and_retains_admin_link(tmp_path):
     with sqlite3.connect(tmp_path / 'workspace.db') as conn:
         conn.executescript("""

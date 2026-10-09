@@ -228,51 +228,51 @@ def _create_app(settings, store):
 
     @asynccontextmanager
     async def lifespan(app):
-        # Close the previous process's attempts before session recovery can
-        # dispatch fresh inference; accounting recovery preserves this outcome.
-        store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
-        harness_gateway.maintenance.recover()
-        await manager.recover()
-        session_lifecycle.start()
-        await checkpoints.flush()
-        slack.recover()
-        identities.start()
-        environments.start()
-        automations.start()
-        spend.recovery.start()
-        watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
-        tracing.start()
-        infrastructure.start()
-        session_titles.start()
-        memory_review.start()
         try:
-            yield
-        finally:
-            await session_lifecycle.close()
-            await memory_review.close()
-            await spend.recovery.close()
-            await harness_gateway.maintenance.close()
-            await harness_gateway.live_context.close()
-            await computer.close()
-            await session_pull_requests.close()
-            await session_titles.close()
-            await infrastructure.close()
-            await automations.close()
-            await environments.close()
-            await identities.close()
-            await slack.shutdown()
+            # Close the previous process's attempts before session recovery can
+            # dispatch fresh inference; accounting recovery preserves this outcome.
+            store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
+            harness_gateway.maintenance.recover()
+            await manager.recover()
+            session_lifecycle.start()
+            await checkpoints.flush()
+            slack.recover()
+            identities.start()
+            environments.start()
+            automations.start()
+            spend.recovery.start()
+            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+            tracing.start()
+            infrastructure.start()
+            session_titles.start()
+            memory_review.start()
             try:
-                await manager.shutdown()
+                yield
             finally:
-                await manager.modal_clients.close()
-            await tracing.close()
-            if watcher:
-                watcher.cancel()
-                await asyncio.gather(watcher, return_exceptions=True)
-            try:
+                await session_lifecycle.close()
+                await memory_review.close()
+                await spend.recovery.close()
+                await harness_gateway.maintenance.close()
+                await harness_gateway.live_context.close()
+                await computer.close()
+                await session_pull_requests.close()
+                await session_titles.close()
+                await infrastructure.close()
+                await automations.close()
+                await environments.close()
+                await identities.close()
+                await slack.shutdown()
+                try:
+                    await manager.shutdown()
+                finally:
+                    await manager.modal_clients.close()
+                await tracing.close()
+                if watcher:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
                 await checkpoints.flush()
-            finally:
-                await asyncio.to_thread(store.close)
+        finally:
+            await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,

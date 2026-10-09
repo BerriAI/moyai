@@ -1,7 +1,6 @@
 import asyncio
 import inspect
 import json
-import sqlite3
 
 import httpx
 import pytest
@@ -261,9 +260,7 @@ def test_native_nonstream_response_bytes_unchanged(workspace, monkeypatch, route
     response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer cap'},
                            json={'messages': [], 'input': [], 'stream': False})
     assert response.status_code == 200 and response.content == wire
-    with sqlite3.connect(app.state.settings.data_dir / 'workspace.db') as db:
-        db.row_factory = sqlite3.Row
-        rows = db.execute('SELECT * FROM model_requests WHERE run_id=?', (run['id'],)).fetchall()
+    rows = app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))
     assert len(rows) == 1
     row = rows[0]
     assert row['id'] == response.headers['x-moyai-model-request-id']

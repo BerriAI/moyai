@@ -58,8 +58,8 @@ def schema_sql(statement: str) -> str:
 
 
 def json_value(document, key):
-    value = json.loads(document).get(key) if document is not None else None
-    return value
+    value = json.loads(document) if document is not None else None
+    return value.get(key) if isinstance(value, dict) else None
 
 
 class SQLiteConnection(sqlite3.Connection):
@@ -91,7 +91,7 @@ def sqlite_connection(path):
     conn.create_function('strpos', 2, lambda text, term: text.find(term) + 1, deterministic=True)
     conn.create_function('greatest', 2, max, deterministic=True)
     conn.create_function('json_text', 2, lambda doc, key: (
-        str(v) if isinstance(v := json_value(doc, key), (str, int, float)) else None), deterministic=True)
+        v if isinstance(v := json_value(doc, key), str) else None), deterministic=True)
     conn.create_function('json_number', 2, lambda doc, key: (
         v if isinstance(v := json_value(doc, key), (int, float)) else None), deterministic=True)
     conn.execute('PRAGMA foreign_keys=ON')
@@ -99,10 +99,10 @@ def sqlite_connection(path):
 
 
 class Row:
-    """Like sqlite3.Row: named/positional access and dict(row), without coercion."""
+    """Named/positional access and dict(row), with Python numeric aggregates."""
     def __init__(self, names, values):
         self.names = names
-        self.values = tuple(int(v) if isinstance(v, Decimal) and v == int(v) else v for v in values)
+        self.values = tuple((int(v) if v == int(v) else float(v)) if isinstance(v, Decimal) else v for v in values)
 
     def keys(self):
         return self.names
@@ -236,7 +236,8 @@ class PostgresDatabase:
                 self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
                     LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
                 self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
-                    LANGUAGE sql IMMUTABLE STRICT AS 'SELECT $1::jsonb ->> $2' ''')
+                    LANGUAGE sql IMMUTABLE STRICT AS $fn$
+                    SELECT CASE WHEN jsonb_typeof($1::jsonb -> $2)='string' THEN $1::jsonb ->> $2 END $fn$''')
                 self.owner.execute('''CREATE OR REPLACE FUNCTION json_number(text,text) RETURNS numeric
                     LANGUAGE sql IMMUTABLE STRICT AS $fn$
                     SELECT CASE jsonb_typeof($1::jsonb -> $2)
@@ -246,6 +247,7 @@ class PostgresDatabase:
 
             def configure(conn):
                 conn.execute(f'SET search_path TO {identifier(schema)}, pg_catalog')
+                conn.execute("SET TIME ZONE 'UTC'")
                 conn.execute("SET lock_timeout = '10s'")
                 conn.execute("SET statement_timeout = '30s'")
                 conn.commit()

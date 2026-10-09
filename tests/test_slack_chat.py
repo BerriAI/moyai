@@ -995,6 +995,7 @@ def test_pending_deletion_with_sending_receipt_recovers_on_actual_app_restart(tm
     store.update_run(run_id, status='idle')
     store.execute("INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,status,created_at) VALUES(?,'restart-proof','answer','Retained answer','sending',?)", (run_id, now()))
     original.state.session_lifecycle.request_delete(run_id, '', True)
+    store.close()
     recovered = create_app(settings)
     try:
         with TestClient(recovered, base_url=settings.public_url, client=('127.0.0.1', 50000)):

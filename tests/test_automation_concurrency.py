@@ -35,7 +35,7 @@ def test_twenty_slack_events_start_twenty_sessions_then_one_more_next_hour(slack
     for number in range(20):
         deliver(number)
     asyncio.run(service.events.dispatch())
-    runs = store.rows('SELECT * FROM runs ORDER BY rowid')
+    runs = store.rows('SELECT * FROM runs ORDER BY created_at,id')
     assert len(runs) == 20
     assert all(run['status'] == 'queued' and run['owner_id'] == owner for run in runs)
     assert len(store.rows('SELECT * FROM durable_sessions')) == 20
@@ -94,7 +94,7 @@ def test_full_workspace_preserves_events_then_drains_available_slots(workspace):
         assert client.post(path, **signed('webhook', {'event': 'benchmark.ready', 'body': f'Feedback {number}'},
                                          delivery=f'capacity-{number}')).json()['status'] == 'accepted'
     asyncio.run(app.state.automations.events.dispatch())
-    pending = store.rows("SELECT * FROM automation_events WHERE status='pending' ORDER BY rowid")
+    pending = store.rows("SELECT * FROM automation_events WHERE status='pending' ORDER BY received_at,occurrence")
     assert len(pending) == 2 and 'workspace session capacity' in pending[0]['detail']
     assert all('Feedback' in event['context'] for event in pending)
     assert len(store.rows('SELECT * FROM runs')) == 2

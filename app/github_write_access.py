@@ -28,7 +28,7 @@ class GitHubWriteAccess:
         self.store.execute('''CREATE INDEX IF NOT EXISTS github_write_access_scope
             ON github_write_access(run_id,connection_version,repository_id,number)''')
         if self.store.database:
-            from .postgres_migration import REVOKE_FUNCTION, REVOKE_POSTGRES
+            from .database_schema import REVOKE_FUNCTION, REVOKE_POSTGRES
             with self.store.connect() as conn:
                 conn.begin_write()
                 conn.execute(REVOKE_FUNCTION.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'))

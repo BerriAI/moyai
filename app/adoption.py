@@ -18,15 +18,18 @@ def report(store, start=None, end=None, *, today=None):
     previous_start = week_start - timedelta(days=7)
     lower = min(start - timedelta(days=6), previous_start)
     upper = max(end, week_end) + timedelta(days=1)
-    rows = store.rows('''
-        SELECT date(m.created_at) AS day,
+    day_sql = "to_char(m.created_at::timestamptz AT TIME ZONE 'UTC','YYYY-MM-DD')" if store.database else 'date(m.created_at)'
+    time_filter = ("m.created_at::timestamptz>=CAST(? AS timestamptz) AND m.created_at::timestamptz<CAST(? AS timestamptz)"
+                   if store.database else 'julianday(m.created_at)>=julianday(?) AND julianday(m.created_at)<julianday(?)')
+    rows = store.rows(f'''
+        SELECT {day_sql} AS day,
                CASE WHEN u.kind='shared' OR m.user_id LIKE 'shared:%' THEN NULL
                     ELSE COALESCE(NULLIF(u.linked_user_id,''), NULLIF(m.user_id,'')) END AS actor,
                COUNT(*) AS requests
         FROM messages m JOIN runs r ON r.id=m.run_id
         LEFT JOIN users u ON u.id=m.user_id
         WHERE m.role='user' AND r.mode='modal' AND r.parent_run_id=''
-          AND julianday(m.created_at)>=julianday(?) AND julianday(m.created_at)<julianday(?)
+          AND {time_filter}
           AND NOT (COALESCE(m.client_id,'')='initial' AND EXISTS (
               SELECT 1 FROM automation_runs a WHERE a.run_id=r.id))
         GROUP BY day, actor

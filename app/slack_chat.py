@@ -599,7 +599,7 @@ class SlackChat:
         self.reconcile_sending()
         self.store.execute("UPDATE slack_outbox SET status='pending' WHERE status='uncertain' AND slack_ts!='' AND json_text(metadata,'credential_request_id') IS NOT NULL")
         self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND "
-                           "(kind='ack' OR (kind='progress' AND json_text(metadata,'event_id') IS NULL) "
+                           "(kind='ack' OR (kind='progress' AND json_number(metadata,'event_id') IS NULL) "
                            "OR (kind='control' AND dedupe_key LIKE 'received:%'))")
         if not self.watcher or self.watcher.done():
             self.watcher = asyncio.create_task(self.watch())

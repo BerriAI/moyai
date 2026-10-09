@@ -4,9 +4,11 @@ import json
 import os
 from pathlib import Path
 from uuid import uuid4
+from unittest.mock import AsyncMock
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.database import DatabaseError, IntegrityError, bindings
@@ -130,6 +132,23 @@ def test_lost_ownership_fences_old_process_and_allows_replacement(store, target,
         replacement.close()
 
 
+@pytest.mark.parametrize('phase', ['recover', 'shutdown'])
+def test_lifespan_failure_releases_application_ownership(target, tmp_path, monkeypatch, phase):
+    from app.runner import RunManager
+
+    url, schema = target
+    settings = Settings(_env_file=None, data_dir=tmp_path, moyai_database_url=url,
+                        moyai_database_schema=schema, moyai_database_initialize=True,
+                        session_titles_enabled=False)
+    monkeypatch.setattr(RunManager, phase, AsyncMock(side_effect=RuntimeError('Synthetic lifecycle failure')))
+    app = create_app(settings)
+    with pytest.raises(RuntimeError, match='Synthetic lifecycle failure'):
+        with TestClient(app):
+            pass
+    replacement = Store(tmp_path, database_url=url, database_schema=schema, application_instance=True)
+    replacement.close()
+
+
 def test_restart_resumes_queued_messages_and_event_cursor(store, target, tmp_path):
     url, schema = target
     run = store.create_run('First', '', 'demo', [], chat_enabled=True)
@@ -173,3 +192,13 @@ def test_imported_database_runs_without_touching_original_sqlite(tmp_path, targe
     finally:
         source.state.store.close()
         destination.state.store.close()
+
+
+def test_typed_json_fields_match_sqlite_for_history_and_permissions(store, tmp_path):
+    local = Store(tmp_path / 'sqlite')
+    try:
+        for document in ['{}', '[]', 'null', '{"key":null}', '{"key":true}', '{"key":1.25}', '{"key":7}', '{"key":"7"}']:
+            query = "SELECT json_number(?,'key') AS number,json_text(?,'key') AS text"
+            assert store.rows(query, (document, document)) == local.rows(query, (document, document))
+    finally:
+        local.close()
