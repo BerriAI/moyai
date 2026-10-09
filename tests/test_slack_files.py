@@ -120,7 +120,7 @@ def test_slack_image_followup_waits_for_its_own_turn(slack_app, monkeypatch):
     first = store.claim_message(run_id)
     store.update_run(run_id, status='running')
     client.post('/hooks/slack/events', **signed(event('ImageFollowup', type='message', subtype='file_share',
-        ts='1790719001.123456', thread_ts=ROOT, text='', files=[FILE])))
+        ts='1790719001.123456', thread_ts=ROOT, text='<@U99999999>', files=[FILE])))
     second = store.messages(run_id)[1]
     assert MessageQueue(store).live_control(run_id, first['id'], []) == {'steer_message_id': second['id'], 'handoff': True}
     asyncio.run(app.state.slack.files.prepare(run_id))

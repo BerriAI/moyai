@@ -18,6 +18,26 @@ from .slack_credentials import SlackCredentials
 from .slack_references import attachment_reference
 
 
+# Literal examples are context, not recipients. Preserve them in the prompt.
+# re.M anchors quote prefixes; \Z keeps fences open across line endings.
+QUOTED_TEXT = re.compile(r'```[\s\S]*?(?:```|\Z)|`[^`\n]*(?:`|$)|^[ \t]*>>>[\s\S]*|^[ \t]*>[^\n]*', re.M)
+
+
+def routing_text(text: str, mention: str) -> tuple[str, str]:
+    parts, visible = [], []
+    end = 0
+    for match in QUOTED_TEXT.finditer(text):
+        plain = text[end:match.start()]
+        visible.append(plain)
+        parts.extend((plain.replace(mention, ''), match[0]))
+        visible.append('\n')
+        end = match.end()
+    plain = text[end:]
+    visible.append(plain)
+    parts.append(plain.replace(mention, ''))
+    return ''.join(visible), ''.join(parts).strip()
+
+
 class SlackSessions:
     def __init__(self, store, connectors, manager, checkpoints, settings):
         self.store, self.connectors, self.manager = store, connectors, manager
@@ -105,12 +125,13 @@ class SlackSessions:
                 and Decimal(thread_ts) <= Decimal(mention_ts)):
             raise HTTPException(400, "Invalid Slack event fields.")
         mention = f"<@{bot.get('user_id')}>"
+        visible, prompt = routing_text(text, mention)
         # A mention can be the subject of a question to somebody else:
         # "@OtherAgent what is @Moyai?" must not wake both agents.
-        addressed = re.match(r'^\s*((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)', text)
+        addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)',
+                             visible.translate(str.maketrans('', '', '*_~')))
         if addressed and mention not in addressed[1]:
             return {'ok': True}
-        prompt = text.replace(mention, "").strip()
         file_ids = slack_file_ids(event.get('files'))
         reference, _ = attachment_reference(event)
         if not prompt and reference:
@@ -125,7 +146,7 @@ class SlackSessions:
         if channel.startswith('D') and (not direct_message or not self.settings.slack_dm_enabled or not self.settings.slack_thread_chat_enabled):
             return {'ok': True}
         await self.channel.handle_validated_event(team=bot['team_id'], event_id=event_id, channel=channel,
-            ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in text,
+            ts=mention_ts, root=thread_ts, user=user, prompt=prompt, mentioned=mention in visible,
             direct_message=direct_message, missing_cloud=missing_cloud, file_ids=file_ids, reference=reference)
         return {'ok': True}
 

@@ -183,6 +183,8 @@ class SlackChat:
 
     def accept(self, *, team, event_id, channel, ts, root, user, prompt, mentioned, missing_cloud, direct_message=False, file_ids=(), reference=''):
         """Reserve the physical Slack message and queue its turn atomically."""
+        if re.match(r'^\s*(?:!aside|\(aside\))(?:\s|$)', prompt, re.I):
+            return None
         original_prompt, selected_model, model_error = prompt, None, ''
         selected_harness, harness_error = None, ''
         harness_directive = re.fullmatch(r'/?harness(?:[ \t]+([^\n]+))?(?:\n([\s\S]*))?', prompt.strip(), re.I)
@@ -210,6 +212,10 @@ class SlackChat:
         # standalone question is answered by the control plane.
         if not directive and not harness_directive and not file_ids and not reference and is_session_id_request(prompt):
             command = 'session-id'
+        # A bound shared thread is a destination, not an invitation to answer
+        # every teammate. DMs and existing standalone controls stay conversational.
+        if not mentioned and not direct_message and (not command or len(original_prompt.strip().splitlines()) != 1):
+            return None
         # Only authored text participates in command/model/harness parsing.
         prompt += reference
         with self.store.connect() as conn:
@@ -321,7 +327,7 @@ class SlackChat:
                 model_name = next((item['name'] for item in self.settings.model_choices() if item['id'] == selected_model), selected_model)
                 response = {'sleep': 'Paused this thread and requested a stop. Say `wake` or mention me to resume.',
                             'stop': 'Stopping the current response and clearing queued follow-ups. You can send another message once it has stopped.',
-                            'wake': 'I’m listening again. Send your next message here.',
+                            'wake': 'I’m listening again. ' + ('Send your next message here.' if direct_message else 'Mention me with your next request.'),
                             'status': 'This thread is paused.' if binding['paused'] else self.status_text(status),
                             'session-id': session_id_response(run_id),
                             'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.',
@@ -388,7 +394,8 @@ class SlackChat:
         conn.execute("""UPDATE slack_outbox SET status='skipped' WHERE run_id=? AND kind='progress'
             AND status='pending' AND json_extract(metadata,'$.turn_id') IS NOT ?""", (run_id, turn_id))
         events = conn.execute("""SELECT id,message FROM events WHERE run_id=? AND kind='message'
-            AND json_extract(data,'$.public_update')=1 AND json_extract(data,'$.turn_id')=? ORDER BY id""",
+            AND json_extract(data,'$.public_update')=1 AND json_extract(data,'$.public_reply_to') IS NOT NULL
+            AND json_extract(data,'$.turn_id')=? ORDER BY id""",
                               (run_id, turn_id)).fetchall()
         for event in events:
             key = f"progress:{event['id']}"
@@ -556,7 +563,13 @@ class SlackChat:
             return False
         with self.store.connect() as conn:
             current = active_turn(conn, row['run_id'])
-            if current is not None and json.loads(row['metadata']).get('turn_id') == current:
+            metadata = json.loads(row['metadata'])
+            # Also retire routine posts queued by an older release. Eligibility
+            # comes from the saved server-owned event, not outbox metadata alone.
+            reply = conn.execute("""SELECT 1 FROM events WHERE run_id=? AND id=? AND kind='message'
+                AND json_extract(data,'$.public_update')=1 AND json_extract(data,'$.public_reply_to') IS NOT NULL
+                AND json_extract(data,'$.turn_id')=?""", (row['run_id'], metadata.get('event_id'), current)).fetchone()
+            if current is not None and metadata.get('turn_id') == current and reply:
                 return False
             conn.execute("UPDATE slack_outbox SET status='skipped' WHERE id=? AND status IN ('pending','sending')", (row['id'],))
         return True

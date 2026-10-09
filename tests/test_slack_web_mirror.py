@@ -4,6 +4,7 @@ import json
 import pytest
 
 from app.db import Store
+from app.message_queue import MessageQueue
 from app.slack_chat import SlackChat
 from test_slack import slack_app, event, signed
 from test_slack_chat import start, send, dm_event, ROOT
@@ -182,25 +183,42 @@ def test_old_and_unbound_inputs_are_never_backfilled(mirror):
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='input'")
 
 
-def test_selected_progress_follows_previous_answer_and_precedes_web_input(mirror):
+def direct_update(store, run_id, active, text):
+    store.update_run(run_id, status='running')
+    question, _ = store.enqueue_message(run_id, 'Did tests pass?', 'question-' + text, user_id=active['user_id'])
+    queue = MessageQueue(store)
+    queue.change(run_id, question['id'], active['user_id'], False, 0, 'steer')
+    assert queue.live_control(run_id, active['id'], [])['input']['id'] == question['id']
+    store.event(run_id, 'message', text, {'input_id': question['id']})
+    queue.acknowledge(run_id, active['id'], [question['id']])
+
+
+def test_routine_progress_stays_on_web_and_direct_reply_precedes_web_input(mirror):
     app, client, run_id = start(mirror)
     store, chat = app.state.store, app.state.slack.chat
     first = store.claim_message(run_id)
     store.finish_message(run_id, first['id'], 'Earlier final')
     store.enqueue_message(run_id, 'Next task', 'next')
     active = store.claim_message(run_id)
+    store.update_run(run_id, status='running')
     for text in ('Opening', 'Tests pass', 'Unwanted narration'):
-        store.event(run_id, 'message', text, {'phase': 'commentary'})
+        store.event(run_id, 'message', text, {'phase': 'commentary', 'public_reply_to': 999})
+    store.event(run_id, 'status', 'Verifying the fix', {'phase': 'focus', 'activity_id': 'focus', 'input_id': active['id']})
+    client.portal.call(chat.activity.sync)
+    assert mirror[3][-1]['status'] == 'Verifying the fix'
+    assert [e['message'] for e in store.events(run_id) if e['kind'] == 'message'] == ['Opening', 'Tests pass']
+    direct_update(store, run_id, active, 'Yes, tests passed')
     assert web(app, client, run_id).status_code == 202
     chat.collect()
     rows = store.rows('SELECT kind,text FROM slack_outbox ORDER BY id')
-    assert [r['kind'] for r in rows] == ['answer', 'progress', 'progress', 'input']
+    assert [r['kind'] for r in rows] == ['answer', 'progress', 'input']
     drain(app)
     store.finish_message(run_id, active['id'], 'Verification failed', 'failed')
     chat.collect()
     drain(app)
     posts = [r for r in mirror[3] if 'text' in r]
-    assert [p['text'].split('\n')[0] for p in posts[:3]] == ['Earlier final', 'Opening', 'Tests pass']
+    assert [p['text'].split('\n')[0] for p in posts[:2]] == ['Earlier final', 'Yes, tests passed']
+    assert not any(p['text'].startswith(('Opening', 'Tests pass', 'Unwanted')) for p in posts)
     assert 'Response failed:' in posts[-1]['text']
     assert all(p['channel'] == 'C12345678' and p['thread_ts'] == ROOT for p in posts)
 
@@ -210,7 +228,7 @@ def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, t
     app, client, run_id = start(mirror)
     store, chat = app.state.store, app.state.slack.chat
     active = store.claim_message(run_id)
-    store.event(run_id, 'message', 'Update before transition')
+    direct_update(store, run_id, active, 'Update before transition')
     chat.collect()
     assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'pending'}]
     if transition in {'finish', 'next-turn'}:
@@ -222,11 +240,11 @@ def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, t
         store.update_run(run_id, status='stopping')
     elif transition == 'sleep':
         store.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
-        store.event(run_id, 'message', 'Update while sleeping')
+        direct_update(store, run_id, active, 'Update while sleeping')
         send(client, 1, 'wake')  # Wake before the periodic collector runs.
     elif transition == 'disabled':
         store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('slack',0)")
-        store.event(run_id, 'message', 'Update while disabled')
+        direct_update(store, run_id, active, 'Update while disabled')
         chat.collect()
         store.execute("UPDATE connection_policies SET enabled=1 WHERE provider='slack'")
         chat.collect()
@@ -245,8 +263,13 @@ def test_pending_progress_survives_recovery_but_ambiguous_send_never_replays(mir
     app, client, run_id = start(mirror)
     app_loop = app.state.slack.chat.watcher.get_loop()
     store = app.state.store
-    store.claim_message(run_id)
-    store.event(run_id, 'message', 'Opening update')
+    active = store.claim_message(run_id)
+    store.event(run_id, 'message', 'Old routine update')
+    legacy = next(e for e in store.events(run_id) if e['message'] == 'Old routine update')
+    with store.connect() as conn:
+        app.state.slack.chat.queue(conn, run_id, f"progress:{legacy['id']}", 'progress', legacy['message'],
+                                   {'event_id': legacy['id'], 'turn_id': active['id']})
+    direct_update(store, run_id, active, 'Direct answer')
     app.state.slack.chat.collect()
     chat = app.state.slack.chat = SlackChat(app.state.slack)
     async def recover_without_delivery() -> None:
@@ -256,7 +279,7 @@ def test_pending_progress_survives_recovery_but_ambiguous_send_never_replays(mir
         await chat.shutdown()
         assert watcher.cancelled()
     client.portal.call(recover_without_delivery)
-    assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'pending'}]
+    assert len(store.rows("SELECT status FROM slack_outbox WHERE kind='progress' AND status='pending'")) == 2
     attempts = []
     async def uncertain(*args, **kwargs):
         attempts.append(kwargs['json'])
@@ -266,7 +289,8 @@ def test_pending_progress_survives_recovery_but_ambiguous_send_never_replays(mir
     chat.collect()
     drain(app)
     assert len(attempts) == 1
-    assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'uncertain'}]
+    assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'skipped'}, {'status': 'uncertain'}]
+    assert 'Direct answer' in attempts[0]['text']
 
 
 def test_adopting_active_legacy_thread_never_backfills_existing_progress(mirror):
@@ -282,7 +306,7 @@ def test_adopting_active_legacy_thread_never_backfills_existing_progress(mirror)
     store.event(old['id'], 'message', 'Progress after binding')
     app.state.slack.chat.collect()
     drain(app)
-    assert any('Progress after binding' in p.get('text', '') for p in mirror[3])
+    assert not any('Progress after binding' in p.get('text', '') for p in mirror[3])
 
 
 def test_legacy_commentary_consumes_budget_without_backfill_or_suppressing_approval(mirror):

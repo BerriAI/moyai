@@ -592,7 +592,7 @@ def test_slack_resume_restores_current_view_owner_without_rewriting_sender_or_re
     for owner in (actor, other):
         lifecycle.archive(root, owner, True)
     store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (actor, slack))
-    payload = send(client, 1, 'Continue the archived work')
+    payload = send(client, 1, '<@U99999999> Continue the archived work')
     assert lifecycle.archives(actor) == set() and lifecycle.archives(other) == {root}
     assert store.messages(root)[-1]['user_id'] == slack
     sign_in(app, client, 'maya', 'maya@berri.ai')
@@ -601,9 +601,9 @@ def test_slack_resume_restores_current_view_owner_without_rewriting_sender_or_re
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
     assert lifecycle.archives(actor) == {root} and len(store.messages(root)) == 2
     store.execute('UPDATE users SET linked_user_id=NULL WHERE id=?', (slack,))
-    send(client, 2, 'Continue while unlinked')
+    send(client, 2, '<@U99999999> Continue while unlinked')
     assert lifecycle.archives(actor) == lifecycle.archives(other) == {root}
     store.execute('UPDATE users SET linked_user_id=? WHERE id=?', (other, slack))
-    send(client, 3, 'Continue after the link changes')
+    send(client, 3, '<@U99999999> Continue after the link changes')
     assert lifecycle.archives(actor) == {root} and lifecycle.archives(other) == set()
     assert all(message['user_id'] == slack for message in store.messages(root))

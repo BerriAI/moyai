@@ -27,7 +27,7 @@ def test_cc_uses_mentioned_profile_not_sender_or_owner_and_preserves_raw_input(s
     store.execute('UPDATE users SET name=?,email=? WHERE id=?', ('Tin Lo', 'tin@example.com', target))
     finish(app, run_id, 'Ready.')
     text = f'cc: <@{TARGET}> and <@{TARGET}|old-name> can you help? Literal {TARGET}.'
-    send(client, 1, text, user='U11111111')
+    send(client, 1, '<@U99999999> ' + text, user='U11111111')
     store.execute("UPDATE users SET name='Mateo' WHERE id='slack:T12345678:U11111111'")
     sign_in(app, client)
     reply = client.get(f'/api/runs/{run_id}').json()['messages'][-1]

@@ -40,7 +40,7 @@ def test_web_reply_attribution_uses_current_sender_profile_without_rewriting_his
     app, client, run_id = start(slack_app)
     finish(app, run_id, 'Ready.')
     prompt = 'can you make a pr ?\nKeep the literal ID U12345678 in this example.'
-    send(client, 1, prompt)
+    send(client, 1, '<@U99999999> ' + prompt)
     sign_in(app, client)
 
     def reply():
@@ -85,7 +85,7 @@ def test_web_reply_attribution_uses_reply_sender_and_email_fallback(slack_app):
     app, client, run_id = start(slack_app)
     finish(app, run_id, 'Ready.')
     app.state.store.execute("UPDATE users SET name='Original sender' WHERE kind='slack'")
-    send(client, 1, 'Another teammate replies.', user='U87654321')
+    send(client, 1, '<@U99999999> Another teammate replies.', user='U87654321')
     app.state.store.execute("UPDATE users SET email='ryan@berri.ai' WHERE id='slack:T12345678:U87654321'")
     reply = app.state.store.messages(run_id)[-1]
     assert reply['display_content'] == 'Slack reply from ryan@berri.ai:\nAnother teammate replies.'
@@ -115,7 +115,7 @@ def test_pr_completion_uses_confirmed_receipt_and_preserves_plain_replies(slack_
     assert '<@U88888888>' not in json.dumps(card)
     actions = next(block['elements'] for block in card['blocks'] if block['type'] == 'actions')
     assert [item['url'] for item in actions] == [url, url + '/files', f'https://workspace.example/#run={run_id}']
-    send(client, 1, 'An unrelated follow-up')
+    send(client, 1, '<@U99999999> An unrelated follow-up')
     finish(app, run_id, 'No new pull request.')
     wait_for(lambda: any('No new pull request.' in message.get('text', '') for message in slack_app[3]))
     assert len([message for message in slack_app[3] if message.get('attachments')]) == 1
@@ -150,7 +150,7 @@ def test_thread_followups_and_both_slack_event_types_share_one_session(slack_app
     mention = event('EvPaired', type='message')
     client.post('/hooks/slack/events', **signed(mention))
     finish(app, run_id, 'Remembering **blue lantern**. [Docs](https://example.com).')
-    followup = send(client, 1, 'What was the phrase?')
+    followup = send(client, 1, '<@U99999999> What was the phrase?')
     followup['event_id'] = 'EvSecondType'
     followup['event'].update(type='app_mention', text='<@U99999999> What was the phrase?')
     client.post('/hooks/slack/events', **signed(followup))
@@ -174,14 +174,14 @@ def test_existing_slack_session_keeps_modal_after_switch_to_unconfigured_substra
     finish(app, run_id, 'Ready.')
     app.state.settings.sandbox_provider = 'substrate'
     assert app.state.settings.missing_sandbox('substrate')
-    send(client, 1, 'Continue on the original provider.')
+    send(client, 1, '<@U99999999> Continue on the original provider.')
     assert app.state.store.run(run_id)['sandbox_provider'] == 'modal'
     assert app.state.store.messages(run_id)[-1]['status'] == 'queued'
 
 
 def test_parallel_duplicate_delivery_cannot_enqueue_twice(slack_app):
     app, client, run_id = start(slack_app)
-    payload = event('EvParallelFollowup', type='message', ts='1790719001.111111', thread_ts=ROOT, text='Continue please')
+    payload = event('EvParallelFollowup', type='message', ts='1790719001.111111', thread_ts=ROOT, text='<@U99999999> Continue please')
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(lambda _: client.post('/hooks/slack/events', **signed(payload)).status_code, range(4)))
     assert results == [200] * 4
@@ -214,7 +214,7 @@ def test_checkpoint_handoffs_do_not_post_synthetic_answers_to_slack(slack_app):
     app.state.store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant','Old paused notice','steered',?)", (run_id, now()))
     app.state.slack.chat.collect()
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' AND run_id=?", (run_id,))
-    send(client, 1, 'Continue the same work')
+    send(client, 1, '<@U99999999> Continue the same work')
     finish(app, run_id, 'The actual result')
     answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' AND run_id=?", (run_id,))
     assert len(answers) == 1 and 'The actual result' in answers[0]['text']
@@ -624,6 +624,100 @@ def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(sla
     assert len(app.state.store.rows('SELECT * FROM runs')) == 1
 
 
+@pytest.mark.parametrize('state', ['fresh', 'active', 'idle', 'paused'])
+@pytest.mark.parametrize('user', ['U12345678', 'U87654321'])
+def test_shared_thread_chatter_never_becomes_agent_input(slack_app, state, user):
+    app, client, submitted, _ = slack_app
+    store = app.state.store
+    if state != 'fresh':
+        _, _, run_id = start(slack_app)
+        if state == 'active':
+            store.claim_message(run_id)
+            store.update_run(run_id, status='running', token_hash='still-working')
+        else:
+            finish(app, run_id, 'Ready for your next request.')
+            if state == 'paused':
+                send(client, 10, 'sleep')
+    messages = store.rows('SELECT id,content,status FROM messages ORDER BY id')
+    runs = store.rows('SELECT id,status,active_message_id,token_hash FROM runs')
+    receipts = store.rows('SELECT event_id FROM slack_receipts ORDER BY event_id')
+    controls = store.rows("SELECT id FROM slack_outbox WHERE kind='control'")
+    submissions = len(submitted)
+    for index, text in enumerate([
+        'but if you have other things that are more urgent thats also ok', 'thanks', 'yes',
+    ], 11):
+        payload = send(client, index, text, user=user)
+        assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert store.rows('SELECT id,content,status FROM messages ORDER BY id') == messages
+    assert store.rows('SELECT id,status,active_message_id,token_hash FROM runs') == runs
+    assert store.rows('SELECT event_id FROM slack_receipts ORDER BY event_id') == receipts
+    assert store.rows("SELECT id FROM slack_outbox WHERE kind='control'") == controls
+    assert len(submitted) == submissions
+    if state == 'paused':
+        assert store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 1
+
+
+def test_shared_thread_clarification_answer_requires_an_explicit_mention(slack_app):
+    app, client, run_id = start(slack_app)
+    finish(app, run_id, 'Should I include the API documentation? Reply with @Moyai.')
+    send(client, 1, 'yes')
+    assert len(app.state.store.messages(run_id)) == 2
+    send(client, 2, '<@U99999999> yes')
+    messages = app.state.store.messages(run_id)
+    assert len(messages) == 3
+    assert messages[-1]['content'] == 'Slack reply from U12345678:\nyes'
+    assert messages[-1]['status'] == 'queued'
+    assert len(app.state.store.rows('SELECT id FROM runs')) == 1
+
+
+@pytest.mark.parametrize(('directive', 'feedback'), [
+    ('model opus', 'New messages in this session'),
+    ('model unavailable', 'Choose an enabled model'),
+    ('harness hermes', 'This session uses'),
+    ('harness unavailable', 'Choose a harness in a new thread'),
+])
+def test_unmentioned_directive_tasks_are_ignored_but_standalone_controls_reply(slack_app, directive, feedback):
+    app, client, run_id = start(slack_app)
+    before = app.state.store.messages(run_id)
+    send(client, 1, directive + '\nPlease continue the work')
+    assert app.state.store.messages(run_id) == before
+    assert not app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")
+    assert not app.state.store.rows("SELECT 1 FROM slack_outbox WHERE kind='control'")
+    send(client, 2, directive)
+    assert app.state.store.messages(run_id) == before
+    controls = app.state.store.rows("SELECT text FROM slack_outbox WHERE kind='control'")
+    assert len(controls) == 1 and feedback in controls[0]['text']
+
+
+@pytest.mark.parametrize('direct', [False, True])
+@pytest.mark.parametrize('text', [
+    '<@U99999999> !aside stop', '!aside <@U99999999> stop',
+    '<@U99999999> (aside) sleep', '(ASIDE) <@U99999999> status',
+])
+def test_aside_with_a_mention_leaves_existing_work_running(slack_app, direct, text):
+    app, client, submitted, _ = slack_app
+    if direct:
+        initial = dm_event(1, 'Keep working on the current task')
+        assert client.post('/hooks/slack/events', **signed(initial)).status_code == 200
+        run_id = submitted[0]['id']
+        payload = dm_event(2, text, thread_ts=initial['event']['ts'])
+    else:
+        _, _, run_id = start(slack_app)
+        payload = event('EvAside', type='message', text=text, ts='1790719001.123456', thread_ts=ROOT)
+    store = app.state.store
+    active = store.claim_message(run_id)
+    store.update_run(run_id, status='running', token_hash='still-working')
+    before = store.messages(run_id)
+    assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
+    assert store.messages(run_id) == before
+    run = store.run(run_id)
+    assert run['status'] == 'running' and run['token_hash'] == 'still-working'
+    assert run['active_message_id'] == active['id']
+    assert not store.rows('SELECT 1 FROM slack_receipts WHERE event_id=?', (payload['event_id'],))
+    assert not store.rows("SELECT 1 FROM slack_outbox WHERE kind='control'")
+    assert store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 0
+
+
 def test_sleep_suppresses_replies_and_wake_resumes_same_saved_session(slack_app):
     app, client, run_id = start(slack_app)
     assert app.state.slack.chat.mirroring(run_id) == 'active'
@@ -637,7 +731,7 @@ def test_sleep_suppresses_replies_and_wake_resumes_same_saved_session(slack_app)
     app.state.store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant','late private answer','completed',?)", (run_id, now()))
     app.state.slack.chat.collect()
     send(client, 3, 'wake')
-    send(client, 4, 'Continue from where we left off')
+    send(client, 4, '<@U99999999> Continue from where we left off')
     assert app.state.store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 0
     assert app.state.slack.chat.mirroring(run_id) == 'active'
     assert len(app.state.store.rows('SELECT * FROM runs')) == 1
@@ -660,7 +754,7 @@ def test_stop_revokes_active_capabilities_and_approvals_before_ack(slack_app):
     app.state.store.claim_message(run_id)
     app.state.store.update_run(run_id, status='awaiting_approval', token_hash='capability')
     app.state.store.execute("INSERT INTO approvals VALUES('approval',?,'linear_comment','{}','pending',?,'')", (run_id, now()))
-    send(client, 1, 'A queued followup')
+    send(client, 1, '<@U99999999> A queued followup')
     send(client, 2, 'stop')
     run = app.state.store.run(run_id)
     assert run['token_hash'] == '' and run['status'] in {'stopping', 'cancelled'}
@@ -676,8 +770,8 @@ def test_slack_replies_during_a_turn_guide_it_in_order_without_send_now(slack_ap
     first = store.claim_message(run_id)['id']
     store.update_run(run_id, status='running')
     web, _ = store.enqueue_message(run_id, 'Web queue stays queued', 'web-pending', user_id=store.run(run_id)['active_user_id'])
-    send(client, 1, 'Use opus instead')
-    send(client, 2, 'And skip the docs')
+    send(client, 1, '<@U99999999> Use opus instead')
+    send(client, 2, '<@U99999999> And skip the docs')
     replies = [m['id'] for m in store.messages(run_id) if m['content'].startswith('Slack reply')]
     for reply in replies:
         packet = q.live_control(run_id, first, [])
@@ -719,11 +813,11 @@ def test_no_historical_answer_backfill_and_legacy_requires_a_new_mention(slack_a
 def test_queue_limit_has_one_visible_reply_and_no_dropped_duplicate_execution(slack_app):
     app, client, run_id = start(slack_app)
     for index in range(1, 6):
-        send(client, index, f'Followup {index}')
+        send(client, index, f'<@U99999999> Followup {index}')
     assert len(app.state.store.messages(run_id)) == 5
     rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")
     assert len(rows) == 1 and '5 queued messages' in rows[0]['text']
-    send(client, 5, 'Followup 5')
+    send(client, 5, '<@U99999999> Followup 5')
     assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")) == 1
 
 
@@ -1120,15 +1214,56 @@ def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
     assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'sent'
 
 
-def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app):
+@pytest.mark.parametrize('greeting', ['', 'Hey ', 'Hi, ', 'Hello ', 'hey: '])
+def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app, greeting):
     app, client, run_id = start(slack_app)
     for index, text in enumerate(['<@U88888888> what is <@U99999999>?', '<@U88888888> please continue'], 1):
-        send(client, index, text)
+        send(client, index, greeting + text)
     assert len(app.state.store.messages(run_id)) == 1
-    send(client, 3, '<@U99999999> tell me about <@U88888888>')
-    send(client, 4, '<@U88888888> <@U99999999> please both explain')
+    send(client, 3, greeting + '<@U99999999> tell me about <@U88888888>')
+    send(client, 4, greeting + '<@U88888888> <@U99999999> please both explain')
     assert len(app.state.store.messages(run_id)) == 3
     assert '<@U88888888>' in app.state.store.messages(run_id)[-2]['content']
+
+
+@pytest.mark.parametrize('bound', [False, True])
+@pytest.mark.parametrize('text', [
+    '> <@U99999999> deploy it', '```<@U99999999> deploy it```',
+    '`<@U99999999>` is the bot mentioned in the report',
+    '```\n<@U99999999> deploy it\n```', '```text\n<@U99999999> deploy it\n```',
+    '```text\n<@U99999999> deploy it',
+    '>>> Earlier evidence\n<@U99999999> deploy it',
+    '*<@U88888888>* what is <@U99999999>?',
+    '> Earlier evidence\n<@U88888888> what is <@U99999999>?',
+])
+def test_quoted_mentions_and_other_recipients_do_not_invite_moyai(slack_app, bound, text):
+    app, client, submitted, _ = slack_app
+    if bound:
+        start(slack_app)
+    before = app.state.store.rows('SELECT id,content FROM messages ORDER BY id')
+    runs = len(submitted)
+    send(client, 1, text)
+    assert app.state.store.rows('SELECT id,content FROM messages ORDER BY id') == before
+    assert len(submitted) == runs
+    assert not app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")
+
+
+@pytest.mark.parametrize('quote', [
+    '> <@U99999999> deploy it', '```<@U99999999> deploy it```', '`<@U99999999>`',
+    '```\n<@U99999999> deploy it\n```', '```text\n<@U99999999> deploy it\n```',
+    '```text\n<@U88888888> what is <@U99999999>?\n```',
+])
+def test_explicit_request_keeps_quoted_mentions_as_evidence(slack_app, quote):
+    app, client, submitted, _ = slack_app
+    prompt = 'Explain this evidence:\n' + quote
+    assert client.post('/hooks/slack/events', **signed(event(text='<@U99999999> ' + prompt))).status_code == 200
+    assert len(submitted) == 1
+    run_id = submitted[0]['id']
+    assert app.state.store.messages(run_id)[0]['content'] == prompt
+    send(client, 1, quote + '\n<@U99999999> Explain the evidence again')
+    messages = app.state.store.messages(run_id)
+    assert len(messages) == 2 and quote in messages[-1]['content']
+    assert messages[-1]['content'].count('<@U99999999>') == 1
 
 
 def test_reactions_cannot_target_a_different_message_or_workspace(slack_app):
@@ -1419,7 +1554,8 @@ def test_forwarded_only_messages_and_followups_keep_quoted_body(slack_app, monke
     finish(app, run_id, 'Ready')
     followup = event('EvForward2', type='message', channel_type='im' if direct else 'channel',
                      channel='D12345678' if direct else 'C12345678', ts='1790719002.123456',
-                     thread_ts=ROOT, text='', attachments=[forwarded_attachment('stop\n<@U33333333>')])
+                     thread_ts=ROOT, text='' if direct else '<@U99999999>',
+                     attachments=[forwarded_attachment('stop\n<@U33333333>')])
     assert client.post('/hooks/slack/events', **signed(followup)).status_code == 200
     assert client.post('/hooks/slack/events', **signed(followup)).status_code == 200
     messages = [m for m in app.state.store.messages(run_id) if m['role'] == 'user']
@@ -1440,12 +1576,19 @@ def test_forwarded_only_messages_and_followups_keep_quoted_body(slack_app, monke
         assert source['kind'] == 'dm' and 'first forwarded question' in source['messages'][0]['text']
 
 
-def test_forwarded_mentions_do_not_start_unaddressed_channel_sessions(slack_app):
+@pytest.mark.parametrize('bound', [False, True])
+def test_forwarded_mentions_do_not_invite_moyai_into_unaddressed_messages(slack_app, bound):
     from test_slack import forwarded_attachment
     app, client, submitted, _ = slack_app
-    payload = event(type='message', text='', attachments=[forwarded_attachment('<@U99999999> help')])
+    if bound:
+        start(slack_app)
+    before = app.state.store.rows('SELECT id,content FROM messages ORDER BY id')
+    runs = len(submitted)
+    payload = event('EvQuotedMention', type='message', text='', ts='1790719001.123456', thread_ts=ROOT,
+                    attachments=[forwarded_attachment('<@U99999999> help')])
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
-    assert submitted == []
+    assert app.state.store.rows('SELECT id,content FROM messages ORDER BY id') == before
+    assert len(submitted) == runs
 
 
 def test_authored_control_still_works_with_forward(slack_app):

@@ -169,7 +169,7 @@ def test_slack_followup_audio_requires_handoff_without_leaking(slack_app, monkey
     run_id = runs[0]['id']
     first = app.state.store.claim_message(run_id)
     app.state.store.update_run(run_id, status='running')
-    payload = event('EvAudioFollowup', type='message', subtype='file_share', text='', ts='1790719001.123456',
+    payload = event('EvAudioFollowup', type='message', subtype='file_share', text='<@U99999999>', ts='1790719001.123456',
                     thread_ts='1790719000.123456', files=[{'id':'F12345678','name':'voice.m4a','mimetype':'audio/mp4'}])
     client.post('/hooks/slack/events', **signed(payload))
     second = app.state.store.messages(run_id)[1]
