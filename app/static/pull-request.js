@@ -2,6 +2,11 @@
 (function(root,factory){
   const value=factory();if(typeof module==='object'&&module.exports)module.exports=value;else root.MoyaiPullRequest=value;
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
+  function presentation(data){
+    const state=data?.merged||data?.state==='merged'?'merged':data?.state==='closed'?'closed':data?.state==='open'?(data.draft?'draft':'open'):'unknown';
+    return {state,label:{merged:'Merged',closed:'Closed',draft:'Draft',open:'Open',unknown:'Status unavailable'}[state],
+      icon:state==='merged'?'git-merge':state==='closed'?'pull-request-closed':'pull-request'};
+  }
   function diffRows(patch){
     let oldLine=0,newLine=0;
     return patch.split('\n').map(text=>{
@@ -22,7 +27,7 @@
         ${file.patch_truncated?'<p class="pr-notice">This diff is truncated. Open GitHub to see the complete file.</p>':''}
       </details>`).join(''):'<p class="pr-notice">No changed files.</p>');
   }
-  function mount({element,url,load,markdown,escape:esc}){
+  function mount({element,url,load,markdown,escape:esc,onStatus=()=>{}}){
     let alive=true,active=false,epoch=0,data=null,section='changes',initialized=false;
     const expanded=new Set();
     MoyaiUI.render(element, `<div class="native-pr">
@@ -50,9 +55,9 @@
       }
     }
     function render(){
-      const state=data.merged?'merged':data.state==='closed'?'closed':data.draft?'draft':data.state==='open'?'open':'unknown';
+      const {state,label}=presentation(data);
       q('[data-state]').className='pr-state pr-state-'+state;
-      q('[data-state]').textContent={merged:'Merged',closed:'Closed',draft:'Draft',open:'Open',unknown:'Status unavailable'}[state];
+      q('[data-state]').textContent=label;
       const date=data.created_at?new Date(data.created_at):null;
       const opened=date&&!Number.isNaN(date.getTime())?'Opened '+date.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'';
       const repository=data.repository||url.split('/').slice(3,5).join('/');
@@ -70,12 +75,12 @@
       try{
         const result=await load();
         if(!alive||!active||request!==epoch)return;
-        data=result;render();status.textContent='';
+        data=result;render();onStatus(data);status.textContent='';
       }catch(error){
         if(!alive||!active||request!==epoch)return;
         if([401,403,404,409].includes(error.status)){
           data=null;initialized=false;expanded.clear();MoyaiUI.render(q('[data-heading]'), '');q('[data-count]').textContent='';
-          q('[data-state]').className='pr-state';q('[data-state]').textContent='Unavailable';renderContent();
+          q('[data-state]').className='pr-state';q('[data-state]').textContent='Unavailable';renderContent();onStatus(null);
         }
         status.textContent=(data?'Could not refresh. Showing the previous version. ':'')+error.message+' Use Refresh to try again.';
       }finally{if(alive&&active&&request===epoch)refresh.disabled=false;}
@@ -92,5 +97,5 @@
       dispose(){alive=false;active=false;epoch++;}
     };
   }
-  return {mount,diffRows,changes};
+  return {mount,diffRows,changes,presentation};
 });

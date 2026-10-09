@@ -231,14 +231,15 @@ const details={number:145,title:'Native review',state:'open',draft:false,merged:
   additions:2,deletions:1,changed_files:2,body:'Description',files:[{filename:'src/view.js',status:'modified',additions:2,deletions:1,patch:'@@ -4,2 +4,3 @@\n-old\n+new\n+added\n context'},
   {filename:'logo.png',status:'added',additions:0,deletions:0,patch:''}]};
 function nativePanel(){
-  const nodes=new Map(),requests=[];
+  const nodes=new Map(),requests=[],statuses=[];
   function node(selector){
     if(!nodes.has(selector))nodes.set(selector,{innerHTML:'',textContent:'',className:'',disabled:false,scrollTop:0,dataset:{},setAttribute(){},querySelector:node,querySelectorAll(){return [];}});
     return nodes.get(selector);
   }
   const lifecycle=native.mount({element:node('root'),url,escape,markdown:escape,
+    onStatus:data=>statuses.push(native.presentation(data).state),
     load:()=>new Promise((resolve,reject)=>requests.push({resolve,reject}))});
-  return {node,requests,...lifecycle};
+  return {node,requests,statuses,...lifecycle};
 }
 test('native diffs show source line numbers, missing patches and truncation without interpreting code as HTML',()=>{
   assert.deepEqual(native.diffRows(details.files[0].patch).map(r=>[r.old,r.next]),[['',''],[4,''],['',4],['',5],[5,6]]);
@@ -251,8 +252,10 @@ test('native PR refresh keeps prior data on temporary failure and clears it on a
   const body=f.node('[data-content]').innerHTML;assert.match(body,/src\/view.js/);assert.match(f.node('[data-heading]').innerHTML,/Native review/);
   const refresh=f.node('[data-refresh]').onclick();f.requests[1].reject(Object.assign(Error('Offline'),{status:502}));await refresh;
   assert.equal(f.node('[data-content]').innerHTML,body);assert.match(f.node('[data-status]').textContent,/previous version/);
+  assert.deepEqual(f.statuses,['open'],'Temporary failures preserve the last confirmed tab status');
   const denied=f.node('[data-refresh]').onclick();f.requests[2].reject(Object.assign(Error('Access removed'),{status:403}));await denied;
   assert.equal(f.node('[data-content]').innerHTML,'');assert.equal(f.node('[data-heading]').innerHTML,'');assert.equal(f.node('[data-state]').textContent,'Unavailable');
+  assert.deepEqual(f.statuses,['open','unknown'],'Access denial also clears the tab status');
   const retry=f.node('[data-refresh]').onclick();f.requests[3].resolve(details);await retry;
   assert.match(f.node('[data-content]').innerHTML,/src\/view.js/);assert.equal(f.node('[data-status]').textContent,'');
 });
@@ -260,11 +263,45 @@ test('hidden, closed and reactivated PR tabs reject stale detail responses',asyn
   for(const ending of ['deactivate','dispose']){
     const f=nativePanel(),pending=f.activate();f[ending]();f.requests[0].resolve(details);await pending;
     assert.equal(f.node('[data-heading]').innerHTML,'');
+    assert.deepEqual(f.statuses,[]);
   }
   const f=nativePanel(),old=f.activate();f.deactivate();const current=f.activate();
   f.requests[1].resolve({...details,title:'Current'});await current;
   f.requests[0].resolve({...details,title:'Stale'});await old;
   assert.match(f.node('[data-heading]').innerHTML,/Current/);assert.doesNotMatch(f.node('[data-heading]').innerHTML,/Stale/);
+  assert.deepEqual(f.statuses,['open']);
+});
+
+test('detail refreshes publish closed, reopened, draft and merged status to the owning tab',async()=>{
+  const f=nativePanel();
+  const states=[{state:'open'},{state:'closed'},{state:'open'},{state:'open',draft:true},
+    {state:'closed',draft:true,merged:true}];
+  for(const [index,change] of states.entries()){
+    const pending=index?f.node('[data-refresh]').onclick():f.activate();
+    f.requests[index].resolve({...details,...change});await pending;
+    assert.equal(f.node('[data-state]').className,'pr-state pr-state-'+f.statuses.at(-1));
+  }
+  assert.deepEqual(f.statuses,['open','closed','open','draft','merged']);
+});
+
+test('session sync updates each PR tab independently without undoing a newer detail read',()=>{
+  const source=fs.readFileSync(panelPath,'utf8');
+  const first={url,title:'First',state:'open'},second={url:url.replace('145','146'),title:'Second',state:'closed'};
+  const tabs=new Map([first,second].map(pr=>[pr.url,{id:pr.url,kind:'pr',url:pr.url,prStatus:pr,prReceipt:pr}]));
+  const ctx={disposed:false,run:{id:'session'},pullRequests:[],prSignature:'',prUrl,tabs,MoyaiPullRequest:native,
+    renderPulls(){},syncToolboxVisibility(){},draw(){},save(){},pullsSection:{},document:{querySelector:()=>null},remove:id=>tabs.delete(id)};
+  vm.createContext(ctx);
+  vm.runInContext(source.slice(source.indexOf('    function syncPullRequests('),source.indexOf('    function followPullRequest(')),ctx);
+  const sync=prs=>ctx.syncPullRequests({id:'session',pull_requests:prs});
+  tabs.get(url).prStatus={state:'closed',merged:true};
+  sync([{...first,title:'Renamed'},second]);
+  assert.equal(native.presentation(tabs.get(url).prStatus).state,'merged');
+  assert.equal(tabs.get(url).title,'Renamed');
+  assert.equal(native.presentation(tabs.get(second.url).prStatus).state,'closed');
+  sync([{...first,state:'merged'},{...second,state:'open'}]);
+  assert.equal(native.presentation(tabs.get(url).prStatus).state,'merged');
+  assert.equal(native.presentation(tabs.get(second.url).prStatus).state,'open');
+  sync([first]);assert.equal(tabs.has(second.url),false);
 });
 
 function agentToolbox(){
