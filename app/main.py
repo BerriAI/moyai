@@ -208,6 +208,7 @@ def create_app(settings: Settings | None = None):
     message_queue = MessageQueue(store, slack.chat.change_queued_in)
     identities = SlackIdentities(store, connectors, settings, security, checkpoints, credentials.same_requester)
     personal_slack = connectors.personal_slack
+    credentials.personal_slack = personal_slack
     connectors.slack_identities = identities
     slack.identities = identities
     manager.prepare_context = slack.prepare
