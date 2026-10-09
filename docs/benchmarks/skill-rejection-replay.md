@@ -2,6 +2,8 @@
 
 A production skill-sync run spent **11.8 minutes** on 33 model calls and 180 tool calls, then ended with “Use at most five skills in one turn.” It later issued a successful delegation, but the earlier rejection left a fatal relay error that prevented continuation. This fix keeps the limit and makes definite skill rejections actionable tool receipts.
 
+![Skill error recovery: corrected cases eligible to resume increase from 0 of 8 to 8 of 8; all 13 fatal-state protections remain enforced.](skill-rejection-replay.png)
+
 | Measured boundary | Before | After |
 | --- | ---: | ---: |
 | Corrected skill errors eligible to resume | 0 / 8 | **8 / 8** |
