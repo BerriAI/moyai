@@ -63,6 +63,14 @@ const options: HTMLReactParserOptions = {
     // Event attributes are never application handlers. API/Markdown content is
     // escaped/sanitized upstream; React must not turn strings into executable JS.
     for (const name of Object.keys(props)) if (/^on/i.test(name)) delete props[name]
+    // Templates seed defaults; controllers own subsequent edits. Keep this
+    // explicit rather than relying on the parser's controlled-prop conversion.
+    if (["input", "textarea", "select"].includes(node.name)) {
+      delete props.value
+      delete props.checked
+      delete props.defaultValue
+      delete props.defaultChecked
+    }
     const children = () => domToReact(node.children as DOMNode[], options)
     switch (node.name) {
       case "script": return <></>
@@ -75,9 +83,17 @@ const options: HTMLReactParserOptions = {
         const button = <Button {...props} title={undefined} variant={variant}>{children()}</Button>
         return title ? <Tooltip><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent sideOffset={6}>{title}</TooltipContent></Tooltip> : button
       }
-      case "input":
-        if (node.attribs.type === "checkbox") return <FormCheckbox {...props} value={node.attribs.value} />
-        return <Input {...props} />
+      case "input": {
+        const type = (node.attribs.type || "text").toLowerCase()
+        const value = node.attribs.value
+        const defaultChecked = "checked" in node.attribs
+        if (type === "checkbox") return <FormCheckbox {...props} value={value} defaultChecked={defaultChecked} />
+        // A choice's value is its submitted identity, not its checked state.
+        if (type === "radio") return <Input {...props} value={value} defaultChecked={defaultChecked} />
+        if (type === "file") return <Input {...props} />
+        if (["button", "submit", "reset", "image"].includes(type)) return <Input {...props} value={value} />
+        return <Input {...props} defaultValue={value} />
+      }
       case "textarea": return <Textarea {...props} defaultValue={node.children.map(child => child.type === "text" ? child.data : "").join("")} />
       case "select": {
         const selected = (node.children as Element[]).flatMap(child => child.name === "optgroup" ? child.children as Element[] : [child])

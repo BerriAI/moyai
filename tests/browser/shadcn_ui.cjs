@@ -570,6 +570,155 @@ for (const width of [1440, 768, 320]) {
   });
 }
 
+test('template form controls preserve editing, native values, validation and reset across input types', async t => {
+  const page = await pageFor(t);
+  const fields = [
+    ['text', 'Original', 'Updated'], ['search', 'release', 'tests'],
+    ['email', 'before@example.com', 'after@example.com'], ['url', 'https://example.com/before', 'https://example.com/after'],
+    ['tel', '123456', '987654'], ['password', 'synthetic-before', 'synthetic-after'],
+    ['number', '0', '42'], ['date', '2026-10-01', '2026-10-08'],
+    ['time', '09:00', '10:30'], ['datetime-local', '2026-10-01T09:00', '2026-10-08T10:30'],
+    ['month', '2026-10', '2026-11'], ['week', '2026-W40', '2026-W41'],
+  ];
+  await page.evaluate(fields => {
+    MoyaiUI.render(document.querySelector('#content'), `<form id="input-contract">
+      ${fields.map(([type, value]) => `<label>${type}<input type="${type}" name="${type}" value="${value}" required></label>`).join('')}
+      <label>Initially empty<input name="empty" value=""></label>
+      <label>Initially absent<input name="absent"></label>
+      <label>Notes<textarea name="notes">Original notes</textarea></label>
+      <label>First<input type="radio" name="scope" value="first" checked></label>
+      <label>Second<input type="radio" name="scope" value="second"></label>
+      <label>Enabled<input type="checkbox" name="enabled" value="yes" checked></label>
+      <label>Notify<input type="checkbox" role="switch" name="notify" value="yes" checked></label>
+      <label>Read only<input name="readonly" value="Keep this" readonly></label>
+      <label>Disabled<input name="disabled" value="Skip this" disabled></label>
+      <label>Upload<input name="upload" type="file"></label>
+      <input name="hidden" type="hidden" value="metadata">
+      <input type="submit" value="Submit changes"><input type="reset" value="Restore defaults"><input type="button" value="Plain action">
+    </form>`);
+    const form = document.querySelector('#input-contract');
+    window.inputSubmissions = [];
+    form.onsubmit = event => { event.preventDefault(); window.inputSubmissions.push(Object.fromEntries(new FormData(form))); };
+  }, fields);
+  const form = page.locator('#input-contract');
+  assert.equal(await form.locator('[name=readonly]').isEditable(), false);
+  assert.equal(await form.locator('[name=disabled]').isDisabled(), true);
+  for (const [type, initial, edited] of fields) {
+    const input = form.locator(`[name="${type}"]`);
+    assert.equal(await input.inputValue(), initial, `${type}: initial value`);
+    if (['text', 'search', 'email', 'url', 'tel', 'password', 'number'].includes(type)) {
+      await input.fill('');
+      await input.pressSequentially(edited);
+    } else await input.fill(edited);
+    await input.press('Tab');
+    assert.equal(await input.inputValue(), edited, `${type}: typed value survives blur`);
+  }
+  await form.locator('[name=empty]').pressSequentially('Now filled');
+  await form.locator('[name=absent]').pressSequentially('Also filled');
+  await form.locator('[name=notes]').fill('Edited notes');
+  await form.getByRole('radio', { name: 'Second', exact: true }).click();
+  assert.equal(await form.getByRole('radio', { name: 'First', exact: true }).isChecked(), false);
+  await form.getByRole('checkbox', { name: 'Enabled', exact: true }).click();
+  await form.getByRole('switch', { name: 'Notify', exact: true }).click();
+  await form.locator('[name=upload]').setInputFiles({ name: 'fixture.txt', mimeType: 'text/plain', buffer: Buffer.from('Synthetic upload') });
+  await form.getByRole('button', { name: 'Submit changes', exact: true }).click();
+  const submitted = await page.evaluate(() => window.inputSubmissions.at(-1));
+  for (const [type, , edited] of fields) assert.equal(submitted[type], edited, `${type}: submitted value`);
+  assert.equal(submitted.scope, 'second');
+  assert.equal(submitted.notes, 'Edited notes');
+  assert.equal(submitted.empty, 'Now filled');
+  assert.equal(submitted.absent, 'Also filled');
+  assert.equal(submitted.readonly, 'Keep this');
+  assert.equal(submitted.hidden, 'metadata');
+  for (const name of ['enabled', 'notify', 'disabled']) assert.equal(name in submitted, false);
+  assert.equal(await form.locator('[name=upload]').evaluate(input => input.files[0].name), 'fixture.txt');
+  await form.locator('[name=text]').evaluate(input => { input.value = 'Controller update'; input.focus(); input.setSelectionRange(input.value.length, input.value.length); });
+  await form.locator('[name=text]').pressSequentially(' kept');
+  assert.equal(await form.locator('[name=text]').inputValue(), 'Controller update kept');
+  await form.locator('[name=text]').fill('');
+  assert.equal(await form.evaluate(form => form.checkValidity()), false);
+  await form.getByRole('button', { name: 'Restore defaults', exact: true }).click();
+  for (const [type, initial] of fields) assert.equal(await form.locator(`[name="${type}"]`).inputValue(), initial, `${type}: reset`);
+  assert.equal(await form.locator('[name=empty]').inputValue(), '');
+  assert.equal(await form.locator('[name=absent]').inputValue(), '');
+  assert.equal(await form.locator('[name=notes]').inputValue(), 'Original notes');
+  assert.equal(await form.getByRole('radio', { name: 'First', exact: true }).isChecked(), true);
+  assert.equal(await form.getByRole('checkbox', { name: 'Enabled', exact: true }).isChecked(), true);
+  assert.equal(await form.getByRole('switch', { name: 'Notify', exact: true }).isChecked(), true);
+  assert.equal(await form.locator('[name=upload]').evaluate(input => input.files.length), 0);
+  assert.equal(await form.evaluate(form => form.checkValidity()), true);
+});
+
+test('prefilled session repository stays editable and survives draft restoration', async t => {
+  const page = await pageFor(t);
+  await page.getByLabel('Session options', { exact: true }).click();
+  await page.locator('#repo').pressSequentially('https://github.com/example/first');
+  await page.evaluate(() => navigate('connections'));
+  await page.evaluate(() => navigate('tasks'));
+  await page.getByLabel('Session options', { exact: true }).click();
+  assert.equal(await page.locator('#repo').inputValue(), 'https://github.com/example/first');
+  await page.locator('#repo').press('End');
+  await page.locator('#repo').pressSequentially('-updated');
+  await page.locator('#repo').press('Tab');
+  assert.equal(await page.evaluate(() => state.newDraft.repo), 'https://github.com/example/first-updated');
+});
+
+for (const scenario of [
+  { route: 'automations', open: '[data-edit-automation="auto-0"]', path: '/api/automations/auto-0', submit: 'Save paused', fields: [['[name=name]', 'Release review'], ['[name=repo_url]', 'https://github.com/example/release'], ['[name=max_runs_per_hour]', '60']], expected: { definition: { name: 'Release review', repo_url: 'https://github.com/example/release', max_runs_per_hour: 60 } } },
+  { route: 'skills', open: '[data-edit-skill="skill-0"]', path: '/api/skills/skill-0', submit: 'Save skill', fields: [['#skill-name', 'release-review'], ['#skill-description', 'Review release notes and tests.']], expected: { name: 'release-review', description: 'Review release notes and tests.' } },
+  { route: 'memory', open: '[data-memory-edit="memory-0"]', path: '/api/memory/memory-0', submit: 'Save memory', fields: [['#memory-title', 'Release review preferences']], expected: { title: 'Release review preferences' } },
+  { route: 'secrets', open: '[data-edit-secret="secret-0"]', path: '/api/credentials/secrets/secret-0', submit: 'Save changes', fields: [['#secret-label', 'Release API access']], expected: { label: 'Release API access' } },
+  { route: 'environments', open: '[data-edit-environment="env-0"]', path: '/api/admin/environments/env-0', submit: 'Save recipe', fields: [['#env-name', 'Release environment'], ['#env-repository', 'example/release'], ['#env-ref', 'release']], expected: { recipe: { name: 'Release environment', repository: 'example/release', ref: 'release' } } },
+]) {
+  for (const width of [1440, 768, 320]) test(`prefilled ${scenario.route} editor accepts typing and preserves save payloads and drafts at ${width}px`, async t => {
+    const page = await pageFor(t, scenario.route, 'populated', width);
+    await page.route(`**${scenario.path}`, route => ['PUT', 'PATCH'].includes(route.request().method())
+      ? route.fulfill({ status: 503, json: { detail: 'Form regression: save rejected' } }) : route.continue());
+    await page.locator(scenario.open).click();
+    for (const [selector, edited] of scenario.fields) {
+      const input = page.locator(selector);
+      assert.notEqual(await input.inputValue(), '', `${selector}: exercising a prefilled field`);
+      await input.fill('');
+      await input.pressSequentially(edited);
+      await input.press('Tab');
+      assert.equal(await input.inputValue(), edited, `${selector}: keystrokes survive blur`);
+    }
+    const request = page.waitForRequest(request => new URL(request.url()).pathname === scenario.path && ['PUT', 'PATCH'].includes(request.method()));
+    await page.getByRole('button', { name: scenario.submit, exact: true }).click();
+    assert.partialDeepStrictEqual((await request).postDataJSON(), scenario.expected);
+    await page.getByText('Form regression: save rejected', { exact: true }).waitFor();
+    for (const [selector, edited] of scenario.fields) assert.equal(await page.locator(selector).inputValue(), edited, `${selector}: failed-save draft`);
+    await page.keyboard.press('Escape');
+    await page.getByRole('dialog').waitFor({ state: 'detached' });
+  });
+}
+
+for (const width of [1440, 768, 320]) test(`credential availability radios submit the chosen access boundary at ${width}px`, async t => {
+  const page = await pageFor(t, 'secrets', 'populated', width);
+  await page.route('**/api/credentials/requests/input-test', route => route.fulfill({ status: 503, json: { detail: 'Synthetic request: save rejected' } }));
+  await page.evaluate(() => openCredentialDialog({ id: 'input-test', provider: 'generic', name: 'synthetic-service', format: 'env', reason: 'Verify availability controls', generation: 1, can_personal: true, can_organization: true, preferred_scope: 'personal' }));
+  assert.equal(await page.locator('#secret-use-personal').isChecked(), true);
+  await page.getByRole('radio', { name: 'Organization', exact: true }).click();
+  assert.equal(await page.locator('#secret-use-organization').isChecked(), true);
+  assert.equal(await page.locator('#secret-use-personal').isChecked(), false);
+  assert.equal(await page.locator('#secret-scope').inputValue(), 'organization');
+  assert.equal(await page.locator('#secret-lifetime').inputValue(), 'persistent');
+  await page.locator('#secret-use-organization').focus();
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#secret-use-personal').isChecked(), true);
+  await page.keyboard.press('ArrowLeft');
+  assert.equal(await page.locator('#secret-use-session').isChecked(), true);
+  assert.equal(await page.locator('#secret-scope').inputValue(), 'personal');
+  assert.equal(await page.locator('#secret-lifetime').inputValue(), 'session');
+  await page.locator('#secret-value').fill('{"DEMO_TOKEN":"synthetic-only"}');
+  const request = page.waitForRequest('**/api/credentials/requests/input-test');
+  await page.getByRole('button', { name: 'Submit', exact: true }).click();
+  assert.partialDeepStrictEqual((await request).postDataJSON(), { decision: 'provide', scope: 'personal', lifetime: 'session', value: '{"DEMO_TOKEN":"synthetic-only"}' });
+  await page.getByText('Synthetic request: save rejected', { exact: true }).waitFor();
+  assert.equal(await page.locator('#secret-use-session').isChecked(), true);
+  assert.equal(await page.locator('#secret-value').inputValue(), '', 'Failed saves still clear sensitive replacement values');
+});
+
 test('incremental assistant updates render, preserve reading state and retain copy actions', async t => {
   const page = await pageFor(t);
   await page.evaluate(() => {

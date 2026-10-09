@@ -55,6 +55,12 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
   content on the element that joins the document so its root is released on removal.
 - Inputs remain uncontrolled. Controllers can read and set `value`, run native
   validation, use `FormData`, and retain drafts while requests are in flight.
+  The adapter explicitly strips controlled form props, independently of the HTML
+  parser: editable inputs use `defaultValue`, choice controls use `defaultChecked`,
+  and a checkbox/radio `value` remains its submitted identity. Action inputs keep
+  their value labels; file inputs never receive a prefilled value. Textareas seed
+  their text content, and selects seed the selected options. Keep this policy in
+  the shared renderer, not individual page templates.
   The Checkbox/Switch adapter preserves the existing `checked` and native
   `input`/`change` event contract, including reset and failed-save rollback.
 - `MoyaiUI.createDialog()` returns a persistent content host with `showModal`,
