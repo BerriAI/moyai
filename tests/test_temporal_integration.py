@@ -14,6 +14,7 @@ from app.session_lifecycle import SessionLifecycle
 from app.session_workflow import SessionWorkflow
 from app.temporal_runtime import TemporalRunManager
 from test_durable import durable  # noqa: F401 -- shared fixture
+from test_workspace import recovery_catalog  # noqa: F401 -- actual broker declarations
 
 
 async def eventually(predicate, seconds=60):
@@ -302,7 +303,9 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             await manager.shutdown()
 
 
-async def test_real_temporal_model_recovery_timer_survives_worker_replacement(durable, tmp_path, monkeypatch):
+@pytest.mark.parametrize('read_name,read_status', [('agents_results', 502), ('github_repositories', 524)])
+async def test_real_temporal_model_recovery_timer_survives_worker_replacement(
+        durable, tmp_path, monkeypatch, recovery_catalog, read_name, read_status):
     from http.server import BaseHTTPRequestHandler
     from sandbox.startup import _read_with_reconnect
     from sandbox.transport_recovery import recovery_marker
@@ -320,11 +323,10 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(du
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(json.dumps([{'name': 'agents_results', 'annotations': {
-                'readOnlyHint': True, 'idempotentHint': True}}]).encode())
+            self.wfile.write(json.dumps(recovery_catalog).encode())
         def do_POST(self):
             self.rfile.read(int(self.headers['Content-Length']))
-            self.send_response(502)
+            self.send_response(read_status if self.path == '/tools/call' else 502)
             self.end_headers()
             self.wfile.write(b'{}')
     def bounded_read(request, reader, **options):
@@ -335,8 +337,8 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(du
         with diagnostic_relay(Edge) as (relay, client, diagnostics):
             agent.context.relay = relay
             assert client.get('/tools').status_code == 200
-            agent.journal.tool_started('results', 'agents_results', {})
-            response = client.post('/tools/call', json={'name': 'agents_results', 'arguments': {}})
+            agent.journal.tool_started('results', read_name, {})
+            response = client.post('/tools/call', json={'name': read_name, 'arguments': {}})
             agent.journal.tool_finished('results', f'Tool failed (HTTP {response.status_code}).')
             assert not relay.uncertain_tool and not relay.last_error
             assert response.status_code == 503

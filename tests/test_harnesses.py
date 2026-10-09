@@ -10,7 +10,7 @@ from app.config import MODEL_CATALOG
 from app.db import Store
 from sandbox.broker_relay import BrokerRelay, InputPending
 from sandbox.broker_transport import unseal
-from test_workspace import workspace
+from test_workspace import workspace, recovery_catalog
 from test_slack import slack_app, event, signed
 from test_slack_chat import send
 
@@ -369,6 +369,84 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
         'steer_message_id': None, 'steering_applied': [], 'transport_attempt': 2})
     from sandbox.context_store import read_records
     assert json.loads(read_records(tmp_path / 'session/context.sqlite3')[-1]['text'])['content'] == 'SDK result'
+
+
+@pytest.mark.parametrize('boundary', ['rotation', 'agents', 'credentials'])
+def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypatch, recovery_catalog, boundary):
+    """Real relay/journal/final emitter; only the model invocation is scripted."""
+    from sandbox import agent
+    from sandbox.codex_harness import CodexAgent
+    from sandbox.context_store import ContextStore
+    from test_broker_transport import diagnostic_relay
+    events, reads = [], []
+    handle = 'a' * 32
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def reply(self, body, status=200):
+            raw = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+        def do_GET(self):
+            self.reply(recovery_catalog if self.path == '/tools' else {'input_budget': 200000})
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path != '/tools/call':
+                return self.reply({})
+            if body['name'] == 'github_repositories':
+                reads.append(body)
+                return self.reply({'repositories': []}, 524 if len(reads) == 1 else 200)
+            self.reply({'moyai_wait_group' if boundary == 'agents' else 'moyai_wait_credential': handle})
+    async def invoke(runtime, prompt, system_message):
+        with httpx.Client(base_url=runtime.context.relay.url,
+                          headers={'Authorization': 'Bearer private-capability'}, timeout=5) as client:
+            assert client.get('/tools').status_code == 200
+            runtime.journal.tool_started('read', 'github_repositories', {})
+            response = client.post('/tools/call', json={'name': 'github_repositories', 'arguments': {}})
+            runtime.journal.tool_finished('read', response.text)
+            if response.status_code == 524:
+                # Reproduce the incident's model-directed retry on old catalogs.
+                runtime.journal.tool_started('read-retry', 'github_repositories', {})
+                response = client.post('/tools/call', json={'name': 'github_repositories', 'arguments': {}})
+                runtime.journal.tool_finished('read-retry', response.text)
+            assert response.status_code == 200
+            if boundary != 'rotation':
+                name = 'agents_fanout' if boundary == 'agents' else 'credentials_request'
+                runtime.journal.tool_started('wait', name, {})
+                response = client.post('/tools/call', json={'name': name, 'arguments': {}})
+                assert response.status_code == 200
+                runtime.journal.tool_finished('wait', response.text)
+        runtime.context.step()
+        assert runtime.stopped.is_set()
+        return {'interrupted': True, 'failed': False, 'messages': runtime.journal.messages}
+    monkeypatch.setattr(CodexAgent, 'validate', lambda self: None)
+    monkeypatch.setattr(CodexAgent, '_run', invoke)
+    monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
+    monkeypatch.setattr(agent, 'computer_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
+    monkeypatch.setattr(agent, 'emit', lambda kind, message, data=None, **extra: events.append((kind, message, extra)))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'private-capability')
+    monkeypatch.chdir(tmp_path)
+    with diagnostic_relay(Edge) as (relay, _, diagnostics):
+        spec = {'run_id': 'read-continuation', 'harness': 'codex', 'broker_url': relay.remote,
+                'repo_url': '', 'model': 'openai/gpt-6-astra', 'prompt': 'Inspect repositories',
+                'max_iterations': 8, 'timeout': 30, 'chat_enabled': True,
+                'rotation_at': 0 if boundary == 'rotation' else None}
+        assert agent.run_agent(spec, relay) == 0
+        assert len(reads) == 2 and not diagnostics and not relay.last_error and not relay.uncertain_tool
+    final = next(extra for kind, _, extra in events if kind == 'final')
+    assert final['continuation'] and not final['completed']
+    assert final['wait_group'] == (handle if boundary == 'agents' else '')
+    assert final['wait_credential'] == (handle if boundary == 'credentials' else '')
+    assert 'transport_retry' not in final and 'transport_failure' not in final
+    store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])
+    try:
+        assert not store.pending and 'github_repositories' in json.dumps(store.history())
+    finally:
+        store.close()
 
 
 def test_registry_extension_reaches_api_without_changing_entrypoint(workspace, monkeypatch):

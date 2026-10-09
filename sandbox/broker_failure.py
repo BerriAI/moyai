@@ -14,7 +14,7 @@ REQUEST_ID_HEADERS = (
     'x-moyai-request-id', 'x-moyai-model-request-id', 'x-request-id',
     'x-render-request-id', 'rndr-id', 'x-litellm-call-id',
 )
-TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504, 524}
 
 
 def safe_id(value):

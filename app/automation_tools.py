@@ -109,8 +109,11 @@ class AutomationTools:
             self.actor(run)
         except HTTPException:
             return []
+        # Reading one automation also synchronizes its remote schedules. Only
+        # these observational catalogs can replay after an unknown outcome.
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments'}}}
+                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments'},
+                                 'idempotentHint': name in {'automation_webhook_info', 'automation_environments'}}}
                 for name, (schema, description) in SPECS.items()]
 
     def owned(self, automation_id, actor):

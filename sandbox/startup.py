@@ -4,6 +4,11 @@ import time
 import urllib.error
 import urllib.request
 
+try:
+    from .broker_failure import TRANSIENT_STATUSES
+except ImportError:  # Loaded by the sandbox script, outside a Python package.
+    from broker_failure import TRANSIENT_STATUSES
+
 
 # The local caller must outlive the relay's complete metadata reconnect window.
 REPOSITORY_METADATA_BUDGET = 180
@@ -36,7 +41,7 @@ def _read_with_reconnect(request, reader, *, stage, notify=None, budget=45, atte
                 notify('Workspace services reconnected. Preparing the agent.')
             return result
         except urllib.error.HTTPError as exc:
-            if exc.code not in {408, 425, 429, 500, 502, 503, 504}:
+            if exc.code not in TRANSIENT_STATUSES:
                 raise
             reason = f'HTTP {exc.code}'
             exc.close()

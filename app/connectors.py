@@ -82,6 +82,16 @@ TOOLS = {
     "notion_append": ("notion", True, NotionAppend, "Append a paragraph to a Notion page directly. No administrator approval step is required."),
 }
 
+# Explicit broker-request replay contract, separate from connection write policy.
+# Metadata/identity caches may refresh; no action or context selection is replayed.
+# github_checkout here only resolves metadata, before the sandbox changes files.
+RETRY_SAFE_READS = frozenset({
+    'github_rulesets', 'github_ruleset', 'github_repositories', 'github_repository',
+    'github_checkout', 'github_pull_request', 'github_pull_request_comments',
+    'linear_my_issues', 'linear_teams', 'linear_search', 'linear_issue',
+    'slack_search', 'slack_thread', 'slack_me', 'notion_search', 'notion_page',
+})
+
 
 class Connectors:
     def __init__(self, store: Store, security, settings):

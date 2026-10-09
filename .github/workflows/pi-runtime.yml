@@ -21,3 +21,16 @@ jobs:
         run: docker build --target workspace -f Dockerfile.sandbox -t moyai-pi-runtime .
       - name: Verify the installed Pi runtime
         run: docker run --rm moyai-pi-runtime pi --version
+      - name: Verify native Hermes tool-read recovery and continuation
+        run: |
+          docker run --rm --volume "$PWD:/src:ro" --workdir /opt/hermes \
+            -e DATA_DIR=/tmp/moyai-hermes-recovery \
+            -e HERMES_TEST_SOURCE=/opt/hermes \
+            -e HERMES_TEST_PYTHON=/opt/hermes-env/bin/python \
+            --entrypoint /bin/sh moyai-pi-runtime -c '
+              set -eu
+              python -m pm.build_env --source /src --out /tmp/controller --group dev --no-install-project
+              cd /src
+              /tmp/controller/bin/python -m pytest -q --tb=line -p no:cacheprovider \
+                tests/test_hermes_steering.py::test_real_hermes_tool_read_recovers_and_continues_without_replaying_write
+            '

@@ -217,9 +217,32 @@ def background_compaction(url, model, enabled):
         agent.close()
 
 
+def read_recovery(url, model):
+    from sandbox.hermes_harness import HermesAgent
+    from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+
+    completed_tools = []
+    activity = SimpleNamespace(start=lambda *args: None,
+        complete=lambda call, name, *args: completed_tools.append(name), commentary=lambda text: None)
+    agent = HermesAgent(spec={'model': model, 'max_iterations': 10, 'timeout': 90},
+        relay=SimpleNamespace(url=url, context_window=lambda: {}), config={}, activity=activity,
+        step=lambda: None, cwd=str(Path.cwd()))
+    agent.validate()
+    agent.agent._cached_system_prompt = 'Perform the fixture tools exactly once, then return the final response.'
+    agent.agent.compression_enabled = False
+    try:
+        result = agent.run_conversation('Complete the fixture write and repository lookup, then reply.',
+            conversation_history=[], system_message='Retain completed tool receipts during read recovery.')
+        report('READ_RECOVERY_PROOF ' + json.dumps({'completed': result['completed'],
+            'final_response': result['final_response'], 'completed_tools': completed_tools}))
+    finally:
+        agent.close()
+        shutdown_mcp_servers()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('scenario', choices=['corrections', 'redirect-cap', 'provider-failure', 'stop', 'guards', 'background'])
+    parser.add_argument('scenario', choices=['corrections', 'redirect-cap', 'provider-failure', 'stop', 'guards', 'background', 'read-recovery'])
     parser.add_argument('--unpatched', action='store_true')
     parser.add_argument('--broker-url')
     parser.add_argument('--model')
@@ -227,5 +250,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.scenario == 'background':
         background_compaction(args.broker_url, args.model, args.live_compaction)
+    elif args.scenario == 'read-recovery':
+        read_recovery(args.broker_url, args.model)
     else:
         conversation(args.scenario, unpatched=args.unpatched)

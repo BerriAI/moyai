@@ -55,7 +55,7 @@ def worker():
     relay = BrokerRelay(job['remote'], job['capability']).start()
     store = ContextStore(directory.parent / 'pi-context.sqlite3', job['run_id'])
     store.initialize([])
-    agent = create_agent('pi', spec={'model': job['model'], 'timeout': job.get('timeout', 40),
+    agent = create_agent(job.get('harness', 'pi'), spec={'model': job['model'], 'timeout': job.get('timeout', 40),
         'max_iterations': job.get('max_iterations', 20)}, relay=relay,
         config={'mcp_servers': {'workspace': {'command': sys.executable,
             'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
@@ -73,7 +73,8 @@ def worker():
     finally:
         proof.update(events=events, sessions=sessions, pending=bool(store.pending or agent.journal and agent.journal.pending),
                      history=store.history(), native_reason=agent.native.reason if agent.native else None,
-                     staged=bool(agent.native and agent.native.staged), calls=agent.model_calls)
+                     staged=bool(agent.native and agent.native.staged), calls=agent.model_calls,
+                     relay_error=relay.last_error, uncertain_tool=relay.uncertain_tool)
         agent.close()
         proof['native_removed'] = not (directory.parent / '.native-sdk').exists()
         store.close()
@@ -138,6 +139,64 @@ def test_pi_native_files_and_real_authorized_mcp(workspace, tmp_path, monkeypatc
         assert [event[1] for event in starts] == [event[1] for event in receipts]
         assert receipts[-1][-1]['isError'] is True, receipts[-1]
         assert proof['staged'] and saved_native(state)
+
+
+@pytest.mark.parametrize('harness', ['pi', 'opencode', 'deepagents', 'tool-loop'])
+def test_native_tool_read_recovery_preserves_completed_write(workspace, tmp_path, monkeypatch, harness):
+    """Each real adapter consumes the actual catalog and continues after an edge524."""
+    from sandbox.broker_transport import unseal
+    app, client = workspace
+    writes, reads = [], []
+    async def ensure(): return {}
+    async def refresh(): pass
+    async def send(name, arguments, **kwargs):
+        writes.append(name)
+        return {'receipt': 'completed-write-once'}
+    monkeypatch.setattr(app.state.connectors.github, 'ensure_connection', ensure)
+    monkeypatch.setattr(app.state.connectors.github, 'refresh_connection', refresh)
+    monkeypatch.setattr(app.state.connectors.github, 'repository_options',
+                        lambda: [{'id': 42, 'name': 'read-recovered'}])
+    monkeypatch.setattr(app.state.connectors, 'call', send)
+    for provider in ('github', 'slack'):
+        app.state.connectors.save(provider, {'access_token': 'fixture'}, 'Controlled provider')
+
+    def upstream(body, state):
+        names = {tool['function']['name'] for tool in body.get('tools', [])}
+        step = len(state.requests)
+        if step == 1 and 'workspace_tools' in names:
+            return call(body, state, 'workspace_tools', {})
+        if not writes:
+            name, arguments = 'slack_send', {'channel': 'me', 'text': 'controlled proof'}
+        elif not reads:
+            assert 'completed-write-once' in json.dumps(body)
+            name, arguments = 'github_repositories', {}
+        else:
+            recovered = 'read-recovered' in json.dumps(body)
+            return answer(body, state, 'read-recovery-complete' if recovered else 'read-unrecovered')
+        if 'workspace_call' in names:
+            return call(body, state, 'workspace_call', {'name': name, 'arguments_json': json.dumps(arguments)})
+        return call(body, state, next(tool for tool in names if tool.endswith(name)), arguments)
+
+    with background_gateway(tmp_path, monkeypatch, workspace, harness, upstream) as state:
+        app.state.store.execute('UPDATE runs SET plugins=? WHERE id=?',
+                                (json.dumps(['github', 'slack']), state.run['id']))
+        request = client.request
+        def edge(method, url, **options):
+            if method == 'POST' and url.endswith('/tools/call'):
+                body = json.loads(unseal(state.capability, '/tools/call', options['content']))
+                if body['name'] == 'github_repositories':
+                    reads.append(body)
+                    if len(reads) == 1:
+                        return httpx.Response(524, json={'error': 'controlled edge timeout'})
+            return request(method, url, **options)
+        monkeypatch.setattr(client, 'request', edge)
+        proof = invoke(state, tmp_path / 'project', harness=harness, timeout=60)
+        assert proof.get('result', {}).get('completed'), proof
+        assert proof['result']['final_response'] == 'read-recovery-complete'
+        assert writes == ['slack_send'] and len(reads) == 2
+        assert proof['sessions'] == ['aagent_session']
+        assert not proof['pending'] and not proof['relay_error'] and not proof['uncertain_tool']
+        assert 'completed-write-once' in json.dumps(proof['history'])
 
 
 @pytest.mark.parametrize('failure', ['unauthorized', 'unavailable', 'truncated'])
