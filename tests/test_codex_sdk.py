@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import tomllib
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,7 +45,7 @@ def sdk_event(method, body):
 
 
 def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notifications=None):
-    observed = SimpleNamespace(homes=[], prompts=[], thread_options=[], steers=[], steer_error=None)
+    observed = SimpleNamespace(homes=[], prompts=[], thread_options=[], steers=[], steer_error=None, exits=[])
 
     class Client:
         def __init__(self, config):
@@ -58,7 +59,7 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
             self.late_items = iter(late_items)
 
         async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
+        async def __aexit__(self, *args): observed.exits.append(self.turn_count)
         async def initialize(self): pass
 
         async def thread_start(self, options):
@@ -436,15 +437,17 @@ def install_transport_relay(agent):
     relay.failure_lock = threading.Lock()
     relay.last_failure, relay.last_error = None, ''
     relay.model_failed = relay.uncertain_tool = False
+    relay.context_required = None
     resumed = []
 
-    def resume(observed):
-        allowed = BrokerRelay.resume_model(relay, observed)
+    def resume(observed, *, live=False):
+        allowed = BrokerRelay.resume_model(relay, observed, live=live)
         if allowed:
             resumed.append(observed['request_id'])
         return allowed
 
     relay.resume_model = resume
+    relay.model_ready = lambda *, timeout: True
     return relay, resumed
 
 
@@ -466,10 +469,11 @@ def test_live_transport_keeps_tools_all_prior_turns_and_queued_input(codex_agent
     sleep = asyncio.sleep
 
     async def backoff(seconds):
-        delays.append(seconds)
-        assert agent.journal.pending and relay.model_failed
-        if len(delays) == 1:
-            assert agent.accept_input({'id': 91, 'content': 'Keep the existing preview running until tests finish.'})
+        if seconds >= 2:
+            delays.append(seconds)
+            assert agent.journal.pending and relay.model_failed
+            if len(delays) == 1:
+                assert agent.accept_input({'id': 91, 'content': 'Keep the existing preview running until tests finish.'})
         await sleep(0)
 
     monkeypatch.setattr(codex_harness.asyncio, 'sleep', backoff)
@@ -602,7 +606,7 @@ def test_transport_budget_survives_native_invocation_reentry(codex_agent, monkey
 
 
 @pytest.mark.parametrize('guard', ['permanent', 'partial', 'tool_failure', 'uncertain_tool',
-    'boundary', 'stop', 'settled', 'missing_failure', 'native_interrupted', 'native_unknown',
+    'boundary', 'stop', 'missing_failure', 'native_interrupted', 'native_unknown',
     'stop_during_wait', 'boundary_during_wait',
     'model_limit', 'model_limit_during_wait', 'uncertain_during_wait', 'replaced_failure', 'deadline'])
 @pytest.mark.parametrize('late_receipt', [False, True])
@@ -613,6 +617,7 @@ def test_live_transport_cannot_bypass_recovery_guards(codex_agent, monkeypatch, 
     sleep, receipt_waits = asyncio.sleep, []
     if guard == 'deadline':
         agent.context.spec['timeout'] = 0.02
+    started, finished = native_item('commandExecution')
 
     async def backoff(seconds):
         if seconds >= 2:
@@ -630,10 +635,7 @@ def test_live_transport_cannot_bypass_recovery_guards(codex_agent, monkeypatch, 
 
     async def stream():
         assert agent.before_model()
-        started, finished = native_item('commandExecution')
         yield sdk_event('item/started', {'item': started})
-        if guard == 'settled':
-            yield sdk_event('item/completed', {'item': finished})
         failure = model_failure(relay)
         if guard == 'permanent': failure['transient'] = False
         if guard == 'partial': failure['response_started'] = True
@@ -646,16 +648,15 @@ def test_live_transport_cannot_bypass_recovery_guards(codex_agent, monkeypatch, 
         status = {'native_interrupted': 'interrupted', 'native_unknown': 'unknown'}.get(guard, 'failed')
         yield sdk_event('turn/completed', {'turn': {'status': status,
             'error': {'codexErrorInfo': {'httpConnectionFailed': {'httpStatusCode': 502}}}}})
-
     # Already queued by the native runtime: rejecting another inference must
     # still save its authoritative result from the completed turn's channel.
-    late_items = [sdk_event('item/completed', {'item': native_item('commandExecution')[1]})] if late_receipt else []
+    late_items = [sdk_event('item/completed', {'item': finished})] if late_receipt else []
     observed = install_codex_client(monkeypatch, agent, stream, late_items=late_items)
     result = asyncio.run(agent._run('Work', 'Moyai'))
     assert not result['completed'] and not resumed and len(observed.prompts) == 1
     assert len(observed.homes) == len(observed.thread_options) == 1
     assert agent.model_calls == 1 and relay.model_failed
-    receipt_saved = guard == 'settled' or (late_receipt and guard != 'deadline')
+    receipt_saved = late_receipt and guard != 'deadline'
     assert bool(agent.journal.pending) == bool(store.pending) == (not receipt_saved)
     receipts = [json.loads(row[0]) for row in store.db.execute('SELECT message FROM journal')]
     receipts = [message for message in receipts if message.get('role') == 'tool']
@@ -665,13 +666,220 @@ def test_live_transport_cannot_bypass_recovery_guards(codex_agent, monkeypatch, 
     assert result['interrupted'] == (guard in {'stop', 'stop_during_wait'})
     if guard in {'stop', 'stop_during_wait'}:
         assert not receipt_waits  # Stop permits queued receipts, never a grace wait.
-    if guard == 'settled' or not receipt_saved:
-        assert bool(recovery_marker(agent, result)) == (guard == 'settled')
+    if not receipt_saved:
+        assert recovery_marker(agent, result) is None
     elif guard in {'permanent', 'partial', 'tool_failure', 'uncertain_tool', 'boundary',
                    'stop', 'missing_failure', 'stop_during_wait', 'boundary_during_wait', 'uncertain_during_wait'}:
         assert recovery_marker(agent, result) is None
     if guard == 'deadline':
         assert result['sdk_failure']['exception_type'] == 'TimeoutError'
+
+
+@pytest.mark.parametrize('tools', ['none', 'settled', 'pending'])
+@pytest.mark.parametrize('stream_started', [False, True])
+def test_live_transport_continues_same_thread_across_tool_and_stream_states(
+        codex_agent, monkeypatch, tools, stream_started):
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    started, finished = native_item('commandExecution')
+    sleep = asyncio.sleep
+
+    async def fast_backoff(seconds):
+        await sleep(0)
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+
+    async def stream():
+        assert agent.before_model()
+        if tools != 'none':
+            yield sdk_event('item/started', {'item': started})
+        if tools == 'settled':
+            yield sdk_event('item/completed', {'item': finished})
+        failure = model_failure(relay)
+        if stream_started:
+            failure.update(http_status=200, response_started=True, transport_interrupted=True)
+        # A surviving native thread can continue a known interrupted stream;
+        # recreating a client from public receipts must keep its stricter gate.
+        assert bool(recovery_marker(agent, {'failed': True})) == (tools != 'pending' and not stream_started)
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
+        assert len(observed.prompts) == 2 and not observed.exits
+        assert agent.before_model()
+        if tools == 'pending':
+            yield sdk_event('item/completed', {'item': finished})
+        yield sdk_event('item/completed', {'item': {'id': 'answer', 'type': 'agentMessage',
+            'phase': 'final_answer', 'text': 'Continued existing work.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    result = asyncio.run(agent._run('Work', 'Moyai'))
+    assert result['completed'] and result['final_response'] == 'Continued existing work.'
+    assert resumed == ['failed-model'] and agent.transport_attempt == 1 and agent.model_calls == 2
+    assert len(observed.homes) == len(observed.thread_options) == len(observed.exits) == 1
+    assert not agent.journal.pending and not store.pending
+    assert agent.journal.completed_tools == int(tools != 'none')
+
+
+def test_broker_readiness_wait_saves_late_receipt_before_resuming(codex_agent, monkeypatch):
+    from openai_codex.errors import TransportClosedError
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    agent.context.spec['transport_recovery_seconds'] = 5
+    started, finished = native_item('commandExecution')
+    sleep, probes, delivered = asyncio.sleep, [], False
+
+    async def fast_backoff(seconds):
+        await sleep(0 if seconds >= 2 else min(seconds, 0.005))
+
+    def model_ready(*, timeout):
+        probes.append(timeout)
+        assert 0 < timeout <= 5
+        assert agent.model_calls == 1 and len(observed.prompts) == 1
+        assert len(observed.homes) == len(observed.thread_options) == 1 and not observed.exits
+        # Returning the broker is independent of native receipt delivery. This
+        # stays unavailable until the live client has drained its completed queue.
+        return agent.journal.completed_tools == 1
+
+    def late(turn_id, current_turn):
+        nonlocal delivered
+        if probes and not delivered:
+            assert current_turn == 1 and not resumed and relay.model_failed
+            delivered = True
+            return sdk_event('item/completed', {'item': finished})
+        raise TransportClosedError('Completed turn has no further receipt')
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+    relay.model_ready = model_ready
+
+    async def stream():
+        assert agent.before_model()
+        yield sdk_event('item/started', {'item': started})
+        model_failure(relay)
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
+        assert delivered and not agent.journal.pending and not store.pending
+        assert agent.before_model()
+        yield sdk_event('item/completed', {'item': {'id': 'answer', 'type': 'agentMessage',
+            'phase': 'final_answer', 'text': 'Recovered with the original receipt.'}})
+        yield sdk_event('turn/completed', {'turn': {'status': 'completed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream,
+                                   late_notifications=late)
+    result = asyncio.run(agent._run('Work', 'Moyai'))
+    assert result['completed'] and len(probes) >= 2
+    assert resumed == ['failed-model'] and agent.transport_attempt == 1 and agent.model_calls == 2
+    receipts = [json.loads(row[0]) for row in store.db.execute('SELECT message FROM journal')]
+    receipts = [message for message in receipts if message.get('role') == 'tool']
+    assert len(receipts) == agent.journal.completed_tools == 1
+    assert receipts[0]['content'] == 'proof'
+    assert len(observed.homes) == len(observed.thread_options) == len(observed.exits) == 1
+
+
+@pytest.mark.parametrize('tools', ['pending', 'settled'])
+@pytest.mark.parametrize('reason', ['unauthorized', 'forbidden', 'invalid', 'stop',
+    'boundary', 'context_required', 'model_limit', 'uncertain_tool', 'replaced_failure',
+    'recovery_deadline', 'task_deadline'])
+def test_broker_readiness_cannot_override_recovery_boundaries(codex_agent, monkeypatch, reason, tools):
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    sleep, probes = asyncio.sleep, []
+    agent.context.spec['transport_recovery_seconds'] = 0.04 if reason == 'recovery_deadline' else 5
+    if reason == 'task_deadline':
+        agent.context.spec['timeout'] = 0.04
+    monkeypatch.setattr(codex_harness, 'RECEIPT_TIMEOUT_SECONDS', 0.01)
+
+    async def fast_backoff(seconds):
+        await sleep(0 if seconds >= 2 else min(seconds, 0.005))
+
+    def model_ready(*, timeout):
+        probes.append(timeout)
+        assert not observed.exits and agent.model_calls == 1
+        if reason in {'unauthorized', 'forbidden'}:
+            raise urllib.error.HTTPError('http://broker/v1/models',
+                401 if reason == 'unauthorized' else 403, 'Unauthorized', {}, None)
+        if reason == 'invalid':
+            raise ValueError('Invalid broker model list')
+        if reason == 'stop': agent.interrupt()
+        if reason == 'boundary': agent.boundary_failed = True
+        if reason == 'context_required': relay.context_required = {'reason': 'context handoff needed'}
+        if reason == 'model_limit': agent.context.spec['max_iterations'] = 1
+        if reason == 'uncertain_tool': relay.uncertain_tool = True
+        if reason == 'replaced_failure': relay.last_failure = dict(relay.last_failure)
+        return reason not in {'recovery_deadline', 'task_deadline'}
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+    relay.model_ready = model_ready
+
+    async def stream():
+        assert agent.before_model()
+        started, finished = native_item('commandExecution')
+        yield sdk_event('item/started', {'item': started})
+        if tools == 'settled':
+            yield sdk_event('item/completed', {'item': finished})
+        model_failure(relay)
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+    result = asyncio.run(agent._run('Work', 'Moyai'))
+    assert probes and not result['completed'] and not resumed
+    assert len(observed.prompts) == agent.model_calls == 1
+    assert len(observed.homes) == len(observed.thread_options) == len(observed.exits) == 1
+    assert bool(agent.journal.pending) == bool(store.pending) == (tools == 'pending')
+    assert relay.model_failed
+    assert result['interrupted'] == (reason == 'stop')
+    if tools == 'pending' or reason in {'unauthorized', 'forbidden', 'invalid', 'stop',
+                                       'boundary', 'uncertain_tool', 'recovery_deadline'}:
+        # Permanent readiness rejection must also close the cold-recovery gate
+        # when every receipt is saved. The durable owner separately enforces the
+        # original deadline/call cap and context handoff eligibility.
+        assert recovery_marker(agent, result) is None
+    if reason == 'task_deadline':
+        assert result['sdk_failure']['exception_type'] == 'TimeoutError'
+
+
+def test_cancellation_during_readiness_cannot_start_another_native_turn(codex_agent, monkeypatch):
+    agent, _, store = codex_agent
+    relay, resumed = install_transport_relay(agent)
+    probe_started, release_probe = threading.Event(), threading.Event()
+    sleep = asyncio.sleep
+
+    async def fast_backoff(seconds):
+        await sleep(0 if seconds >= 2 else min(seconds, 0.005))
+
+    def model_ready(*, timeout):
+        assert 0 < timeout <= 1
+        probe_started.set()
+        assert release_probe.wait(timeout=1)
+        return True
+
+    monkeypatch.setattr(codex_harness.asyncio, 'sleep', fast_backoff)
+    relay.model_ready = model_ready
+
+    async def stream():
+        assert agent.before_model()
+        yield sdk_event('item/started', {'item': native_item('commandExecution')[0]})
+        model_failure(relay)
+        yield sdk_event('turn/completed', {'turn': {'status': 'failed'}})
+
+    observed = install_codex_client(monkeypatch, agent, stream)
+
+    async def cancel_while_waiting():
+        task = asyncio.create_task(agent._run('Work', 'Moyai'))
+        try:
+            async with asyncio.timeout(0.5):
+                while not probe_started.is_set():
+                    await sleep(0.001)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert observed.exits == [1] and not resumed
+        finally:
+            release_probe.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(cancel_while_waiting())
+    assert len(observed.prompts) == agent.model_calls == 1
+    assert agent.journal.pending and store.pending and relay.model_failed
 
 
 def test_native_restart_accepts_reused_message_ids(codex_agent, monkeypatch):

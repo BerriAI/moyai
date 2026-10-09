@@ -16,6 +16,8 @@ from app.security import digest
 from sandbox.agent import conversation_prompt
 from sandbox.broker_relay import BrokerRelay, EDGE_ERROR
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, cipher, seal, unseal
+from sandbox.sdk_failure import codex_details
+from sandbox.transport_recovery import retryable_failure
 from test_spend import active
 from test_workspace import workspace, cloud_capability, wait_for
 
@@ -48,6 +50,8 @@ def test_refused_connection_preserves_cause_type_and_errno_without_endpoint():
         endpoint = f'http://127.0.0.1:{unavailable.getsockname()[1]}/private-remote-path'
         with diagnostic_relay(BaseHTTPRequestHandler, remote=endpoint) as (relay, client, diagnostics):
             unavailable.close()
+            assert relay.model_ready(timeout=0.1) is False
+            assert not diagnostics and relay.last_failure is None
             assert client.post('/v1/messages', json={'messages': ['private-prompt']}).status_code == 502
             saved = relay.last_failure
             assert len(diagnostics) == 1 and saved == diagnostics[0]
@@ -264,10 +268,106 @@ def test_partial_stream_is_recorded_without_sending_another_http_status():
         assert response.status_code == 200 and response.content == piece
         assert len(diagnostics) == 1
         saved = relay.last_failure
-        assert saved['response_started'] and not saved['transient']
+        assert saved['response_started'] and saved['transient'] and saved['transport_interrupted']
         assert saved['response_bytes'] == len(piece) and saved['error_type'] == 'IncompleteRead'
         assert saved['request_ids'] == {'x-request-id': 'partial-request'}
         assert client.post('/v1/messages', json={}).status_code == 409
+        assert not retryable_failure(saved) and not relay.resume_model(saved)
+        assert retryable_failure(saved, live=True) and relay.resume_model(saved, live=True)
+        assert len(diagnostics) == 1 and not relay.model_failed
+
+
+@pytest.mark.parametrize('info,message,expected', [
+    ('other', 'stream disconnected before completion: stream closed before response.completed', 'responseStreamDisconnected'),
+    ({'other': None}, 'stream disconnected before completion: stream closed before response.completed', 'responseStreamDisconnected'),
+    ('other', 'stream disconnected before completion: stream closed before response.completed private-detail', 'other'),
+    ('other', 'private provider failure', 'other'),
+    ('badRequest', 'stream disconnected before completion: stream closed before response.completed', 'badRequest'),
+])
+def test_clean_eof_normalizes_only_the_pinned_native_protocol_error(info, message, expected):
+    assert codex_details({'codexErrorInfo': info, 'message': message}, will_retry=False) == {
+        'source': 'native_error', 'code': expected, 'will_retry': False}
+
+
+def test_native_eof_uses_only_the_current_responses_metadata_without_overwriting_failures():
+    calls = []
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            body = json.loads(unseal('private-capability', self.path,
+                                    self.rfile.read(int(self.headers['Content-Length']))))
+            calls.append((self.path, self.headers['X-Moyai-Request-ID']))
+            self.send_response(502 if body.get('fail') else 200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('X-Request-ID', 'responses-edge-id')
+            self.end_headers()
+            self.wfile.write(b'event: response.created\ndata: {"private":"fixture"}\n\n')
+    with diagnostic_relay(Edge) as (relay, client, diagnostics):
+        relay.note_stream_disconnect()
+        assert relay.last_failure is None and not diagnostics
+        assert client.post('/v1/messages', json={}).status_code == 200
+        relay.note_stream_disconnect()
+        assert relay.model_response is None and relay.last_failure is None
+        assert client.post('/v1/responses', json={}).status_code == 200
+        observed = relay.model_response
+        assert observed['route'] == '/v1/responses' and observed['http_status'] == 200
+        assert observed['request_id'] == calls[-1][1]
+        assert observed['request_ids'] == {'x-request-id': 'responses-edge-id'}
+        assert observed['response_started'] and observed['transport_interrupted']
+        assert 'private' not in json.dumps(observed)
+        relay.uncertain_tool = True
+        relay.note_stream_disconnect()
+        assert relay.last_failure is None and not diagnostics
+        relay.uncertain_tool = False
+        relay.note_stream_disconnect()
+        relay.note_stream_disconnect()
+        assert relay.last_failure is observed and diagnostics == [observed]
+        assert client.post('/v1/responses', json={}).status_code == 409 and len(calls) == 2
+        assert not retryable_failure(observed) and not relay.resume_model(observed)
+        assert retryable_failure(observed, live=True) and relay.resume_model(observed, live=True)
+        assert client.post('/v1/responses', json={}).status_code == 200
+        assert relay.model_response['request_id'] != observed['request_id']
+        assert client.post('/v1/messages', json={'fail': True}).status_code == 502
+        current = relay.last_failure
+        relay.note_stream_disconnect()
+        assert relay.last_failure is current and current['route'] == '/v1/messages'
+        assert len(calls) == 4 and diagnostics == [observed, current]
+
+
+@pytest.mark.parametrize('outcome', ['ready', 'unavailable', 'unauthorized', 'forbidden',
+                                    'redirect', 'invalid', 'shape', 'oversize'])
+def test_recovery_readiness_uses_one_authenticated_get_and_rejects_invalid_responses(outcome):
+    requests = []
+    status = {'unavailable': 503, 'unauthorized': 401, 'forbidden': 403, 'redirect': 302}.get(outcome, 200)
+    body = {'invalid': b'not-json', 'shape': b'{"data":[]}', 'oversize': b' ' * 8193}.get(
+        outcome, b'{"object":"list","data":[]}')
+    class Edge(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_GET(self):
+            requests.append((self.command, self.path, self.headers['Authorization'], self.headers['X-Moyai-Request-ID']))
+            self.send_response(status)
+            if outcome == 'redirect':
+                self.send_header('Location', '/must-not-receive-the-capability')
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        do_POST = do_GET
+    with diagnostic_relay(Edge) as (relay, _, diagnostics):
+        if outcome in {'ready', 'unavailable'}:
+            assert relay.model_ready(timeout=0.5) is (outcome == 'ready')
+        elif status != 200:
+            with pytest.raises(urllib.error.HTTPError) as error:
+                relay.model_ready(timeout=0.5)
+            assert error.value.code == status
+        else:
+            with pytest.raises(ValueError):
+                relay.model_ready(timeout=0.5)
+        assert len(requests) == 1
+        method, path, authorization, request_id = requests[0]
+        assert (method, path, authorization) == ('GET', '/v1/models', 'Bearer private-capability')
+        assert UUID(request_id).hex == request_id
+        assert relay.last_failure is None and not diagnostics
 
 
 def test_compaction_waits_for_unbilled_admission_with_fresh_envelopes(monkeypatch):

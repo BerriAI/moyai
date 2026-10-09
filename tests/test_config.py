@@ -20,6 +20,18 @@ def test_deployment_cannot_select_github_repositories(monkeypatch):
     assert 'github_repository' not in type(settings).model_fields
 
 
+def test_transport_recovery_window_is_configurable_and_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('TRANSPORT_RECOVERY_SECONDS', raising=False)
+    assert Settings(_env_file=None).transport_recovery_seconds == 600
+    for seconds in (30, 3600):
+        monkeypatch.setenv('TRANSPORT_RECOVERY_SECONDS', str(seconds))
+        assert Settings(_env_file=None).transport_recovery_seconds == seconds
+    for seconds in (29, 3601):
+        monkeypatch.setenv('TRANSPORT_RECOVERY_SECONDS', str(seconds))
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)
+
+
 @pytest.mark.parametrize('source', ['environment', 'dotenv'])
 @pytest.mark.parametrize('legacy_models', ['openai/gpt-6-astra,anthropic/claude-opus-5-5', ''])
 def test_stale_deployment_model_list_cannot_hide_code_models(tmp_path, monkeypatch, source, legacy_models):

@@ -1,5 +1,7 @@
 """Small, body-free diagnostics shared by the broker and sandbox relay."""
+import http.client
 import re
+import urllib.error
 
 
 MODEL_ROUTES = {'/v1/chat/completions', '/v1/messages', '/v1/responses'}
@@ -40,6 +42,9 @@ def failure(route, request_id, exc, *, headers=None, status=None, response_start
     transient = (effective_status in TRANSIENT_STATUSES if effective_status else True)
     if status == 429 and upstream is None:
         transient = False
+    interrupted = (isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException))
+                   and not isinstance(exc, urllib.error.HTTPError)
+                   and (effective_status is None or 200 <= effective_status < 300))
     upstream_error = headers.get('x-moyai-upstream-error-type', '')
     if not isinstance(upstream_error, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}', upstream_error):
         upstream_error = ''
@@ -55,6 +60,8 @@ def failure(route, request_id, exc, *, headers=None, status=None, response_start
         'upstream_error_type': upstream_error,
         'cause_type': type(cause).__name__ if cause else '',
         'errno': errno if type(errno) is int else None,
-        'response_bytes': response_bytes, 'transient': transient and not response_started,
+        'response_bytes': response_bytes,
+        'transient': interrupted or (transient and not response_started),
+        'transport_interrupted': interrupted,
         'uncertain_tool': route in TOOL_ROUTES,
     }

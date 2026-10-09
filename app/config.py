@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     temporal_task_queue: str = "moyai-sessions-v1"
     temporal_checkpoint_seconds: int = Field(default=600, ge=30, le=3600)
     startup_recovery_seconds: int = Field(default=600, ge=30, le=3600)
+    transport_recovery_seconds: int = Field(default=600, ge=30, le=3600)
     demo_step_seconds: float = Field(default=0.8, ge=0, le=10)
     linear_client_id: str = ""
     linear_client_secret: str = ""
