@@ -5,14 +5,22 @@ with the complete upstream Python package at an immutable revision, avoiding
 an unrelated Rust wheel build in the sandbox. No source files are vendored.
 """
 from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
 import importlib.util
 import subprocess
 import sys
 import shutil
+import shlex
+import tempfile
 
-LITELLM_REVISION = '2cee61626d9581bc22bbdeefb1924f854f50d427'
+LITELLM_REVISION = '36f96259f08d449bdc996ed36919c47b39ce527f'
 LITELLM_SOURCE = Path('/opt/litellm-harness')
 CODEX_SDK_VERSION = '0.161.0'
+MCP_VERSION = '2.2.0'
+PI_VERSION = '1.1.0'
+PI_NODE_VERSION = '22.23.3'
+PI_ROOT = Path('/opt/moyai-pi')
+PI_LAUNCHER = Path('/usr/local/bin/pi')
 
 
 def ensure_pip() -> None:
@@ -22,6 +30,28 @@ def ensure_pip() -> None:
 
 
 def prepare_binary(binding):
+    if binding == 'pi':
+        if shutil.which('pi') and runtime_version('pi') == PI_VERSION:
+            return
+        # Debian's Node 20 cannot start Pi 1.1. Keep Pi's Node isolated so
+        # restoring a workspace does not replace the project's Node runtime.
+        subprocess.run(['npm', 'install', '--prefix', str(PI_ROOT), '--no-audit', '--no-fund',
+                        'node@' + PI_NODE_VERSION, '@earendil-works/pi-coding-agent@' + PI_VERSION],
+                       check=True, timeout=300)
+        node = PI_ROOT / 'node_modules/node/bin/node'
+        cli = PI_ROOT / 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'
+        PI_LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', dir=PI_LAUNCHER.parent, delete=False) as stream:
+            launcher = Path(stream.name)
+            stream.write('#!/bin/sh\nexec ' + shlex.quote(str(node)) + ' ' + shlex.quote(str(cli)) + ' "$@"\n')
+        try:
+            launcher.chmod(0o755)
+            launcher.replace(PI_LAUNCHER)
+        finally:
+            launcher.unlink(missing_ok=True)
+        if runtime_version('pi') != PI_VERSION:
+            raise RuntimeError('The pinned Pi runtime could not start. Rebuild the workspace image.')
+        return
     packages = {'opencode': 'opencode-ai@1.18.35'}
     if binding in packages and not shutil.which(binding):
         subprocess.run(['npm', 'install', '-g', packages[binding]], check=True, timeout=300)
@@ -29,7 +59,7 @@ def prepare_binary(binding):
 
 def runtime_version(binding):
     """Fingerprint the installed CLI, including binaries from older snapshots."""
-    if binding != 'opencode':
+    if binding not in ('opencode', 'pi'):
         return ''
     try:
         result = subprocess.run([binding, '--version'], capture_output=True, text=True, timeout=10)
@@ -54,24 +84,25 @@ def prepare_codex():
 def prepare_runtime():
     # An image build already fetched this revision: activate it before probing
     # the older wheel, without running pip on every turn.
+    upgrade = False
     if (LITELLM_SOURCE / 'litellm' / 'harness').is_dir():
         revision = subprocess.run(['git', '-C', str(LITELLM_SOURCE), 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=10)
-        if revision.returncode or revision.stdout.strip() != LITELLM_REVISION:
-            raise RuntimeError('LiteLLM harness source revision does not match the pinned build')
-        if str(LITELLM_SOURCE) not in sys.path:
+        upgrade = bool(revision.returncode or revision.stdout.strip() != LITELLM_REVISION)
+        if not upgrade and str(LITELLM_SOURCE) not in sys.path:
             sys.path.insert(0, str(LITELLM_SOURCE))
     try:
-        from litellm import Harness, aagent_session
-        import claude_agent_sdk
-        import deepagents, langchain_litellm
-        return
-    except ImportError:
+        if not upgrade and version('mcp') == MCP_VERSION:
+            from litellm import Harness, aagent_session
+            import claude_agent_sdk
+            import deepagents, langchain_litellm
+            return
+    except (ImportError, PackageNotFoundError):
         pass
     # Hermes creates its isolated environment without pip. Bootstrap the
     # installer in that interpreter, including when restoring older snapshots.
     ensure_pip()
     subprocess.run([sys.executable, '-m', 'pip', 'install', 'litellm==1.104.0',
-                    'claude-agent-sdk==0.2.163', 'mcp<2', 'starlette', 'uvicorn',
+                    'claude-agent-sdk==0.2.163', 'mcp==' + MCP_VERSION, 'starlette', 'uvicorn',
                     'deepagents==0.7.22', 'langchain-litellm==0.11.0'],
                    check=True, timeout=300)
     if not LITELLM_SOURCE.exists():
@@ -93,3 +124,4 @@ if __name__ == '__main__':
     prepare_codex()
     prepare_runtime()
     prepare_binary('opencode')
+    prepare_binary('pi')

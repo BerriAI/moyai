@@ -821,3 +821,246 @@ def test_deleted_session_rejects_replayed_creation_and_side_chat_source(workspac
         store.create_run('Side chat copy', '', 'demo', [], chat_enabled=True, side_chat_of=run_id)
     assert store.claim_message(run_id) is None
     assert app.state.session_lifecycle.can_delete({'owner_id': '', 'parent_run_id': ''}, '', False) is False
+
+
+def activity_event(store, run_id, kind, message, data=None):
+    from app.db import now
+    with store.connect() as connection:
+        return connection.execute('INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)',
+                                  (run_id, kind, message, json.dumps(data or {}), now())).lastrowid
+
+
+def test_chat_summary_defers_completed_bodies_and_keeps_live_activity(workspace):
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('Earlier request', '', 'demo', [], chat_enabled=True)['id']
+    first = store.claim_message(run_id)['id']
+    old = activity_event(store, run_id, 'tool', 'Long command output',
+                         {'turn_id': first, 'output': 'historical-body-' * 10000})
+    store.finish_message(run_id, first, 'Earlier answer')
+    store.enqueue_message(run_id, 'Current request', 'current-activity')
+    current = store.claim_message(run_id)['id']
+    store.update_run(run_id, status='running')
+    live = activity_event(store, run_id, 'tool', 'Current command', {'turn_id': current, 'phase': 'started'})
+    full = client.get('/api/runs/' + run_id)
+    summary = client.get('/api/runs/' + run_id, params={'activity': 'summary'})
+    assert full.status_code == summary.status_code == 200
+    data = summary.json()
+    assert data['messages'] == full.json()['messages']
+    assert data['loaded_activity'] == [str(current)]
+    assert data['deferred_activity'] == [str(first)]
+    assert old not in {event['id'] for event in data['events']}
+    assert live in {event['id'] for event in data['events']}
+    assert data['activity_cursor'] == live
+    assert 'historical-body-' not in summary.text
+    assert len(summary.content) < len(full.content) / 10
+    assert old in {event['id'] for event in full.json()['events']}
+    history = client.get(f'/api/runs/{run_id}/activity', params={'message_id': first}).json()
+    assert old in {event['id'] for event in history['events']}
+    store.finish_message(run_id, current, 'Current answer')
+    store.update_run(run_id, status='idle')
+    completed = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert completed['loaded_activity'] == []
+    assert set(completed['deferred_activity']) == {str(first), str(current)}
+    assert any(event['message'] == 'Response saved' and event['data']['message_id'] == current
+               for event in completed['events'])
+
+
+def test_activity_pages_are_bounded_and_keep_the_first_snapshot(workspace):
+    from app.db import now
+
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('Paginated request', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)['id']
+    with store.connect() as connection:
+        connection.executemany('INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)',
+            [(run_id, 'tool', f'Command {index}', json.dumps({'turn_id': turn}), now()) for index in range(450)])
+    live = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert live['loaded_activity'] == [str(turn)]
+    assert len([event for event in live['events'] if event['kind'] == 'tool']) == 450
+    store.finish_message(run_id, turn, 'Finished')
+    store.update_run(run_id, status='idle')
+    url = f'/api/runs/{run_id}/activity'
+    first = client.get(url, params={'message_id': turn, 'until': 2**63-1}).json()
+    expected = [event['id'] for event in store.events(run_id, limit=10000)
+                if event['data'].get('turn_id') == turn or event['data'].get('message_id') == turn]
+    assert len(first['events']) == 200 and first['has_more']
+    assert first['until'] == expected[-1]
+    late = activity_event(store, run_id, 'status', 'Late receipt', {'turn_id': turn})
+    received, page = list(first['events']), first
+    while page['has_more']:
+        page = client.get(url, params={'message_id': turn, 'after': page['next_after'], 'until': first['until']}).json()
+        assert len(page['events']) <= 200 and page['until'] == first['until']
+        received.extend(page['events'])
+    assert [event['id'] for event in received] == expected
+    assert late not in {event['id'] for event in received}
+    empty = client.get(url, params={'message_id': turn, 'after': first['until'], 'until': first['until']}).json()
+    assert empty['events'] == [] and not empty['has_more']
+    assert empty['next_after'] == first['until']
+    latest = client.get(url, params={'message_id': turn, 'after': first['until']}).json()
+    assert [event['id'] for event in latest['events']] == [late]
+
+
+def test_activity_history_retains_recovery_epochs_steering_and_legacy_ownership(workspace):
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('Original request', '', 'demo', [], chat_enabled=True)['id']
+    first = store.claim_message(run_id)['id']
+    store.finish_message(run_id, first, 'Earlier result')
+    second = store.enqueue_message(run_id, 'Other request', 'other-activity')[0]['id']
+    steering = store.enqueue_message(run_id, 'Steering input', 'steering-activity')[0]['id']
+    store.execute("UPDATE messages SET steering_parent_id=?,status='injected' WHERE id=?", (first, steering))
+    store.execute('DELETE FROM events WHERE run_id=?', (run_id,))
+    def record(kind, message, data=None):
+        return activity_event(store, run_id, kind, message, data)
+
+    record('status', 'Before any response')
+    record('chat', 'Response started', {'message_id': first})
+    owned = [record('tool', 'Legacy before recovery')]
+    record('chat', 'Response started', {'message_id': first})
+    owned.append(record('tool', 'Legacy after repeated start'))
+    record('chat', 'Response started', {'message_id': second})
+    other = [record('tool', 'Other turn legacy activity')]
+    record('chat', 'Response saved', {'message_id': first})
+    other.append(record('tool', 'Other turn after earlier late save'))
+    owned.append(record('tool', 'Interleaved tagged activity', {'turn_id': first}))
+    record('chat', 'Response started', {'message_id': first})
+    owned.append(record('tool', 'Legacy recovered activity', {'turn_id': 0}))
+    record('chat', 'Response saved', {'message_id': first})
+    record('tool', 'Legacy outside a response')
+    owned.append(record('tool', 'Tagged final receipt', {'turn_id': first}))
+    root = client.get(f'/api/runs/{run_id}/activity', params={'message_id': first}).json()
+    child = client.get(f'/api/runs/{run_id}/activity', params={'message_id': steering}).json()
+    assert child == root
+    assert [event['id'] for event in root['events'] if event['kind'] == 'tool'] == owned
+    other_page = client.get(f'/api/runs/{run_id}/activity', params={'message_id': second}).json()
+    assert [event['id'] for event in other_page['events'] if event['kind'] == 'tool'] == other
+    store.execute("UPDATE messages SET status='running' WHERE id=?", (first,))
+    summary = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert set(summary['loaded_activity']) == {str(first), str(second)}
+    assert summary['deferred_activity'] == []
+    assert {event['id'] for event in summary['events'] if event['kind'] == 'tool'} == set(owned + other)
+
+
+def test_activity_snapshot_cannot_skip_events_committed_during_chat_read(workspace, monkeypatch):
+    import app.activity_history as activity_history
+
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('Snapshot request', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)['id']
+    store.update_run(run_id, status='running')
+    before = activity_event(store, run_id, 'tool', 'Before snapshot', {'turn_id': turn})
+    original = store.messages
+    saved = []
+
+    def finish_after_run_read(selected, *, connection=None):
+        # WAL permits the independent writer to commit while the endpoint holds
+        # its read snapshot. Message, lifecycle and cursor must stay consistent.
+        if selected == run_id and connection is not None and not saved:
+            saved.append(activity_event(store, run_id, 'tool', 'Committed during read', {'turn_id': turn}))
+            store.finish_message(run_id, turn, 'Concurrent answer')
+            store.update_run(run_id, status='idle')
+        return original(selected, connection=connection)
+
+    monkeypatch.setattr(store, 'messages', finish_after_run_read)
+    summary = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert summary['activity_cursor'] == before
+    assert summary['loaded_activity'] == [str(turn)]
+    assert next(message for message in summary['messages'] if message['id'] == turn)['status'] == 'running'
+    assert saved[0] not in {event['id'] for event in summary['events']}
+    assert saved[0] in {event['id'] for event in store.events(run_id, after=summary['activity_cursor'])}
+    assert not any(event['message'] == 'Response saved' for event in summary['events'])
+    fresh = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert fresh['deferred_activity'] == [str(turn)] and fresh['loaded_activity'] == []
+    assert any(message['content'] == 'Concurrent answer' for message in fresh['messages'])
+    # A second writer at the marker read cannot advance the summary cursor.
+    original_markers = activity_history.markers
+    additional = []
+
+    def append_after_cursor(connection, selected, cursor):
+        if selected == run_id and not additional:
+            additional.append(activity_event(store, run_id, 'status', 'After cursor', {'turn_id': turn}))
+        return original_markers(connection, selected, cursor)
+
+    monkeypatch.setattr(activity_history, 'markers', append_after_cursor)
+    final = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert final['activity_cursor'] < additional[0]
+    assert additional[0] in {event['id'] for event in store.events(run_id, after=final['activity_cursor'])}
+
+
+def test_activity_endpoint_shares_auth_deletion_and_message_boundaries(workspace):
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('History access', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)['id']
+    store.finish_message(run_id, turn, 'Finished')
+    store.update_run(run_id, status='idle')
+    assistant = next(message['id'] for message in store.messages(run_id) if message['role'] == 'assistant')
+    foreign = store.create_run('Other session', '', 'demo', [], chat_enabled=True)['id']
+    foreign_turn = store.messages(foreign)[0]['id']
+    url = f'/api/runs/{run_id}/activity'
+    for message in (assistant, foreign_turn, 9999999):
+        assert client.get(url, params={'message_id': message}).status_code == 404
+    store.execute('UPDATE messages SET steering_parent_id=? WHERE id=?', (foreign_turn, turn))
+    assert client.get(url, params={'message_id': turn}).status_code == 404
+    store.execute('UPDATE messages SET steering_parent_id=NULL WHERE id=?', (turn,))
+    for params in ({'message_id': 0}, {'message_id': turn, 'after': -1},
+                   {'message_id': turn, 'until': 2**63}, {'message_id': 2**63}):
+        assert client.get(url, params=params).status_code == 422
+    assert client.get(url, params={'message_id': turn}).status_code == 200
+    assert client.delete('/api/runs/' + run_id).status_code == 200
+    assert client.get(url, params={'message_id': turn}).status_code == 404
+    assert client.get('/api/runs/' + run_id, params={'activity': 'summary'}).status_code == 404
+    client.cookies.clear()
+    assert client.get(f'/api/runs/{foreign}/activity', params={'message_id': foreign_turn}).status_code == 401
+    assert client.get('/api/runs/' + foreign, params={'activity': 'summary'}).status_code == 401
+
+
+@pytest.mark.parametrize('status', ['failed', 'interrupted', 'cancelled', 'steered', 'save_failed', 'awaiting_approval', 'missing_answer'])
+def test_chat_summary_keeps_commentary_until_a_successful_answer(workspace, status):
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('Unfinished request', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)['id']
+    store.update_run(run_id, status='running')
+    update = activity_event(store, run_id, 'message', 'Here is the progress so far.',
+                            {'turn_id': turn, 'public_update': True})
+    tool = activity_event(store, run_id, 'tool', 'Recorded work', {'turn_id': turn})
+    if status == 'missing_answer':
+        store.execute("UPDATE messages SET status='completed' WHERE id=?", (turn,))
+        activity_event(store, run_id, 'chat', 'Response saved', {'message_id': turn})
+        store.update_run(run_id, status='idle')
+    elif status == 'awaiting_approval':
+        store.update_run(run_id, status=status)
+    else:
+        store.finish_message(run_id, turn, 'The request still needs attention.', status=status)
+        store.update_run(run_id, status=status)
+    summary = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert summary['deferred_activity'] == []
+    assert summary['loaded_activity'] == [str(turn)]
+    assert {update, tool} <= {event['id'] for event in summary['events']}
+    assert next(event for event in summary['events'] if event['id'] == update)['data']['public_update'] is True
+
+
+def test_chat_summary_matches_successful_answers_around_inline_session_id(workspace):
+    from app.db import now
+    from app.session_metadata import complete_in
+
+    app, client = workspace
+    store = app.state.store
+    run_id = store.create_run('Main request', '', 'demo', [], chat_enabled=True)['id']
+    turn = store.claim_message(run_id)['id']
+    old = activity_event(store, run_id, 'tool', 'Main request history', {'turn_id': turn})
+    inline = store.enqueue_message(run_id, 'What is the session ID?', 'inline-activity')[0]['id']
+    with store.connect() as connection:
+        complete_in(connection, run_id, inline, now())
+    live = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert live['deferred_activity'] == [] and live['loaded_activity'] == [str(turn)]
+    assert old in {event['id'] for event in live['events']}
+    store.finish_message(run_id, turn, 'Main request completed')
+    store.update_run(run_id, status='idle')
+    summary = client.get('/api/runs/' + run_id, params={'activity': 'summary'}).json()
+    assert summary['deferred_activity'] == [str(turn)] and summary['loaded_activity'] == []
+    assert old not in {event['id'] for event in summary['events']}

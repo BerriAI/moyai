@@ -5,7 +5,11 @@ from pathlib import Path
 
 
 def tools_for(cwd, config):
-    from mcp import ClientSession, McpError, StdioServerParameters
+    from mcp import ClientSession, StdioServerParameters
+    try:
+        from mcp import MCPError
+    except ImportError:  # Controller tests and older snapshots can use MCP 1.x.
+        from mcp import McpError as MCPError
     from mcp.client.stdio import stdio_client
     from mcp.types import INTERNAL_ERROR
 
@@ -34,19 +38,19 @@ def tools_for(cwd, config):
                 # otherwise discovers tools after execution, risking its receipt.
                 try:
                     catalog = await client.list_tools()
-                except McpError as exc:
+                except MCPError as exc:
                     if exc.error.code != INTERNAL_ERROR:
                         raise
                     return json.dumps({'isError': True, 'content': [{'type': 'text',
                         'text': 'Workspace tool discovery failed. No tool action was attempted. '
                                 'Check the workspace connection and call workspace_tools before trying again.'}]})
                 if not name:
-                    return catalog.model_dump_json()
+                    return catalog.model_dump_json(by_alias=True)
                 if name not in {tool.name for tool in catalog.tools}:
                     return json.dumps({'isError': True, 'content': [{'type': 'text',
                         'text': 'Tool is not in the authorized catalog. No tool action was attempted. '
                                 'Use workspace_tools to discover available tools.'}]})
-                return (await client.call_tool(name, arguments)).model_dump_json()
+                return (await client.call_tool(name, arguments)).model_dump_json(by_alias=True)
 
     def resolve(path):
         root = Path(cwd).resolve()

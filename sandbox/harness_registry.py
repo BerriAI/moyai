@@ -44,6 +44,8 @@ HARNESSES = {
         live_steering=True, litellm_harness='DEEPAGENTS', runtime_binding='deepagents', durable_context=True),
     'tool-loop': HarnessDefinition('tool-loop', 'Tool Loop', 'litellm_harness', 'LiteLLMAgent',
         live_steering=True, litellm_harness='TOOL_LOOP', runtime_binding='tool-loop', durable_context=True),
+    'pi': HarnessDefinition('pi', 'Pi', 'litellm_harness', 'LiteLLMAgent',
+        live_steering=True, litellm_harness='PI', runtime_binding='pi', durable_context=True),
 }
 
 

@@ -585,14 +585,22 @@ def create_app(settings: Settings | None = None):
         return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
     @app.get("/api/runs/{run_id}")
-    async def get_run(run_id: str, request: Request):
+    async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
         security.require(request)
-        run = store.run(run_id)
-        if not run:
-            raise HTTPException(404, "Task not found")
+        from .activity_history import projection
+        # Keep message status and the activity cursor in one read snapshot. A
+        # response completing during this request must be included or replayed
+        # by SSE, never skipped between independent database reads.
+        with store.connect() as connection:
+            connection.execute('BEGIN')
+            run = store.run(run_id, connection=connection)
+            if not run or run['deleted_at']:
+                raise HTTPException(404, "Task not found")
+            messages = public_messages(run, store.messages(run_id, connection=connection))
+            activity_data = projection(connection, run, messages) if activity == 'summary' and run['chat_enabled'] else {
+                'events': store.events(run_id, limit=10000, connection=connection)}
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        messages = public_messages(run, store.messages(run_id))
         identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
         sidebar_id = store.root_id(run_id)
@@ -601,7 +609,7 @@ def create_app(settings: Settings | None = None):
         return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
                 **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
                 'pr_summary': pr_summary,
-                "events": store.events(run_id, limit=10000), "approvals": store.approvals(run_id), "messages": messages,
+                **activity_data, "approvals": store.approvals(run_id), "messages": messages,
                 'pull_requests': pr_summary['pull_requests'],
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
@@ -610,6 +618,16 @@ def create_app(settings: Settings | None = None):
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+
+    @app.get('/api/runs/{run_id}/activity')
+    async def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
+                               after: int = Query(default=0, ge=0, le=2**63-1),
+                               until: int | None = Query(default=None, ge=0, le=2**63-1)):
+        security.require(request)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Session not found.')
+        from .activity_history import history_page
+        return history_page(store, run_id, message_id, after=after, until=until)
 
     from .github_write_access import WriteDecision
 

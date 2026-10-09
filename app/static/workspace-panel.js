@@ -32,7 +32,7 @@
     }
     return render(fileTree(files))||'<p class="panel-empty">No matching saved files.</p>';
   }
-  function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated,statusFor=()=>'Status unknown'}){
+  function create({run,layout,api,computer,markdown,escape:esc,size,user,models,toast,onCreated,onActivity=async()=>{},statusFor=()=>'Status unknown'}){
     const key='moyai-panel:'+user+':'+run.id;
     let initial;try{initial=restore(localStorage.getItem(key));}catch{initial=restore(null);}
     const tabs=new Map();let active='',visible=false,width=initial.width,disposed=false,expanded=false,sideChats=[],restoring=true;
@@ -139,7 +139,13 @@
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}
-      if(t.kind==='activity'){t.element.append(activity);return;}
+      if(t.kind==='activity'){
+        t.element.append(activity);
+        // Restore only after the chat controller has installed its snapshot.
+        // Activating again also permits a failed history request to retry.
+        t.activate=()=>Promise.resolve().then(()=>{if(good(t))return onActivity();}).catch(e=>{if(good(t))toast(e.message);});
+        return;
+      }
       if(t.kind==='chat'){mountChat(t);return;}
       t.renderPreview=null;loading(t);
       try{

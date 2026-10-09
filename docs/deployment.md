@@ -87,7 +87,7 @@ The **Pre-Deploy Command** is `/app/.venv/bin/python /app/build_workspace_image.
 
 For other hosts, run `uv run python build_workspace_image.py` with the deployment's Modal settings before deploying. This builds the image in Modal and incurs build usage; it does not deploy or restart the web service. If a later image build fails during provisioning, the affected response ends with a visible image-build error instead of retrying indefinitely. Fix and rebuild the image before sending a new message.
 
-For a full build and short-lived sandbox check, run `uv run python scripts/workspace_image_smoke.py`. It checks Hermes and Claude SDK imports, the prepared harness runtime, and the Codex/OpenCode binaries without model calls, then terminates the sandbox. It does not deploy or restart the web service.
+For a full build and short-lived sandbox check, run `uv run python scripts/workspace_image_smoke.py`. It checks Hermes and Claude SDK imports, the prepared harness runtime, and the Codex/OpenCode/Pi binaries without model calls, then terminates the sandbox. It does not deploy or restart the web service.
 
 The deployed Blueprint sets `RENDER_MIGRATION_STAGE=false` and leaves `BOOTSTRAP_MODAL_VOLUME` empty now that the import is complete. For a fresh migration, `render_start.py` defaults to staging mode unless explicitly configured. The health endpoint is available, but sessions and Slack events are refused until cutover. Configure the existing environment secrets privately in Render; preserve `ENCRYPTION_KEY`, both workspace passwords, and `SESSION_SECRET`. `PUBLIC_URL` comes from Render's own `RENDER_EXTERNAL_URL`; Modal proxy rewriting and Modal Volume checkpoint writes are disabled on Render.
 

@@ -1456,3 +1456,46 @@ for (const width of [1440, 768, 320]) {
     assert.equal(await page.locator('[data-slot="dialog-overlay"]').count(), 0);
   });
 }
+
+for (const width of [1440, 768, 320]) test(`Pi selection, keyboard, logo and submitted harness at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'populated', width);
+  await page.route('**/api/config', async route => {
+    const response = await route.fetch();
+    const data = await response.json();
+    data.harnesses.push({ id: 'pi', name: 'Pi' });
+    await route.fulfill({ response, json: data });
+  });
+  await page.reload();
+  const source = page.locator('#new-harness');
+  const trigger = source.locator('..').getByRole('combobox');
+  await trigger.focus();
+  await page.keyboard.press('Space');
+  await page.getByRole('option', { name: 'Pi', exact: true }).waitFor();
+  await page.waitForFunction(() => document.activeElement?.getAttribute('role') === 'option');
+  await page.keyboard.press('End');
+  await page.waitForFunction(() => document.activeElement?.textContent === 'Pi');
+  await page.keyboard.press('Enter');
+  await page.getByRole('listbox').waitFor({ state: 'detached' });
+  assert.equal(await source.inputValue(), 'pi');
+  await page.waitForFunction(() => document.querySelector('.harness-picker img')?.src.endsWith('/harness-logos/pi.svg'));
+  const logo = page.locator('.harness-picker img');
+  await logo.evaluate(img => img.decode());
+  assert.equal(await logo.evaluate(img => img.naturalWidth > 0), true);
+  await trigger.click();
+  const menu = await page.getByRole('listbox').boundingBox();
+  assert.ok(menu.x >= 0 && menu.x + menu.width <= width + 1, 'Menu fits viewport');
+  await page.screenshot({ path: `test-results/pi-picker-${width}.png`, fullPage: true });
+  await page.keyboard.press('Escape');
+  let submitted;
+  await page.route('**/api/runs', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    submitted = route.request().postDataJSON();
+    await route.fulfill({ status: 400, json: { detail: 'Synthetic submission captured.' } });
+  });
+  await page.locator('#prompt').fill('Check the Pi integration');
+  await page.locator('#task-form button[type=submit]').click();
+  await page.getByText('Synthetic submission captured.', { exact: true }).waitFor();
+  assert.equal(submitted.harness, 'pi');
+  assert.equal(submitted.prompt, 'Check the Pi integration');
+  assert.equal(await source.inputValue(), 'pi', 'Selection survives a failed submission');
+});

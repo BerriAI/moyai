@@ -1,0 +1,23 @@
+name: Pi runtime
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test real Pi, broker, MCP, resume, failures and compaction
+        run: scripts/test_pi_runtime.sh
+      - name: Build the production workspace runtime
+        run: docker build --target workspace -f Dockerfile.sandbox -t moyai-pi-runtime .
+      - name: Verify the installed Pi runtime
+        run: docker run --rm moyai-pi-runtime pi --version

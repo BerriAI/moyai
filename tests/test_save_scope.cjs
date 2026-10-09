@@ -547,9 +547,10 @@ test('async session opening retains a target across metadata retry and ignores a
 
 function routeFixture(authenticated){
   const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),opened=[],handlers={},redirects=[];
+  f.ctx.state.runs=[];
   for(const id of ['google-signin','signin-error','logout'])f.element(id);
   Object.assign(f.ctx,{location:{hash:accessLink(),search:'',assign:url=>redirects.push(url)},URLSearchParams,
-    applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
+    renderSidebar(){},showError:error=>{throw error;},applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
     registerWebMCP(){},navigate:async view=>opened.push({view}),openRun:async(id,hash)=>opened.push({id,hash}),
     settingsViews:new Set(['secrets','users']),window:{addEventListener:(event,handler)=>handlers[event]=handler},
     api:async(path,options)=>{

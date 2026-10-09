@@ -283,6 +283,29 @@
     const nearBottom=container.scrollHeight-container.scrollTop-container.clientHeight<100;
     const turns=groups(run),byInput=timeline(run,turns),histories=completedHistory(run,turns);
     container.querySelectorAll('[data-activity-slot]').forEach(slot=>{
+      const message=(run.messages||[]).find(item=>String(item.id)===slot.dataset.activitySlot);
+      const turnId=String(message?.steering_parent_id||slot.dataset.activitySlot);
+      const deferred=options.loadActivity&&run.deferred_activity?.includes(turnId)&&!run.loaded_activity?.includes(turnId);
+      let placeholder=slot.querySelector?.(':scope > [data-deferred-activity]');
+      if(deferred){
+        if(!placeholder){
+          placeholder=slot.ownerDocument.createElement('details');placeholder.className='turn-work';
+          placeholder.dataset.deferredActivity=turnId;
+          placeholder.innerHTML='<summary class="work-heading"><span class="work-chevron" aria-hidden="true">›</span><span class="work-title"></span></summary><div class="work-body" role="status"></div>';
+          slot.replaceChildren(placeholder);
+          placeholder.addEventListener('toggle',async()=>{
+            if(!placeholder.open||placeholder.dataset.loading==='true')return;
+            placeholder.dataset.loading='true';const body=placeholder.querySelector('.work-body');body.textContent='Loading work history…';
+            try{await options.loadActivity(turnId);}catch{
+              body.textContent='Could not load work history. Close and reopen to retry.';
+            }finally{delete placeholder.dataset.loading;}
+          });
+        }
+        const turn=turns.get(turnId);
+        placeholder.querySelector('.work-title').textContent=message?.steering_parent_id?'Earlier activity':turn?.start?`Worked for ${duration(turn.start,turn.end||turn.start)}`:'Work history';
+        return;
+      }
+      const expand=placeholder?.open,focused=placeholder?.contains(slot.ownerDocument.activeElement);placeholder?.remove();
       const items=byInput.get(slot.dataset.activitySlot)||[];
       const title=items.some(item=>item.type==='update')?histories.get(slot.dataset.activitySlot):null;
       let history=slot.querySelector?.(':scope > .completed-work');
@@ -303,6 +326,11 @@
         if(history){slot.append(...history.querySelector('.work-body').children);history.remove();}
         syncItems(slot,items,options);
       }
+      if(expand){
+        const details=slot.querySelector('details');if(details){details.open=true;details.dataset.workManual='open';}
+        else if(!slot.children.length)slot.textContent='No recorded work history.';
+      }
+      if(focused)slot.querySelector('summary')?.focus({preventScroll:true});
     });
     if(nearBottom)container.scrollTop=container.scrollHeight;
   }

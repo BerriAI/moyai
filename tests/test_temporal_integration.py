@@ -269,6 +269,16 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             first_state = manager.state(run_id)
             first_message = first_state['message_id']
             original_deadlines = (first_state['turn_started'], first_state['startup_deadline'])
+            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
+            # SQLite records startup_wait before the activity returns its
+            # backoff. Replace the worker only after Temporal owns that timer,
+            # or this can test activity replay without ever creating a timer.
+            async with asyncio.timeout(10):
+                while True:
+                    history = await handle.fetch_history()
+                    if any(event.HasField('timer_started_event_attributes') for event in history.events):
+                        break
+                    await asyncio.sleep(0.05)
             await manager.shutdown()
             assert cloud.machines[0].alive
             recovered = True
@@ -281,7 +291,6 @@ async def test_real_temporal_startup_retry_timer_survives_worker_replacement(dur
             assert len(cloud.launches) == 2 and len(cloud.machines) == 1
             assert resumed_deadlines == [original_deadlines]
             assert [m['content'] for m in successor.store.messages(run_id) if m['role']=='assistant'] == ['Saved answer']
-            handle = env.client.get_workflow_handle('moyai-session-' + run_id)
             history = await handle.fetch_history()
             assert any(event.HasField('timer_started_event_attributes') for event in history.events)
             await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
