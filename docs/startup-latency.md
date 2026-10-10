@@ -24,14 +24,17 @@ Enabling it requires Temporal, Modal, and a size smaller than `MAX_CONCURRENT_RU
 
 The pool creates clean Modal machines and syncs the runtime, without a task, agent
 process, run token, identity, or connected-app credentials. It serves only fresh
-sessions without a snapshot, repository, custom environment, parent, side chat,
+sessions without a snapshot, repository, selected or default environment, parent, side chat,
 or Slack source. Used workspaces never return to the pool. Runtime changes invalidate
 old entries; the fingerprint includes Python adapters and Hermes patches.
 
 A shared lease serializes pool maintenance. Every reservation counts toward the
 existing workspace limit, including creation and cleanup. Atomic assignment
-transfers ownership to the durable session journal. Admission can reclaim unused
-prepared machines before stopping existing idle workspaces.
+transfers ownership to the durable session journal and public workspace reference
+in one transaction. Only a new response that can claim the prepared machine gets
+admission credit; computer wake and expired claims use ordinary capacity checks.
+Admission reclaims ready pool machines before stopping existing idle workspaces,
+skips uncertain cleanup entries, and does not wait on an ongoing pool build.
 
 A lost create acknowledgement is reconciled by its durable name. If creation is
 ambiguous and lookup still says absent during cleanup, the reservation remains

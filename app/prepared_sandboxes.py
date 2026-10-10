@@ -40,12 +40,20 @@ class PreparedSandboxes:
             self.settings.modal_vm_runtime, revision.hexdigest())).encode()).hexdigest()
 
     def eligible(self, run):
-        return bool(self.settings.sandbox_prepared_pool_size and run
+        basic = bool(self.settings.sandbox_prepared_pool_size and run
             and run['mode'] == 'modal' and run.get('sandbox_provider', 'modal') == 'modal'
             and not run.get('snapshot_id') and not run.get('repo_url')
+            and not run.get('github_repository_id')
+            and not run.get('environment_build_id')
             and run.get('environment_id') in ('', 'auto', None)
             and not run.get('parent_run_id') and not run.get('side_chat_of')
             and not self.store.slack_source(run['id']))
+        if not basic:
+            return False
+        # Auto can resolve to an organization default even with no repository.
+        # Such sessions must retain the normal prepare/bind/provision path.
+        return not (self.manager.environments and self.manager.environments.choose(
+            run.get('environment_id'), run.get('repo_url', ''), run.get('github_repository_id')))
 
     def ready(self, run_id):
         return self.eligible(self.store.run(run_id)) and bool(self.store.rows('''
@@ -70,12 +78,16 @@ class PreparedSandboxes:
                          machine_started=row['created_at'], reused_machine=True,
                          prepared_workspace=True, prepared_build=self.build)
             conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+            conn.execute('UPDATE runs SET sandbox_id=? WHERE id=?', (row['sandbox_id'], run_id))
             conn.execute('DELETE FROM prepared_sandboxes WHERE name=?', (row['name'],))
         record('prepared_workspace_claimed', run_id=run_id)
         return True
 
     @asynccontextmanager
-    async def guard(self):
+    async def guard(self, *, wait=True):
+        if not wait and self.lock.locked():
+            yield False
+            return
         async with self.lock:
             if self.manager.coordinated_database:
                 async with lease(self.manager.coordinated_database, 'prepared-sandboxes', wait=False) as acquired:
@@ -107,12 +119,15 @@ class PreparedSandboxes:
         return True
 
     async def reclaim(self):
-        async with self.guard() as acquired:
+        async with self.guard(wait=False) as acquired:
             if not acquired:
                 return False
             rows = await database(self.store.rows,
-                'SELECT * FROM prepared_sandboxes ORDER BY created_at LIMIT 1')
-            return await self.remove(rows[0]) if rows else False
+                "SELECT * FROM prepared_sandboxes ORDER BY CASE WHEN status='ready' THEN 0 ELSE 1 END,created_at")
+            for row in rows:
+                if await self.remove(row):
+                    return True
+            return False
 
     async def maintain(self):
         async with self.guard() as acquired:

@@ -275,7 +275,7 @@ class DurableRunner(RunManager):
                 if not await database(self.store.has_queued_messages, run_id) and not await database(self.store.rows,
                         "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
                     return False
-                async with self.admission(run_id) as available:
+                async with self.admission(run_id, prepared=True) as available:
                     if not available:
                         return 'capacity'
                     if not await database(self.begin_turn, run_id, await database(self.store.run, run_id)):
@@ -338,6 +338,11 @@ class DurableRunner(RunManager):
             self.store.event(run_id, 'status', 'Reusing the saved session sandbox for this response.')
         elif self.prepared.assign(run_id, row, state):
             return True
+        elif not self.has_capacity():
+            # A prepared entry may expire after admission's optimistic check.
+            # Keep the claimed input durable, but do not create a cold-machine
+            # reservation until ordinary capacity is available.
+            return False
         self.save(run_id, state)
         return True
 
@@ -399,26 +404,26 @@ class DurableRunner(RunManager):
         return True
 
     @asynccontextmanager
-    async def admission(self, run_id):
+    async def admission(self, run_id, *, prepared=False):
         # Hold global admission only for the capacity check and the caller's
         # persisted reservation. Provider cleanup keeps its session lease and
         # occupied slot, but cannot prevent other sessions from claiming space.
         while True:
             async with self.admission_lock:
-                if await database(self.has_capacity, run_id):
+                if await database(self.has_capacity, run_id if prepared else None):
                     yield True
                     return
-            if not await self.make_capacity(run_id):
+            if not await self.make_capacity(run_id, prepared=prepared):
                 yield False
                 return
             # Reclamation is not a reservation: another worker may have claimed
             # the freed slot. Check again under global admission before yielding.
 
-    async def make_capacity(self, run_id):
+    async def make_capacity(self, run_id, *, prepared=False):
         # Best-effort reclamation outside global admission. The caller must use
         # admission() to reserve the space. Skip owned sessions to avoid cycles
         # between admissions that each already hold their own session lease.
-        if await database(self.has_capacity, run_id):
+        if await database(self.has_capacity, run_id if prepared else None):
             return True
         if await self.prepared.reclaim():
             return True
@@ -432,7 +437,7 @@ class DurableRunner(RunManager):
             async with self.session_guard(other, wait=False) as acquired:
                 if not acquired:
                     continue
-                if await database(self.has_capacity, run_id):
+                if await database(self.has_capacity, run_id if prepared else None):
                     return True
                 state = await database(self.state, other)
                 if state.get('phase') not in {'warm', 'warm_cleanup'}:
@@ -440,7 +445,7 @@ class DurableRunner(RunManager):
                 if await database(self.store.has_queued_messages, other):
                     continue
                 await self.release_warm(other, state, 'capacity needed by another session')
-                if await database(self.has_capacity, run_id):
+                if await database(self.has_capacity, run_id if prepared else None):
                     return True
         return False
 
@@ -528,9 +533,16 @@ class DurableRunner(RunManager):
                                  {'phase': 'provision', 'attempt': attempt + 1})
             return True
         state.update(sandbox_id=sandbox.object_id, machine_started=getattr(sandbox, 'started_at', time.time()), phase='install')
-        await database(self.save, run_id, state)
-        await database(self.store.update_run, run_id, sandbox_id=sandbox.object_id)
+        await database(self.save_provisioned, run_id, state)
         return sandbox
+
+    def save_provisioned(self, run_id, state):
+        # Cancellation may detach the worker immediately after this commit.
+        # The resumed install and workspace APIs must agree about its machine.
+        with self.store.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+            conn.execute('UPDATE runs SET sandbox_id=? WHERE id=?', (state['sandbox_id'], run_id))
 
     def directory(self, state):
         suffix = f"-startup-{state['startup_attempt']}" if state.get('startup_attempt') else ''

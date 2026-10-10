@@ -607,7 +607,7 @@ def _create_app(settings, store):
 
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
-        security.require(request, mutation=True)
+        await database(security.require, request, mutation=True)
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
                             and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
@@ -638,7 +638,8 @@ def _create_app(settings, store):
             body.github_repository_id = identity
         if body.mode == "modal" and not metadata_request:
             await database(environments.choose, body.environment_id, body.repo_url, body.github_repository_id)
-        user_id = await database(store.identity, security.session_info(request))
+        session = await database(security.session_info, request)
+        user_id = await database(store.identity, session)
         try:
             run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)

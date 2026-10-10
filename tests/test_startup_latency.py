@@ -107,6 +107,7 @@ async def test_prepared_machine_is_clean_claimed_once_and_counts_toward_capacity
     assert not ready.spec and not cloud.launch_tokens
     await manager.advance(run_id)
     assert manager.state(run_id)['sandbox_id'] == ready.object_id
+    assert manager.store.run(run_id)['sandbox_id'] == ready.object_id
     assert manager.state(run_id)['prepared_workspace']
     assert not manager.prepared.count()
     await manager.prepared.maintain()
@@ -234,3 +235,117 @@ async def test_invalid_install_spec_still_finishes_instead_of_retrying_forever(d
     monkeypatch.setattr(manager, 'spec', invalid)
     await drive(manager, run_id)
     assert manager.store.messages(run_id)[0]['status'] == 'failed'
+
+
+async def test_cancelled_provision_commits_both_workspace_references(durable, monkeypatch):
+    from contextlib import contextmanager
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='provision')
+    entered, release = threading.Event(), threading.Event()
+    connect = manager.store.connect
+
+    @contextmanager
+    def held(*args, **kwargs):
+        with connect(*args, **kwargs) as conn:
+            class Connection:
+                def __getattr__(self, key):
+                    return getattr(conn, key)
+                def execute(self, sql, params=()):
+                    result = conn.execute(sql, params)
+                    if sql.startswith('UPDATE durable_sessions SET state=') and '"phase": "install"' in params[0]:
+                        entered.set()
+                        assert release.wait(3)
+                    return result
+            yield Connection()
+
+    monkeypatch.setattr(manager.store, 'connect', held)
+    task = asyncio.create_task(manager.advance(run_id))
+    assert await asyncio.to_thread(entered.wait, 2)
+    task.cancel()
+    try:
+        await asyncio.sleep(.03)
+        assert not task.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    state = manager.state(run_id)
+    assert state['phase'] == 'install'
+    assert state['sandbox_id'] == manager.store.run(run_id)['sandbox_id'] == cloud.machines[0].object_id
+
+
+async def test_default_environment_bypasses_generic_prepared_pool(durable, monkeypatch):
+    from app.environments import Environments
+    from test_environments import prepared
+    manager, cloud, run_id = durable
+    enable_pool(manager)
+    env = Environments(manager.store, manager.settings, None, manager, None, SimpleNamespace(flush=AsyncMock()))
+    manager.environments = env
+    build_id = prepared(env)
+    await manager.prepared.maintain()
+    images = []
+    monkeypatch.setattr('app.durable_runner.modal.Image.from_id', lambda value, **kw: images.append(value) or 'image')
+    await drive(manager, run_id, phase='monitor')
+    assert not manager.state(run_id).get('prepared_workspace')
+    assert manager.prepared.count() == 1
+    assert manager.store.run(run_id)['environment_build_id'] == build_id
+    assert images == ['im-project']
+    assert cloud.machines[-1].spec['project_environment']['build_id'] == build_id
+
+
+async def test_computer_wake_cannot_spend_an_unclaimed_pool_reservation(durable, monkeypatch):
+    from fastapi import HTTPException
+    manager, _, run_id = durable
+    enable_pool(manager)
+    await manager.prepared.maintain()
+    occupied = manager.store.create_run('Active work', '', 'modal', [])
+    manager.submit(occupied)
+    manager.save(occupied['id'], {'phase': 'monitor'})
+    manager.store.execute('DELETE FROM messages WHERE run_id=?', (run_id,))
+    manager.store.update_run(run_id, status='idle')
+    monkeypatch.setattr(manager.settings.__class__, 'missing_sandbox', lambda *args: [])
+    # Cleanup is held elsewhere. Computer wake must not treat an unassigned
+    # ready pool entry as free capacity and create a third reservation.
+    manager.prepared.reclaim = AsyncMock(return_value=False)
+    with pytest.raises(HTTPException) as error:
+        await manager.wake_computer(run_id)
+    assert error.value.status_code == 409
+    assert manager.state(run_id) == {} and manager.prepared.count() == 1
+
+
+async def test_pool_expiry_between_capacity_check_and_assignment_does_not_over_admit(durable, monkeypatch):
+    manager, _, run_id = durable
+    enable_pool(manager)
+    await manager.prepared.maintain()
+    occupied = manager.store.create_run('Active work', '', 'modal', [])
+    manager.submit(occupied)
+    manager.save(occupied['id'], {'phase': 'monitor'})
+    assign = manager.prepared.assign
+
+    def expired(*args):
+        manager.store.execute('UPDATE prepared_sandboxes SET expires_at=0')
+        return assign(*args)
+
+    monkeypatch.setattr(manager.prepared, 'assign', expired)
+    await manager.advance(run_id)
+    assert manager.state(run_id) == {}  # Claimed input survives without an extra machine slot.
+    assert manager.store.messages(run_id)[0]['status'] == 'running'
+    assert not manager.has_capacity()
+
+
+async def test_pool_reclaim_never_waits_on_local_inflight_preparation(durable):
+    manager, _, _ = durable
+    async with manager.prepared.guard() as acquired:
+        assert acquired
+        assert await asyncio.wait_for(manager.prepared.reclaim(), .2) is False
+
+
+async def test_reclaim_skips_uncertain_pool_entry_before_evicting_user_workspace(durable):
+    manager, cloud, _ = durable
+    enable_pool(manager)
+    await manager.prepared.maintain()
+    manager.store.execute('''INSERT INTO prepared_sandboxes(name,build,status,created_at,expires_at)
+        VALUES('uncertain',?,'deleting',0,?)''', (manager.prepared.build, time.time() + 300))
+    assert await manager.prepared.reclaim()
+    assert not cloud.machines[0].alive
+    assert manager.store.rows('SELECT name FROM prepared_sandboxes') == [{'name': 'uncertain'}]
