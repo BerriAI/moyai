@@ -709,10 +709,12 @@ def test_edge_failure_is_actionable_and_does_not_guess_about_user_key():
         relay.close();server.shutdown();server.server_close();thread.join(timeout=2)
 
 
-def test_slack_source_is_imported_once_and_current_followup_stays_current():
+def test_live_slack_source_remains_attributed_alongside_current_followup():
     spec={'prompt':'Find the existing PR', 'slack_source': {'messages':[{'text':'Issue LIT-6275'}]}}
     assert 'Issue LIT-6275' in conversation_prompt(spec)
-    assert conversation_prompt(spec,has_history=True)=='Find the existing PR'
+    followup = conversation_prompt(spec,has_history=True)
+    assert followup.startswith('CURRENT USER REQUEST:\nFind the existing PR')
+    assert 'Issue LIT-6275' in followup and 'untrusted source data' in followup
 
 
 def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):

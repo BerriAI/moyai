@@ -155,3 +155,23 @@ Open a session pull request from the conversation, the PR list, or a saved PR ta
 The panel includes the session’s confirmed PRs and those of its direct child agents. Disabled GitHub access or removed repository selection makes the details unavailable. Large changes show explicit truncation notices; GitHub remains available for complete diffs. Computer and Saved captures retain their separate controls.
 
 For a local demo, run `uv run python scripts/pull_request_panel_demo.py --port 8987` and open `http://localhost:8987/demo/login`. The session and GitHub data are fixtures. Add `--live-github` to read real PR details using your existing local `gh` login; no model, cloud workspace, or GitHub write is used.
+
+## File and terminal tools
+
+The shared computer tools read complete files in byte pages and return exact
+base64 bytes, including binary files and UTF-8 characters split across pages.
+`computer_write_file` publishes a complete replacement atomically; replacing an
+existing file requires `overwrite=true` and preserves its executable mode.
+
+`computer_terminal` returns a process handle. Commands continue after the tool
+returns; use `computer_terminal_read` to inspect status and page through the full
+saved output. A stable `request_key` identifies one launch across acknowledgment
+retries. An unavailable supervisor has an unknown outcome and does not authorize
+relaunching the command.
+
+Use `computer_terminal_input` to send text, exact base64 bytes, EOF, or an explicit
+force stop. When the process cannot accept all input immediately, the receipt
+identifies the accepted prefix and returns the exact remaining base64 suffix.
+Only send that remaining suffix again. Run services as foreground commands with
+handles; descendants stop when their owning command exits. Logs and command
+arguments stay outside repository trees, under the saved session directory.

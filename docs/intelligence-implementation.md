@@ -304,3 +304,21 @@ all 56 cases after correcting those expectations. PostgreSQL passes 96
 migration/rolling-owner checks and 74 goal/journal/source/library/artifact
 contracts. The full repository regression is still running; provider and
 production rehearsals remain separate release gates.
+
+## Shared computer primitives (WP6/WP8 prerequisite)
+
+The MCP catalog and in-process harness bindings share complete byte/range file
+reads, atomic text/binary writes and persistent command handles. Removed the
+100 KB output/read cutoffs and 120-second command lifetime. Launch identities
+prevent duplicate execution after a lost acknowledgment; unavailable supervisors
+report unknown outcomes. Explicit stop kills the process group, including a
+command ignoring TERM. Input backpressure returns an acknowledged byte prefix
+and exact remaining suffix. Appending logs remain readable without pretending
+that the file is immutable. Logs/arguments live outside Git working trees.
+
+Validation: 183 computer/MCP/harness cases passed with 15 optional runtime skips;
+all eight new computer contracts passed after the log-location follow-up; the
+final MCP suite passes all 32 cases. The live Slack-source regression expectation
+now preserves the current attributed reference. Independent agent runtime and
+lazy computer acquisition are still in progress and are not enabled by this
+prerequisite.
