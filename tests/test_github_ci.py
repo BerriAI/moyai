@@ -34,7 +34,12 @@ class CIProvider(Provider):
         self.calls.append((request.method, path, dict(request.url.params)))
         assert request.method == 'GET' and path.startswith('/repositories/101/')
         permissions = self.tokens[request.headers['authorization'].removeprefix('Bearer ')]
-        assert permissions == ({'checks': 'read', 'contents': 'read'} if '/commits/' in path else {'actions': 'read'})
+        # Enforce GitHub's endpoint permission contract independently of the
+        # requested token scopes. Contents read does not grant status access.
+        required = 'checks' if path.endswith('/check-runs') else 'statuses' if path.endswith('/statuses') else 'actions'
+        if permissions.get(required) not in ('read', 'write'):
+            return httpx.Response(403, json={'message': 'Resource not accessible by integration'},
+                                  headers={'X-Accepted-GitHub-Permissions': required + '=read'})
         if self.on_result:
             self.on_result()
         count = 30 if self.many else 1
@@ -89,7 +94,7 @@ def test_ci_catalog_and_reads_work_with_read_only_connection(ci):
     assert provider.calls[-1][2]['head_sha'] == SHA
     jobs = call('github_workflow_jobs', run_id=7).json()
     assert jobs['jobs'][0]['steps'][0]['conclusion'] == 'failure'
-    assert {'checks': 'read', 'contents': 'read'} in provider.minted
+    assert {'checks': 'read', 'statuses': 'read'} in provider.minted
     assert {'actions': 'read'} in provider.minted
     assert not any(method not in ('GET', 'POST') for method, _, _ in provider.calls)
     assert all(path.endswith('/access_tokens') for method, path, _ in provider.calls if method == 'POST')
@@ -139,6 +144,16 @@ def test_missing_permissions_do_not_disable_existing_pr_access(ci):
     assert 'Checks: read' in call('github_ci_checks', head_sha=SHA).json()['error']
     assert 'Actions: read' in call('github_workflow_runs').json()['error']
     assert all(scope == {'metadata': 'read'} for scope in provider.minted)
+
+
+def test_missing_statuses_permission_is_actionable_and_preserves_actions(ci):
+    *_, provider, call = ci
+    provider.permissions.pop('statuses', None)
+    result = call('github_ci_checks', head_sha=SHA).json()
+    assert 'Commit statuses: read' in result['error']
+    assert 'organization owner' in result['error']
+    assert not any('/commits/' in path for _, path, _ in provider.calls)
+    assert call('github_workflow_runs', head_sha=SHA).json()['workflow_runs'][0]['id'] == 7
 
 
 def test_ci_repository_scope_and_revocation_are_rechecked(ci):

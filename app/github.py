@@ -26,7 +26,7 @@ from .github_ci import GitHubCI
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
-MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'actions': 'read'}
+MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'read'}
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
 
@@ -287,14 +287,17 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             if ci:
                 if ci not in {'checks', 'actions'} or write or rules:
                     raise ValueError('Invalid CI token scope')
-                permissions = {'checks': 'read', 'contents': 'read'} if ci == 'checks' else {'actions': 'read'}
+                permissions = {'checks': 'read', 'statuses': 'read'} if ci == 'checks' else {'actions': 'read'}
                 installed = await self.request('GET', f'/app/installations/{installation}', token=self.app_jwt(config))
                 if (installed.get('suspended_at') or installed.get('account', {}).get('type') != 'Organization'
                         or installed.get('account', {}).get('id') != credentials.get('account_id')):
                     raise ConnectorError('The GitHub installation is suspended or belongs to another organization. Reconnect GitHub.')
                 if not supports_permissions(installed.get('permissions'), permissions):
-                    raise ConnectorError(f'CI reading requires {ci.title()}: read access on the organization GitHub App. '
-                                         'An organization owner must enable and approve that permission for this installation. Existing code and PR access still works.')
+                    labels = {'checks': 'Checks', 'statuses': 'Commit statuses', 'actions': 'Actions'}
+                    missing = ', '.join(labels[key] + ': read' for key in permissions
+                                        if not supports_permissions(installed.get('permissions'), {key: 'read'}))
+                    raise ConnectorError(f'CI reading requires {missing} access on the organization GitHub App. '
+                                         'An organization owner must enable and approve this access for the installation. Existing code and PR access still works.')
             if rules and write:
                 installed = await self.request('GET', f'/app/installations/{installation}', token=self.app_jwt(config))
                 if (installed.get('suspended_at') or installed.get('account', {}).get('type') != 'Organization'

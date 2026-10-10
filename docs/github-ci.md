@@ -21,12 +21,15 @@ Pin checks and workflow queries to the PR's head SHA so newer commits are not
 confused with the reviewed commit. Workflow jobs report their attempt; a rerun
 can change the latest attempt between reads.
 
-Checks use a repository-scoped token with Checks read and Contents read. Actions
+Checks use a repository-scoped token with Checks read and Commit statuses read. Actions
 use Actions read only. Tokens remain on the server. New GitHub App manifests ask
 for these read permissions. Existing installations must have an organization
-owner enable and approve Checks/Actions read; missing scopes return actionable
+owner enable and approve Checks/Commit statuses/Actions read; missing scopes return actionable
 tool errors and do not disable existing code/PR access. CI tools cannot rerun,
 cancel, dispatch, edit or delete workflows.
+
+GitHub's [commit-status endpoint](https://docs.github.com/en/rest/commits/statuses#list-commit-statuses-for-a-reference)
+requires the separate Commit statuses permission; Contents read does not grant it.
 
 Job-log reads accept only a server-constructed job endpoint and approved HTTPS
 GitHub log-storage redirects, with no installation Authorization or cookies sent
