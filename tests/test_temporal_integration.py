@@ -247,8 +247,12 @@ async def test_real_temporal_restart_recovers_confirmed_delete_before_cleanup_st
     manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
     manager.settings.sandbox_idle_seconds = 300
     checkpoints = SimpleNamespace(flush=AsyncMock())
+    connected = asyncio.Event()
+    if restart_state == 'warm':
+        connected.set()  # A warm workspace already has a live workflow owner.
     async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
         async def connect():
+            await connected.wait()
             return env.client
         manager.connect_temporal = connect
         successor = lifecycle = None
@@ -293,8 +297,25 @@ async def test_real_temporal_restart_recovers_confirmed_delete_before_cleanup_st
                 assert len(messages) == len(saved) and all(m['status'] == 'cancelled' for m in messages)
                 assert [{k: v for k, v in m.items() if k != 'status'} for m in messages] == [
                     {k: v for k, v in m.items() if k != 'status'} for m in saved]
+                assert not successor.ready.is_set()
+            # Idle cleanup may finish before Temporal connects. Wait for the
+            # durable wake acknowledgement before requesting workflow history.
+            connected.set()
+            await eventually(lambda: successor.store.rows(
+                'SELECT 1 FROM durable_sessions WHERE run_id=? AND delivered>=revision AND delivered>0',
+                (run_id,)), seconds=25)
             handle = env.client.get_workflow_handle('moyai-session-' + run_id)
-            await Replayer(workflows=[SessionWorkflow]).replay_workflow(await handle.fetch_history())
+            async with asyncio.timeout(25):
+                while True:
+                    history = await handle.fetch_history()
+                    if any(event.HasField('activity_task_completed_event_attributes') for event in history.events):
+                        break
+                    await asyncio.sleep(0.1)
+            await Replayer(workflows=[SessionWorkflow]).replay_workflow(history)
+            # The late wake must observe the tombstone without replaying work.
+            assert successor.store.messages(run_id) == messages
+            assert len(cloud.launches) == launches
+            assert not any(machine.alive for machine in cloud.machines)
             await handle.terminate('Integration test complete')
         finally:
             if lifecycle:
