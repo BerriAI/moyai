@@ -107,7 +107,7 @@ def server(environment, role, directory):
 
 def source_build(root):
     digest = hashlib.sha256()
-    for directory in ('app', 'sandbox'):
+    for directory in ('app', 'agent', 'sandbox'):
         for path in sorted((root / directory).rglob('*')):
             if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
                 digest.update(str(path.relative_to(root)).encode() + b'\0' + path.read_bytes() + b'\0')
@@ -116,7 +116,7 @@ def source_build(root):
 
 def candidate_builds(root, environment):
     candidate = root / 'candidate-source'
-    for directory in ('app', 'sandbox'):
+    for directory in ('app', 'agent', 'sandbox'):
         shutil.copytree(ROOT / directory, candidate / directory, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     main = candidate / 'app/main.py'
     main.write_text(main.read_text() + '''

@@ -240,7 +240,9 @@ class APIRelease(Release):
             if candidate != {k: self.baseline[k] for k in ('contract', 'schema')}:
                 raise ReleaseError('Candidate API contract is incompatible with the running cluster; use a maintenance release.')
             self.record.update(previous_commit=api.sha, previous_deploy=api.deploy_id,
-                               background_owners=sorted(self.background), previous_api_owner=old_owner)
+                               background_owners=sorted(self.background), previous_api_owner=old_owner,
+                               cluster_policy=self.baseline['policy'], api_contract=self.baseline['contract'],
+                               schema_revision=self.baseline['schema'])
             self.unchanged()
             if self.preflight_only:
                 self.record['status'] = 'preflight_passed'
