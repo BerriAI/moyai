@@ -15,11 +15,36 @@ Open **Organization** and either enter the appropriate token or use the OAuth bu
 
 | App | Required setup | Tools exposed |
 | --- | --- | --- |
-| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | List accessible teams (50 results), search issue titles (20 results), read an issue and its parent, create an issue (optionally under a parent) directly, update an existing issue's parent or add a comment directly. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
-| Slack | User token with `search:read` and relevant channel/DM history scopes for reads. Sending requires the installed **Moyai bot** with `chat:write`, `im:write` (to open DMs), and `im:history` (to verify them). OAuth callback: `PUBLIC_URL/oauth/slack/callback`. Bot tokens cannot search messages. | Search messages (20 results), read a thread (50 messages), send as the Moyai app. |
-| Notion | Integration token with content access and the target pages shared to it; or public integration OAuth client with callback `PUBLIC_URL/oauth/notion/callback`. | Search page titles (20 results), read up to 100 top-level blocks, append a paragraph directly. |
+| Linear | Personal API key, or OAuth app with `read,write`; callback `PUBLIC_URL/oauth/linear/callback`. | Page through teams, requester issues, title search, and issue comments; read descriptions and parents; create, reparent, or comment on issues. Creating issues requires the credential’s Create issues permission (Linear also permits updates under that scope). |
+| Slack | User token with `search:read` and relevant channel/DM history scopes for reads. Sending requires the installed **Moyai bot** with `chat:write`, `im:write` (to open DMs), and `im:history` (to verify them). OAuth callback: `PUBLIC_URL/oauth/slack/callback`. Bot tokens cannot search messages. | Page through search matches, channel roots, or thread replies; send as the Moyai app. |
+| Notion | Integration token with content access and the target pages shared to it; or public integration OAuth client with callback `PUBLIC_URL/oauth/notion/callback`. | Page through title search and page/block children, traverse nested blocks, and append complete text. |
 
-Set `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`, `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET`, and/or `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` to show native OAuth buttons. Provider administrators may need to approve the apps and scopes. Notion search is title search, not full-text search; nested page blocks and subsequent result pages are not automatically expanded in this MVP.
+Set `LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`, `SLACK_CLIENT_ID` / `SLACK_CLIENT_SECRET`, and/or `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` to show native OAuth buttons. Provider administrators may need to approve the apps and scopes. Notion search is title search, not full-text search.
+
+Research reads return the complete provider page plus `next_arguments` and
+`coverage`. Call the same tool with `next_arguments` until it is null, and check
+the coverage warning: a missing or repeated provider cursor is an incomplete
+result. `page_size` changes transport size, not total reachable results. Provider
+permissions, retention, search indexing, rate limits, and concurrent edits still
+bound coverage; these tools do not claim to mirror an entire workspace.
+`notion_page` accepts a page or block ID; traverse its `child_collections` to read
+nested blocks. `slack_channel` reads roots, with replies through `slack_thread`.
+
+Long Slack sends continue in replies at Slack's 40,000-character field boundary,
+returning receipts for every part. Notion append divides text across rich-text
+values and payloads at Notion's actual API limits. Neither discards the remaining
+text. Partial failures report acknowledged parts and the completed offset. Verify
+the failed part before continuing; resending the entire original would duplicate
+earlier parts. Each batch rechecks connection policy and execution ownership.
+
+Connector tool errors report `code`, `outcome`, `dispatched`, `retryable`, and
+when available `status_code` and `retry_after_seconds`. Invalid arguments produce
+field paths/types without copying submitted values. Rejections that occur before
+dispatch can be corrected; HTTP rate limits may be retried after the indicated
+delay. A lost write response has an unknown outcome and must be reconciled at its
+destination first. Authentication and expired session capabilities still reject
+the HTTP request. Legacy GitHub errors without dispatch evidence remain unknown
+for writes; no automatic write replay is inferred from a generic failure.
 
 **Slack sender identity:** `slack_send` always uses the installed bot, including in shared chats and follow-up turns from other users. The server prefixes the body with the active requester's stored profile name (`Moe: message` or `Tin: message`), not the session creator or connection owner. The agent supplies only the message body and cannot override the sender. Unidentified/shared-password requesters cannot send. It never loads or falls back to the shared user token. Pass a recipient’s Slack user ID (`U…` or `W…`) as `channel` for a DM; Moyai opens the bot’s conversation before posting. Existing bot-accessible channel/conversation IDs still work. Missing, expired, or insufficient bot access fails with a reconnect instruction. Use `slack_thread(as_bot=true)` with the returned channel and timestamp to verify the bot’s DM without switching to the shared read account. Reconnect existing installations to grant `im:write` and `im:history` before opening/verifying bot DMs. New OAuth connections no longer request user `chat:write`; previously granted user permissions are not automatically revoked. Shared search/thread reads remain unchanged; per-user Slack OAuth is not implemented.
 

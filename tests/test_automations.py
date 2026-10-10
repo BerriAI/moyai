@@ -193,9 +193,10 @@ def test_my_linear_issues_uses_session_identity_not_connection_owner(workspace,m
     monkeypatch.setattr(app.state.connectors,'request',request)
     result=client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{}})
     assert result.status_code==200 and result.json()['issues']['nodes'][0]['identifier']=='LIT-123'
-    assert sent[0]['variables']=={'email':'tin@berri.ai'}
+    assert sent[0]['variables']=={'email':'tin@berri.ai', 'first':50, 'after':None}
     assert 'assignee' in sent[0]['query'] and 'completed' in sent[0]['query']
-    assert client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{'email':'someone@berri.ai'}}).status_code==422
+    rejected=client.post('/broker/'+run_id+'/tools/call',headers=headers,json={'name':'linear_my_issues','arguments':{'email':'someone@berri.ai'}}).json()
+    assert rejected['code']=='invalid_arguments' and rejected['dispatched'] is False
 
 
 def test_concurrent_occurrences_admit_independent_sessions(workspace,monkeypatch):

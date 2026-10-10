@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from app.config import Settings
+from app.config import ModelContextLimits, Settings
 from app.db import Store
 from app.main import create_app
 from app.memory import Note
@@ -20,8 +20,14 @@ def review_app(tmp_path):
     values.update(data_dir=tmp_path, litellm_api_base='https://gateway.example/v1', litellm_api_key='test-key',
                   google_client_id='test', google_client_secret='test', google_admin_emails='alice@berri.ai',
                   session_secret='test-session-secret', memory_review_idle_seconds=0,
-                  auto_prepare_repositories=False, session_titles_enabled=False)
-    app = create_app(Settings(_env_file=None, **values))
+                  auto_prepare_repositories=False, session_titles_enabled=False,
+                  model_context_limits={values['agent_model']: {'context_window': 128000, 'max_input_tokens': 120000,
+                      'max_output_tokens': 8000, 'default_output_tokens': 4000}})
+    settings = Settings(_env_file=None, **values)
+    settings.model_context_limits[settings.resolve_model()] = ModelContextLimits.model_validate({
+        'context_window': 128000, 'max_input_tokens': 120000,
+        'max_output_tokens': 8000, 'default_output_tokens': 4000})
+    app = create_app(settings)
     for user in ('alice', 'bob'):
         app.state.store.identity({'method': 'google', 'identity': {'sub': user, 'email': user+'@berri.ai'}})
     yield app
@@ -387,3 +393,26 @@ async def test_ultrafast_memory_review_uses_the_base_gateway_model(review_app):
     assert jobs(app)[0]['status'] == 'completed'
     body = json.loads(requests[0].content)
     assert body['model'] == ASTRA and 'service_tier' not in body
+
+
+async def test_large_turn_reviews_every_page_and_captures_late_correction(review_app):
+    app = review_app
+    selected = app.state.settings.resolve_model()
+    app.state.settings.model_context_limits[selected] = {'context_window': 32000, 'max_input_tokens': 28000,
+        'max_output_tokens': 4000, 'default_output_tokens': 4000}
+    tail = 'For benchmark reports, always include uncertainty and evidence.'
+    original = ('Reference information. ' * 2000) + tail
+    run, message_id = turn(app, original)
+    observed = []
+    def gateway(request):
+        data = json.loads(json.loads(request.content)['messages'][1]['content'])
+        observed.extend(data['messages'])
+        if tail in data['messages'][-1]['content']:
+            return completion([proposal(request, content='Include uncertainty and evidence in benchmark reports.', source_quote=tail)])
+        return completion([])
+    await process(app, gateway)
+    assert len(observed) > 3
+    assert ''.join(item['content'] for item in observed) == original
+    note = app.state.memory.listing('google:alice')[0]
+    assert note['source']['quote'] == tail
+    assert note['source']['message_id'] == message_id

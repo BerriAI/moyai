@@ -141,7 +141,7 @@ def test_invalid_custom_origins_never_start(monkeypatch, url):
         configure_environment()
 
 
-@pytest.mark.parametrize('role,seconds', [('api', 270), ('coordinator', 20), ('broker', 20), ('worker', 20)])
+@pytest.mark.parametrize('role,seconds', [('api', 270), ('coordinator', 20), ('broker', 270), ('worker', 20)])
 def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, seconds):
     import render_start
     monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example')

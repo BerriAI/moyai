@@ -122,7 +122,7 @@ def main():
         asyncio.run(bootstrap())
     uvicorn.run(maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
                 port=int(os.environ.get("PORT", "10000")), workers=1,
-                timeout_graceful_shutdown=API_GRACEFUL_SHUTDOWN_SECONDS if os.environ.get('MOYAI_RUNTIME_ROLE') == 'api' else 20,
+                timeout_graceful_shutdown=API_GRACEFUL_SHUTDOWN_SECONDS if os.environ.get('MOYAI_RUNTIME_ROLE') in {'api', 'broker'} else 20,
                 # The app resolves the client from X-Forwarded-For itself (TRUSTED_PROXY_HOPS).
                 proxy_headers=False)
 

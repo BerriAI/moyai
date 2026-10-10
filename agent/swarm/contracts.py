@@ -69,7 +69,10 @@ class Results(Group):
 
 class Artifact(Arguments):
     child_id: str = Field(pattern=r'^[0-9a-f]{32}$')
-    path: str = Field(default='', max_length=500)
+    path: str = ''
+    revision: str = ''
+    offset: int = Field(default=0, ge=0)
+    length: int = Field(default=65536, ge=1)
     latest: bool = False
 
 

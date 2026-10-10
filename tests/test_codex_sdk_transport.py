@@ -539,7 +539,8 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
             assert result['final_response'] == 'codex-transport-ok'
             assert ('commentary', 'codex-transport-ok') not in events
         expected_samples = 6 if outcome == 'context-recovery-limit' else 5
-        assert result['completed'] and len(samples) == expected_samples and len(calls) == 1
+        assert result['completed'], result
+        assert len(samples) == expected_samples and len(calls) == 1
         assert len(requests) == expected_samples + len(summaries)
         assert 'requester-private-first-marker' not in json.dumps(requests[-1])
         assert 'requester-private-second-marker' in json.dumps(requests[-1])

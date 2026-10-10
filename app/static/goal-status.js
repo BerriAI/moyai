@@ -8,7 +8,7 @@
     if(!goal)return null;
     const ended=['idle','completed','failed','cancelled','interrupted'].includes(run.status)&&!run.active;
     const waiting=['waiting_credential','waiting_children','reconnecting','awaiting_approval','queued','provisioning'].includes(run.status);
-    const status=goal.status==='active'?(ended?'paused':waiting?'waiting':'active'):goal.status;
+    const status=goal.status==='active'?(ended?'interrupted':waiting?'waiting':'active'):goal.status;
     return {...goal,status,ended};
   }
   function elapsed(goal,run,now=Date.now()){
@@ -23,11 +23,13 @@
     if(!node)return;
     const goal=current(run);
     node.hidden=!goal;if(!goal){MoyaiUI.render(node, '');delete node.dataset.signature;return;}
-    const labels={active:'Running',waiting:'Waiting',paused:'Paused',blocked:'Blocked',completed:'Completed'};
-    const signature=JSON.stringify([goal.id,goal.objective,goal.status,goal.reason]);
+    const labels={active:'Running',waiting:'Waiting',paused:'Paused',blocked:'Blocked',completed:'Completed',wrapping:'Reporting',budget_exhausted:'Budget ended',needs_input:'Needs your input',interrupted:'Interrupted',cancelled:'Cancelled'};
+    const budget=goal.budget||{};
+    const budgetText=budget.seconds?`${({timebox:'Timebox',floor:'Minimum work',cap:'Work cap'})[budget.kind]||'Work budget'}: ${root.MoyaiActivity.duration(0,budget.seconds*1000)}`:budget.deadline?`Deadline: ${new Date(budget.deadline*1000).toLocaleString()}`:'';
+    const signature=JSON.stringify([goal.id,goal.objective,goal.status,goal.reason,budgetText]);
     if(node.dataset.signature!==signature){
       node.dataset.signature=signature;
-      MoyaiUI.render(node, `<div class="goal-heading"><strong>Goal</strong><span class="goal-state">${esc(labels[goal.status]||goal.status)}</span><time class="goal-elapsed" aria-label="Goal elapsed time"></time></div><div class="goal-objective">${esc(goal.objective)}</div>${goal.reason&&goal.status!=='active'?`<p class="goal-reason">${esc(goal.reason)}</p>`:''}`);
+      MoyaiUI.render(node, `<div class="goal-heading"><strong>Goal</strong><span class="goal-state">${esc(labels[goal.status]||goal.status)}</span><time class="goal-elapsed" aria-label="Goal elapsed time"></time></div><div class="goal-objective">${esc(goal.objective)}</div>${budgetText?`<p class="goal-budget">${esc(budgetText)}</p>`:''}${goal.reason&&goal.status!=='active'?`<p class="goal-reason">${esc(goal.reason)}</p>`:''}`);
     }
     node.dataset.status=goal.status;
     node.querySelector('time').textContent=root.MoyaiActivity.duration(0,elapsed(goal,run)*1000);

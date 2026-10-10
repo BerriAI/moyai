@@ -70,7 +70,7 @@ def test_search_schema_receipt_survives_activity_formatting(codex_agent, monkeyp
 
 
 def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notifications=None):
-    observed = SimpleNamespace(homes=[], prompts=[], thread_options=[], steers=[], steer_error=None, exits=[])
+    observed = SimpleNamespace(homes=[], prompts=[], thread_options=[], steers=[], steer_error=None, exits=[], replay=[])
 
     class Client:
         def __init__(self, config):
@@ -90,6 +90,12 @@ def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notific
         async def thread_start(self, options):
             observed.thread_options.append(options)
             return SimpleNamespace(thread=SimpleNamespace(id='fresh-thread'))
+
+        async def request(self, method, params, *, response_model):
+            assert method == 'thread/inject_items'
+            assert params['threadId'] == 'fresh-thread'
+            observed.replay.append(params['items'])
+            return response_model()
 
         async def turn_start(self, thread_id, prompt):
             assert thread_id == 'fresh-thread'
@@ -309,7 +315,7 @@ def test_live_input_uses_current_native_turn_and_preserves_journal(codex_agent, 
         observed.steer_error = TransportClosedError('Connection lost after write')
     result = agent.run_conversation('Continue.', conversation_history=[], system_message='Moyai')
     assert observed.steers == [('fresh-thread', 'fresh-turn-1',
-                               '[User correction to the current task]\nAlso verify the correction.')]
+                               '[New authenticated user message; interpret its intent in context]\nAlso verify the correction.')]
     assert len(observed.prompts) == (2 if delivery in {'ended', 'accepted-at-finish'} else 1)
     if delivery == 'accepted-at-finish':
         assert 'Also verify the correction.' not in observed.prompts[1]
@@ -1217,6 +1223,9 @@ def test_turn_start_keeps_prior_receipts_flowing(codex_agent, monkeypatch):
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def initialize(self): pass
+        async def request(self, method, params, *, response_model):
+            assert method == 'thread/inject_items'
+            return response_model()
         async def thread_start(self, options):
             return SimpleNamespace(thread=SimpleNamespace(id='same-thread'))
         async def turn_start(self, thread_id, prompt):
@@ -1444,11 +1453,12 @@ def test_each_invocation_uses_disposable_native_state_and_preserves_public_recei
                and options['experimentalRawEvents'] for options in observed.thread_options)
     assert all(result['completed'] == (not fail_after_tool) and result['failed'] == fail_after_tool for result in results)
     assert all('requester-native-secret' not in prompt for prompt in observed.prompts)
-    assert 'proof' in observed.prompts[1] and not store.pending
+    assert 'proof' in json.dumps(observed.replay[1]) and not store.pending
+    assert observed.prompts[1] == 'Continue the task.'
     saved = ''.join(row[0] for row in store.db.execute('SELECT message FROM journal'))
     assert 'private-provider-error' not in json.dumps([results, events])
     assert 'requester-native-secret' not in saved
-    assert sum(message.get('role') == 'tool' for message in results[-1]['messages']) == 1
+    assert sum(message.get('role') == 'tool' for message in results[-1]['messages']) == 2
     assert saved_prose(store) == ([] if fail_after_tool else ['Public answer.', 'Public answer.'])
 
 
@@ -1472,6 +1482,9 @@ def test_code_mode_output_allows_polling_but_lifecycle_requires_nested_receipt(
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
         async def initialize(self): pass
+        async def request(self, method, params, *, response_model):
+            assert method == 'thread/inject_items'
+            return response_model()
         async def thread_start(self, options):
             return SimpleNamespace(thread=SimpleNamespace(id='thread'))
         async def turn_start(self, thread_id, prompt):

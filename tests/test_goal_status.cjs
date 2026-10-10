@@ -16,10 +16,15 @@ test('goal timer survives pauses and resumes without counting paused time',()=>{
   run.goal={status:'active',active_since:150,elapsed_seconds:25};
   assert.equal(goal.elapsed(goal.current(run),run,160000),35);
   run.status='interrupted';run.updated_at=new Date(155000).toISOString();
-  assert.equal(goal.current(run).status,'paused');
+  assert.equal(goal.current(run).status,'interrupted');
   assert.equal(goal.elapsed(goal.current(run),run,200000),30);
 });
 test('waiting and verified completion are distinct from running',()=>{
   assert.equal(goal.current({status:'waiting_credential',goal:{status:'active'}}).status,'waiting');
   assert.equal(goal.current({status:'idle',goal:{status:'completed'}}).status,'completed');
+});
+
+test('budget exhaustion and reporting never imply completion',()=>{
+  for(const status of ['wrapping','budget_exhausted','needs_input','interrupted']) assert.equal(goal.current({status:'idle',goal:{status}}).status,status);
+  assert.equal(goal.elapsed({elapsed_seconds:10800},{status:'idle'},999999999),10800);
 });

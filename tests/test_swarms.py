@@ -575,7 +575,7 @@ def test_elapsed_deadline_rejects_new_input_even_before_status_reconciliation(du
 
 
 @pytest.mark.parametrize('limit', ['session', 'capacity'])
-async def test_continuation_admission_failure_blocks_with_saved_reason(durable, limit):
+async def test_continuation_preserves_long_sessions_and_reports_capacity_failure(durable, limit):
     manager, _, run_id = durable
     enable(manager, run_id)
     await drive(manager, run_id)
@@ -588,6 +588,12 @@ async def test_continuation_admission_failure_blocks_with_saved_reason(durable, 
         manager.store.create_run('An unrelated queued task', '', 'modal', [], chat_enabled=True)
     await manager.advance(run_id)
     mission = manager.swarms.get(run_id)
+    if limit == 'session':
+        assert mission['status'] == 'active' and mission['round'] == 2
+        assert manager.store.rows(
+            "SELECT id FROM messages WHERE run_id=? AND role='user' AND status IN ('queued','running')", (run_id,))
+        assert len(manager.store.messages(run_id)) > 100
+        return
     assert mission['status'] == 'blocked'
     assert 'needs attention' in mission['reason']
     assert mission['round'] == 1

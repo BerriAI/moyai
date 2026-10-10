@@ -1,5 +1,8 @@
 """Load the same instructions for production and evaluations."""
+import json
 from pathlib import Path
+from agent.skills import catalog
+from agent.repository_guidance import resolve as repository_guidance
 from string import Template
 
 from agent.tools.tool_guidance import tool_guidance
@@ -18,6 +21,10 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
         delegation=_read('delegation') + ' ' if spec.get('is_child_agent') else '',
         slack=_read('slack') + ' ' if spec.get('slack_thread_chat') else '',
     )
+    message += '\nBundled skill catalog (read through bundled_skill_read):\n' + json.dumps(catalog(), ensure_ascii=False)
+    guidance = repository_guidance([str(workspace)], workspace=workspace)
+    if any(item['guidance'] for item in guidance['paths']):
+        message += '\nApplicable root repository guidance (directory scoped):\n' + json.dumps(guidance, ensure_ascii=False)
     if spec.get('side_chat_context'):
         message += (
             '\nThis is a separate side conversation. The main task continues independently. '

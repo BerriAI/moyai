@@ -21,6 +21,8 @@ def prepare_context(agent, history):
     if hasattr(relay, 'context_window'):
         try:
             agent.compaction_window = relay.context_window()['input_budget']
+            if agent.context_store is not None:
+                agent.context_store.input_budget = agent.compaction_window
         except StartupUnavailable as exc:
             if getattr(agent, 'journal', None) is not None:
                 # A later goal/steering invocation owns completed work. Save it
@@ -39,7 +41,9 @@ def run_with_context_recovery(agent, prompt, history, invoke):
     ctx, store = agent.context, agent.context_store
     directory = ctx.spec.get('history_reference_dir', ctx.cwd)
     native = getattr(agent, 'native', None)
-    current = prompt if native is not None and native.resumed else agent.journal.prompt(prompt, history, cwd=directory)
+    typed_replay = getattr(agent, 'typed_replay', False)
+    agent.replay_history = history
+    current = prompt if typed_replay or (native is not None and native.resumed) else agent.journal.prompt(prompt, history, cwd=directory)
     previous = None
     attempts = 0
     timeout = ctx.spec.get('timeout')
@@ -81,13 +85,15 @@ def run_with_context_recovery(agent, prompt, history, invoke):
         # commentary/tool receipts were already journaled by the public hooks.
         pending_text = getattr(agent, 'pending_text', [])
         pending_text.clear()
-        target = max(512, min(6000, pressure['input_budget'] // (8 * attempts)))
+        store.input_budget = pressure['input_budget']
+        target = max(1, pressure['input_budget'] // (8 * attempts))
         ctx.activity.commentary('Compacting saved context before continuing. Completed tool receipts are preserved.')
         store.compact(ctx.relay.compact, force=True, summary_bytes=target)
         history = store.history()
-        current = agent.journal.prompt(
+        agent.replay_history = history
+        handoff = (
             'Continue the unfinished task from the saved receipts. This is a context handoff, not a new request. '
-            'Do not repeat completed actions.\n\nOriginal current request:\n' + prompt,
-            history, cwd=directory)
+            'Do not repeat completed actions.\n\nOriginal current request:\n' + prompt)
+        current = handoff if typed_replay else agent.journal.prompt(handoff, history, cwd=directory)
         if native is not None:
             native.begin(resume=False)

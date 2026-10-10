@@ -345,7 +345,10 @@ def test_worker_startup_leaves_coordinator_jobs_untouched_and_rejects_http(clust
     monkeypatch.setattr(ContextMaintenance, 'recover', lambda self: pytest.fail('Worker interrupted coordinator compaction'))
     options = settings.model_copy(update={'moyai_runtime_role': 'worker', 'data_dir': settings.data_dir / 'worker-api'})
     app = create_app(options)
+    recovery.side_effect = app.state.manager.ready.set
     with TestClient(app, base_url=settings.public_url, client=('127.0.0.1', 50000)) as client:
+        assert client.get('/health').status_code == 200
+        app.state.manager.ready.clear()
         assert client.get('/health').status_code == 503
         assert client.get('/api/config').status_code == 404
         assert client.post('/broker/example/control', json={}).status_code == 404

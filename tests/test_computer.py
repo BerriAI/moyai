@@ -940,6 +940,7 @@ class BrowserPage:
     """Page interface fixture: assertions exercise Computer's production routing."""
     def __init__(self, name):
         self.url, self.closed, self.events = name, False, {}
+        self.name, self.main_frame, self.frames = name, self, [self]
         self.mouse = SimpleNamespace(click=AsyncMock(), wheel=AsyncMock(), move=AsyncMock(), down=AsyncMock(), up=AsyncMock())
         self.keyboard = SimpleNamespace(insert_text=AsyncMock(), press=AsyncMock())
         self.bring_to_front = AsyncMock()
@@ -959,6 +960,10 @@ class BrowserPage:
         self.events[event] = callback
     def locator(self, selector):
         return SimpleNamespace(inner_text=AsyncMock(return_value=self.url), evaluate_all=AsyncMock(return_value=[]))
+    async def evaluate_handle(self, expression):
+        nodes = SimpleNamespace(get_properties=AsyncMock(return_value={}), dispose=AsyncMock())
+        return SimpleNamespace(evaluate=AsyncMock(return_value={'text': self.url, 'elements': []}),
+                               get_property=AsyncMock(return_value=nodes), dispose=AsyncMock())
 
 
 def restoring_context(desktop, *, navigation='', failure=''):

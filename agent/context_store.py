@@ -5,6 +5,7 @@ The summary and its coverage cursor commit together. No native SDK transcript,
 personal-memory injection, or Temporal payload belongs in this database.
 """
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -18,14 +19,11 @@ if __package__ in {None, ''}:
 
 from agent.history_reference import encoded, excerpt
 from agent.memory_history import scrub_memory_history
+from sandbox.broker_transport import MAX_BODY
 
 
-VERSION = 1
-SUMMARY_BYTES = 12_000
-BATCH_BYTES = 24_000
-ENTRY_BYTES = 1_600
-BATCH_ROWS = 32
-RECENT_ROWS = 8
+VERSION = 2
+IMPORT_PAGE_SIZE = 100  # Transport page size; every page is imported.
 
 
 class ContextUnavailable(RuntimeError):
@@ -40,6 +38,8 @@ class ContextStore:
             raise ContextUnavailable('Saved context must not be a symbolic link.')
         self.lock = threading.RLock()
         self.maintenance_ack = ''
+        self.relay = None
+        self.input_budget = None
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
@@ -62,12 +62,21 @@ class ContextStore:
                 self.db.execute("ALTER TABLE state ADD COLUMN epoch TEXT NOT NULL DEFAULT ''")
             self.db.execute("UPDATE state SET epoch=? WHERE epoch=''", (uuid4().hex,))
         state = self.state()
+        if state['version'] == 1 and state['run_id'] == run_id:
+            # Old previews were lossy. Rebuild only the derived byte index from
+            # the complete stored records; no canonical data is rewritten.
+            total = 0
+            with self.db:
+                for row in self.db.execute('SELECT seq,message FROM journal ORDER BY seq').fetchall():
+                    total += len(row['message'].encode())
+                    self.db.execute('UPDATE journal SET preview=?,total_bytes=? WHERE seq=?', (row['message'], total, row['seq']))
+                self.db.execute('UPDATE state SET version=? WHERE id=1', (VERSION,))
+            state = self.state()
         if state['version'] != VERSION or state['run_id'] != run_id:
             self.close()
             raise ContextUnavailable('Saved context belongs to a different session or version.')
         covered = self.db.execute('SELECT 1 FROM journal WHERE seq=?', (state['cursor'],)).fetchone()
-        if (state['cursor'] < 0 or (state['cursor'] and (not covered or not state['summary'].strip()))
-                or len(state['summary'].encode()) > SUMMARY_BYTES):
+        if state['cursor'] < 0 or (state['cursor'] and (not covered or not state['summary'].strip())):
             self.close()
             raise ContextUnavailable('Saved context has an invalid summary position; restore a valid checkpoint.')
 
@@ -99,34 +108,116 @@ class ContextStore:
     def _append(self, message):
         message = scrub_memory_history([message])[0]
         raw = encoded(message)
-        preview = excerpt(raw, 8_000 if message.get('role') == 'user' else ENTRY_BYTES)
+        preview = raw
         previous = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
         seq, total = (previous['seq'] + 1, previous['total_bytes']) if previous else (1, 0)
-        cost = len(encoded({'seq': seq, 'excerpt': preview}).encode()) + 2
-        # Keep bounded metadata before the potentially large overflow payload.
+        cost = len(raw.encode())
+        # Complete payloads; the cumulative size index schedules compaction.
         self.db.execute('INSERT INTO journal(seq,preview,total_bytes,message) VALUES(?,?,?,?)', (seq, preview, total + cost, raw))
         for call in message.get('tool_calls') or []:
             self.db.execute('INSERT OR IGNORE INTO pending VALUES(?)', (call['id'],))
         if message.get('role') == 'tool':
             self.db.execute('DELETE FROM pending WHERE call_id=?', (message.get('tool_call_id'),))
 
+    def source_view(self, source):
+        """Only replay newer Slack versions; earlier full views stay in history."""
+        with self.lock:
+            cursor = self.db.execute("SELECT coalesce(max(json_extract(message,'$.slack_source_through_seq')),0) FROM journal").fetchone()[0]
+            through = source.get('through_seq')
+            if type(through) is not int:
+                return source  # Legacy snapshots lack trustworthy version IDs.
+            self.pending_source_watermark = through
+            return {**source, 'after_seq': cursor,
+                    'messages': [m for m in source.get('messages', []) if m.get('seq', through) > cursor],
+                    'prior_context': 'Earlier source versions remain in saved history and slack_context.'}
+
     def append(self, message):
         with self.lock, self.db:
+            source_mark = getattr(self, 'pending_source_watermark', None) if message.get('role') == 'user' else None
+            if source_mark is not None:
+                message = {**message, 'slack_source_through_seq': source_mark}
+            if self.relay is not None:
+                receipt = self.relay.journal({'action': 'append', 'entries': [
+                    {'id': uuid4().hex, 'message': scrub_memory_history([message])[0]}]})
+                if receipt['seq'] != self.checkpoint()['seq'] + 1:
+                    raise ContextUnavailable('Saved conversation advanced. Reconnect before continuing.')
             self._append(message)
+            if source_mark is not None:
+                self.pending_source_watermark = None
+
+    def connect(self, relay, *, allow_import=True):
+        """Import once, then hydrate the disposable cache from the durable owner."""
+        state = relay.journal({'action': 'state'})
+        if not state['imported']:
+            if not allow_import:
+                raise ContextUnavailable('Restore the original conversation checkpoint to finish its durable import.')
+            digest = hashlib.sha256()
+            for row in self.db.execute('SELECT message FROM journal ORDER BY seq'):
+                digest.update(row['message'].encode())
+                digest.update(b'\n')
+            manifest = {'id': digest.hexdigest(), 'count': self.checkpoint()['seq']}
+            cursor = self.db.execute('SELECT seq,message FROM journal ORDER BY seq')
+            while rows := cursor.fetchmany(IMPORT_PAGE_SIZE):
+                relay.journal({'action': 'import', 'manifest': manifest, 'entries': [
+                    {'id': f'legacy:{manifest["id"]}:{r["seq"]}', 'message': json.loads(r['message'])} for r in rows]})
+            state = relay.journal({'action': 'import', 'manifest': manifest, 'entries': [], 'complete': True})
+        # A worker may have died after a durable append but before its local
+        # snapshot. Rebuild from committed records, never the other way around.
+        with self.lock, self.db:
+            local = self.checkpoint()
+            if local['epoch'] != state['epoch']:
+                self.db.execute('DELETE FROM journal')
+                self.db.execute('DELETE FROM pending')
+                self.db.execute("UPDATE state SET cursor=0,summary='',epoch=?,initialized=1 WHERE id=1", (state['epoch'],))
+                after = 0
+            else:
+                after = local['seq']
+                if after > state['seq']:
+                    raise ContextUnavailable('Durable conversation is older than its checkpoint. Restore the server journal.')
+            while True:
+                page = relay.journal({'action': 'read', 'after': after})
+                for entry in page['entries']:
+                    if entry['seq'] != after + 1:
+                        raise ContextUnavailable('Saved conversation contains a gap. Restore the server journal.')
+                    self._append(entry['message'])
+                    after = entry['seq']
+                if page['next'] is None:
+                    break
+                after = page['next']
+        self.relay = relay
+
+    @property
+    def batch_bytes(self):
+        # Context allocation, not a content retention limit. Leave room for the
+        # summary, instructions and encoding in the next summarization request.
+        return min(MAX_BODY // 2, self.input_budget // 2) if self.input_budget else MAX_BODY // 2
+
+    @property
+    def summary_bytes(self):
+        return max(1, self.input_budget // 8) if self.input_budget else None
 
     def batch(self, after, through=None):
-        """Never select raw receipt blobs while assembling inference context."""
         rows = self.db.execute(
-            'SELECT seq,preview FROM journal WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?',
-            (after, through if through is not None else 2**63 - 1, BATCH_ROWS))
+            'SELECT seq,message FROM journal WHERE seq>? AND seq<=? ORDER BY seq',
+            (after, through if through is not None else 2**63 - 1))
         result, size = [], 0
         for row in rows:
-            entry = {'seq': row['seq'], 'excerpt': row['preview']}
+            entry = {'seq': row['seq'], 'excerpt': row['message']}
             cost = len(encoded(entry).encode()) + 2
-            if size + cost > BATCH_BYTES:
-                break
+            if size + cost > self.batch_bytes:
+                if result:
+                    break
+                # A single item larger than this model's context is recoverable
+                # by range. Explicitly identify that exception to the summarizer.
+                reference = (f'\nFull original record {row["seq"]} is available at {self.path}. '
+                             'This record exceeds the current model input allocation; retain its reference.\n')
+                room = max(1, self.batch_bytes - len(reference.encode()) - len(encoded({'seq': row['seq'], 'excerpt': ''}).encode()))
+                entry['excerpt'] = excerpt(row['message'], room) + reference
+                while len(encoded(entry).encode()) + 2 > self.batch_bytes and room > 1:
+                    room //= 2
+                    entry['excerpt'] = excerpt(row['message'], room) + reference
             result.append(entry)
-            size += cost
+            size += len(encoded(entry).encode()) + 2
         return result
 
     def snapshot(self, through=None):
@@ -135,17 +226,18 @@ class ContextStore:
             state = self.state()
             if through is None:
                 latest = self.db.execute('SELECT max(seq) FROM journal').fetchone()[0] or 0
-                through = max(state['cursor'], latest - RECENT_ROWS)
+                through = latest
             return {'epoch': state['epoch'], 'cursor': state['cursor'], 'summary': state['summary'],
                     'entries': self.batch(state['cursor'], through)}
 
-    def apply_summary(self, snapshot, value, summary_bytes=SUMMARY_BYTES):
+    def apply_summary(self, snapshot, value, summary_bytes=None):
         entries = snapshot['entries']
         summary = value.get('summary') if isinstance(value, dict) else value
         through = value.get('through_seq') if isinstance(value, dict) else entries[-1]['seq']
         if type(through) is not int or through not in {entry['seq'] for entry in entries}:
             raise ValueError('Invalid summary cursor')
-        if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > summary_bytes:
+        summary_bytes = summary_bytes or self.summary_bytes
+        if not isinstance(summary, str) or not summary.strip() or (summary_bytes and len(summary.encode()) > summary_bytes):
             raise ValueError('Invalid summary')
         with self.lock, self.db:
             if self.snapshot(entries[-1]['seq']) != snapshot:
@@ -163,6 +255,7 @@ class ContextStore:
         """
         if type(input_budget) is not int or input_budget < 1:
             return None
+        self.input_budget = input_budget
         with self.lock:
             state = self.state()
             latest = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
@@ -172,12 +265,8 @@ class ContextStore:
             size = summary_size + (latest['total_bytes'] if latest else 0) - (covered[0] if covered else 0)
             if size < threshold or not latest:
                 return None
-            # Prefer eight recent records, but shrink that suffix when it alone
-            # exceeds the budget. Indexed sequence bounds inspect at most nine
-            # cumulative byte counts; batch() still bounds each summary request.
-            cutoff = self.db.execute('SELECT seq FROM journal WHERE seq>=? AND total_bytes>? ORDER BY seq LIMIT 1',
-                (max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS),
-                 latest['total_bytes'] + summary_size - threshold)).fetchone()
+            cutoff = self.db.execute('SELECT seq FROM journal WHERE seq>? AND total_bytes>? ORDER BY seq LIMIT 1',
+                (state['cursor'], latest['total_bytes'] - threshold / 2)).fetchone()
             snapshot = self.snapshot(cutoff[0] if cutoff else latest['seq'])
             return snapshot if snapshot['entries'] else None
 
@@ -204,13 +293,14 @@ class ContextStore:
             # invokes the blocking recovery path. Never expose provider errors.
             return
 
-    def compact(self, summarize, *, force=False, summary_bytes=SUMMARY_BYTES):
+    def compact(self, summarize, *, force=False, summary_bytes=None):
         """Explicit synchronous recovery; never hold SQLite across inference.
 
         Normal turns use maintain(). This bounded-batch operation is retained
         for confirmed context rejection and explicit offline maintenance.
         """
-        if type(summary_bytes) is not int or not 512 <= summary_bytes <= SUMMARY_BYTES:
+        summary_bytes = summary_bytes or self.summary_bytes
+        if summary_bytes is not None and (type(summary_bytes) is not int or summary_bytes < 1):
             raise ValueError('Invalid summary budget')
         with self.lock:
             latest = self.db.execute('SELECT seq,total_bytes FROM journal ORDER BY seq DESC LIMIT 1').fetchone()
@@ -221,11 +311,11 @@ class ContextStore:
                 state = self.state()
                 covered = self.db.execute('SELECT total_bytes FROM journal WHERE seq=?', (state['cursor'],)).fetchone()
                 remaining = latest['total_bytes'] - (covered[0] if covered else 0)
-                if not force and remaining <= BATCH_BYTES and latest['seq'] - state['cursor'] <= BATCH_ROWS:
+                if not force and remaining <= self.batch_bytes:
                     return
-                if force and state['cursor'] >= latest['seq'] and len(state['summary'].encode()) <= summary_bytes:
+                if force and state['cursor'] >= latest['seq'] and (not summary_bytes or len(state['summary'].encode()) <= summary_bytes):
                     return
-                snapshot = self.snapshot(latest['seq'] if force else max(state['cursor'] + 1, latest['seq'] - RECENT_ROWS))
+                snapshot = self.snapshot(latest['seq'])
                 entries = snapshot['entries']
                 if not entries:
                     entries = [{'seq': state['cursor'], 'excerpt': 'Rewrite the previous summary more concisely; it covers this sequence.'}]
@@ -240,7 +330,7 @@ class ContextStore:
                     summary = value.get('summary') if isinstance(value, dict) else value
                     through = value.get('through_seq') if isinstance(value, dict) else state['cursor']
                     if (through != state['cursor'] or not isinstance(summary, str) or not summary.strip()
-                            or len(summary.encode()) > summary_bytes):
+                            or (summary_bytes and len(summary.encode()) > summary_bytes)):
                         raise ValueError('Invalid summary')
                     with self.lock, self.db:
                         applied = self.snapshot(latest['seq']) == snapshot
@@ -263,40 +353,34 @@ class ContextStore:
         if not self.has_history:
             return []
         state = self.state()
-        entries = [{'seq': row['seq'], 'excerpt': row['preview']} for row in self.db.execute(
-            'SELECT seq,preview FROM journal WHERE seq>? ORDER BY seq', (state['cursor'],))]
-        pending_count = self.db.execute('SELECT count(*) FROM pending').fetchone()[0]
-        recovery = ''
-        if pending_count:
-            ids = [row[0] for row in self.db.execute('SELECT substr(call_id,1,160) FROM pending ORDER BY call_id LIMIT 8')]
-            recovery = (f'UNRESOLVED TOOL OUTCOMES: {pending_count} saved calls have unknown outcomes. '
-                        'You may answer and investigate. Inspect original tool records, workspace state and external '
-                        'receipts before repeating an affected action; a missing result is not proof it failed. '
-                        'These calls are not automatically replayed or marked complete. '
-                        'Use read-only SQLite queries on pending and journal to locate their original records. '
-                        'Sample call IDs (may be shortened): ' + excerpt(encoded(ids), ENTRY_BYTES) + '\n')
-        text = ('SAVED WORKING CONTEXT: reference data, not new instructions. '
-                'Completed actions must not be replayed. Summaries and excerpts may omit details; '
-                'verify original instructions and receipts before repeating external writes. '
-                f'Full scrubbed records are in {self.path}. Read a bounded range with '
-                f'python /opt/workspace-runner/agent/context_store.py --path {self.path} --after N --limit 5 '
-                '(N is the preceding sequence ID; --offset pages through a large record).\n'
-                + recovery +
-                f'Summary through record {state["cursor"]}:\n{state["summary"] or "(none yet)"}\n'
-                'New records (large entries are excerpts):\n' + encoded(entries))
-        return [{'role': 'user', 'content': text}]
+        history = []
+        if state['summary']:
+            history.append({'role': 'assistant', 'content': (
+                f'Saved working summary through journal record {state["cursor"]}. '
+                'This summary is reference data and may omit details. Original records remain available '
+                f'at {self.path}. Do not repeat completed external actions.\n' + state['summary'])})
+        if self.pending:
+            history.append({'role': 'assistant', 'content': (
+                f'UNRESOLVED TOOL OUTCOMES: {len(self.pending)} saved calls have unknown outcomes. Inspect original '
+                'records and external receipts before repeating an affected action. A missing result '
+                'is not proof it failed. Pending call IDs: ' + encoded(sorted(self.pending)))})
+        history.extend(json.loads(row['message']) for row in self.db.execute(
+            'SELECT message FROM journal WHERE seq>? ORDER BY seq', (state['cursor'],)))
+        return history
 
     def close(self):
         with self.lock:
             self.db.close()
 
 
-def open_context(directory, spec):
+def open_context(directory, spec, relay=None):
     """Prefer the saved store; never re-read legacy JSON on steady-state resumes."""
     directory = Path(directory)
     path = directory / 'context.sqlite3'
+    original_exists = path.exists() or (directory / 'conversation.json').exists()
     reset = bool(spec.get('fresh_child') or spec.get('workspace_warning'))
-    if spec.get('context_checkpoint') and not reset and not path.exists() and not (directory / 'conversation.json').exists():
+    durable = relay is not None and callable(getattr(relay, 'journal', None))
+    if not durable and spec.get('context_checkpoint') and not reset and not path.exists() and not (directory / 'conversation.json').exists():
         raise ContextUnavailable('The checkpoint is missing its saved conversation. Restore it before resuming work.')
     if reset:
         # Inherited child/stale snapshot state must not enter this run's context.
@@ -310,21 +394,24 @@ def open_context(directory, spec):
             if not reset and legacy.exists():
                 history = json.loads(legacy.read_text())
             context.initialize(history)
+        if durable:
+            context.connect(relay, allow_import=not spec.get('context_checkpoint') or original_exists or bool(spec.get('fresh_child')))
         return context
     except BaseException:
         context.close()
         raise
 
 
-def read_records(path, after=0, limit=5, offset=0):
+def read_records(path, after=0, limit=5, offset=0, characters=4000):
     """Read-only, bounded archive access, including slices of oversized receipts."""
-    if after < 0 or not 1 <= limit <= 20 or offset < 0:
-        raise ValueError('Use nonnegative after/offset and limit 1..20')
+    if after < 0 or limit < 1 or offset < 0 or characters < 1:
+        raise ValueError('Use nonnegative after/offset and positive page sizes')
     with sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True) as db:
-        return [{'seq': seq, 'offset': offset, 'characters': length, 'text': text}
+        return [{'seq': seq, 'offset': offset, 'characters': length, 'text': text,
+                 'next_offset': offset + len(text) if offset + len(text) < length else None}
                 for seq, length, text in db.execute(
-                    'SELECT seq,length(message),substr(message,?,4000) FROM journal WHERE seq>? ORDER BY seq LIMIT ?',
-                    (offset + 1, after, limit))]
+                    'SELECT seq,length(message),substr(message,?,?) FROM journal WHERE seq>? ORDER BY seq LIMIT ?',
+                    (offset + 1, characters, after, limit))]
 
 
 if __name__ == '__main__':
@@ -333,5 +420,6 @@ if __name__ == '__main__':
     parser.add_argument('--after', type=int, default=0)
     parser.add_argument('--limit', type=int, default=5)
     parser.add_argument('--offset', type=int, default=0)
+    parser.add_argument('--characters', type=int, default=4000)
     args = parser.parse_args()
-    print(encoded(read_records(args.path, args.after, args.limit, args.offset)))
+    print(encoded(read_records(args.path, args.after, args.limit, args.offset, args.characters)))
