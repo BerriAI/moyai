@@ -27,10 +27,21 @@ def best_effort(method):
     def wrapped(self, *args, **kwargs):
         if not self.enabled:
             return
+        connection = kwargs.get('connection')
+        if connection is not None:
+            # A caught SQL error still aborts a PostgreSQL transaction. Keep
+            # optional tracing inside the answer's transaction, but isolate
+            # capture failures so the answer and memory review can commit.
+            connection.execute('SAVEPOINT agent_trace_capture')
         try:
             return method(self, *args, **kwargs)
         except Exception as exc:
+            if connection is not None:
+                connection.execute('ROLLBACK TO SAVEPOINT agent_trace_capture')
             log.warning('Agent trace capture failed (%s)', type(exc).__name__)
+        finally:
+            if connection is not None:
+                connection.execute('RELEASE SAVEPOINT agent_trace_capture')
     return wrapped
 
 
@@ -240,7 +251,7 @@ class AgentTracing:
             self.events.enqueue(span, connection)
 
     @best_effort
-    def finish_turn(self, run_id, message_id, output, status, connection=None):
+    def finish_turn(self, run_id, message_id, output, status, *, connection=None):
         def rows(sql, values):
             return [dict(r) for r in connection.execute(sql, values).fetchall()] if connection is not None else self.store.rows(sql, values)
         run = rows('SELECT * FROM runs WHERE id=?', (run_id,))[0]
@@ -273,7 +284,7 @@ class AgentTracing:
         mentioned = sorted(set(MENTION.findall(root)))
         names = {row['user_id']: row['name'] for row in rows(
             f"SELECT user_id,name FROM slack_mention_names WHERE name!='' AND user_id IN ({','.join('?' * len(mentioned))})",
-            tuple(mentioned))}
+            tuple(mentioned))} if mentioned else {}
         title = MENTION.sub(lambda match: '@' + names.get(match[1], 'someone'), root)
         return {'agent.source.type': 'slack', 'agent.source.url': url,
                 'agent.source.title': self.content(' '.join(title.split()))[:200]}

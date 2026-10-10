@@ -569,10 +569,8 @@ async def test_terminal_published_orphan_wakes_idle_owner_without_replaying_work
 
 
 async def test_idle_orphan_repair_preserves_fresh_queued_followup(
-    durable: tuple[TemporalRunManager, Cloud, str], monkeypatch: pytest.MonkeyPatch,
+    durable: tuple[TemporalRunManager, Cloud, str],
 ) -> None:
-    from unittest.mock import AsyncMock
-
     manager, cloud, run_id = durable
     await drive(manager, run_id, phase='save')
     published = manager.store.messages(run_id)[-1]
@@ -581,7 +579,10 @@ async def test_idle_orphan_repair_preserves_fresh_queued_followup(
     manager.store.update_run(run_id, status='interrupted', pending_result='', sandbox_id='')
     manager.save(run_id, {'phase': 'idle'})
     fresh, _ = manager.store.enqueue_message(run_id, 'A fresh explicit followup', 'after-orphan')
-    monkeypatch.setattr(manager, 'make_capacity', AsyncMock(return_value=False))
+    manager.settings.max_concurrent_runs = 1
+    occupied = manager.store.create_run('Occupy the only slot', '', 'demo', [], chat_enabled=True)
+    manager.submit(occupied)
+    manager.save(occupied['id'], {'phase': 'provision'})
     assert await manager.advance(run_id) == 'capacity'
     messages = manager.store.messages(run_id)
     assert next(message for message in messages if message['id'] == published['id']) == {**published, 'status': 'interrupted'}
