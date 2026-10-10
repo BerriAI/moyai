@@ -19,7 +19,8 @@ from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe
 from .security import digest
 from .sandboxes import ProvisioningTerminated
 from .db import database
-from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
 
 class LostExecution(Exception):
@@ -546,6 +547,39 @@ class DurableRunner(RunManager):
             conn.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
             conn.execute('UPDATE runs SET sandbox_id=? WHERE id=?', (state['sandbox_id'], run_id))
 
+    async def prepare_cold_start(self, run_id, state):
+        """Overlap retryable source reads with the existing acquisition owner.
+
+        Provisioning persists its name and machine before acknowledging readiness.
+        Keep context_pending in that journal until both branches finish: a worker
+        lost after acquisition must still load context before writing a launch spec.
+        """
+        async def context():
+            if self.prepare_context:
+                await self.prepare_context(run_id)
+
+        acquisition = asyncio.create_task(self.provision(run_id, state))
+        source = asyncio.create_task(context())
+        try:
+            result, _ = await asyncio.gather(asyncio.shield(acquisition), source)
+        finally:
+            # Context is retryable. A cloud create is not: retain the session
+            # guard until its response/creation journal is accounted for, even
+            # when context fails or the activity is cancelled more than once.
+            source.cancel()
+            drained = asyncio.gather(acquisition, source, return_exceptions=True)
+            cancelled = None
+            while not drained.done():
+                try:
+                    await asyncio.shield(drained)
+                except asyncio.CancelledError as exc:
+                    cancelled = exc
+            if cancelled is not None:
+                raise cancelled
+        state.pop('context_pending', None)
+        await database(self.save, run_id, state)
+        return result
+
     def directory(self, state):
         suffix = f"-startup-{state['startup_attempt']}" if state.get('startup_attempt') else ''
         return f"/session/executions/{state['message_id']}-{state['segment']}{suffix}"
@@ -597,7 +631,8 @@ class DurableRunner(RunManager):
         # Pass capabilities only in the exec environment, never in a persisted
         # task spec, command argument or Temporal payload. Reused machines have
         # an older creation-time environment, so every launch overrides it.
-        process = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/durable_process.py', *args,
+        process = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                         RUNTIME_ROOT, 'durable_process.py', *args,
                                          timeout=30, env=self.settings.broker_environment(token) if token else {})
         output, _ = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
         if await process.wait.aio() != 0:
@@ -693,7 +728,10 @@ class DurableRunner(RunManager):
                 await database(self.running_status, run_id, 'provisioning')
                 return True
         if phase == 'prepare':
-            if self.prepare_context:
+            # Cold startup can read source context while the provider prepares
+            # the machine. Warm and demo turns retain their existing ordering.
+            cold = run['mode'] != 'demo' and not state.get('sandbox_id')
+            if self.prepare_context and not cold:
                 await self.prepare_context(run_id)
             if stop_requested((await database(self.store.run, run_id))):
                 return True
@@ -705,14 +743,27 @@ class DurableRunner(RunManager):
                 row = await database(self.store.run, run_id)
                 state.update(phase='finish', outcome='steered' if row['status']=='steered' else 'completed', response=row['summary'])
             else:
+                if cold:
+                    state['context_pending'] = True
                 state['phase'] = 'install' if state.get('sandbox_id') else 'provision'
                 await database(self.running_status, run_id, 'running' if state.get('sandbox_id') else 'provisioning')
             await database(self.save, run_id, state)
         elif phase in {'provision', 'waiting_environment'}:
-            result = await self.provision(run_id, state)
+            result = (await self.prepare_cold_start(run_id, state) if state.get('context_pending')
+                      else await self.provision(run_id, state))
             if result == 'capacity':
                 return 'capacity'
         elif phase == 'install':
+            if state.get('context_pending'):
+                # Acquisition may have committed before context finished on a
+                # previous worker. These reads are idempotent; agent work has
+                # not started and must not observe an incomplete source.
+                if self.prepare_context:
+                    await self.prepare_context(run_id)
+                if stop_requested(await database(self.store.run, run_id)):
+                    return True
+                state.pop('context_pending', None)
+                await database(self.save, run_id, state)
             sandbox = await self.sandbox(state)
 
             async def prepare_files():

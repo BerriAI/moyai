@@ -16,6 +16,66 @@ startup phases runs in worker threads. Received event batches finish persistence
 before cancellation releases ownership. Runtime upload and independent launch-spec
 reads overlap; both must finish before agent launch.
 
+## Overlap source context and cold acquisition
+
+Cold Temporal turns now load Slack source context and attachments concurrently
+with the existing workspace acquisition path. Warm, prepared-pool and demo turns
+retain their previous ordering. This removes a sequential wait when both source
+loading and provisioning take time. It does **not** start the agent before its
+sandbox: native tools still run only inside that sandbox.
+
+The existing session guard, capacity reservation, provider name, environment pin
+and snapshot selection still own acquisition. A `context_pending` flag in the
+durable session JSON survives provider completion. Only successful completion of
+both branches clears it. If a worker stops after the machine is saved, the next
+worker repeats the idempotent source reads before writing the launch spec. Agent
+launch and broker capability activation still occur after that barrier.
+
+Cancellation or a source error cancels source loading and joins acquisition before
+releasing the session guard, including repeated activity cancellation. A returned
+machine is recorded for ordinary cleanup; a lost acknowledgement retains the
+existing provider-name reconciliation path. This does not add provider-level
+exactly-once guarantees or solve a provider create that remains ambiguous after a
+hard process crash. No agent actions are retried by this change.
+
+Starting acquisition earlier can start billable compute earlier, including when
+source preparation later fails. A ready machine can wait for slower source I/O.
+No compute-cost reduction is claimed. No setting or database schema changes are
+required. Deploy matching builds using the existing coordinated rollout. To roll
+back, finish or stop active turns and let their cleanup settle before reverting
+all roles together; older code does not understand the new pending-context marker.
+
+### Controlled measurements and demo
+
+The same real durable controller was run from baseline `945983c766ee608ad51e5eefd1df086d7957a00f`
+and the candidate with identical provider/source fixtures. Each sample creates a
+fresh SQLite store and a cold session. The timer starts immediately before input
+persistence and stops at the agent launch boundary; API delivery, Temporal queue
+time, SDK startup, model inference, and final response are not measured.
+
+| Fixture: source 300 ms, provider 500 ms | Cold samples | Median | p95 (nearest rank) | Range |
+| --- | ---: | ---: | ---: | ---: |
+| Baseline sequential | 20 | 846.75 ms | 861.12 ms | 837.64–862.32 ms |
+| Candidate overlap | 20 | 549.12 ms | 556.49 ms | 540.33–573.64 ms |
+
+Every sample reached one launch with one fixture machine and complete source
+context. These local distributions demonstrate removal of the sequential wait;
+they are not production model-response percentiles. No live model/cloud run or
+cost measurement was performed for this prerequisite. Warm reuse is regression
+tested but not included in these cold measurements.
+
+```sh
+uv run --frozen python scripts/startup_overlap_probe.py --samples 20 --output /tmp/candidate.json
+# Run the same probe against an unchanged baseline checkout:
+uv run --frozen python scripts/startup_overlap_probe.py --source /path/to/baseline --samples 20 --output /tmp/baseline.json
+# Local diagnostic UI: real controller, simulated external I/O, 3s/4s waits:
+uv run --frozen python scripts/startup_overlap_probe.py --serve 8979 --baseline /path/to/baseline
+# Open http://127.0.0.1:8979 and click Run comparison.
+```
+
+The remaining work to start the real agent without an execution sandbox is
+described in [Agent startup separation](agent-startup.md).
+
 ## Optional prepared workspaces
 
 `SANDBOX_PREPARED_POOL_SIZE` defaults to **0**. Leave it at 0 for the first rollout.

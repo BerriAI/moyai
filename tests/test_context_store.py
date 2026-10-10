@@ -7,15 +7,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.context_store import ContextStore, ContextUnavailable, open_context, read_records, BATCH_BYTES, SUMMARY_BYTES
-from sandbox.harness_agent import TurnJournal
-from sandbox.continuation import RotationDeadline
+from agent.context_store import ContextStore, ContextUnavailable, open_context, read_records, BATCH_BYTES, SUMMARY_BYTES
+from agent.harnesses.harness_agent import TurnJournal
+from agent.continuation import RotationDeadline
 
 
 @pytest.fixture
 def native_checkpoint(tmp_path):
     from app.native_sessions import NativeSessions
-    from sandbox.native_session import NativeSession
+    from agent.harnesses.native_session import NativeSession
     store = ContextStore(tmp_path / 'context.sqlite3', 'run')
     store.initialize([{'role': 'assistant', 'content': 'Public completed receipt'}])
     requests = []
@@ -64,7 +64,7 @@ def test_native_commit_requires_the_exact_completed_public_checkpoint(native_che
 @pytest.mark.parametrize('failure', ['missing', 'corrupt', 'oversize', 'wrong_lease', 'unavailable',
                                      'restart_unavailable', 'restart_wrong_lease'])
 def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_checkpoint, failure):
-    from sandbox.native_session import MAX_BYTES
+    from agent.harnesses.native_session import MAX_BYTES
     native, store, requests = native_checkpoint
     private = native.root / 'claude/previous.jsonl'
     private.write_text('OLD PRIVATE STATE')
@@ -116,7 +116,7 @@ def test_native_file_restore_rejects_bad_names_before_writing(native_checkpoint,
 
 
 def test_native_file_roundtrip_is_private_and_size_count_bounded(native_checkpoint, monkeypatch):
-    from sandbox import native_session
+    from agent.harnesses import native_session
     native, _, _ = native_checkpoint
     data = base64.b64encode(b'private').decode()
     native.restore_files(native.cache, {'nested/session.json': data})

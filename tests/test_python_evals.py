@@ -1,11 +1,13 @@
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import httpx
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 import pytest
 
+from agent import agent as shared_agent
 from evals import agent_worker
 from evals.agent import AgentRunError, MoyaiAgent
 
@@ -95,9 +97,16 @@ def worker(monkeypatch, tmp_path):
     class Harness:
         def __init__(self, **kwargs):
             self.context = kwargs
+            state['context_path'] = kwargs['context_store'].path
+            bridge = Path(kwargs['config']['mcp_servers']['workspace']['args'][0])
+            assert bridge.is_file(), 'The eval must launch an existing MCP bridge.'
+
+        def validate(self):
+            state['validated'] = True
 
         def run_conversation(self, prompt, **kwargs):
             import time
+            state.setdefault('conversations', []).append({'prompt': prompt, **kwargs})
             app = state['app']
             store = app.state.store
             run = store.rows('SELECT * FROM runs')[0]
@@ -107,13 +116,17 @@ def worker(monkeypatch, tmp_path):
             activity = self.context['activity']
             activity.start('tool-1', 'terminal', {'command': 'python solution.py'})
             activity.complete('tool-1', 'terminal', {}, {'exit_code': 0, 'stdout': 'passed'})
+            if state.get('pending_tool'):
+                self.context['context_store'].append({
+                    'role': 'assistant', 'tool_calls': [{'id': 'unsettled-tool'}],
+                })
             return state.get('result', {'completed': True, 'final_response': 'Tests passed.'})
 
         def close(self):
             state['closed'] = True
 
     monkeypatch.setattr(agent_worker, 'create_app', create_app)
-    monkeypatch.setattr(agent_worker, 'create_agent', lambda harness, **kwargs: Harness(**kwargs))
+    monkeypatch.setattr(shared_agent, 'create_agent', lambda harness, **kwargs: Harness(**kwargs))
     monkeypatch.setattr(agent_worker, 'source_revision', lambda root: BUILD)
     payload = {
         'input': 'Implement and test.', 'workspace': str(tmp_path / 'workspace'),
@@ -133,6 +146,7 @@ def test_should_export_linked_agent_model_and_tool_spans_before_returning(worker
     assert result['agent_version'] == BUILD
     assert result['model_calls'] == result['tool_calls'] == 1
     assert state['closed']
+    assert state['validated']
     assert len(exported) == 3
     assert {span.trace_id.hex() for span in exported} == {result['trace_id']}
     attrs = [{item.key: item.value.string_value for item in span.attributes} for span in exported]
@@ -142,11 +156,34 @@ def test_should_export_linked_agent_model_and_tool_spans_before_returning(worker
     assert all(span.parent_span_id == root.span_id for span in exported if span != root)
 
 
+def test_should_use_production_instructions_with_isolated_session_storage(worker):
+    payload, state, _ = worker
+    agent_worker.execute(payload)
+    conversation = state['conversations'][0]
+    assert conversation['prompt'] == payload['input']
+    assert conversation['conversation_history'] == []
+    assert payload['workspace'] in conversation['system_message']
+    assert "Do not claim a check passed unless you ran it." in conversation['system_message']
+    assert "Before each meaningful phase" in conversation['system_message']
+    assert state['context_path'] == Path(payload['state']) / 'context.sqlite3'
+    assert (Path(payload['state']) / 'goal.json').is_file()
+    assert not list(Path(payload['workspace']).iterdir())
+
+
+def test_should_record_the_same_final_output_as_production(worker):
+    payload, state, _ = worker
+    state['result'] = {'completed': True, 'final_response': '<status>Checking</status>Tests passed.'}
+    assert agent_worker.execute(payload)['output'] == 'Tests passed.'
+
+
 @pytest.mark.parametrize('result', [
     {'completed': False, 'final_response': 'incomplete'},
     {'completed': True, 'failed': True, 'final_response': 'failure'},
     {'completed': True, 'interrupted': True, 'final_response': 'interrupted'},
+    {'completed': True, 'partial': True, 'final_response': 'partial'},
     {'completed': True, 'final_response': ''},
+    {'completed': True, 'final_response': '<status>Checking</status>'},
+    {'completed': True, 'final_response': 123},
 ])
 def test_should_reject_incomplete_or_empty_outputs_and_close_resources(worker, result):
     payload, state, _ = worker
@@ -156,6 +193,14 @@ def test_should_reject_incomplete_or_empty_outputs_and_close_resources(worker, r
     assert state['closed']
     messages = state['app'].state.store.rows("SELECT status FROM messages WHERE role='user'")
     assert messages == [{'status': 'failed'}]
+
+
+def test_should_reject_unsettled_tool_calls_from_shared_agent(worker):
+    payload, state, _ = worker
+    state['pending_tool'] = True
+    with pytest.raises(AgentRunError, match='settling all tool calls'):
+        agent_worker.execute(payload)
+    assert state['closed']
 
 
 def test_should_fail_when_lens_does_not_acknowledge_spans():
@@ -173,6 +218,27 @@ def test_should_reject_uncommitted_production_source(monkeypatch, tmp_path):
     from evals.agent import source_revision
     monkeypatch.setattr('evals.agent.subprocess.run', lambda *args, **kwargs: SimpleNamespace(returncode=1))
     with pytest.raises(ValueError, match='Commit changes'):
+        source_revision(tmp_path)
+
+
+def test_should_reject_uncommitted_agent_prompt_changes(tmp_path):
+    from evals.agent import source_revision
+
+    def git(*args):
+        return subprocess.run(
+            ['git', '-C', str(tmp_path), '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', *args],
+            check=True, capture_output=True, text=True,
+        )
+
+    prompt = tmp_path / 'agent' / 'prompts' / 'system.md'
+    prompt.parent.mkdir(parents=True)
+    prompt.write_text('Production instructions.')
+    git('init')
+    git('add', 'agent')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'Initial agent')
+    assert source_revision(tmp_path) == git('rev-parse', 'HEAD').stdout.strip()
+    prompt.write_text('Changed production instructions.')
+    with pytest.raises(ValueError, match='Commit changes to agent/'):
         source_revision(tmp_path)
 
 

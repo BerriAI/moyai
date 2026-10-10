@@ -3,8 +3,8 @@ from copy import deepcopy
 
 import pytest
 
-from sandbox.harness_agent import TurnJournal
-from sandbox.history_reference import HISTORY_BYTES, history_prompt
+from agent.harnesses.harness_agent import TurnJournal
+from agent.history_reference import HISTORY_BYTES, history_prompt
 
 
 def reference(prompt):

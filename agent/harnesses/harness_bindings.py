@@ -16,10 +16,7 @@ class RuntimeBinding:
     def tools(self, cwd, config):
         if not self.in_process:
             return []
-        try:
-            from .harness_tools import tools_for
-        except ImportError:
-            from harness_tools import tools_for
+        from agent.tools.harness_tools import tools_for
         tools = tools_for(cwd, config)
         return tools[:2] if self.native_file_tools else tools
 

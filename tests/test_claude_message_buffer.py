@@ -16,8 +16,8 @@ from types import SimpleNamespace
 from PIL import Image, ImageDraw
 import pytest
 
-from sandbox.claude_harness import ClaudeAgent, SDK_MAX_BUFFER_SIZE
-from sandbox.context_store import ContextStore
+from agent.harnesses.claude_harness import ClaudeAgent, SDK_MAX_BUFFER_SIZE
+from agent.context_store import ContextStore
 
 
 def large_image_case(tmp_path, monkeypatch, *, sdk_default=False, progress=lambda message: None):
@@ -120,7 +120,7 @@ def large_image_case(tmp_path, monkeypatch, *, sdk_default=False, progress=lambd
     relay = SimpleNamespace(url=f'http://127.0.0.1:{server.server_port}', native=native)
     agent = ClaudeAgent(spec={'model': 'anthropic/claude-sonnet-4-5', 'timeout': 30, 'max_iterations': 3},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'large-image-fixture'}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
             complete=lambda *args: events.append(('complete', args)), commentary=lambda text: None),

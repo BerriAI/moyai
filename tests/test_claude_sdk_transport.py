@@ -13,8 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.claude_harness import ClaudeAgent
-from sandbox.context_store import ContextStore
+from agent.harnesses.claude_harness import ClaudeAgent
+from agent.context_store import ContextStore
 
 
 @pytest.fixture
@@ -40,10 +40,10 @@ def test_claude_background_compaction_keeps_running_sdk_and_new_tail(tmp_path, m
 def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
     """Real SDK/MCP recovery proof, also callable by the local recording demo."""
     from claude_agent_sdk import ClaudeSDKClient, ResultMessage
-    from sandbox.activity import ActivityReporter
+    from agent.activity import ActivityReporter
     from sandbox.broker_relay import BrokerRelay
     from sandbox.broker_transport import unseal
-    from sandbox.transport_recovery import recovery_marker, validate_recovery
+    from agent.transport_recovery import recovery_marker, validate_recovery
 
     capability = 'recovery-fixture-capability'
     request_id = 'render-recovery-request-502'
@@ -159,7 +159,7 @@ def broker_recovery_case(tmp_path, monkeypatch, progress=lambda message: None):
                                  'history_reference_dir': str(store.path.parent),
                                  **({'transport_recovery': marker, 'continuation': True} if marker else {})},
             relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
             activity=ActivityReporter(lambda *args: None),
             step=lambda: None, cwd=str(workspace), definition=None, context_store=store)
@@ -227,7 +227,7 @@ def test_real_claude_safe_read_recovers_without_replaying_write(tmp_path, monkey
     """Bundled SDK, Bash and MCP are real; provider replies inject one tool 524."""
     import shlex
     from claude_agent_sdk import ClaudeSDKClient, ResultMessage
-    from sandbox.activity import ActivityReporter
+    from agent.activity import ActivityReporter
     from sandbox.broker_transport import unseal
     from test_broker_transport import diagnostic_relay
     from test_claude_native_compaction import send_message
@@ -288,7 +288,7 @@ def test_real_claude_safe_read_recovers_without_replaying_write(tmp_path, monkey
     with diagnostic_relay(Edge) as (relay, _, diagnostics):
         agent = ClaudeAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 45, 'max_iterations': 8},
             relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'private-capability'}}}},
             activity=ActivityReporter(lambda *args: None), step=lambda: None,
             cwd=str(directory), definition=None, context_store=store)
@@ -454,7 +454,7 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         return ClaudeAgent(spec={'model': model, 'timeout': int(os.environ.get('MOYAI_SDK_TEST_TIMEOUT', '30')), 'max_iterations': 4,
                              'history_reference_dir': str(session)},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': url, 'WORKSPACE_RUN_TOKEN': 'fixture-capability'}}}},
         activity=SimpleNamespace(start=lambda *a: events.append(('start', a)),
             complete=lambda *a: events.append(('complete', a)), commentary=lambda text: None),
@@ -610,7 +610,7 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
     from claude_agent_sdk import ClaudeSDKClient, ResultMessage
     import shlex
     import time
-    from sandbox.activity import ActivityReporter
+    from agent.activity import ActivityReporter
     from sandbox.broker_relay import BrokerRelay, InputPending
     from sandbox.broker_transport import unseal
     from test_claude_native_compaction import send_message

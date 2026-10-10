@@ -690,7 +690,7 @@ def test_mcp_transport_discovers_and_executes_media_with_actionable_errors(rig, 
                        content=self.rfile.read(int(self.headers['Content-Length'])),
                        headers={key: self.headers[key] for key in ('Authorization', 'Content-Type')}))
 
-    script = Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py'
+    script = Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py'
     with diagnostic_relay(Edge) as (relay, _, diagnostics):
         env = {'PATH': os.environ['PATH'], 'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'private-capability'}
         messages = [{'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'},
@@ -703,7 +703,7 @@ def test_mcp_transport_discovers_and_executes_media_with_actionable_errors(rig, 
                 assert result.returncode == 0, result.stderr
                 return [json.loads(line)['result'] for line in result.stdout.splitlines()]
         else:
-            from sandbox.harness_bindings import RUNTIME_BINDINGS
+            from agent.harnesses.harness_bindings import RUNTIME_BINDINGS
             config = {'mcp_servers': {'workspace': {'command': sys.executable, 'args': [str(script)], 'env': env}}}
             discover, execute = RUNTIME_BINDINGS[harness].tools('/workspace', config)[:2]
             async def run_calls():

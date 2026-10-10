@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import Settings
-from sandbox.continuation import RotationDeadline, resumed_context
+from agent.continuation import RotationDeadline, resumed_context
 
 
 def test_resume_context_does_not_claim_pending_workers_or_keys_have_finished():

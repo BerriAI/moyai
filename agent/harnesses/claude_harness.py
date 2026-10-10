@@ -7,20 +7,12 @@ import sys
 import threading
 from uuid import UUID, uuid4
 
-try:
-    from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
-    from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
-    from .native_session import NativeSession, MAX_BYTES
-    from .sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary, CLAUDE_ERRORS
-    from .transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
-    from .broker_relay import InputPending
-except ImportError:
-    from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
-    from context_recovery import run_with_context_recovery, prepare_context, maintain_context
-    from native_session import NativeSession, MAX_BYTES
-    from sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary, CLAUDE_ERRORS
-    from transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
-    from broker_relay import InputPending
+from agent.harnesses.harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
+from agent.context_recovery import run_with_context_recovery, prepare_context, maintain_context
+from agent.harnesses.native_session import NativeSession, MAX_BYTES
+from agent.harnesses.sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary, CLAUDE_ERRORS
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
+from sandbox.broker_relay import InputPending
 
 
 NATIVE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'ToolSearch']

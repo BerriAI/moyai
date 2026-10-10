@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox import codex_harness
-from sandbox.codex_harness import CodexAgent
+from agent.harnesses import codex_harness
+from agent.harnesses.codex_harness import CodexAgent
 from test_codex_sdk_transport import send_response
 
 
@@ -78,7 +78,7 @@ def readiness_case(tmp_path, monkeypatch, *, delay=2, fail_tools=False, progress
     relay.url = f'http://127.0.0.1:{server.server_port}'
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': 3},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
             complete=lambda *args: events.append(('complete', args)),

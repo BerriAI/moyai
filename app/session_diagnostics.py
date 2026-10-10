@@ -1,5 +1,5 @@
 """Bounded, read-only observations attached to shared session history."""
-from sandbox.activity import public_text
+from agent.activity import public_text
 
 from .agents import AgentCoordinator
 from .workspace_diagnostics import failure_record

@@ -2,27 +2,24 @@
 import argparse
 import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import time
 import warnings
-from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / 'tests')]
 warnings.filterwarnings('ignore', message='Using .*starlette.testclient.*')
 
 from pytest import MonkeyPatch
-from sandbox.codex_harness import CodexAgent
+from scripts.harness_baseline import load_codex_baseline
+from agent.harnesses.codex_harness import CodexAgent
 from test_codex_tool_readiness import readiness_case
 
 
 def demonstrate(baseline_ref, output):
     output.mkdir(parents=True, exist_ok=True)
-    source = subprocess.check_output(['git', 'show', baseline_ref + ':sandbox/codex_harness.py'], cwd=ROOT)
-    baseline = ModuleType('sandbox._readiness_baseline')
-    exec(compile(source, 'baseline_codex_harness.py', 'exec'), baseline.__dict__)
+    baseline = load_codex_baseline(ROOT, baseline_ref)
     started, events, proof = time.monotonic(), [], {}
     with (output / 'tool-readiness.cast').open('w') as recording:
         recording.write(json.dumps({'version': 2, 'width': 108, 'height': 28, 'timestamp': int(time.time())}) + '\n')

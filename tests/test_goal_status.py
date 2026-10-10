@@ -1,4 +1,4 @@
-from sandbox.goals import GoalLoop
+from agent.goals import GoalLoop
 from app.db import Store
 
 

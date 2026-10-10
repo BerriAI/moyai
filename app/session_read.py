@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from sandbox.activity import public_text, tool_details
+from agent.activity import public_text, tool_details
 from .runner import response_status
 from .session_diagnostics import read_diagnostics
 

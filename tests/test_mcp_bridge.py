@@ -70,7 +70,7 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
         {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"skills_search","arguments":{"query":"benchmark","turn_id":1}}},
     ]
     try:
-        script = Path(__file__).resolve().parents[1] / "sandbox" / "mcp_bridge.py"
+        script = Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py'
         result = subprocess.run([sys.executable, str(script)], input="\n".join(json.dumps(m) for m in messages)+"\n",
                                 text=True, capture_output=True, timeout=10,
                                 env={"PATH": os.environ["PATH"], "WORKSPACE_BROKER_URL": f"http://127.0.0.1:{server.server_port}", "WORKSPACE_RUN_TOKEN": "test-run-token"})
@@ -150,7 +150,7 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
                 'key': 'concise-explanations', 'title': 'Concise explanations', 'content': quote,
                 'request_id': 'correct-memory-fields', 'source_message_id': run['active_message_id'],
                 'source_quote': quote, **changes}}} for index, changes in enumerate([invalid, {}], 1)]
-    script = Path(__file__).resolve().parents[1] / 'sandbox' / 'mcp_bridge.py'
+    script = Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py'
     with diagnostic_relay(Edge) as (relay, relay_client, diagnostics):
         saved = None
         for existing_failure in (False, True):
@@ -169,7 +169,7 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
                 assert 'private-input-marker' not in result.stdout + result.stderr
                 rejected, recovered = [json.loads(line)['result'] for line in result.stdout.splitlines()]
             else:
-                from sandbox.harness_bindings import RUNTIME_BINDINGS
+                from agent.harnesses.harness_bindings import RUNTIME_BINDINGS
                 config = {'mcp_servers': {'workspace': {'command': sys.executable, 'args': [str(script)], 'env': env}}}
                 workspace_call = RUNTIME_BINDINGS[harness].tools(str(app.state.settings.data_dir), config)[1]
 
@@ -207,7 +207,7 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
 
 @pytest.mark.parametrize('arguments', ['{private-input-marker', '[]', 'null', '"private-input-marker"', '1', 'true'])
 def test_workspace_call_rejects_nonobject_arguments_without_starting_mcp(arguments: str) -> None:
-    from sandbox.harness_tools import tools_for
+    from agent.tools.harness_tools import tools_for
     # No server configuration: rejected arguments must never attempt a call.
     result = json.loads(asyncio.run(tools_for('/workspace', {})[1]('fixture', arguments)))
     assert result['isError']
@@ -217,7 +217,7 @@ def test_workspace_call_rejects_nonobject_arguments_without_starting_mcp(argumen
 
 @pytest.mark.parametrize('tool_index', [0, 1])
 def test_workspace_call_preserves_mcp_transport_failure(tool_index: int) -> None:
-    from sandbox.harness_tools import tools_for
+    from agent.tools.harness_tools import tools_for
     # Initialize successfully, then close the MCP transport during discovery.
     server = """import json, sys
 for line in sys.stdin:
@@ -238,7 +238,7 @@ for line in sys.stdin:
 @pytest.mark.parametrize('tool_index', [0, 1])
 def test_workspace_discovery_failure_precedes_actions_and_can_recover(
         monkeypatch: pytest.MonkeyPatch, harness: str, status: int, tool_index: int) -> None:
-    from sandbox.harness_bindings import RUNTIME_BINDINGS
+    from agent.harnesses.harness_bindings import RUNTIME_BINDINGS
     from sandbox.startup import read_with_reconnect
     # Exercise real retry exhaustion without spending the production 45 seconds.
     monkeypatch.setattr('sandbox.broker_relay.read_with_reconnect', partial(read_with_reconnect, budget=0))
@@ -257,7 +257,7 @@ def test_workspace_discovery_failure_precedes_actions_and_can_recover(
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"saved":true}')
-    script = Path(__file__).resolve().parents[1] / 'sandbox' / 'mcp_bridge.py'
+    script = Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py'
     with diagnostic_relay(Edge) as (relay, _, diagnostics):
         config = {'mcp_servers': {'workspace': {'command': sys.executable, 'args': [str(script)],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'private-capability'}}}}

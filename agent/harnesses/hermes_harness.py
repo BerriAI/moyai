@@ -1,14 +1,13 @@
 """Hermes-specific setup lives outside the harness-neutral session lifecycle."""
 import os
 import sys
-try:
-    from .harness_agent import HarnessAgent
-except ImportError:
-    from harness_agent import HarnessAgent
+from agent.harnesses.harness_agent import HarnessAgent
+from sandbox.hermes_compat import prepare_hermes_imports
 
 
 class HermesAgent(HarnessAgent):
     def __init__(self, *, spec, relay, config, activity, step, cwd, definition=None):
+        prepare_hermes_imports()
         from run_agent import AIAgent
         from tools.mcp_tool_discovery import discover_mcp_tools
         discover_mcp_tools(allowed_mcp_names=['workspace'])

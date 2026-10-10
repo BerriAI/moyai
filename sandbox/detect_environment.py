@@ -66,7 +66,7 @@ def detect(root, recipe):
     if (root / 'package.json').exists():
         package = read_json(root / 'package.json')
         version = node_version(root, package)
-        setup += ['python /opt/workspace-runner/detect_environment.py install-node ' + shlex.quote(version)]
+        setup += ['python /opt/workspace-runner/sandbox/detect_environment.py install-node ' + shlex.quote(version)]
         prefix = 'export PATH="/opt/moyai-node/bin:$PATH"\n'
         manager = package.get('packageManager', '')
         if manager and not isinstance(manager, str):

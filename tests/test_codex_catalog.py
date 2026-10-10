@@ -7,7 +7,7 @@ import subprocess
 import pytest
 from codex_cli_bin import bundled_codex_path
 
-from sandbox.codex_catalog import search_catalog
+from agent.harnesses.codex_catalog import search_catalog
 
 
 @pytest.mark.parametrize('model', ['gpt-6-astra', 'gpt-6.1-sol'])

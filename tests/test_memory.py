@@ -9,8 +9,8 @@ from fastapi import HTTPException
 from app.db import Store, now
 from app.memory import Memory, Note, MAX_CONTEXT
 from app.security import Security
-from sandbox.activity import ActivityReporter
-from sandbox.memory_history import scrub_memory_history
+from agent.activity import ActivityReporter
+from agent.memory_history import scrub_memory_history
 from test_spend import active, sign_in
 from test_workspace import workspace
 

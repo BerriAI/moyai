@@ -6,18 +6,20 @@ one subprocess by credential_tools and never returned as raw tool output.
 """
 import json
 import os
+from pathlib import Path
 import sys
 import urllib.request
 from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor
 from threading import BoundedSemaphore, Lock
 
-try:
-    from . import github_tools, computer, credential_tools
-except ImportError:
-    import github_tools
-    import computer
-    import credential_tools
+# MCP runtimes launch this file directly with an arbitrary working directory.
+if __package__ in {None, ''}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from agent.tools import github_tools
+from sandbox import computer
+from agent.tools import credential_tools
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")

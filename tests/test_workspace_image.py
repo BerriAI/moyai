@@ -1,4 +1,6 @@
+import shutil
 import subprocess
+import sys
 import venv
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,3 +103,32 @@ async def test_prebuild_requires_complete_credentials() -> None:
         await build_workspace_image(
             Settings(_env_file=None, modal_token_id="", modal_token_secret="")
         )
+
+
+@pytest.mark.parametrize('entrypoint', ['sandbox/agent.py', 'agent/tools/mcp_bridge.py'])
+def test_packaged_entrypoints_bootstrap_without_controller_or_working_directory(tmp_path, entrypoint):
+    source = Path(__file__).resolve().parents[1]
+    runtime = tmp_path / 'workspace-runner'
+    for package in ('agent', 'sandbox'):
+        shutil.copytree(source / package, runtime / package,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    # Old checkpoints still contain this file; the package must take precedence.
+    (runtime / 'agent.py').write_text('raise RuntimeError("stale entrypoint imported")')
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', 'import runpy, sys; runpy.run_path(sys.argv[1])',
+         str(runtime / entrypoint)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize('name', ['agent.py', '../computer.py', '/tmp/computer.py'])
+def test_runtime_command_rejects_unowned_entrypoints(tmp_path, name):
+    from app.runtime_files import RUNTIME_COMMAND
+
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(tmp_path), name],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode != 0
+    assert 'Invalid runtime command' in result.stderr

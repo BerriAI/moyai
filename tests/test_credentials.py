@@ -13,7 +13,7 @@ from app.db import Store, now
 from app.security import Security
 from app.session_lifecycle import SessionLifecycle
 from app.temporal_runtime import TemporalRunManager
-from sandbox.continuation import AgentWait
+from agent.continuation import AgentWait
 from test_durable import Cloud, durable, drive
 from test_spend import active, sign_in
 from test_workspace import workspace

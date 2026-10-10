@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import create_app
 from app.security import digest
-from sandbox.credential_tools import run as credential_run
+from agent.tools.credential_tools import run as credential_run
 
 
 def demonstrate() -> str:

@@ -13,7 +13,7 @@ from app.attachments import MAX_FILE, inspect_file
 from app.db import Store
 from app.persistence import Checkpoints, restore_checkpoint
 from app.security import digest
-from sandbox.agent import conversation_prompt
+from agent.agent import conversation_prompt
 from sandbox.attachments import prepare_attachments
 from test_spend import sign_in
 from test_workspace import workspace

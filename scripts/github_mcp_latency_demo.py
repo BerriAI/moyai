@@ -56,14 +56,19 @@ def benchmark():
             provider.repos = {i: {**repository_data('BerriAI/litellm'), 'id': i,
                                   'full_name': f'Example/repo-{i}'} for i in selected}
             provider.installed = selected
-            script = ROOT / 'sandbox/mcp_bridge.py'
+            script = ROOT / 'agent/tools/mcp_bridge.py'
             if mode == 'before':
                 # Execute the actual old refresh and bridge, not a timing model.
                 namespace = {'__name__': 'app._baseline_repositories', '__package__': 'app'}
                 exec(compile(baseline_file('app/github_repositories.py'), '<baseline>', 'exec'), namespace)
                 github.refresh_connection = MethodType(namespace['GitHubRepositories'].refresh_connection, github)
                 script = Path(directory) / 'mcp_before.py'
-                script.write_text(baseline_file('sandbox/mcp_bridge.py'))
+                source = baseline_file('sandbox/mcp_bridge.py')
+                # Keep the historical bridge; resolve only its relocated dependencies.
+                source = source.replace('import github_tools', 'from agent.tools import github_tools')
+                source = source.replace('import credential_tools', 'from agent.tools import credential_tools')
+                source = source.replace('import computer', 'from sandbox import computer')
+                script.write_text(source)
 
             async def upstream(request):
                 await asyncio.sleep(0.1)
@@ -92,7 +97,7 @@ def benchmark():
                 thread.start()
                 process = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                    env={'PATH': os.environ['PATH'], 'PYTHONPATH': str(ROOT / 'sandbox'),
+                    env={'PATH': os.environ['PATH'], 'PYTHONPATH': str(ROOT),
                          'WORKSPACE_BROKER_URL': f'http://127.0.0.1:{server.server_port}',
                          'WORKSPACE_RUN_TOKEN': 'local-fixture'})
                 try:

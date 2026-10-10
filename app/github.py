@@ -16,7 +16,7 @@ import httpx
 import jwt
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from sandbox.github_limits import MAX_FILE, MAX_TOTAL
+from agent.tools.github_limits import MAX_FILE, MAX_TOTAL
 
 from .connector_errors import ConnectorError
 from .db import now

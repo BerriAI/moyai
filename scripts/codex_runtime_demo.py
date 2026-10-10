@@ -13,7 +13,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / 'tests')]
 warnings.filterwarnings('ignore', message='Using .*starlette.testclient.*')
 
 from pytest import MonkeyPatch
-from sandbox.codex_harness import CodexAgent
+from agent.harnesses.codex_harness import CodexAgent
 from sandbox.codex_runtime import RuntimeLease
 from test_codex_tool_readiness import readiness_case
 

@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from sandbox import mcp_bridge
-from sandbox.tool_guidance import tool_guidance
+from agent.tools import mcp_bridge
+from agent.tools.tool_guidance import tool_guidance
 from app.security import digest
 from test_workspace import cloud_capability, workspace  # noqa: F401
 

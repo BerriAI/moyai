@@ -2,20 +2,21 @@ FROM public.ecr.aws/docker/library/python:3.14-slim@sha256:a2b82f3c48559aa0a8446
 RUN apt-get update && apt-get install -y --no-install-recommends git chromium xvfb ffmpeg openbox tint2 xterm xdotool xclip x11-xserver-utils ca-certificates build-essential libffi-dev ripgrep nodejs npm \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir cryptography playwright==1.58.0 pillow==12.3.0
-COPY sandbox /opt/workspace-runner
-ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt/hermes HERMES_RUNTIME_DIR=/opt/hermes-tools \
+COPY sandbox /opt/workspace-runner/sandbox
+COPY agent /opt/workspace-runner/agent
+ENV PYTHONUNBUFFERED=1 PYTHONPATH=/opt/workspace-runner:/opt/hermes HERMES_RUNTIME_DIR=/opt/hermes-tools \
     HERMES_PYTHON=/opt/hermes-env/bin/python HERMES_HOME=/tmp/hermes-home GIT_TERMINAL_PROMPT=0
 EXPOSE 80
-CMD ["python", "/opt/workspace-runner/substrate_guest.py"]
+CMD ["python", "/opt/workspace-runner/sandbox/substrate_guest.py"]
 
 FROM transport AS workspace
 ARG HERMES_REVISION=7968c72a3cb80beaae51948378944dd6e3423b96
 RUN git init /opt/hermes && cd /opt/hermes && git remote add origin https://github.com/NousResearch/hermes-agent.git \
     && git fetch --depth 1 origin "$HERMES_REVISION" && git checkout --detach FETCH_HEAD \
     && python -m pm.build_env --source /opt/hermes --out /opt/hermes-env --no-install-project --extra mcp
-RUN /opt/hermes-env/bin/python /opt/workspace-runner/harness_dependencies.py \
-    && python /opt/workspace-runner/install_access_tools.py \
-    && python /opt/workspace-runner/hermes_compat.py \
+RUN /opt/hermes-env/bin/python /opt/workspace-runner/sandbox/harness_dependencies.py \
+    && python /opt/workspace-runner/sandbox/install_access_tools.py \
+    && python /opt/workspace-runner/sandbox/hermes_compat.py \
     && cd /opt/hermes && /opt/hermes-env/bin/python -c 'from run_agent import AIAgent; import mcp; import claude_agent_sdk'
 
 # Lambda snapshots only this idle HTTP service. No agent/model connection is

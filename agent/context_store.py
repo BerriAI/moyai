@@ -8,15 +8,16 @@ import argparse
 import json
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 from uuid import uuid4
 
-try:
-    from .history_reference import encoded, excerpt
-    from .memory_history import scrub_memory_history
-except ImportError:
-    from history_reference import encoded, excerpt
-    from memory_history import scrub_memory_history
+# Support the history-inspection command invoked from any working directory.
+if __package__ in {None, ''}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agent.history_reference import encoded, excerpt
+from agent.memory_history import scrub_memory_history
 
 
 VERSION = 1
@@ -278,7 +279,7 @@ class ContextStore:
                 'Completed actions must not be replayed. Summaries and excerpts may omit details; '
                 'verify original instructions and receipts before repeating external writes. '
                 f'Full scrubbed records are in {self.path}. Read a bounded range with '
-                f'python /opt/workspace-runner/context_store.py --path {self.path} --after N --limit 5 '
+                f'python /opt/workspace-runner/agent/context_store.py --path {self.path} --after N --limit 5 '
                 '(N is the preceding sequence ID; --offset pages through a large record).\n'
                 + recovery +
                 f'Summary through record {state["cursor"]}:\n{state["summary"] or "(none yet)"}\n'
