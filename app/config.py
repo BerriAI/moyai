@@ -41,9 +41,16 @@ class Settings(BaseSettings):
     temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000)
     temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000)
     temporal_dispatch_batch_size: int = Field(default=200, ge=1, le=10000)
+    sandbox_prepared_pool_size: int = Field(default=0, ge=0, le=20)
+    sandbox_prepared_idle_seconds: int = Field(default=300, ge=30, le=3600)
 
     @model_validator(mode='after')
     def database_backend(self):
+        if self.sandbox_prepared_pool_size:
+            if not self.temporal_enabled or self.sandbox_provider != 'modal':
+                raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
+            if self.sandbox_prepared_pool_size >= self.max_concurrent_runs:
+                raise ValueError('Prepared workspaces must leave capacity for active sessions.')
         if self.moyai_database_url:
             if urlsplit(self.moyai_database_url).scheme not in {'postgresql', 'postgres'}:
                 raise ValueError('MOYAI_DATABASE_URL must be a Postgres connection URL.')

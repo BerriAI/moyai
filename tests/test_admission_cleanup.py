@@ -107,8 +107,8 @@ async def test_capacity_is_rechecked_when_another_session_takes_the_reclaimed_sl
     reclaimed, resume = asyncio.Event(), asyncio.Event()
     make_capacity = first.make_capacity
 
-    async def pause_after_cleanup(run_id):
-        available = await make_capacity(run_id)
+    async def pause_after_cleanup(run_id, **kwargs):
+        available = await make_capacity(run_id, **kwargs)
         if run_id == waiting and available:
             reclaimed.set()
             await resume.wait()

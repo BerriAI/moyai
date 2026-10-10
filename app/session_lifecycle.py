@@ -137,7 +137,7 @@ class SessionLifecycle:
                              'url': self.security.settings.public_url.rstrip('/') + '/#run=' + run_id})
         return {'sessions': sessions, 'has_more': len(ids) > args.limit}
 
-    async def require_live_api(self, request: Request):
+    def require_live_api(self, request: Request):
         """Guard the actual dispatched run routes, including files and computer."""
         route = request.scope.get('route')
         if not getattr(route, 'path', '').startswith('/api/runs/{run_id}'):

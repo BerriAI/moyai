@@ -183,3 +183,40 @@ async def test_sidebar_receipts_still_schedule_pr_refreshes_on_event_loop(users_
         assert second.json()[0]['pr_summary']['label'] == 'PR is ready'
         assert len(calls) == 1
     await unused.close()
+
+
+@pytest.mark.parametrize('operation', ['create', 'detail'])
+async def test_startup_authorization_reads_do_not_block_other_requests(users_app, monkeypatch, operation):
+    app, client = users_app
+    sign_as(app, client, 'tin@berri.ai')
+    run = app.state.store.create_run('Existing session', '', 'demo', [], user_id='google:tin')
+    entered, release = Event(), Event()
+    original = app.state.security.require
+
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(app.state.security, 'require', held)
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+
+    @app.get('/test/startup-ping')
+    async def ping():
+        return {'ready': True}
+
+    fallback = Timer(2, release.set)
+    fallback.start()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=str(client.base_url),
+                                cookies=client.cookies, headers=client.headers) as reader:
+        request = (reader.post('/api/runs', json={'prompt': 'Create a session', 'mode': 'demo'})
+                   if operation == 'create' else reader.get('/api/runs/' + run['id']))
+        pending = asyncio.create_task(request)
+        try:
+            assert await asyncio.to_thread(entered.wait, 1)
+            assert (await reader.get('/test/startup-ping')).json() == {'ready': True}
+            assert not release.is_set(), 'Startup authorization SQL blocked the event loop'
+        finally:
+            release.set()
+            fallback.cancel()
+            assert (await pending).status_code == (201 if operation == 'create' else 200)

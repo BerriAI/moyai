@@ -67,6 +67,25 @@ def test_split_preflight_refuses_inconsistent_broker_without_writes(split_setup,
     assert render.calls == []
 
 
+@pytest.mark.parametrize('service', [WORKER, BROKER])
+@pytest.mark.parametrize('key,value', [('SANDBOX_PREPARED_POOL_SIZE', '1'), ('SANDBOX_PREPARED_IDLE_SECONDS', '600')])
+def test_prepared_pool_drift_is_rejected_before_deployment(split_setup, service, key, value):
+    release, render, _ = split_setup
+    render.env[service][key] = value
+    with pytest.raises(ReleaseError, match='same build and runtime configuration'):
+        release.run()
+    assert render.calls == []
+
+
+def test_explicit_prepared_pool_defaults_match_omitted_settings(split_setup):
+    release, render, _ = split_setup
+    render.env[WORKER].update(SANDBOX_PREPARED_POOL_SIZE='0', SANDBOX_PREPARED_IDLE_SECONDS='300')
+    release.preflight_only = True
+    release.run()
+    assert release.record['status'] == 'preflight_passed'
+    assert render.calls == []
+
+
 @pytest.mark.parametrize('counter', ['owners', 'brokers', 'model_requests', 'live_leases'])
 def test_old_broker_must_relinquish_ownership_and_requests_before_app_update(split_setup, counter):
     release, render, _ = split_setup

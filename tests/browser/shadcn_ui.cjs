@@ -49,6 +49,26 @@ for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'membe
   }
 });
 
+for (const width of [1440, 768, 320]) test(`sidebar toggles survive tooltip updates at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'member', width);
+  const firstOpen = width <= 850;
+  for (const open of [firstOpen, !firstOpen, firstOpen, !firstOpen]) {
+    // The mobile scrim also has the Close sidebar name; test the tooltip button.
+    const button = page.locator(open ? '#open-sidebar' : '#close-sidebar');
+    await button.hover();
+    await page.getByRole('tooltip', { name: open ? 'Show sidebar' : 'Hide sidebar', exact: true }).waitFor();
+    await button.click();
+    await page.waitForFunction(({ width, open }) => {
+      const classes = document.body.classList;
+      return (width <= 850 ? classes.contains('sidebar-open') : !classes.contains('rail-collapsed')) === open;
+    }, { width, open });
+    if (open) {
+      const box = await page.locator('#sidebar').boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width, 'The opened sidebar is inside the viewport');
+    }
+  }
+});
+
 for (const width of [1440, 768, 320]) for (const composer of ['new', 'reply']) test(`skill picker rows stay aligned in the ${composer} composer at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'skill-picker', width);
   if (composer === 'reply') await page.goto(`${base}/?fixture=skill-picker#run=${'a'.repeat(32)}`);
@@ -390,6 +410,10 @@ async function inspectMenus(page, width) {
       return [...range.getClientRects()].some(rect => rect.width && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1));
     }));
     assert.equal(overflow, false, 'Long option text wraps within the menu');
+    // A visible portal can precede Radix's initial focus effect. Send End only
+    // after an option owns focus, so keyboard navigation starts in the menu.
+    await page.waitForFunction(el => el.contains(document.activeElement) &&
+      document.activeElement?.getAttribute('role') === 'option', await menu.elementHandle());
     await page.keyboard.press('End');
     const last = menu.locator('[role=option]:not([aria-disabled=true])').last();
     await page.waitForFunction(el => el === document.activeElement, await last.elementHandle());
@@ -1598,6 +1622,9 @@ test('session connection selections survive navigation and reach the submit payl
     await page.getByRole('button', { name: 'Start session', exact: true }).click();
     assert.deepEqual((await request).postDataJSON().plugins.sort(), expected);
     await page.waitForFunction(() => !state.sending.has('new'));
+    await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+    await page.locator('#prompt').waitFor();
+    await page.getByLabel('Session options', { exact: true }).click();
   }
 });
 
@@ -1924,6 +1951,8 @@ for (const width of [1440, 768, 320]) test(`Pi selection, keyboard, logo and sub
   await page.getByText('Synthetic submission captured.', { exact: true }).waitFor();
   assert.equal(submitted.harness, 'pi');
   assert.equal(submitted.prompt, 'Check the Pi integration');
+  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+  await page.locator('#prompt').waitFor();
   assert.equal(await source.inputValue(), 'pi', 'Selection survives a failed submission');
 });
 

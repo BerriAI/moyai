@@ -128,18 +128,35 @@ def test_only_broker_runs_inference_recovery_and_memory_review(split_settings, m
 
 
 async def test_broker_serves_no_temporal_work_or_wake_dispatch(split_settings, monkeypatch):
+    split_settings = split_settings.model_copy(update={'sandbox_prepared_pool_size': 1})
     api = create_app(split_settings)
     broker = create_app(split_settings.model_copy(update={'moyai_runtime_role': 'broker'}))
     manager = broker.state.manager
     monkeypatch.setattr(manager, 'dispatch', AsyncMock(side_effect=AssertionError('Broker dispatched wakes')))
+    monkeypatch.setattr(manager, 'listen_dispatch', AsyncMock(side_effect=AssertionError('Broker subscribed to wakes')))
+    monkeypatch.setattr(manager.prepared, 'serve', AsyncMock(side_effect=AssertionError('Broker prepared sandboxes')))
     try:
         await manager.recover()
         await asyncio.wait_for(manager.ready.wait(), 3)
         assert manager.worker is None
         manager.dispatch.assert_not_awaited()
+        manager.listen_dispatch.assert_not_awaited()
+        manager.prepared.serve.assert_not_awaited()
+        assert manager.dispatch_listener_task is manager.prepared_task is None
     finally:
         await manager.shutdown()
         broker.state.store.close()
+        api.state.store.close()
+
+
+@pytest.mark.parametrize('role', ['worker', 'broker'])
+@pytest.mark.parametrize('field,value', [('sandbox_prepared_pool_size', 1), ('sandbox_prepared_idle_seconds', 600)])
+def test_split_runtime_rejects_prepared_pool_configuration_drift(split_settings, role, field, value):
+    api = create_app(split_settings)
+    try:
+        with pytest.raises(DatabaseError, match='same shared runtime configuration'):
+            create_app(split_settings.model_copy(update={'moyai_runtime_role': role, field: value}))
+    finally:
         api.state.store.close()
 
 

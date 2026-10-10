@@ -125,10 +125,10 @@ test('unsent drafts and rejected submissions retain text; retry clears only on s
   const reject=route=>route.request().method()==='POST'?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test rejection: retry safely'})}):route.continue();
   await page.route('**/api/runs',reject);
   await page.locator('#prompt').press('Enter');
-  await page.locator('#toast').filter({hasText:'Test rejection'}).waitFor();
-  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Keep this draft until accepted');
+  await page.getByRole('alert').filter({hasText:'Test rejection'}).waitFor();
+  assert.equal(await page.locator('.chat-message.user .message-content').textContent(),'Keep this draft until accepted');
   await page.unroute('**/api/runs',reject);
-  await page.locator('#prompt').press('Enter');await page.locator('#followup').waitFor();
+  await page.getByRole('button',{name:'Retry sending',exact:true}).click();await page.locator('#followup').waitFor();
   await home(page);
   assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });
@@ -144,8 +144,11 @@ test('text typed during a pending create is not discarded',async t=>{
   });
   await page.locator('#prompt').fill('First request');await page.locator('#prompt').press('Enter');
   await waiting;
-  await page.locator('#prompt').fill('Different next request');release();
-  await page.locator('#followup').waitFor();await home(page);
+  await home(page);
+  await page.locator('#prompt').fill('Different next request');
+  const accepted=page.waitForResponse(response=>response.url().endsWith('/api/runs')&&response.request().method()==='POST');
+  release();await accepted;
+  await page.waitForTimeout(100);
   assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Different next request');
 });
 
@@ -154,7 +157,8 @@ test('accepted creation clears text even if subsequent sidebar refresh fails',as
   await page.route('**/api/runs?*',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test sidebar unavailable'})}));
   await page.locator('#prompt').fill('Accepted despite sidebar outage');await page.locator('#prompt').press('Enter');
   await page.locator('#toast').filter({hasText:'Test sidebar unavailable'}).waitFor();
-  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
+  await page.locator('#followup').waitFor();
+  assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Accepted despite sidebar outage');
   await page.unroute('**/api/runs?*');
   await home(page);assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });
@@ -207,25 +211,30 @@ test('session deletion dialog preserves cancellation, errors and locked shadcn c
   assert.equal(requests.length,2);
 });
 
-test('rename persists after reload, preserves messages and drafts, and rejects stale reads',async t=>{
+test('rename persists after reload, preserves messages and drafts, and rejects stale reads',{timeout:60000},async t=>{
   const page=await setup(t);
   await send(page,'Original rename request');
   await page.locator('#followup').fill('Unsent follow-up');
   let release,arrived;let count=0;
   const gate=new Promise(resolve=>release=resolve),ready=new Promise(resolve=>arrived=resolve);
+  t.after(()=>release());
   const stale=async route=>{
     const response=await route.fetch();
     if(++count===2)arrived();await gate;await route.fulfill({response});
   };
   const id=await page.evaluate(()=>state.selected);
-  await page.route('**/api/runs?*',stale);
-  await page.route(`**/api/runs/${id}`,stale);
-  await page.evaluate(()=>{refreshRuns();refreshChat(state.selected);});await ready;
+  const detail=new RegExp('/api/runs/'+id+'(?:\\?.*)?$');
+  // Hold one response from each read. Background polling must not satisfy both
+  // arrivals or acquire another stale handler while these reads are released.
+  await page.route('**/api/runs?*',stale,{times:1});
+  await page.route(detail,stale,{times:1});
+  const refreshed=page.evaluate(()=>Promise.all([refreshRuns(),refreshChat(state.selected)]));
+  await ready;
   const dialog=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Navigation follow-up');
   await dialog.getByRole('button',{name:'Save',exact:true}).click();
   await page.locator('#toast').filter({hasText:'Session renamed.'}).waitFor();
-  release();await page.unrouteAll({behavior:'wait'});
+  release();await refreshed;
   assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
   assert.equal(await page.title(),'Navigation follow-up · Moyai');
   assert.equal(await page.locator(`[data-run="${id}"] .session-link-title`).textContent(),'Navigation follow-up');
@@ -235,12 +244,13 @@ test('rename persists after reload, preserves messages and drafts, and rejects s
   assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Original rename request');
   let resume,loaded;
   const opening=new Promise(resolve=>loaded=resolve),hold=new Promise(resolve=>resume=resolve);
-  await page.route(`**/api/runs/${id}`,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});});
-  await page.evaluate(id=>{openRun(id);},id);await opening;
+  t.after(()=>resume());
+  await page.route(detail,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});},{times:1});
+  const reopened=page.evaluate(id=>openRun(id),id);await opening;
   const duringOpen=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Renamed while opening');
   await duringOpen.getByRole('button',{name:'Save',exact:true}).click();
-  await duringOpen.waitFor({state:'hidden'});resume();await page.unrouteAll({behavior:'wait'});
+  await duringOpen.waitFor({state:'hidden'});resume();await reopened;
   await page.waitForFunction(()=>state.chatRun?.display_title==='Renamed while opening');
   assert.equal(await page.locator('#page-title').textContent(),'Renamed while opening');
   await page.locator(`[data-session-actions="${id}"]`).click();
@@ -303,4 +313,32 @@ test('session actions and rename remain usable at desktop, tablet and narrow mob
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
     if(width<850)await page.locator('#close-sidebar').click();
   }
+});
+
+test('submission is visible before save and opening never waits for a held sidebar',async t=>{
+  const page=await setup(t);
+  let save,sidebar;
+  const saveGate=new Promise(resolve=>{save=resolve;});
+  const sidebarGate=new Promise(resolve=>{sidebar=resolve;});
+  t.after(()=>{save();sidebar();});
+  let saved=false,sidebarHeld=false;
+  await page.route('**/api/runs',async route=>{
+    if(route.request().method()==='POST'){
+      await saveGate;saved=true;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/runs?*',async route=>{
+    sidebarHeld=true;await sidebarGate;await route.continue();
+  });
+  await page.locator('#prompt').fill('Show this before the save finishes');
+  await page.locator('#prompt').press('Enter');
+  await page.getByRole('status').filter({hasText:'Creating session'}).waitFor();
+  assert.equal(saved,false);
+  assert.equal(await page.locator('.chat-message.user .message-content').textContent(),'Show this before the save finishes');
+  save();
+  await page.locator('#followup').waitFor();
+  assert.equal(sidebarHeld,true);
+  assert.equal(await page.locator('.chat-message.user').count(),1);
+  sidebar();
 });

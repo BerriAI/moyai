@@ -126,8 +126,10 @@ This version supports one coordinator (`srv-db41eiqj9qps73fpuan0`), one worker
 S3 and Temporal. It rejects auto-deploy, autoscaling, extra runtime owners,
 staged/draining baselines and inconsistent split flags. The read-only probe
 verifies the runtime fingerprint schema of the running build, including the
-pre-broker format during the first upgrade. It does not accept a legacy
-fingerprint for a new build. Further ownership or compatibility changes need
+pre-broker and pre-prepared-pool formats during the first upgrade. It does not
+accept a legacy fingerprint for a new build. Prepared-pool settings must match
+across all roles; omitted settings use the defaults of zero prepared workspaces
+and 300 seconds of idle lifetime. Further ownership or compatibility changes need
 corresponding release checks; never bypass them to force a deployment.
 
 Run the credential-free rehearsal from the repository root:

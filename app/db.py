@@ -315,17 +315,23 @@ class Store:
         try:
             if self.database:
                 with self.database.connect(write_scope=write_scope) as conn:
+                    conn.commit_callbacks = []
                     yield conn
                 if conn.changed:
                     self.generation += 1
+                for callback in conn.commit_callbacks:
+                    callback()
                 return
             require_database_owner(self.path)
             conn = sqlite_connection(self.path)
+            conn.commit_callbacks = []
             try:
                 with conn:
                     yield conn
                 if conn.total_changes:
                     self.generation += 1
+                for callback in conn.commit_callbacks:
+                    callback()
             finally:
                 conn.close()
         finally:

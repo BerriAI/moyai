@@ -35,7 +35,9 @@ FAILED_DEPLOYS = {'build_failed', 'pre_deploy_failed', 'update_failed', 'cancele
 SHARED_KEYS = ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA', 'SESSION_SECRET', 'ENCRYPTION_KEY',
                'OBJECT_STORAGE_BUCKET', 'OBJECT_STORAGE_ENDPOINT', 'OBJECT_STORAGE_PREFIX',
                'MOYAI_PUBLIC_URL', 'TEMPORAL_ADDRESS', 'TEMPORAL_NAMESPACE', 'TEMPORAL_TASK_QUEUE',
-               'MAX_CONCURRENT_RUNS', 'MAX_PENDING_RUNS', 'MAX_CONCURRENT_MODEL_REQUESTS')
+               'MAX_CONCURRENT_RUNS', 'MAX_PENDING_RUNS', 'MAX_CONCURRENT_MODEL_REQUESTS',
+               'SANDBOX_PREPARED_POOL_SIZE', 'SANDBOX_PREPARED_IDLE_SECONDS')
+SHARED_DEFAULTS = {'SANDBOX_PREPARED_POOL_SIZE': '0', 'SANDBOX_PREPARED_IDLE_SECONDS': '300'}
 
 
 class ReleaseError(RuntimeError):
@@ -413,7 +415,8 @@ class Release:
     def check_shared(coordinator, owner, service, service_owner, split):
         if (owner != service_owner or coordinator.sha != service.sha
                 or (service.env.get('MOYAI_SEPARATE_BROKER', 'false').lower() == 'true') != split
-                or any(coordinator.env.get(k, '') != service.env.get(k, '') for k in SHARED_KEYS)):
+                or any(coordinator.env.get(k, SHARED_DEFAULTS.get(k, ''))
+                       != service.env.get(k, SHARED_DEFAULTS.get(k, '')) for k in SHARED_KEYS)):
             raise ReleaseError('The services do not share the same build and runtime configuration.')
 
 

@@ -53,10 +53,14 @@ def require(condition):
 
 
 def policy_fingerprint(settings):
-    # The first split-capable release adds a policy field even while disabled.
-    # Select the schema from the running build's Settings, never from a failed
-    # comparison, so the same release can verify its pre-upgrade baseline.
-    fields = POLICY_FIELDS + (('moyai_separate_broker',) if hasattr(settings, 'moyai_separate_broker') else ())
+    # Startup pooling and broker isolation each extend the shared policy.
+    # Select fields from the running build's Settings, never from a failed
+    # comparison, so pre-upgrade checks preserve that build's exact schema.
+    fields = POLICY_FIELDS
+    if hasattr(settings, 'sandbox_prepared_pool_size'):
+        fields += ('sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
+    if hasattr(settings, 'moyai_separate_broker'):
+        fields += ('moyai_separate_broker',)
     return hashlib.sha256(json.dumps({key: getattr(settings, key) for key in fields}, sort_keys=True).encode()).hexdigest()
 
 

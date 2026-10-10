@@ -24,15 +24,10 @@ async def test_successful_full_wake_batches_drain_before_idle_poll(cluster, monk
         manager.submit(run)
     client = SimpleNamespace(start_workflow=AsyncMock())
     manager.connect_temporal = AsyncMock(return_value=client)
-    sleep = asyncio.sleep
+    async def idle():
+        manager.closing = True
 
-    async def idle(seconds):
-        if seconds == 2:
-            manager.closing = True
-        else:
-            await sleep(seconds)
-
-    monkeypatch.setattr(asyncio, 'sleep', idle)
+    monkeypatch.setattr(manager, 'wait_for_dispatch', idle)
     await asyncio.wait_for(manager.serve(), 5)
     assert client.start_workflow.await_count == 5
     assert not store.rows('SELECT 1 FROM durable_sessions WHERE revision>delivered')

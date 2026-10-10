@@ -19,7 +19,9 @@ Set `MOYAI_SEPARATE_BROKER=true` on **every** process:
 The broker has an exclusive PostgreSQL ownership lock, separate from the
 coordinator lock. A second broker is refused before inference recovery runs.
 The shared policy includes the split setting; a process configured for the wrong
-topology, keys, storage, limits or build is refused. An API restart no longer
+topology, keys, storage, limits, prepared-pool settings or build is refused. Only
+execution workers maintain prepared sandboxes; the broker never starts the pool
+or subscribes to execution wake notifications. An API restart no longer
 interrupts pending model requests, running compaction or executing tool receipts.
 Restarting the broker still performs that recovery, because its old connections
 have ended. Do not overlap broker instances or turn off the ownership checks.
@@ -96,8 +98,9 @@ resuming the worker. It does not change the split flag or edge route and does
 not perform this first topology switch. Clear the broker's `MAINTENANCE_DRAIN`
 flag during activation so all three services form a clean release baseline.
 
-With pool size 8, three processes require up to 27 database connections, plus
-administrative reserve. One overlapping worker adds 9. This does not authorize
+With database pool size 8, three processes plus the coordinator's wake listener
+require up to 28 database connections, plus administrative reserve. One
+overlapping worker adds 9. This does not authorize
 overlapping coordinator or broker instances. Render [private services use TCP
 health checks](https://render.com/docs/health-checks), not an HTTP health-check
 path. The broker therefore waits for Temporal and valid database ownership before

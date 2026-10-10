@@ -34,6 +34,7 @@ class TraceOutbox:
         self.lock = asyncio.Lock()
         self.wake = asyncio.Event()
         self.task = None
+        self.loop = None
         with store.connect() as conn:
             conn.executescript(f'''
                 CREATE TABLE IF NOT EXISTS {table} (
@@ -62,7 +63,19 @@ class TraceOutbox:
         else:
             with self.store.connect() as conn:
                 conn.execute(sql, values)
-        self.wake.set()
+        # Producers also run in database threads. Notify only after commit;
+        # signalling an asyncio Event from those threads can lose trace writes.
+        if connection is not None:
+            connection.commit_callbacks.append(self.notify)
+        else:
+            self.notify()
+
+    def notify(self):
+        if self.loop is not None and not self.loop.is_closed():
+            try:
+                self.loop.call_soon_threadsafe(self.wake.set)
+            except RuntimeError:
+                pass  # A closed exporter recovers its durable queue on restart.
 
     def encode_batch(self, rows):
         request = ExportTraceServiceRequest()
@@ -86,6 +99,7 @@ class TraceOutbox:
 
     def start(self):
         if self.task is None:
+            self.loop = asyncio.get_running_loop()
             self.task = asyncio.create_task(self.run())
 
     async def run(self):

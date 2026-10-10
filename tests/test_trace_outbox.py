@@ -373,3 +373,36 @@ async def test_child_name_parent_and_identity_survive_group_completion_and_resta
         request = ExportTraceServiceRequest.FromString(row['payload'])
         assert request.resource_spans[0].resource.attributes[0].value.string_value == 'moyai'
     await tracing.close()
+
+
+async def test_threaded_finish_preserves_trace_and_wakes_waiting_exporter(tmp_path):
+    from app.db import database
+    store, tracing, run, message = setup(tmp_path)
+    outbox = tracing.outboxes[0]
+    delivered, waiting = asyncio.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    previous_debug = loop.get_debug()
+    loop.set_debug(True)
+
+    def receiver(request):
+        delivered.set()
+        return httpx.Response(200)
+
+    await transport(tracing, receiver)
+    original_wait = outbox.wake.wait
+
+    async def idle_wait():
+        waiting.set()
+        return await original_wait()
+
+    outbox.wake.wait = idle_wait
+    outbox.start()
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        await database(store.finish_message, run['id'], message['id'], 'Threaded answer')
+        await asyncio.wait_for(delivered.wait(), 1)
+        assert store.rows('SELECT 1 FROM trace_outbox')
+        assert store.messages(run['id'])[-1]['content'] == 'Threaded answer'
+    finally:
+        await tracing.close()
+        loop.set_debug(previous_debug)

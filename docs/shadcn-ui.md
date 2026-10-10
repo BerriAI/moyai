@@ -254,3 +254,16 @@ Menu placement is verified in Chromium rather than by mocking Radix geometry.
 The dropdown suite opens every rendered single-choice menu across the primary
 pages and editors at 1440/768/320px, checks field/menu separation, wrapping,
 keyboard focus, Escape, and the native form bridge.
+
+## Composer message history
+
+In a conversation, Up at the start of the reply text recalls the signed-in
+user’s previous messages. Repeated Up/Down browses that history; Down past the
+newest entry restores the unsent draft. Moving the caret or editing returns
+to ordinary text navigation until the caret reaches the start/end again.
+History is local to the mounted conversation, excludes other participants,
+and recalls text only, without reattaching files. Slash-picker navigation
+takes priority. The new-session composer has no conversation history.
+
+`node --test tests/browser/message_history.cjs` checks the real composer
+against synthetic responses at desktop, tablet and mobile widths.

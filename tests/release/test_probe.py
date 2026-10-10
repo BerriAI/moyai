@@ -91,14 +91,21 @@ def test_release_fingerprint_matches_actual_runtime_policy(production_shape):
     assert policy_fingerprint(settings) == state['policy']
     assert policy_fingerprint(settings.model_copy(update={'moyai_separate_broker': not settings.moyai_separate_broker})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'encryption_key': 'different'})) != state['policy']
+    assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_pool_size': 1})) != state['policy']
+    assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_idle_seconds': 600})) != state['policy']
 
 
-def test_first_upgrade_verifies_legacy_fingerprint_without_accepting_it_for_new_build():
+@pytest.mark.parametrize('extra', [
+    {}, {'moyai_separate_broker': False},
+    {'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300},
+    {'moyai_separate_broker': False, 'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300}])
+def test_first_upgrade_verifies_each_running_build_fingerprint_without_schema_fallback(extra):
     values = {key: getattr(Settings(_env_file=None), key) for key in POLICY_FIELDS}
-    legacy = SimpleNamespace(**values)
-    old_fingerprint = hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
-    assert policy_fingerprint(legacy) == old_fingerprint
-    assert policy_fingerprint(SimpleNamespace(**values, moyai_separate_broker=False)) != old_fingerprint
+    expected = hashlib.sha256(json.dumps(values | extra, sort_keys=True).encode()).hexdigest()
+    assert policy_fingerprint(SimpleNamespace(**values, **extra)) == expected
+    for field in extra:
+        incomplete = {key: value for key, value in (values | extra).items() if key != field}
+        assert expected != hashlib.sha256(json.dumps(incomplete, sort_keys=True).encode()).hexdigest()
 
 
 @pytest.mark.parametrize('production_shape', [True], indirect=True)
