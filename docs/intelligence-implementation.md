@@ -498,3 +498,32 @@ provider data; deployed provider quality and latency remain unqualified.
 Current source requires schema 11 and all four role protocols 7. Earlier schema
 digests are preserved; revision 11 adds owner grants. Release all roles together
 after the offline migration. No deployment was performed.
+
+## Complete GitHub PR and CI reads (WP6; not deployed)
+
+The agent and native PR panel can page through every provider-returned file.
+Descriptions, comments and patches no longer lose text at local character limits.
+Head/base SHA checks protect every page, including a second check after fetching
+files, from mixed-revision evidence. The panel retains loaded pages on tab return
+and clears them after a revision/access conflict. Missing patches and incomplete
+provider file lists have explicit coverage and a checkout fallback.
+
+CI metadata retains all supplied step names and steps. Job logs no longer stop at
+2 MiB or omit long lines at 20,000 characters. Positive line/page parameters have
+no arbitrary upper cap. Redaction runs over the complete downloaded source before
+line paging; continuation arguments bind its digest, and changed logs require a
+fresh read. Provider access and credential-free redirect checks remain in place.
+The current implementation downloads and redacts the full log for each page;
+large-log memory/latency optimization remains possible without sacrificing coverage.
+
+Validation: 141 GitHub read, delivery and follow-up cases passed; the new seven
+source-completeness/revision contracts passed after correcting their fixture
+import. Another 66 read/delivery cases passed. Thirty-eight Node/browser cases
+passed, including 101 loaded files, a 25,500-character patch line, complete
+descriptions and changed-source clearing at 1440/768/320 pixels. These checks use
+synthetic GitHub responses. Provider patch/file limits remain provider limits;
+the returned patches are not proof of a complete local diff.
+
+The schema remains 11; all role protocols are 8 so mixed brokers do not disagree
+about paged read and source-revision arguments. Publication file/binary limits
+remain the next GitHub implementation step.

@@ -154,7 +154,7 @@ Up to 32 tabs resume, including the active tab. A failed per-tab session storage
 
 Open a session pull request from the conversation, the PR list, or a saved PR tab to see its status, branches, description, and changed-file diffs directly in Moyai. This read-only view uses the organization’s selected GitHub repositories and works while the cloud workspace is asleep. Refresh updates the details; Open in GitHub provides the full review, discussion, and checks interface.
 
-The panel includes the session’s confirmed PRs and those of its direct child agents. Disabled GitHub access or removed repository selection makes the details unavailable. Large changes show explicit truncation notices; GitHub remains available for complete diffs. Computer and Saved captures retain their separate controls.
+The panel includes the session’s confirmed PRs and those of its child agents. Disabled GitHub access or removed repository selection makes the details unavailable. **Load more files** retrieves additional changed files and retains loaded pages when you return to the tab. Descriptions and provider-supplied patches remain complete. If the PR changes between pages, refresh before continuing. GitHub can omit patches or stop returning files; the panel reports those gaps. Computer and Saved captures retain their separate controls.
 
 For a local demo, run `uv run python scripts/pull_request_panel_demo.py --port 8987` and open `http://localhost:8987/demo/login`. The session and GitHub data are fixtures. Add `--live-github` to read real PR details using your existing local `gh` login; no model, cloud workspace, or GitHub write is used.
 
