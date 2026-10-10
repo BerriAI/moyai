@@ -125,10 +125,10 @@ test('unsent drafts and rejected submissions retain text; retry clears only on s
   const reject=route=>route.request().method()==='POST'?route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test rejection: retry safely'})}):route.continue();
   await page.route('**/api/runs',reject);
   await page.locator('#prompt').press('Enter');
-  await page.locator('#toast').filter({hasText:'Test rejection'}).waitFor();
-  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Keep this draft until accepted');
+  await page.getByRole('alert').filter({hasText:'Test rejection'}).waitFor();
+  assert.equal(await page.locator('.chat-message.user .message-content').textContent(),'Keep this draft until accepted');
   await page.unroute('**/api/runs',reject);
-  await page.locator('#prompt').press('Enter');await page.locator('#followup').waitFor();
+  await page.getByRole('button',{name:'Retry sending',exact:true}).click();await page.locator('#followup').waitFor();
   await home(page);
   assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });
@@ -144,8 +144,11 @@ test('text typed during a pending create is not discarded',async t=>{
   });
   await page.locator('#prompt').fill('First request');await page.locator('#prompt').press('Enter');
   await waiting;
-  await page.locator('#prompt').fill('Different next request');release();
-  await page.locator('#followup').waitFor();await home(page);
+  await home(page);
+  await page.locator('#prompt').fill('Different next request');
+  const accepted=page.waitForResponse(response=>response.url().endsWith('/api/runs')&&response.request().method()==='POST');
+  release();await accepted;
+  await page.waitForTimeout(100);
   assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'Different next request');
 });
 
@@ -154,7 +157,8 @@ test('accepted creation clears text even if subsequent sidebar refresh fails',as
   await page.route('**/api/runs?*',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test sidebar unavailable'})}));
   await page.locator('#prompt').fill('Accepted despite sidebar outage');await page.locator('#prompt').press('Enter');
   await page.locator('#toast').filter({hasText:'Test sidebar unavailable'}).waitFor();
-  assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
+  await page.locator('#followup').waitFor();
+  assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Accepted despite sidebar outage');
   await page.unroute('**/api/runs?*');
   await home(page);assert.equal(await page.locator('#prompt').evaluate(el=>el.value),'');
 });

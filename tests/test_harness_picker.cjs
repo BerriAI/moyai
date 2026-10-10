@@ -54,7 +54,7 @@ test('new-session submission omits automatic selection and preserves an explicit
     const fields=Object.fromEntries(Object.entries({'#prompt':'Run a task','#repo':'','#project-environment':'auto','#mode':'modal','#new-model':'openai/gpt-6-astra','#new-harness':selected}).map(([key,value])=>[key,{value}]));
     fields['#task-form']={querySelector:()=>({disabled:false,isConnected:true})};
     let payload;
-    const context={state:{sending:new Set(),attachments:{ids:()=>[],lock(){},clear(){}},newDraft:{}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'request-id'},api:async(path,request)=>{assert.equal(path,'/api/runs');payload=JSON.parse(request.body);return {id:'saved-session'};},refreshRuns:async()=>{},openRun:async()=>{},autoSize(){},toast(message){throw Error(message);}};
+    const context={stopStream(){},setView(){},sessionTitle:()=>'New session',renderSessionSubmission(){},showError:()=>{},state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>[],lock(){},clear(){}},newDraft:{}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'request-id'},api:async(path,request)=>{assert.equal(path,'/api/runs');payload=JSON.parse(request.body);return {id:'saved-session'};},refreshRuns:async()=>{},openRun:async()=>{},autoSize(){},toast(message){throw Error(message);}};
     vm.createContext(context);vm.runInContext(submission,context);
     await context.submitTask({preventDefault(){}});
     assert.equal(payload.model,'openai/gpt-6-astra');

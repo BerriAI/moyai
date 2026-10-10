@@ -27,8 +27,54 @@ class TemporalRunManager(DurableRunner):
         self.worker_task = None
         self.dispatch_task = None
         self.diagnostics_task = None
+        self.prepared_task = None
+        self.dispatch_listener_task = None
         self.ready = asyncio.Event()
+        self.dispatch_wake = asyncio.Event()
+        self.dispatch_loop = None
         self.identity = 'moyai-' + settings.moyai_runtime_role + '-' + uuid4().hex[:12]
+
+    def submit_in(self, conn, run):
+        super().submit_in(conn, run)
+        # Wake only after the outbox transaction commits. A rolled-back input
+        # must not start a workflow, and thread-pool writers cannot set an
+        # asyncio Event directly. Postgres delivers NOTIFY only on commit, so
+        # inputs saved by another coordinator or worker also wake the dispatcher.
+        if not run.get('deleted_at'):
+            if self.store.database:
+                conn.execute("SELECT pg_notify('moyai_dispatch', ?)", (self.store.database.schema,))
+            conn.commit_callbacks.append(self.notify_dispatch)
+
+    def notify_dispatch(self):
+        loop = self.dispatch_loop
+        if loop is not None and not loop.is_closed() and not self.closing:
+            try:
+                loop.call_soon_threadsafe(self.dispatch_wake.set)
+            except RuntimeError:
+                pass  # Shutdown may close the loop after the check; input is durable.
+
+    async def listen_dispatch(self):
+        import psycopg
+        while not self.closing:
+            try:
+                async with await psycopg.AsyncConnection.connect(
+                        self.store.database.pool.conninfo, autocommit=True, connect_timeout=10) as conn:
+                    await conn.execute('LISTEN moyai_dispatch')
+                    self.notify_dispatch()  # Drain inputs committed while disconnected.
+                    async for notification in conn.notifies():
+                        if notification.payload == self.store.database.schema:
+                            self.notify_dispatch()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning('Dispatch notifications reconnecting (%s)', type(exc).__name__)
+                await asyncio.sleep(2)  # The durable two-second poll remains active.
+
+    async def wait_for_dispatch(self):
+        try:
+            await asyncio.wait_for(self.dispatch_wake.wait(), timeout=2)
+        except TimeoutError:
+            pass
 
     async def cancel(self, run_id):
         state = self.state(run_id)
@@ -50,6 +96,8 @@ class TemporalRunManager(DurableRunner):
     async def recover(self):
         if not (self.settings.encryption_key or self.settings.session_secret):
             raise RuntimeError('Configure a stable ENCRYPTION_KEY before enabling Temporal')
+        if self.settings.moyai_runtime_role != 'coordinator':
+            self.prepared_task = asyncio.create_task(self.prepared.serve())
         if self.settings.moyai_runtime_role == 'worker':
             self.dispatch_task = asyncio.create_task(self.serve())
             self.diagnostics_task = asyncio.create_task(watch_event_loop())
@@ -91,6 +139,19 @@ class TemporalRunManager(DurableRunner):
                       graceful_shutdown_timeout=timedelta(seconds=1))
 
     async def serve(self):
+        self.dispatch_loop = asyncio.get_running_loop()
+        if self.store.database and self.settings.moyai_runtime_role != 'worker':
+            self.dispatch_listener_task = asyncio.create_task(self.listen_dispatch())
+        try:
+            await self.serve_dispatch()
+        finally:
+            if self.dispatch_listener_task:
+                self.dispatch_listener_task.cancel()
+                await asyncio.gather(self.dispatch_listener_task, return_exceptions=True)
+                self.dispatch_listener_task = None
+            self.dispatch_loop = None
+
+    async def serve_dispatch(self):
         while not self.closing:
             try:
                 await database(self.store.rows, 'SELECT 1')
@@ -100,6 +161,9 @@ class TemporalRunManager(DurableRunner):
                     self.worker_task = asyncio.create_task(self.worker.run())
                 self.ready.set()
                 while not self.closing:
+                    # Clear before reading the outbox, never after: an input
+                    # committed during dispatch must interrupt the next wait.
+                    self.dispatch_wake.clear()
                     if self.worker_task and self.worker_task.done():
                         await self.worker_task
                         raise RuntimeError('Temporal worker stopped')
@@ -107,10 +171,12 @@ class TemporalRunManager(DurableRunner):
                     # when the task queue currently has no work to deliver.
                     await database(self.store.rows, 'SELECT 1')
                     backlog = False
+                    dispatch_failed = False
                     if self.settings.moyai_runtime_role != 'worker':
                         try:
                             backlog = await self.dispatch()
                         except Exception as exc:
+                            dispatch_failed = True
                             # One failed wake must not tear down a healthy
                             # worker and detach all sandbox observations.
                             log.warning('Temporal wake delivery will retry (%s)', type(exc).__name__)
@@ -118,7 +184,10 @@ class TemporalRunManager(DurableRunner):
                     # seconds per 200 wakes adds 28 seconds to a 3,000-row burst.
                     # Empty/partial batches and failures retain bounded polling.
                     if not backlog:
-                        await asyncio.sleep(2)
+                        if dispatch_failed or self.settings.moyai_runtime_role == 'worker':
+                            await asyncio.sleep(2)
+                        else:
+                            await self.wait_for_dispatch()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -218,6 +287,12 @@ class TemporalRunManager(DurableRunner):
     async def shutdown(self):
         self.closing = True
         self.ready.clear()
+        if self.dispatch_listener_task:
+            self.dispatch_listener_task.cancel()
+            await asyncio.gather(self.dispatch_listener_task, return_exceptions=True)
+        if self.prepared_task:
+            self.prepared_task.cancel()
+            await asyncio.gather(self.prepared_task, return_exceptions=True)
         if self.diagnostics_task:
             self.diagnostics_task.cancel()
             await asyncio.gather(self.diagnostics_task, return_exceptions=True)

@@ -314,7 +314,8 @@ class PostgresDatabase:
         # task queues or workspace limits must never silently form one cluster.
         names = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
                  'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
-                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha')
+                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
+                 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
         policy = hashlib.sha256(json.dumps({name: getattr(settings, name) for name in names}, sort_keys=True).encode()).hexdigest()
         with self.connect() as conn:
             if self.runtime_role == 'coordinator':

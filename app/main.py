@@ -23,7 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
 from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
-from .db import Store, now
+from .db import Store, now, database
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
@@ -611,13 +611,13 @@ def _create_app(settings, store):
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
                             and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
-            parent = store.run(body.side_chat_of)
+            parent = await database(store.run, body.side_chat_of)
             if not parent or parent['deleted_at']:
                 raise HTTPException(404, 'Original session not found.')
             if not body.chat_enabled:
                 raise HTTPException(422, 'Side chats require a chat session.')
         try:
-            requested_model = body.model if body.model is not None else user_model(request)
+            requested_model = body.model if body.model is not None else await database(user_model, request)
             harness = body.harness or (parent['harness'] if body.side_chat_of else settings.default_harness(requested_model))
             model = settings.harness_model(harness, requested_model)
         except ValueError as exc:
@@ -625,7 +625,7 @@ def _create_app(settings, store):
         if body.mode == "modal" and not metadata_request:
             if missing_cloud():
                 raise HTTPException(503, "Cloud setup is incomplete. See Runtime for the missing settings.")
-            connected = {item["id"] for item in connectors.list() if item["connected"] and item["enabled"]}
+            connected = {item["id"] for item in await database(connectors.list) if item["connected"] and item["enabled"]}
             if not set(body.plugins) <= connected:
                 raise HTTPException(422, "Connect the selected apps before starting the task.")
         if body.mode == 'modal' and not metadata_request and (body.repo_url or body.github_repository_id):
@@ -637,16 +637,19 @@ def _create_app(settings, store):
                 identity, body.repo_url = repo['id'], 'https://github.com/' + repo['full_name']
             body.github_repository_id = identity
         if body.mode == "modal" and not metadata_request:
-            environments.choose(body.environment_id, body.repo_url, body.github_repository_id)
-        user_id = store.identity(security.session_info(request))
+            await database(environments.choose, body.environment_id, body.repo_url, body.github_repository_id)
+        user_id = await database(store.identity, security.session_info(request))
         try:
-            run = store.create_run(body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
+            run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         if not metadata_request:
-            manager.submit(run)
+            if settings.temporal_enabled:
+                await database(manager.submit, run)
+            else:
+                manager.submit(run)
             session_titles.schedule(run['id'])
         return public_run(run)
 
@@ -660,8 +663,7 @@ def _create_app(settings, store):
         rows = store.rows("SELECT id,owner_id,parent_run_id,prompt,agent_label,display_title,status,model,created_at,updated_at,active_message_id,pending_result,deletion_requested_at,deleted_at FROM runs WHERE side_chat_of=? AND deleted_at='' ORDER BY created_at,id", (run_id,))
         return [{**public_run(row), **session_lifecycle.metadata(row, actor, security.role(request) == 'admin', archives)} for row in rows]
 
-    @app.get("/api/runs/{run_id}")
-    async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
+    def load_run_details(run_id, request, activity):
         security.require(request)
         from .activity_history import projection
         # Keep message status and the activity cursor in one read snapshot. A
@@ -677,7 +679,6 @@ def _create_app(settings, store):
                 'events': store.events(run_id, limit=10000, connection=connection)}
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        identities.wake.set()  # Resolve newly discovered mentions in saved Slack history.
         actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
         feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request))
@@ -685,13 +686,10 @@ def _create_app(settings, store):
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = store.root_id(run_id)
         run['workflow_root_id'] = sidebar_id
-        pr_summary = session_pull_requests.summaries([run_id])[run_id]
         return {**public_run(run), **session_lifecycle.metadata(run, actor, security.role(request) == 'admin'),
                 **store.sidebar_metadata(actor, [sidebar_id]).get(sidebar_id, {}),
-                'pr_summary': pr_summary,
                 'feedback_enabled': lens_feedback.enabled,
                 **activity_data, "approvals": store.approvals(run_id), "messages": messages,
-                'pull_requests': pr_summary['pull_requests'],
                 'pr_write_access': connectors.github.access_requests(run, actor),
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
@@ -699,6 +697,15 @@ def _create_app(settings, store):
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+
+    @app.get("/api/runs/{run_id}")
+    async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
+        result = await run_in_threadpool(load_run_details, run_id, request, activity)
+        identities.wake.set()
+        # PR refresh tasks are event-loop owned; database and object-store reads
+        # above keep their complete transactions in the thread pool.
+        summary = session_pull_requests.summaries([run_id])[run_id]
+        return {**result, 'pr_summary': summary, 'pull_requests': summary['pull_requests']}
 
     def feedback_author(request):
         actor = store.identity(security.session_info(request))
@@ -1010,7 +1017,7 @@ def _create_app(settings, store):
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
-    async def tool_list(run_id: str, request: Request):
+    def tool_list(run_id: str, request: Request):
         return workspace_catalog(require_run(run_id, request))
 
     @app.post("/broker/{run_id}/tools/call")

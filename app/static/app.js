@@ -364,27 +364,47 @@ async function renderHome(initialConfig,recent=false){
   bindComposer($('#prompt'),$('#task-form'));
   document.querySelectorAll('[data-prompt]').forEach(b=>b.onclick=()=>{$('#prompt').value=b.dataset.prompt;saveDraft();autoSize($('#prompt'));$('#prompt').focus();});
 }
+function renderSessionSubmission(body, message='Creating session…', failed=false) {
+  MoyaiUI.render($('#content'), `<div class="chat-layout"><section class="chat-panel"><div class="conversation" role="log" aria-label="Conversation"><article class="chat-message user"><div class="message-content" style="white-space:pre-wrap">${esc(body.prompt)}</div>${body.attachment_ids.length?`<small>${body.attachment_ids.length} attachment${body.attachment_ids.length===1?'':'s'}</small>`:''}</article></div><div class="chat-bottom"><p role="${failed?'alert':'status'}">${esc(message)}</p>${failed?'<button id="retry-create" class="primary">Retry sending</button><button id="edit-create" class="quiet">Edit message</button>':''}</div></section></div>`);
+}
 async function submitTask(e){
   e.preventDefault();if(state.sending.has('new'))return;
   const files=state.attachments;let attachment_ids;
   try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
-  const form=$('#task-form'),input=$('#prompt'),submittedPrompt=input.value;
-  const button=form.querySelector('button[type="submit"]');button.disabled=true;state.sending.add('new');files.lock(true);
-  const body={prompt:$('#prompt').value.trim()||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':''),repo_url:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value||undefined,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
+  const input=$('#prompt'),submittedPrompt=input.value;
+  const body={prompt:input.value.trim()||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':''),repo_url:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value||undefined,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
   const signature=JSON.stringify(body);if(state.pendingNew?.signature!==signature)state.pendingNew={signature,client_id:crypto.randomUUID()};
-  try{
-    const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:state.pendingNew.client_id})});
-    // Clear the submitted DOM value too: removing a focused textarea fires a
-    // change event, which would otherwise save the old prompt back into newDraft.
-    // Keep text edited while the request was in flight, and keep drafts on failure.
-    if(input.value===submittedPrompt){input.value='';autoSize(input);}
-    if(state.newDraft.prompt===submittedPrompt)state.newDraft={};
-    files.clear(attachment_ids);state.pendingNew=null;
-    await refreshRuns();await openRun(run.id);
-  }
-  catch(error){toast(error.message);}finally{state.sending.delete('new');files.lock(false);if(button.isConnected)button.disabled=false;}
+  const pending=state.pendingNew;
+  // Keep the draft and upload identities until acknowledgement, including a
+  // lost response. A retry must use the same idempotency key.
+  state.newDraft={...state.newDraft,prompt:submittedPrompt};
+  state.sending.add('new');files.lock(true);
+  stopStream();const version=++state.pageVersion;
+  setView('chat',sessionTitle(body));
+  const current=()=>state.pageVersion===version;
+  const send=async()=>{
+    if(!current())return;
+    state.sending.add('new');files.lock(true);
+    renderSessionSubmission(body);
+    try{
+      const run=await api('/api/runs',{method:'POST',body:JSON.stringify({...body,client_id:pending.client_id})});
+      if(input.value===submittedPrompt)input.value='';
+      if(state.newDraft.prompt===submittedPrompt)state.newDraft={};
+      files.clear(attachment_ids);if(state.pendingNew===pending)state.pendingNew=null;
+      // Sidebar availability must never gate an accepted conversation. Leaving
+      // this page while creation is pending must not navigate the user back.
+      refreshRuns().catch(showError);
+      if(current())await openRun(run.id,'#run='+run.id,body);
+    }catch(error){
+      if(!current()){toast(error.message);return;}
+      renderSessionSubmission(body,error.message,true);
+      $('#retry-create').onclick=()=>send();
+      $('#edit-create').onclick=()=>navigate('tasks').catch(showError);
+    }finally{state.sending.delete('new');files.lock(false);}
+  };
+  await send();
 }
-async function openRun(id,hash='#run='+id){
+async function openRun(id,hash='#run='+id,submission=null){
   const link=parseSessionLink(hash);
   const sessionEdits=state.sessionEdits||0;
   const titleEdits=state.titleEdits||0;
@@ -401,7 +421,8 @@ async function openRun(id,hash='#run='+id){
     if(cachedTitle)cached.display_title=cachedTitle.display_title;
     state.activeParentId=cached.parent_run_id?(cached.workflow_root_id||cached.parent_run_id):'';
     state.view='tasks';renderChat(cached);
-  }else MoyaiUI.render($('#content'), '<div class="chat-loading" role="status">Loading conversation…</div>');
+  }else if(submission)renderSessionSubmission(submission,'Opening conversation…');
+  else MoyaiUI.render($('#content'), '<div class="chat-loading" role="status">Loading conversation…</div>');
   const refreshVersion=state.chatRefresh=(state.chatRefresh||0)+1;
   let run;
   try{[run]=await Promise.all([api(path,{recent:!preview}),state.configReady]);}catch(error){
