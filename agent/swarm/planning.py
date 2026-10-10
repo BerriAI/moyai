@@ -101,6 +101,29 @@ def plan_team(task: str, *, runtimes: Sequence[Runtime],
         raise ValueError('At least one runtime is required to plan a team.')
     if not roles:
         raise ValueError('At least one role is required to plan a team.')
+    return tuple(PlannedTask(
+        label=role.label, prompt=worker_prompt(task, role=role, team_size=len(roles)),
+        harness=runtime.harness, model=runtime.model,
+    ) for role, runtime in zip(roles, _runtime_roster(runtimes, len(roles), rng), strict=True))
+
+
+def plan_swarm(task: str, *, runtimes: Sequence[Runtime], count: int = INITIAL_TEAM_SIZE,
+               rng: random.Random | random.SystemRandom | None = None) -> tuple[PlannedTask, ...]:
+    """Pick runtimes while leaving leadership and work allocation to members."""
+    from .mission import shared_worker_prompt
+
+    _require_text(task, 'Task')
+    if type(count) is not int or not 1 <= count <= 100:
+        raise ValueError('A swarm must have between 1 and 100 members.')
+    return tuple(PlannedTask(
+        label=f'Agent {index + 1}', prompt=shared_worker_prompt(task, f'Agent {index + 1}'),
+        harness=runtime.harness, model=runtime.model,
+    ) for index, runtime in enumerate(_runtime_roster(runtimes, count, rng)))
+
+
+def _runtime_roster(runtimes, count, rng):
+    if not runtimes:
+        raise ValueError('At least one runtime is required to plan a team.')
     by_harness: dict[str, list[str]] = {}
     for runtime in runtimes:
         models = by_harness.setdefault(runtime.harness, [])
@@ -109,16 +132,11 @@ def plan_team(task: str, *, runtimes: Sequence[Runtime],
     source = random.SystemRandom() if rng is None else rng
     harnesses = list(by_harness)
     source.shuffle(harnesses)
-    assignments = []
-    for index, role in enumerate(roles):
+    roster = []
+    for index in range(count):
         harness = harnesses[index % len(harnesses)]
-        assignments.append(PlannedTask(
-            label=role.label,
-            prompt=worker_prompt(task, role=role, team_size=len(roles)),
-            harness=harness,
-            model=source.choice(by_harness[harness]),
-        ))
-    return tuple(assignments)
+        roster.append(Runtime(harness=harness, model=source.choice(by_harness[harness])))
+    return roster
 
 
 def continuation_message(number, original, latest_direction=None):
@@ -170,9 +188,11 @@ def coordinator_prompt(*, round_number: int, ends_at: str, max_workers: int,
     return (f'\n\nSWARM MODE — HOST POLICY (round {round_number}/{MAX_ROUNDS}; '
             f'absolute deadline {ends_at}):\n'
             'Work collaboratively on the user’s mission. For new swarms the host already queued '
-            f'an initial team of {INITIAL_TEAM_SIZE} real workers. Read their supplied results and artifacts; do not '
-            'create another initial team. Use agents_fanout only for necessary follow-up work '
-            'with genuinely independent, complementary assignments, then gather actual results and '
+            f'an initial team of {INITIAL_TEAM_SIZE} real workers. Members choose a lead by self-nomination '
+            'and organize assignments and findings on their durable shared board. Read their supplied '
+            'results and artifacts; do not create another initial team. Use swarm_start with one shared '
+            'task and a roster only for necessary follow-up collaboration; use agents_fanout when '
+            'specific independent assignments are already known. Gather actual results and '
             'synthesize a useful update. Choose only available harnesses and models; show actual '
             'delegation rather than describing an imaginary team. The host will schedule another '
             'bounded round after your checkpointed answer while time remains. Do not start /goal, '
@@ -184,5 +204,5 @@ def coordinator_prompt(*, round_number: int, ends_at: str, max_workers: int,
             f'Configured maximum workers per group: {max_workers}. '
             'Keep follow-up work bounded and avoid duplicate assignments. '
             'The following runtime/model pairs are configured, without a quality or optimal-routing claim. '
-            'Use their exact IDs in agents_fanout tasks when a different runtime is helpful; '
+            'Use their exact IDs in swarm_start agents when a different runtime is helpful; '
             'omit selectors to inherit the coordinator’s runtime.\n' + json.dumps(catalog))

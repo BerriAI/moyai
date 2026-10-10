@@ -42,17 +42,21 @@ async def test_sdk_dispatch_survives_host_replacement_and_returns_saved_handoff(
     manager, cloud, owner, coordinator = await start_owner(durable)
     team = coordinator.swarm(owner)
     assert isinstance(team, AgentSwarm)
-    agents = [Agent(name='Research', task='Find the evidence.', harness=Harness.CODEX, model='sol'),
-              Agent(name='Review', task='Challenge the assumptions.', harness=Harness.CLAUDE_AGENT_SDK, model='opus')]
-    run = await team.start(request_key='sdk-review', agents=agents)
-    again = await team.start(request_key='sdk-review', agents=agents)
+    agents = [Agent(name='Alex', harness=Harness.CODEX, model='sol'),
+              Agent(name='Sam', harness=Harness.CLAUDE_AGENT_SDK, model='opus')]
+    task = 'Review the proposal together and choose who will lead.'
+    run = await team.start(task=task, agents=agents)
+    again = await team.start(task=task, agents=agents)
     assert run.id == again.id and run.checkpoint_required
     assert len(run.children) == 2 and cloud.snapshots == 1
     pending = await run.result()
     assert not pending.settled and pending.total == 2
     assert {child.harness for child in pending.children} == {'codex', 'claude-agent-sdk'}
-    with pytest.raises(ValueError, match='different work'):
-        await team.start(request_key='sdk-review', tasks=[Task(label='Changed', prompt='Different task.')])
+    assert manager.store.rows('SELECT task,leader_id FROM swarm_teams WHERE group_id=?', (run.id,)) == [
+        {'task': task, 'leader_id': ''}]
+    assert all(manager.store.run(child.id)['prompt'].endswith(task) for child in run.children)
+    with pytest.raises(ValueError, match='existing agent group'):
+        await team.start(task='Different shared goal.', agents=agents)
 
     # Even a host-side Python caller without the broker relay marker is caught
     # by the durable owner's pending-group guard at its natural completion.
@@ -73,15 +77,13 @@ async def test_sdk_dispatch_survives_host_replacement_and_returns_saved_handoff(
 
 async def test_sdk_is_scoped_to_its_owner_and_children_can_own_their_own_team(durable):
     manager, _, owner, coordinator = await start_owner(durable)
-    parent_team = await coordinator.swarm(owner).start(request_key='parent-team', tasks=[
-        Task(label='Lead', prompt='Review the assigned work.')])
+    parent_team = await coordinator.swarm(owner).start(task='Review the assigned work.', agents=[Agent()])
     child = coordinator.children(parent_team.id)[0]['id']
     await drive(manager, child, phase='monitor')
     child_swarm = coordinator.swarm(child)
     with pytest.raises(ValueError, match='does not belong'):
         await child_swarm.group(parent_team.id).result()
-    nested = await child_swarm.start(request_key='child-team', tasks=[
-        Task(label='Verifier', prompt='Verify the assigned evidence.')])
+    nested = await child_swarm.start(task='Verify the assigned evidence.', agents=[Agent()])
     assert coordinator.group(child, nested.id)['parent_id'] == child
     grandchild = coordinator.children(nested.id)[0]['id']
     assert manager.store.run(grandchild)['parent_run_id'] == child
@@ -96,15 +98,13 @@ async def test_sdk_cannot_extend_owner_deadline_or_launch_after_it(durable):
     past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     manager.store.execute('UPDATE swarm_missions SET ends_at=? WHERE run_id=?', (past, owner))
     with pytest.raises(ValueError, match='time budget has ended'):
-        await coordinator.swarm(owner).start(request_key='too-late', tasks=[
-            Task(label='Late', prompt='Do not start this work.')])
+        await coordinator.swarm(owner).start(task='Do not start this work.', agents=[Agent()])
     assert not manager.store.rows('SELECT id FROM agent_groups WHERE parent_id=?', (owner,))
 
 
 async def test_sdk_cancel_preserves_worker_records_and_uses_normal_cascade(durable):
     manager, _, owner, coordinator = await start_owner(durable)
-    run = await coordinator.swarm(owner).start(request_key='cancel-team', tasks=[
-        Task(label='Review', prompt='Review the proposal.')])
+    run = await coordinator.swarm(owner).start(task='Review the proposal.', agents=[Agent()])
     result = await run.cancel()
     assert result.status == 'cancelled'
     assert len(coordinator.children(run.id)) == 1

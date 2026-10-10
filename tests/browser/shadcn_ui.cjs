@@ -629,7 +629,7 @@ test('model and session scope pickers retain choices through real controller upd
     const response = await route.fetch();
     const data = await response.json();
     data.models.push({ id: 'synthetic-model', name: 'Synthetic model', default_harness: 'codex' });
-    data.harnesses.push({ id: 'codex', name: 'Codex' });
+    data.harnesses = [{ id: 'hermes', name: 'Hermes' }, { id: 'codex', name: 'Codex' }];
     await route.fulfill({ response, json: data });
   });
   await page.reload();

@@ -1,13 +1,7 @@
-"""Typed agent definitions for the public swarm interface.
-
-Harness values identify built-in runtimes; the host still decides which runtime
-and model are available. These definitions grant no permissions or time budget.
-"""
+"""Typed runtime preferences for agents joining a shared mission."""
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
-
-from .contracts import Assignment
 
 
 class Harness(StrEnum):
@@ -23,20 +17,15 @@ class Harness(StrEnum):
 
 
 class Agent(BaseModel):
-    """A named worker and its assigned task, submitted by an owning agent.
+    """A participant, without a predefined job or leadership role.
 
-    Names and tasks are free-form text. Select a built-in harness explicitly;
-    omitting the model asks the host to inherit the owner's configured model.
+    An omitted name receives a unique display name when the swarm starts.
+    Omitting a harness or model asks the host to inherit the owner's runtime.
+    These preferences grant no permissions or additional time budget.
     """
 
     model_config = ConfigDict(extra='forbid', frozen=True, str_strip_whitespace=True)
 
-    name: str = Field(min_length=1, max_length=100)
-    task: str = Field(min_length=3, max_length=12000)
-    harness: Harness
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    harness: Harness | None = None
     model: str | None = Field(default=None, min_length=1, max_length=120)
-
-    def to_assignment(self) -> Assignment:
-        """Translate to the existing host contract without changing its wire shape."""
-        return Assignment(label=self.name, prompt=self.task,
-                          harness=self.harness.value, model=self.model)

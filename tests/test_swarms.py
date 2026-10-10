@@ -86,6 +86,10 @@ def test_initial_team_commits_ten_native_workers_with_pinned_diverse_runtimes(du
         assert execution_policy(manager.store, child['id'])['ends_at'] == run['swarm']['ends_at']
     assert not cloud.machines and not cloud.launches
     group = manager.swarms.initial_group(run['id'])
+    team = manager.store.rows('SELECT * FROM swarm_teams WHERE group_id=?', (group['id'],))[0]
+    assert team['task'] == run['prompt'] and team['leader_id'] == ''
+    assert {child['agent_label'] for child in children} == {f'Agent {i}' for i in range(1, 11)}
+    assert all('swarm_claim_lead' in child['prompt'] and 'swarm_publish' in child['prompt'] for child in children)
     assert manager.coordinator.results(run['id'], group['id'])['total'] == 10
     pinned = {child['id']: (child['harness'], child['model']) for child in children}
     again = bootstrap(manager)
@@ -105,7 +109,7 @@ def test_initial_team_failure_rolls_back_mission_children_and_dispatch(durable, 
     manager, _, _ = durable
     attach(manager)
     before = {table: len(manager.store.rows('SELECT * FROM ' + table))
-              for table in ('runs', 'messages', 'agent_groups', 'swarm_missions', 'durable_sessions')}
+              for table in ('runs', 'messages', 'agent_groups', 'swarm_missions', 'swarm_teams', 'durable_sessions')}
     if failure == 'group_limit':
         manager.settings.max_parallel_agents = 3
     elif failure == 'queue_limit':

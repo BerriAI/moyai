@@ -14,8 +14,9 @@ from .db import database, now
 # Agent behavior is shared with SDK consumers; this module owns persistence.
 from agent.swarm.planning import (
     INITIAL_TEAM_SIZE, MAX_ROUNDS, ROUND_DELAY_SECONDS,
-    Runtime, continuation_message, coordinator_prompt, plan_team,
+    Runtime, continuation_message, coordinator_prompt, plan_swarm,
 )
+from .swarm_collaboration import create_team_in
 
 INITIAL_TEAM_KEY = 'host-swarm-initial-team'
 
@@ -95,7 +96,7 @@ class SwarmMissions:
     def initial_plan(self, task, model):
         if self.manager.settings.max_parallel_agents < INITIAL_TEAM_SIZE:
             raise ValueError('Swarm mode needs a worker-group limit of at least 10. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
-        return plan_team(task, runtimes=self.runtime_catalog(model, for_dispatch=True))
+        return plan_swarm(task, runtimes=self.runtime_catalog(model, for_dispatch=True))
 
     def bootstrap_in(self, conn, run_id, message_id, stamp):
         """Commit real child sessions and their dispatch wakes with the mission.
@@ -130,6 +131,7 @@ class SwarmMissions:
             VALUES(?,?,?,?,?,'running',?,?)''',
             (group_id, run_id, message_id, INITIAL_TEAM_KEY,
              json.dumps({'host_bootstrap': True, 'source_message_id': message_id}), stamp, json.dumps(runtimes)))
+        create_team_in(conn, group_id, run['prompt'])
         for task, runtime in zip(plan, runtimes, strict=True):
             label, prompt = task.label, task.prompt
             child_id = runtime['id']
@@ -160,6 +162,8 @@ class SwarmMissions:
         return group_id
 
     def initial_group(self, run_id, message_id=None):
+        if not self.get(run_id):
+            return None
         rows = self.store.rows('SELECT id,message_id,status FROM agent_groups WHERE parent_id=? AND request_key=?',
                                (run_id, INITIAL_TEAM_KEY))
         if not rows or (message_id is not None and rows[0]['message_id'] != message_id):

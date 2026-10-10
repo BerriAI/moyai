@@ -1,6 +1,6 @@
 # Swarm mode
 
-Choose **Swarm**, describe a task, and set a maximum duration. Moyai immediately queues 10 real child agents with complementary perspectives, then the coordinator gathers their outputs into a useful result. Harnesses are assigned in a randomized, balanced rotation across the configured runtime/model pairs. Each worker receives the complete original task, initial uploads, enabled apps, and the existing permission rules. The activity view shows actual launches, handoffs, tools, and messages; queued workers are not presented as running before they acquire capacity.
+Choose **Swarm**, describe a task, and set a maximum duration. Moyai immediately queues 10 real child agents with the same shared goal. Members volunteer to lead, divide the work through a durable board, and publish findings; the coordinator gathers their saved outputs into a useful result. Harnesses are assigned in a randomized, balanced rotation across the configured runtime/model pairs. Each worker receives the complete original task, initial uploads, enabled apps, and the existing permission rules. The activity view shows actual launches, handoffs, tools, and messages; queued workers are not presented as running before they acquire capacity.
 
 Swarm mode requires the existing cloud sandbox setup and Temporal execution. It uses Moyai's durable sessions, saved conversation/workspace checkpoints, delegation tools, and permission boundaries. It is not an independent background loop or a Hermes `/goal` command.
 
@@ -18,7 +18,7 @@ The duration is a wall-clock deadline from creation, including queuing, sandbox 
 
 The API accepts `swarm: {"budget_seconds": 300}` on `POST /api/runs` (60–86,400 seconds). Run details include `swarm.status`, `budget_seconds`, `ends_at`, `round`, and `reason`. Controls are `POST /api/runs/{id}/swarm/pause`, `POST /api/runs/{id}/swarm/resume`, and the existing `POST /api/runs/{id}/cancel`. They require normal authentication and mutation protection. Creation, mission intent, the initial message, all 10 workers, their group, and all durable dispatch wakes commit atomically; continuation messages, round advancement, and their dispatch wake do likewise.
 
-Schema revision 5 adds `swarm_missions` and pinned per-worker runtime assignments. For deployments using explicit PostgreSQL migrations, stop runtime owners and run the existing offline migration before starting this version. This feature does not deploy or migrate an existing production installation automatically.
+Schema revision 5 adds `swarm_missions` and pinned per-worker runtime assignments; revision 6 adds the durable shared board and peer assignments. For deployments using explicit PostgreSQL migrations, stop runtime owners and run the existing offline migration before starting this version. This feature does not deploy or migrate an existing production installation automatically.
 
 ## Interface preview
 
@@ -33,3 +33,7 @@ These are actual browser captures of the production frontend against synthetic l
 [Mobile view at 320px](assets/swarm-mode-mobile.jpg). The interface was also checked at 768px, including draft preservation between Chat and Space, child conversations and model identity, duration selection, Pause/Resume/Stop, keyboard focus, and blocked/expired message controls. Reduced-motion behavior is covered by the canvas implementation; a screen-reader audit was not performed.
 
 To inspect the same sample locally, run `npm run preview -- --port 8840` and open `http://127.0.0.1:8840/?fixture=swarm#run=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`. Alternate fixtures are `swarm-paused`, `swarm-expired`, and `swarm-error`.
+
+## Shared-goal API
+
+`await agentswarm.start(task="Explore this idea", agents=[Agent(), Agent()])` is the primary internal API. Participants optionally select a typed `Harness`, name and model. Callers do not manage request keys or per-agent jobs. See [AgentSwarm](../agent/swarm/README.md) for the owner-bound interface, leadership semantics, durable results, and the separate advanced explicit-delegation API.

@@ -11,6 +11,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .contracts import Assignment, Fanout, Group, Results, Retry
+from .mission import SharedMission, internal_request_key
 from .planning import PlannedTask
 from .types import Agent, Harness
 
@@ -143,10 +144,15 @@ class SwarmRun:
         value = await _call(self._backend, 'agents_cancel', Group(group_id=self.id))
         return self._result(value)
 
-    async def retry(self, *, request_key: str, child_ids: Sequence[str], instructions: str) -> 'SwarmRun':
+    async def retry(self, *, child_ids: Sequence[str], instructions: str,
+                    request_key: str | None = None) -> 'SwarmRun':
         """Request explicit recovery of failed workers; never replay work automatically."""
-        request = Retry(group_id=self.id, request_key=request_key, child_ids=list(child_ids),
+        request = Retry(group_id=self.id, request_key=request_key if request_key is not None else 'auto', child_ids=list(child_ids),
                         instructions=instructions)
+        if request_key is None:
+            request.request_key = internal_request_key({
+                'operation': 'retry', **request.model_dump(exclude={'request_key'}),
+            })
         value = await _call(self._backend, 'agents_retry', request)
         return _handle(self._backend, value, expected_id=self.id)
 
@@ -168,23 +174,35 @@ class AgentSwarm:
     def __init__(self, backend: SwarmBackend):
         self._backend = backend
 
-    async def start(self, *, request_key: str, agents: Sequence[Agent] = (),
-                    tasks: Sequence[Assignment | PlannedTask] = (),
-                    instructions: str = '', items: Sequence[str] = (), workers: int = 10,
-                    harness: Harness | None = None, model: str | None = None) -> SwarmRun:
-        """Submit typed agents or partition items, returning a durable receipt.
+    async def start(self, *, task: str, agents: Sequence[Agent]) -> SwarmRun:
+        """Start one shared goal; members choose a leader and divide the work.
 
-        Reuse request_key only for retries of identical input. The host rejects
-        conflicting reuse and pins the selected workers across recovery. The
-        legacy tasks argument also accepts host-generated plans.
+        The host persists the roster and shared board, deduplicates equal starts
+        within this owner's active turn, and checkpoints the owner while members
+        collaborate. Runtime defaults, permissions and deadlines remain host-owned.
         """
-        if agents and tasks:
-            raise ValueError('Supply agents or tasks, not both.')
-        assignments = ([Agent.model_validate(agent).to_assignment() for agent in agents] if agents else
-                       [asdict(task) if isinstance(task, PlannedTask) else task for task in tasks])
+        request = SharedMission(task=task, agents=list(agents))
+        value = await _call(self._backend, 'swarm_start', request)
+        return _handle(self._backend, value)
+
+    async def delegate(self, *, tasks: Sequence[Assignment | PlannedTask] = (),
+                       instructions: str = '', items: Sequence[str] = (), workers: int = 10,
+                       harness: Harness | None = None, model: str | None = None,
+                       request_key: str | None = None) -> SwarmRun:
+        """Advanced explicit assignments or item partitioning without a shared board.
+
+        Prefer start(task=..., agents=...) for a self-organizing swarm. Equal
+        validated delegation input receives a stable internal receipt key; an
+        explicit request_key remains available for legacy integrations.
+        """
+        assignments = [asdict(task) if isinstance(task, PlannedTask) else task for task in tasks]
         selected_harness = Harness(harness).value if harness is not None else None
-        request = Fanout(request_key=request_key, instructions=instructions, items=list(items),
+        request = Fanout(request_key=request_key if request_key is not None else 'auto', instructions=instructions, items=list(items),
                          workers=workers, tasks=assignments, harness=selected_harness, model=model)
+        if request_key is None:
+            request.request_key = internal_request_key({
+                'operation': 'delegate', **request.model_dump(exclude={'request_key'}),
+            })
         value = await _call(self._backend, 'agents_fanout', request)
         return _handle(self._backend, value)
 

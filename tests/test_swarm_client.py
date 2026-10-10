@@ -43,51 +43,53 @@ def result(**updates):
                           'future_artifact_metadata': {'version': 'v1'}}], **updates}
 
 
-async def test_typed_agents_keep_the_existing_request_payload_and_alias():
+async def test_shared_goal_and_typed_agents_start_without_caller_retry_keys():
     assert Swarm is AgentSwarm
     backend = Backend(receipt())
-    agents = [Agent(name='Researcher', task='Find supporting evidence.', harness=Harness.CODEX),
-              Agent(name='Critic', task='Challenge the assumptions.', harness=Harness.CLAUDE_AGENT_SDK,
-                    model='anthropic/example')]
-    group = await AgentSwarm(backend).start(request_key='typed-team', agents=agents)
+    agents = [Agent(), Agent(name='Athena', harness=Harness.CLAUDE_AGENT_SDK,
+                             model='anthropic/example')]
+    group = await AgentSwarm(backend).start(task='Find promising product ideas.', agents=agents)
     assert group.checkpoint_required and len(backend.calls) == 1
-    name, payload = backend.calls[0]
-    assert name == 'agents_fanout'
-    assert payload == Fanout(request_key='typed-team', workers=10, tasks=[
-        Assignment(label='Researcher', prompt='Find supporting evidence.', harness='codex'),
-        Assignment(label='Critic', prompt='Challenge the assumptions.', harness='claude-agent-sdk',
-                   model='anthropic/example'),
-    ]).model_dump()
-    assert type(payload['tasks'][0]['harness']) is str
+    assert backend.calls == [('swarm_start', {
+        'task': 'Find promising product ideas.',
+        'agents': [
+            {'name': None, 'harness': None, 'model': None},
+            {'name': 'Athena', 'harness': Harness.CLAUDE_AGENT_SDK, 'model': 'anthropic/example'},
+        ],
+    })]
+    assert group.id == GROUP and group.children[0].id == CHILD
+    assert agents[0].name is None  # Host-assigned names never mutate caller input.
 
 
-async def test_typed_roster_validation_precedes_backend_io():
+async def test_shared_roster_and_goal_validation_precede_backend_io():
     backend = Backend()
     swarm = AgentSwarm(backend)
-    agent = Agent(name='Reviewer', task='Review the task.', harness=Harness.CODEX)
-    invalid = [
-        {'agents': [agent], 'tasks': [Task(label='Legacy', prompt='Review the task.')]},
-        {'agents': [agent], 'items': ['case'], 'instructions': 'Review this case.'},
-        {'agents': [{'name': 'Reviewer', 'task': 'Review the task.', 'harness': 'codxe'}]},
-        {'items': ['case'], 'instructions': 'Review this case.', 'harness': 'codxe'},
-    ]
-    for arguments in invalid:
-        with pytest.raises(ValueError):
-            await swarm.start(request_key='invalid-team', **arguments)
+    for arguments in [
+        {'task': 'ab', 'agents': [Agent()]},
+        {'task': 'Review the case.', 'agents': []},
+        {'task': 'Review the case.', 'agents': [Agent()] * 101},
+        {'task': 'Review the case.', 'agents': [{'harness': 'codxe'}]},
+        {'task': 'Review the case.', 'agents': [{'task': 'Do my predefined task.'}]},
+        {'task': 'Review the case.', 'agents': [Agent(name='Athena'), Agent(name='athena')]},
+    ]:
+        with pytest.raises(ValidationError):
+            await swarm.start(**arguments)
+    with pytest.raises(TypeError):
+        await swarm.start(task='Review the case.', agents=[Agent()], request_key='not-public')
     assert not backend.calls
 
 
 async def test_partition_harness_enum_serializes_to_stable_wire_id():
     backend = Backend(receipt())
-    await AgentSwarm(backend).start(request_key='cases', items=['one', 'two'],
+    await AgentSwarm(backend).delegate(request_key='cases', items=['one', 'two'],
                                     instructions='Review every case.', harness=Harness.OPENCODE)
     assert backend.calls[0][1]['harness'] == 'opencode'
     assert type(backend.calls[0][1]['harness']) is str
 
 
-async def test_start_validates_contract_and_returns_checkpoint_receipt_without_waiting():
+async def test_delegate_preserves_explicit_tasks_and_checkpoint_receipts():
     backend = Backend(receipt())
-    group = await AgentSwarm(backend).start(request_key='research-1', instructions='Use evidence.', tasks=[
+    group = await AgentSwarm(backend).delegate(request_key='research-1', instructions='Use evidence.', tasks=[
         Task(label='Research', prompt='Investigate the request.', harness='codex', model='openai/example'),
     ])
     assert group.id == GROUP and group.checkpoint_required
@@ -105,7 +107,7 @@ async def test_start_validates_contract_and_returns_checkpoint_receipt_without_w
 async def test_partition_request_and_invalid_input_never_reach_backend():
     backend = Backend(receipt())
     swarm = AgentSwarm(backend)
-    await swarm.start(request_key='batch-1', items=['a', 'b', 'c'], instructions='Review each item.',
+    await swarm.delegate(request_key='batch-1', items=['a', 'b', 'c'], instructions='Review each item.',
                       workers=2, harness='hermes')
     payload = backend.calls[0][1]
     assert payload['workers'] == 2 and payload['items'] == ['a', 'b', 'c']
@@ -116,7 +118,7 @@ async def test_partition_request_and_invalid_input_never_reach_backend():
         {'request_key': 'too-many', 'items': ['a'], 'instructions': 'Review.', 'workers': 101},
     ]:
         with pytest.raises(ValidationError):
-            await swarm.start(**arguments)
+            await swarm.delegate(**arguments)
     assert len(backend.calls) == 1
 
 
@@ -126,7 +128,7 @@ async def test_planner_output_submits_through_shared_contract_with_exact_allowed
                         roles=[Role('Research', 'Find evidence.'), Role('Critic', 'Challenge assumptions.')])
     assert all(isinstance(task, PlannedTask) for task in planned)
     backend = Backend(receipt())
-    group = await AgentSwarm(backend).start(request_key='planned-team', tasks=planned)
+    group = await AgentSwarm(backend).delegate(request_key='planned-team', tasks=planned)
     assert group.checkpoint_required
     name, payload = backend.calls[0]
     validated = Fanout.model_validate(payload)
@@ -142,7 +144,7 @@ async def test_planned_tasks_retain_wire_input_caps_before_backend_submission():
     backend = Backend()
     planned = plan_team('x' * 12000, runtimes=[Runtime('codex', 'openai/example')])
     with pytest.raises(ValidationError):
-        await AgentSwarm(backend).start(request_key='oversized-plan', tasks=planned)
+        await AgentSwarm(backend).delegate(request_key='oversized-plan', tasks=planned)
     assert not backend.calls
 
 
@@ -210,7 +212,7 @@ async def test_owner_authorization_and_transport_errors_propagate_without_replay
     timeout = TimeoutError('Delegation outcome is unknown.')
     backend = Backend(timeout)
     with pytest.raises(TimeoutError) as captured:
-        await AgentSwarm(backend).start(request_key='stable-key', tasks=[Task(label='Review', prompt='Review the task.')])
+        await AgentSwarm(backend).start(task='Review the task.', agents=[Agent()])
     assert captured.value is timeout and len(backend.calls) == 1
 
 
@@ -218,7 +220,7 @@ async def test_invalid_or_mismatched_backend_receipts_fail_instead_of_claiming_s
     for value in [{}, {'error': 'denied'}, {'isError': True}, [],
                   receipt(moyai_wait_group='c' * 32), receipt(children=[{'id': 'invalid', 'label': 'bad'}])]:
         with pytest.raises((ValueError, RuntimeError)):
-            await AgentSwarm(Backend(value)).start(request_key='start-1', tasks=[Task(label='Review', prompt='Review task.')])
+            await AgentSwarm(Backend(value)).start(task='Review the task.', agents=[Agent()])
     for operation, value in [('result', result(group_id='c' * 32)), ('cancel', result(group_id='c' * 32))]:
         with pytest.raises(ValueError, match='different group'):
             await getattr(AgentSwarm(Backend(value)).group(GROUP), operation)()
@@ -244,8 +246,24 @@ class BlockHost(importlib.abc.MetaPathFinder):
             raise AssertionError('Unexpected host dependency: ' + fullname)
 sys.meta_path.insert(0, BlockHost())
 from agent.swarm import Agent, AgentSwarm, Harness, SwarmBackend, SwarmRun
-print(Agent(name='Research', task='Investigate this task.', harness=Harness.CODEX).model_dump_json())
+print(Agent(name='Research', harness=Harness.CODEX).model_dump_json())
 '''
     completed = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],
                                capture_output=True, text=True, check=True)
     assert json.loads(completed.stdout)['name'] == 'Research'
+
+
+async def test_advanced_delegation_and_retry_generate_stable_internal_keys():
+    backend = Backend(receipt(), receipt(), receipt(), receipt(), receipt())
+    swarm = AgentSwarm(backend)
+    await swarm.delegate(tasks=[Task(label='Evidence', prompt='Find the evidence.')])
+    await swarm.delegate(tasks=[Task(label='Evidence', prompt='  Find the evidence.  ')])
+    await swarm.delegate(tasks=[Task(label='Evidence', prompt='Find different evidence.')])
+    first, repeated, changed = [arguments['request_key'] for _, arguments in backend.calls]
+    assert first == repeated and first != changed
+    assert len(first) <= 80
+    group = swarm.group(GROUP)
+    await group.retry(child_ids=[CHILD], instructions='Verify before retrying.')
+    await group.retry(child_ids=[CHILD], instructions='  Verify before retrying.  ')
+    assert backend.calls[-1] == backend.calls[-2]
+    assert backend.calls[-1][1]['request_key'] != first

@@ -279,6 +279,31 @@ def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(sp
         api.state.store.close()
 
 
+def test_revision_five_adds_shared_boards_without_changing_saved_work(split_settings):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        run = api.state.store.create_run('Existing revision-five session', '', 'modal', [])
+        saved = api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],))
+    finally:
+        api.state.store.close()
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE swarm_posts')
+        conn.execute('DROP TABLE swarm_teams')
+        conn.execute('UPDATE schema_state SET revision=5')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+    ready(split_settings)
+    assert execute(settings, 'SELECT * FROM swarm_teams') == []
+    assert execute(settings, 'SELECT * FROM swarm_posts') == []
+    api = main.create_app(settings)
+    try:
+        assert api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],)) == saved
+    finally:
+        api.state.store.close()
+
+
 def test_schema_initializers_have_a_versioned_manifest():
     # A schema edit without a new revision must fail CI, including optional
     # components and backend-specific functions/triggers used by the migrator.

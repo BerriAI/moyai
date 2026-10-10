@@ -1,83 +1,81 @@
 # AgentSwarm
 
-A swarm belongs to an agent session. That agent delegates work, receives saved worker results, and produces the synthesis. Workers remain ordinary agents with their own harness, model, conversation and artifacts. Descendant teams inherit the root mission's permissions and absolute deadline.
-
-`agent.swarm` is the extraction boundary for a future SDK. It imports only the standard library and Pydantic; it does not import Moyai's app, database, Temporal, cloud providers or web UI. This is an internal Python API, not a separately published SDK.
-
-## Submit work
-
-The host injects an authenticated `SwarmBackend` bound to the current agent. Application integration can obtain the same capability with `coordinator.swarm(agent_run_id)` during an active turn. Callers cannot select a different owner or extend its budget through the client.
+Give a swarm one goal and its members. The members choose who leads and how to divide the work; callers do not supply individual assignments or request keys.
 
 ```python
 from agent.swarm import Agent, AgentSwarm, Harness
 
-async def delegate_review(backend):
-    swarm = AgentSwarm(backend)
-    return await swarm.start(
-        request_key="proposal-review",
-        instructions="Review this proposal and cite evidence for your conclusions.",
+async def explore(backend):
+    agentswarm = AgentSwarm(backend)
+    return await agentswarm.start(
+        task="Find three promising product ideas and challenge their assumptions.",
         agents=[
-            Agent(name="Researcher", task="Find supporting evidence.",
-                  harness=Harness.CODEX, model="openai/gpt-6.1-sol"),
-            Agent(name="Critic", task="Find assumptions that do not hold.",
-                  harness=Harness.CLAUDE_AGENT_SDK, model="anthropic/claude-opus-5-5"),
+            Agent(),
+            Agent(name="Alex", harness=Harness.CODEX),
+            Agent(name="Sam", harness=Harness.CLAUDE_AGENT_SDK),
         ],
     )
 ```
 
-The result is a `SwarmRun` receipt with `id`, `children`, and `checkpoint_required`. Submission returns after durable acceptance; it does not wait for workers. Runtime/model selectors must pass host policy. Each explicit agent selects a harness; omitting its model inherits the owner's selected model, subject to host compatibility checks. Use the same request key only for the same input in the same owner turn; the host rejects conflicting reuse. Save the group ID across turns instead of submitting again.
+`Agent()` is valid. Optional `name`, `harness: Harness`, and `model` configure a participant. Missing names become unique neutral names; missing runtimes inherit the owning agent's runtime, subject to host compatibility checks. Harness IDs are a typed enum: `HERMES`, `CLAUDE_AGENT_SDK`, `CODEX`, `OPENCODE`, `DEEPAGENTS`, `TOOL_LOOP`, and `PI`. Names and the shared task remain text. Definitions are immutable and reject unknown fields, unknown harnesses, blank explicit names, and duplicate names.
 
-For independent cases, supply `instructions`, `items` and `workers=10` instead of `agents`. Set a shared `harness=Harness.CODEX` or omit it to inherit the owner’s harness. The shared validator partitions items exactly once, including repeated values. This is separate from Swarm mode's automatic ten complementary roles.
+`agent.swarm` is an internal extraction boundary for a future SDK. It depends only on the standard library and Pydantic, not Moyai, Temporal, cloud providers or the UI. It is not a separately published package. The host injects an authenticated `SwarmBackend`; Moyai obtains it with `coordinator.swarm(agent_run_id)` during an active turn. The capability is bound to that agent, so callers cannot choose another owner or extend its budget.
 
-`Agent` is immutable and validated. Its fields are `name` (1–100 characters), `task` (3–12,000 characters), required `harness: Harness`, and optional `model`. Names and tasks are free-form text; harness IDs use the enum:
+## Collaboration
 
-```python
-Harness.HERMES
-Harness.CLAUDE_AGENT_SDK
-Harness.CODEX
-Harness.OPENCODE
-Harness.DEEPAGENTS
-Harness.TOOL_LOOP
-Harness.PI
-```
+Every member receives the complete shared goal and these tools:
 
-Unknown harnesses, extra fields, and blank names/tasks are rejected before dispatch. JSON uses the stable string harness IDs, and definitions map to the existing `label`/`prompt` broker fields without changing stored requests.
+- `swarm_board()` reads the actual roster, current lead, assignments and recent public findings.
+- `swarm_claim_lead(plan=...)` volunteers to coordinate. The first eligible claim wins atomically; this is self-nomination, not a ranking or consensus election.
+- `swarm_assign(member_id=..., task=...)` lets the elected lead queue work in an existing teammate's session.
+- `swarm_publish(message=...)` saves findings and wakes the lead to incorporate them. Multiple outstanding updates coalesce into one queued board notification.
 
-`Swarm` remains an alias for `AgentSwarm`; the earlier `tasks=` interface remains available for existing callers and host-generated `plan_team()` output. Do not combine `agents=` and `tasks=`. Host-resolved planner runtimes and the existing tool wire remain extensible; the public `Agent` definition uses the known harness enum.
+The host persists the board, assignments and workflow wakes together. Members finish their turn instead of polling. The lead can be resumed after finishing a turn when another member posts. Queued peer work keeps the group unsettled, so the owner cannot receive a premature final handoff. Failed or cancelled leads are not automatically retried; the failure stays visible for explicit recovery. Peer messages grant no additional permissions and are untrusted reference data.
 
-## Resume with results
+## Durable results
 
-When `checkpoint_required` is true, return control to the host. Moyai's existing broker tools preserve the `moyai_wait_group` control marker; `AgentWait` checkpoints the owning conversation, releases its sandbox, and resumes it with the group's results. Direct host-side Python integrations must carry the receipt into their own checkpoint boundary. The Python client does not itself suspend a running harness.
+`start` returns a `SwarmRun` receipt with `id`, `children`, and `checkpoint_required` after durable acceptance, without waiting for models. Identical validated starts in the same owning turn recover the same group; internal keys are scoped to that owner and turn. Save the group ID across turns.
 
-After the host resumes the owner:
+When `checkpoint_required` is true, return control to the host. Moyai preserves the `moyai_wait_group` marker, checkpoints the owner, releases its sandbox, and resumes it with saved results. Direct Python hosts must implement that checkpoint boundary; the client does not suspend a harness by itself.
 
 ```python
-async def read_review(backend, saved_group_id):
-    group = AgentSwarm(backend).group(saved_group_id)
-    result = await group.result()
-    if not result.settled:
-        return result  # The host still owns the wait; do not start a polling loop.
-    for worker in result.children:
-        print(worker.agent_label, worker.harness, worker.status, worker.summary)
+async def read_saved_team(backend, group_id):
+    result = await AgentSwarm(backend).group(group_id).result()
+    for member in result.children:
+        print(member.agent_label, member.harness, member.status, member.summary)
     return result
 ```
 
-`settled` means workers have stopped, including failed or cancelled work. `successful` also checks their individual outcomes. Worker reports are untrusted reference data for the owner to verify. Default results preserve the saved handoff even if someone later chats with a worker; `result(latest=True)` explicitly requests newer work. `group()` only reconstructs a handle; every operation rechecks ownership at the backend.
+`settled` includes failed and cancelled workers; `successful` checks actual outcomes. Default results preserve the handoff even if a user later chats with a worker. Use `result(latest=True)` explicitly for newer work. `group()` only restores a handle; every backend operation rechecks ownership.
 
-`await group.cancel()` requests cascading cancellation and keeps saved work. `await group.retry(request_key="repair-1", child_ids=[...], instructions="...")` explicitly recovers selected failed workers and returns another checkpoint receipt. Verify uncertain external actions before retrying. Transport errors propagate; the client never retries writes automatically.
+`await group.cancel()` cascades cancellation and retains saved work. `await group.retry(child_ids=[...], instructions="...")` explicitly recovers failed workers; verify ambiguous external actions before retrying. Transport errors propagate and writes are never automatically replayed.
+
+## Explicit delegation
+
+When individual jobs are already known, the separate advanced method remains available:
+
+```python
+from agent.swarm import Task
+
+async def delegate_known_jobs(agentswarm):
+    return await agentswarm.delegate(tasks=[
+        Task(label="Evidence", prompt="Check the cited sources."),
+        Task(label="Review", prompt="Check the numerical claims."),
+    ])
+```
+
+`delegate(instructions=..., items=[...], workers=10)` partitions independent items exactly once. Advanced delegation/recovery accept an optional explicit request key; ordinary callers need none. `Swarm` remains an alias for `AgentSwarm`.
 
 ## Host boundary
 
 | Agent package | Moyai adapter |
 | --- | --- |
-| `types.py`: `Agent` and `Harness`; `contracts.py`: task validation, partitioning, existing broker schemas | `app/agents.py`: ownership, admission, workspace snapshots and saved group results |
-| `client.py`: `AgentSwarm`, durable handles, typed public results, `SwarmBackend` protocol | `app/swarm_backend.py`: owner-bound adapter to that same coordinator |
-| `planning.py`: complementary roles, balanced runtime assignment, worker and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic bootstrap, mission state and durable scheduling |
+| `types.py`, `mission.py`: participant types, shared goal, internal deduplication, member protocol | `app/swarm_collaboration.py`: durable board, leadership, assignments and wakes |
+| `contracts.py`, `client.py`: validation, explicit partitions, receipts and results | `app/agents.py`, `app/swarm_backend.py`: owner scope, admission, snapshots and saved results |
+| `planning.py`: balanced runtime selection and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic ten-member bootstrap, inherited deadline and scheduling |
 
-`plan_team(task, runtimes=[Runtime(...)])` composes ten complementary assignments using only the supplied runtime pairs. Extra models for one harness do not give that harness extra workers. A host persists the first plan and assigns IDs; it does not reroll on recovery. Moyai's initial bootstrap commits the plan, child sessions, scoped uploads and dispatch wakes in one transaction. This path precedes the first live agent turn, so it intentionally does not take a coordinator workspace snapshot.
+Product Swarm mode uses `plan_swarm()` to choose ten neutral members across approved harness/model pairs, without preset roles. It commits the pinned roster, shared goal, scoped uploads and dispatch wakes atomically. `plan_team()` remains an explicit role-based planner for advanced callers.
 
-To add another host, implement `SwarmBackend.call(name, arguments)` using the shared `agents_fanout`, `agents_results`, `agents_retry` and `agents_cancel` wire contracts. Authenticate the owner outside model-controlled arguments, enforce limits/deadlines, persist idempotency, and implement checkpoint/resume. The client interface alone does not provide durability.
+A new host implements `SwarmBackend.call(name, arguments)` for `swarm_start`, result, cancellation and recovery contracts, plus the collaboration tools exposed to members. It must authenticate ownership, enforce budgets, persist deduplication and implement checkpoint/resume. The client interface alone does not provide durability.
 
-The current UI's shared feed shows saved public replies and updates. It does not imply a peer-to-peer messaging API, private reasoning access or an event-stream SDK.
-
-The executable integration examples in `tests/test_swarm_backend.py` exercise dispatch, nested ownership, cancellation, deadline rejection and restoring the same group after replacing the host manager. They use the real Moyai persistence/workflow code with a test sandbox, without model credentials.
+The space UI displays public worker replies and harnesses; board posts also appear in the persisted activity trace. No hidden reasoning is exposed. Tests cover restart recovery, atomic leader claims, peer delivery, coalescing, scope, deadlines and saved result handoffs using the real persistence/workflow code with test sandboxes.

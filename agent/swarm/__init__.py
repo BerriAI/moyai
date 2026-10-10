@@ -1,4 +1,8 @@
-"""Agent-owned swarm contracts and a host-independent durable client."""
+"""Start one shared task with typed participants and a durable host backend.
+
+``AgentSwarm(backend).start(task=goal, agents=[Agent(), Agent()])`` lets members
+organize their work. Explicit assignments remain available through ``delegate``.
+"""
 from .client import AgentSwarm, GroupResult, Swarm, SwarmBackend, SwarmRun, WorkerRef, WorkerResult
 from .contracts import Task
 from .planning import PlannedTask, Role, Runtime, plan_team

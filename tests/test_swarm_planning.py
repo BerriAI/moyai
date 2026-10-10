@@ -17,8 +17,19 @@ from agent.swarm.planning import (
     continuation_message,
     coordinator_prompt,
     plan_team,
+    plan_swarm,
     worker_prompt,
 )
+
+
+def test_shared_swarm_picks_balanced_runtimes_without_assigning_roles():
+    goal = 'x' * 16000
+    runtimes = [Runtime('hermes', 'alpha'), Runtime('codex', 'beta'), Runtime('codex', 'gamma')]
+    planned = plan_swarm(goal, runtimes=runtimes, rng=random.Random(42))
+    assert [member.label for member in planned] == [f'Agent {i}' for i in range(1, 11)]
+    assert Counter(member.harness for member in planned) == {'hermes': 5, 'codex': 5}
+    assert all(member.prompt.endswith(goal) and 'swarm_claim_lead' in member.prompt for member in planned)
+    assert all('Your perspective:' not in member.prompt for member in planned)
 
 
 def test_balances_harnesses_without_bias_from_model_count():
