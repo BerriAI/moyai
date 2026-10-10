@@ -12,6 +12,8 @@ final responses. The goal survives computer replacement independently of its fil
 | “Up to three hours” | Work cap; verified completion can end it earlier. |
 | “By 5 pm” | Explicit clock deadline, interpreted with the user's timezone. |
 | “Until the tests pass and the PR is ready” | Outcome goal; no invented time or continuation limit. |
+| “At three hours, report and continue” | A reporting checkpoint; work remains active. |
+| “Report every hour while you work” | Repeating progress reports, independently of the stop budget. |
 
 The model interprets natural language through the shared `goal` tool. The harness
 stores and enforces the resulting budget. Timeboxes and caps enter **Reporting**
@@ -35,6 +37,33 @@ Commands read authenticated user input. Quoted Slack messages, tool output and
 old history cannot create a control directive. Controls still use the current
 session execution path; removing computer startup for these requests is separate
 work. This is a conversation command, not a workspace-level Slack slash command.
+
+## Report without stopping
+
+Ask for a checkpoint or recurring report in the same request as the objective.
+For example: “Keep working until the full fix is verified. Report at three hours
+and continue.” The goal panel shows the report schedule separately from any
+stop budget. No reporting cadence is imposed when you have not requested one.
+
+The shared tool represents cumulative active-work milestones in
+`reporting.at_seconds` and repeating active-work intervals in
+`reporting.interval_seconds`. An authenticated create, revise or resume directive
+can set the schedule; `{}` disables it without stopping the work. Omitting the
+field preserves it. An interval starts when its reporting schedule is saved;
+one-off milestones must be later than the goal's current recorded work time.
+
+At a requested boundary, the server saves a factual checkpoint and Slack send
+intent in the same transaction. It reports the most recent `goal progress` note,
+when that note was saved, remaining work and journal references. The model should
+keep those notes current. A checkpoint does not need another model call and
+cannot declare completion. If no progress note exists, the report says so.
+
+Checkpoints use the same clock receipts as the work budget. A retry or computer
+replacement cannot publish the same checkpoint twice. After delayed receipts,
+missed intervals produce one current report rather than a burst of stale ones.
+User-paused time and unobserved machine downtime do not count. A simultaneous
+stop boundary takes precedence and produces the final goal report. Provider
+outages can delay Slack delivery; the saved checkpoint remains in the web chat.
 
 ## Completion and delivery
 
@@ -80,7 +109,7 @@ Administrator time, iteration and spending policies still apply. They never
 silently reset when the agent continues. Unrecoverable execution failure saves an
 interruption report; it does not masquerade as a user pause or completed objective.
 
-Follow [schema migration](schema-migrations.md) for schema revision 9. This change
+Follow [schema migration](schema-migrations.md) for the current schema revision. This change
 requires coordinated runtime migration; it is not an API-only mixed-build update.
 
 ## Verification and remaining qualification

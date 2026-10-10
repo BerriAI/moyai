@@ -580,3 +580,35 @@ final authority checks also passed on PostgreSQL. Another 103 automation,
 history, time-control, runtime and package regressions passed. The automation
 and swarm guides were rendered at desktop/mobile widths and inspected.
 Schema remains 12; all role protocols are 10. Nothing was deployed.
+
+## Complete public progress and independent goal checkpoints (WP4/WP9)
+
+Removed the server's two-update allowance and both 3,000/1,200-character
+commentary cuts. The model already receives guidance to report meaningful
+changes rather than narrate every tool. Updates now retain complete redacted
+text and actual input provenance. Receipt/text deduplication, stale-input
+rejection and final-answer precedence remain. All public updates reach the
+connected Slack thread through the same durable outbox, with long updates split
+into transport parts. Saved text and send intent commit together.
+
+Goals can register explicit one-off active-work checkpoints and repeating report
+intervals independently of a stopping budget. At a requested checkpoint, the
+existing clock transaction saves the latest reported progress, its age, remaining
+work and evidence references as public commentary, together with send intent.
+This path requires no additional inference. Reports do not imply verification,
+pause work or invent a cadence. Missed intervals coalesce into one current report;
+clock and event receipts prevent replay after acknowledgment loss or recovery.
+A simultaneous stop budget takes precedence and uses final report settlement.
+The goal panel shows the reporting schedule separately from the stop budget.
+
+Validation: 270 initial progress/Slack checks passed; two old suppression
+expectations were corrected. The final PostgreSQL suite passed 112 activity,
+Slack, goal and checkpoint cases, including rollback, duplicate ticks, a
+three-hour report-and-continue case, pause/resume, revocation and atomic Slack
+intent. Another 181 Slack/source/gateway/status/schema cases passed, and all ten
+new checkpoint contracts passed locally. Eight Node/browser cases passed at
+1440/768/320; before/after rendered panels and updated documentation were
+inspected. The UI build and typecheck passed. This is local behavior with a fake
+clock and synthetic Slack; the live three-hour release rehearsal remains open.
+
+Schema remains 12; all role protocols are 11. Nothing was deployed.

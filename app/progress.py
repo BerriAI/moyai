@@ -5,7 +5,6 @@ from .database import Connection
 from agent.activity import focus_text, public_text
 
 
-MAX_UPDATES = 2
 INACTIVE = {'stopping', 'completed', 'failed', 'cancelled', 'interrupted', 'idle', 'steered'}
 
 
@@ -49,7 +48,7 @@ def current_focus(conn: Connection, run_id: str) -> str:
 
 
 def record_focus(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:
-    """Admit task focus independently of the durable chat-message allowance."""
+    """Admit task focus independently of public commentary."""
     turn_id = active_turn(conn, run_id)
     message = focus_text(message)
     if turn_id is None or not message:
@@ -72,11 +71,11 @@ def record_focus(conn: Connection, run_id: str, message: str, data: dict[str, ob
 def record(conn: Connection, run_id: str, message: str, data: dict[str, object], stamp: str) -> None:
     """Caller holds the write transaction across scope lookup and admission.
 
-    No timer or process counter: a replay cannot resurrect suppressed chatter,
-    and sandbox renewal cannot reset the two-update allowance.
+    Persist complete public commentary once; the model owns when an update is
+    useful. Receipt and input identity survive process/sandbox replacement.
     """
     turn_id = active_turn(conn, run_id)
-    message = public_text(message, 1200).strip()
+    message = public_text(message, None).strip()
     if turn_id is None or not message or message == '[System: Empty message content sanitised to satisfy protocol]':
         return
     rows = conn.execute("""SELECT message,data FROM events WHERE run_id=? AND kind='message'
@@ -86,17 +85,18 @@ def record(conn: Connection, run_id: str, message: str, data: dict[str, object],
     if data.get('activity_id') and any(meta.get('activity_id') == data['activity_id'] for _, meta in previous):
         return
     # The sandbox may answer before its next model request acknowledges receipt.
-    # Only server-owned, delivered steering children grant a direct-answer slot.
+    # Only server-owned, delivered steering children can receive a direct reply.
     input_id = data.get('input_id')
     reply = None
     if turn_id and type(input_id) is int:
         reply = conn.execute("""SELECT id FROM messages WHERE run_id=? AND id=? AND steering_parent_id=?
             AND (status='injected' OR (status='queued' AND queue_locked=1))""", (run_id, input_id, turn_id)).fetchone()
-    reply_to = reply['id'] if reply and not any(meta.get('public_reply_to') == reply['id'] for _, meta in previous) else None
-    if reply_to is None:
-        routine = [text for text, meta in previous if not meta.get('public_reply_to')]
-        if len(routine) >= MAX_UPDATES or message in routine:
-            return
-    metadata = {**data, 'turn_id': turn_id, 'public_update': True, 'public_reply_to': reply_to}
+    if input_id is not None and (type(input_id) is not int or (input_id != turn_id and not reply)):
+        return  # Stale/undelivered inputs cannot publish into another input's work.
+    input_id = reply['id'] if reply else turn_id
+    if any(text == message and meta.get('input_id', turn_id) == input_id for text, meta in previous):
+        return
+    metadata = {**data, 'turn_id': turn_id, 'input_id': input_id,
+                'public_update': True, 'public_reply_to': reply['id'] if reply else None}
     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'message',?,?,?)",
                  (run_id, message, json.dumps(metadata), stamp))

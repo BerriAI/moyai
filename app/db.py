@@ -89,7 +89,7 @@ class Store:
         self.tracing = None
         self.memory_review = None
         self.goals = None
-        self.answer_delivery = None
+        self.public_delivery = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
@@ -824,8 +824,8 @@ class Store:
             self.save_answer_in(conn, run_id, message_id, content, status)
         else:
             conn.execute("UPDATE messages SET status='steered' WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id))
-        if self.answer_delivery:
-            self.answer_delivery(conn, run_id)
+        if self.public_delivery:
+            self.public_delivery(conn, run_id)
         if self.tracing:
             # Commit the answer and its pending span together. A crash
             # after saving the answer must not lose its root trace.
@@ -1009,6 +1009,8 @@ class Store:
             with self.connect() as conn:
                 conn.begin_write()
                 record(conn, run_id, message, data, now())
+                if self.public_delivery:
+                    self.public_delivery(conn, run_id)
             return
         if kind != 'chat':
             # A queued user's creation time can precede the current response.
