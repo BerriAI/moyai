@@ -12,7 +12,6 @@ from fastapi import HTTPException
 from app.security import digest
 from test_broker_transport import diagnostic_relay
 from test_skill_saving import call, form
-from test_skills import create
 from test_spend import active, sign_in
 from test_workspace import workspace
 
@@ -65,10 +64,10 @@ def mcp_calls(relay, calls):
     return [json.loads(line)['result'] for line in result.stdout.splitlines()]
 
 
-REJECTIONS = [('load-limit', 409), ('load-missing', 404), ('search-turn', 409),
+REJECTIONS = [('load-missing', 404), ('search-turn', 409),
               ('search-keywords', 422), ('save-permission', 403), ('save-revision', 409),
               ('read-missing', 404), ('read-offset', 422)]
-EXPLANATIONS = {'load-limit': 'at most five skills', 'load-missing': 'unavailable',
+EXPLANATIONS = {'load-missing': 'unavailable',
                 'search-turn': 'Read the current skill context', 'search-keywords': 'specific skill keywords',
                 'save-permission': 'Only an administrator', 'save-revision': 'expected_revision=1',
                 'read-missing': 'Supporting file not found', 'read-offset': 'past the end of this file'}
@@ -80,14 +79,7 @@ def test_rejected_skill_allows_correction_without_clearing_real_failure(skill_re
                                                                       prior_failure, record_property):
     app, client, run, relay, transport, diagnostics, receipts = skill_relay
     valid = ('skills_load', {'name': 'personal:team-review'})
-    if case == 'load-limit':
-        for index in range(6):
-            assert create(client, name=f'fixture-{index}', client_id=f'fixture-{index}').status_code == 201
-        for index in range(5):
-            app.state.skills.load(run, f'personal:fixture-{index}')
-        invalid = ('skills_load', {'name': 'personal:fixture-5'})
-        valid = ('skills_load', {'name': 'personal:fixture-0'})
-    elif case == 'load-missing':
+    if case == 'load-missing':
         invalid = ('skills_load', {'name': 'personal:missing'})
     elif case.startswith('search-'):
         args = {'query': 'review', 'turn_id': run['active_message_id']}
@@ -125,7 +117,7 @@ def test_rejected_skill_allows_correction_without_clearing_real_failure(skill_re
 
     assert rejected['isError'] and not recovered['isError']
     assert len(receipts) == 2  # Neither the rejection nor the write was retried.
-    assert loaded == (5 if case == 'load-limit' else 0 if case.startswith(('save-', 'search-')) else 1)
+    assert loaded == (0 if case.startswith(('save-', 'search-')) else 1)
     if case == 'save-permission':
         assert not app.state.store.rows("SELECT * FROM skills WHERE scope='organization'")
     if case == 'save-revision':

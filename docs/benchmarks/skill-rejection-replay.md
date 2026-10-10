@@ -1,5 +1,9 @@
 # Skill errors can recover without losing the safety stop
 
+This is the **historical paired benchmark** of baseline `33900218` and candidate `f39dc2bc`, recorded on October 9, 2026. PR #308 subsequently shipped the recovery behavior and removed the five-skill cap. The chart and raw results below remain the original measurements; they do not describe the new unlimited-skill policy. This PR now adds regression coverage for the seven rejection classes that still exist (19 checks including fatal-state controls), without changing application behavior.
+
+Current-main validation: 187 tests passed across skill recovery, skills, skill saving, broker transport, and the MCP bridge on Python 3.13. Python compilation and `git diff --check` passed. The current tests deliberately do not reintroduce the removed cap.
+
 A production skill-sync run spent **11.8 minutes** on 33 model calls and 180 tool calls, then ended with “Use at most five skills in one turn.” It later issued a successful delegation, but the earlier rejection left a fatal relay error that prevented continuation. This fix keeps the limit and makes definite skill rejections actionable tool receipts.
 
 ![Skill error recovery: corrected cases eligible to resume increase from 0 of 8 to 8 of 8; all 13 fatal-state protections remain enforced.](skill-rejection-replay.png)
@@ -18,10 +22,12 @@ The eight cases cover the load limit, unavailable skill, stale search turn, empt
 
 **Evidence:** production trace `79ae353201fd710fd330e4168097c03e`; baseline commit `33900218b4d7c7dca6824fbeb55e16779c5137bb`; candidate `app/main.py` Git blob `3f10c66536afee06141084d105abaf7323962c75`; frozen test Git blob `dc50061ddeb46f1625861b0a09ddb2aac9413b91`. The production trace motivates the test but is not itself replayed. The candidate changes only the skill-tool exception envelope. Raw paired measurements are in [skill-rejection-replay.json](skill-rejection-replay.json).
 
-To reproduce with Python 3.13 and the repository dependencies, run the following in the candidate checkout. The baseline receives the identical test file; its 16 failures are expected because it lacks the corrected receipt/recovery behavior. Both versions should retain all 13 fatal-state protections.
+To reproduce the historical comparison with Python 3.13 and the repository dependencies, use the frozen candidate checkout below. The baseline receives the identical historical test file; its 16 failures are expected because it lacks the corrected receipt/recovery behavior. Both historical versions should retain all 13 fatal-state protections.
 
 ```sh
 git worktree add --detach /tmp/moyai-skill-base 33900218b4d7c7dca6824fbeb55e16779c5137bb
+git worktree add --detach /tmp/moyai-skill-candidate f39dc2bc02c925de7c1ac2147fd9d864f0d83f64
+cd /tmp/moyai-skill-candidate
 cp tests/test_skill_recovery.py /tmp/moyai-skill-base/tests/test_skill_recovery.py
 python -m pytest tests/test_skill_recovery.py -q -o junit_family=xunit1 --junitxml=/tmp/skill-after.xml
 cd /tmp/moyai-skill-base
