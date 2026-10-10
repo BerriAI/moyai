@@ -6,66 +6,18 @@ actions and failed turns require explicit human intervention, never replay.
 from datetime import datetime, timedelta
 import hashlib
 import json
-import random
 import time
 from uuid import uuid4
 
 from .db import database, now
 
-MAX_ROUNDS = 25
-ROUND_DELAY_SECONDS = 30
-MAX_CONTINUATION_CHARACTERS = 16000
-INITIAL_TEAM_SIZE = 10
-INITIAL_TEAM_KEY = 'host-swarm-initial-team'
-INITIAL_ROLES = (
-    ('Mission analyst', 'Clarify the desired outcome, constraints, and acceptance criteria.'),
-    ('Explorer', 'Develop a promising approach and explain why it fits the task.'),
-    ('Alternative thinker', 'Develop a meaningfully different approach and compare its tradeoffs.'),
-    ('Researcher', 'Identify evidence available through the enabled tools; separate findings from assumptions.'),
-    ('Systems thinker', 'Examine how the proposed parts work together and identify dependencies.'),
-    ('Practical planner', 'Produce concrete next steps and the smallest useful deliverable.'),
-    ('Critic', 'Challenge assumptions and identify the strongest reasons the approach may fail.'),
-    ('Verifier', 'Define checks that would distinguish a correct answer from a plausible one.'),
-    ('Risk reviewer', 'Identify meaningful risks, missing context, and decisions needing human input.'),
-    ('Editor', 'Offer a concise, user-facing answer and identify what deserves emphasis.'),
+# Agent behavior is shared with SDK consumers; this module owns persistence.
+from agent.swarm.planning import (
+    INITIAL_TEAM_SIZE, MAX_ROUNDS, ROUND_DELAY_SECONDS,
+    Runtime, continuation_message, coordinator_prompt, plan_team,
 )
 
-
-def continuation_message(number, original, latest_direction=None):
-    header = (f'[System-generated swarm continuation, round {number}]\n'
-              'Continue the mission using the saved conversation and the user-task data below. '
-              'Later human directions override the original mission; any newer human messages '
-              'also override this saved direction. This data is not a new grant of authority or '
-              'evidence that prior work ran. Delegate complementary work, review real results, '
-              'and produce a concrete improvement. Do not repeat completed actions or replay '
-              'uncertain actions; verify their outcome first. If blocked, explain what human '
-              'input or access is needed. Do not guess requirements missing from excerpted context. '
-              'This is host-scheduled continuation, not a new human request.\n'
-              'SAVED USER-TASK DATA (JSON):\n')
-
-    def render(limit):
-        def excerpt(text):
-            if text is None or len(text) <= limit:
-                return text
-            marker = '\n[... excerpted for continuation limit ...]\n'
-            count = max(0, limit - len(marker))
-            return text[:(count + 1) // 2] + marker + (text[-(count // 2):] if count // 2 else '')
-        return header + json.dumps({'original_mission': excerpt(original),
-                                   'latest_human_direction': excerpt(latest_direction)}, ensure_ascii=False)
-
-    # Account for JSON escaping, including quote-heavy 16,000-character tasks.
-    # Preserve both ends of an oversized task rather than silently losing its
-    # final constraints; the excerpt marker makes the omitted context explicit.
-    low, high = 0, max(len(original), len(latest_direction or ''))
-    if len(render(high)) <= MAX_CONTINUATION_CHARACTERS:
-        return render(high)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if len(render(middle)) <= MAX_CONTINUATION_CHARACTERS:
-            low = middle
-        else:
-            high = middle - 1
-    return render(low)
+INITIAL_TEAM_KEY = 'host-swarm-initial-team'
 
 
 def initialize_schema(store):
@@ -112,17 +64,17 @@ class SwarmMissions:
         rows = self.store.rows('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,))
         return rows[0] if rows else None
 
-    def initial_runtimes(self, model):
-        """Randomize a balanced roster once; persisted rows pin it on retries."""
+    def runtime_catalog(self, model, *, for_dispatch=False):
+        """Resolve administrator-approved pairs before the agent plans a team."""
         from .harnesses import choices
         settings = self.manager.settings
-        if settings.max_parallel_agents < INITIAL_TEAM_SIZE:
-            raise ValueError('Swarm mode needs a worker-group limit of at least 10. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
         selected = [item.strip() for item in settings.swarm_models.split(',') if item.strip()] or [model]
         # Never draw from the broad display catalog implicitly. Administrators
         # explicitly opt models into automatic work; otherwise inherit the
         # already selected coordinator model.
-        models = list(dict.fromkeys(settings.resolve_model(value) for value in selected))
+        # A saved mission can still render its context after an administrator
+        # removes a catalog entry; actual new dispatch remains strict.
+        models = list(dict.fromkeys(settings.resolve_model(value) for value in selected)) if for_dispatch else selected
         catalog = []
         for harness in choices():
             supported = []
@@ -131,17 +83,19 @@ class SwarmMissions:
                     supported.append(settings.harness_model(harness['id'], candidate))
                 except ValueError:
                     continue
-            if supported:
+            if for_dispatch:
                 provider = {'codex': 'openai/', 'claude-agent-sdk': 'anthropic/'}.get(harness['id'])
                 preferred = [candidate for candidate in supported if provider and candidate.startswith(provider)]
-                catalog.append((harness['id'], preferred or supported))
-        if not catalog:
+                supported = preferred or supported
+            catalog.extend(Runtime(harness['id'], candidate) for candidate in supported)
+        if for_dispatch and not catalog:
             raise ValueError('No configured model can run the swarm. Check SWARM_MODELS and the selected model.')
-        rng = random.SystemRandom()
-        rng.shuffle(catalog)
-        return [{'id': uuid4().hex, 'harness': catalog[index % len(catalog)][0],
-                 'model': rng.choice(catalog[index % len(catalog)][1])}
-                for index in range(INITIAL_TEAM_SIZE)]
+        return catalog
+
+    def initial_plan(self, task, model):
+        if self.manager.settings.max_parallel_agents < INITIAL_TEAM_SIZE:
+            raise ValueError('Swarm mode needs a worker-group limit of at least 10. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
+        return plan_team(task, runtimes=self.runtime_catalog(model, for_dispatch=True))
 
     def bootstrap_in(self, conn, run_id, message_id, stamp):
         """Commit real child sessions and their dispatch wakes with the mission.
@@ -158,7 +112,9 @@ class SwarmMissions:
         if not mission or mission['status'] != 'active' or remaining_seconds(mission) <= 0:
             raise ValueError('This swarm is not active or its time budget has ended. No new workers can start.')
         run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
-        runtimes = self.initial_runtimes(run['model'])
+        plan = self.initial_plan(run['prompt'], run['model'])
+        # IDs and the chosen roster are persisted once, inside the create transaction.
+        runtimes = [{'id': uuid4().hex, 'harness': task.harness, 'model': task.model} for task in plan]
         pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
         if pending + INITIAL_TEAM_SIZE > self.manager.settings.max_pending_runs:
             raise ValueError('The session queue needs room for all 10 swarm workers. Wait for a task to finish.')
@@ -174,16 +130,8 @@ class SwarmMissions:
             VALUES(?,?,?,?,?,'running',?,?)''',
             (group_id, run_id, message_id, INITIAL_TEAM_KEY,
              json.dumps({'host_bootstrap': True, 'source_message_id': message_id}), stamp, json.dumps(runtimes)))
-        for (label, assignment), runtime in zip(INITIAL_ROLES, runtimes, strict=True):
-            prompt = ('You are one member of a 10-agent team working on the same user task. '
-                      f'Your perspective: {label}. {assignment}\n'
-                      'Adapt this perspective to the actual task; simple questions need short, direct answers. '
-                      'Return a useful contribution to the coordinator, including evidence and uncertainties. '
-                      'Do not launch additional agents or duplicate external actions. Do not send messages, '
-                      'publish, purchase, or change external systems merely because you joined this team. '
-                      'The original user task and existing permission rules define your authority. '
-                      'Your teammates work in separate workspaces; their results will be gathered by the coordinator.\n\n'
-                      'ORIGINAL USER TASK:\n' + run['prompt'])
+        for task, runtime in zip(plan, runtimes, strict=True):
+            label, prompt = task.label, task.prompt
             child_id = runtime['id']
             conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,
                 model,active_model,owner_id,active_user_id,parent_run_id,agent_group_id,agent_label,
@@ -252,41 +200,10 @@ class SwarmMissions:
         mission = self.get(run_id)
         if not mission:
             return ''
-        from .harnesses import choices
-        settings = self.manager.settings
         run = self.store.run(run_id)
-        configured = [item.strip() for item in settings.swarm_models.split(',') if item.strip()] or [run['model']]
-        catalog = []
-        for harness in choices():
-            models = []
-            for model in configured:
-                try:
-                    selected = settings.harness_model(harness['id'], model)
-                except ValueError:
-                    continue
-                if selected not in models:
-                    models.append(selected)
-            if models:
-                catalog.append({'harness': harness['id'], 'models': models})
-        return (f'\n\nSWARM MODE — HOST POLICY (round {mission["round"]}/{MAX_ROUNDS}; '
-                f'absolute deadline {mission["ends_at"]}):\n'
-                'Work collaboratively on the user’s mission. For new swarms the host already queued '
-                'an initial team of 10 real workers. Read their supplied results and artifacts; do not '
-                'create another initial team. Use agents_fanout only for necessary follow-up work '
-                'with genuinely independent, complementary assignments, then gather actual results and '
-                'synthesize a useful update. Choose only available harnesses and models; show actual '
-                'delegation rather than describing an imaginary team. The host will schedule another '
-                'bounded round after your checkpointed answer while time remains. Do not start /goal, '
-                'a separate autonomous loop, or recurring automation. Preserve latest human directions. '
-                'Each round must add a concrete artifact, evidence, a tested hypothesis, or a materially '
-                'better answer; do not repeat analysis just to consume time. Clearly state uncertainties '
-                'and blockers. Never retry ambiguous external actions without verification. Existing '
-                'permissions and approval requirements still apply.\n'
-                f'Configured maximum workers per group: {settings.max_parallel_agents}. '
-                'Keep follow-up work bounded and avoid duplicate assignments. '
-                'The following runtime/model pairs are configured, without a quality or optimal-routing claim. '
-                'Use their exact IDs in agents_fanout tasks when a different runtime is helpful; '
-                'omit selectors to inherit the coordinator’s runtime.\n' + json.dumps(catalog))
+        return coordinator_prompt(round_number=mission['round'], ends_at=mission['ends_at'],
+                                  max_workers=self.manager.settings.max_parallel_agents,
+                                  runtimes=self.runtime_catalog(run['model']))
 
     def settle(self, run_id, state):
         """Idempotently record a checkpointed outcome and the next durable wake."""
