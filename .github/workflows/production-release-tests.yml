@@ -1,0 +1,32 @@
+name: Production release rehearsal
+on:
+  pull_request:
+    paths: ['scripts/release/**', 'tests/release/**', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
+  push:
+    branches: [main]
+    paths: ['scripts/release/**', 'tests/release/**', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
+permissions:
+  contents: read
+jobs:
+  release-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: synthetic-release-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:synthetic-release-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify release ordering, failures and real PostgreSQL drain guards
+        run: uv run --frozen --python 3.13 pytest -q tests/release
