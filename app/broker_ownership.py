@@ -27,16 +27,28 @@ class BrokerWork:
             AND owner_pid=? AND owner_started=?''', (kind, work_id, self.pid, self.started))
 
     def recover(self):
+        # Backend PID alone can be reused. Both the exact backend lifetime
+        # and its runtime ownership lock must still exist to protect a row.
+        dead_query = '''SELECT kind,work_id FROM broker_work_owners o
+            WHERE NOT EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
+                WHERE a.pid=o.owner_pid AND extract(epoch FROM a.backend_start)::text=o.owner_started
+                AND l.locktype='advisory' AND l.classid=726940
+                AND l.objid=?::regnamespace::oid AND l.objsubid=2 AND l.granted)'''
+        schema = (self.database.schema,)
         with self.store.connect() as conn:
+            if not conn.execute(dead_query + ' LIMIT 1', schema).fetchone():
+                return 0
+        # A fresh transaction also refreshes pg_stat_activity's snapshot, so an
+        # owner that joined after the probe cannot be mistaken for a dead one.
+        with self.store.connect() as conn:
+            # A queued exclusive lock would stall unrelated session writers
+            # behind recovery. Try once; a busy schema is revisited next tick.
+            if not conn.execute('SELECT pg_try_advisory_xact_lock(726941, ?::regnamespace::oid::int)', schema).fetchone()[0]:
+                return 0
+            # Retain all normal admission/lease fences, then re-read ownership
+            # under the writer lock: another broker may have recovered already.
             conn.begin_write()
-            # Backend PID alone can be reused. Both the exact backend lifetime
-            # and its runtime ownership lock must still exist to protect a row.
-            dead = conn.execute('''SELECT kind,work_id FROM broker_work_owners o
-                WHERE NOT EXISTS(SELECT 1 FROM pg_stat_activity a JOIN pg_locks l ON l.pid=a.pid
-                    WHERE a.pid=o.owner_pid AND extract(epoch FROM a.backend_start)::text=o.owner_started
-                    AND l.locktype='advisory' AND l.classid=726940
-                    AND l.objid=?::regnamespace::oid AND l.objsubid=2 AND l.granted)''',
-                (self.database.schema,)).fetchall()
+            dead = conn.execute(dead_query, schema).fetchall()
             for row in dead:
                 if row['kind'] == 'model':
                     conn.execute("UPDATE model_requests SET status='interrupted' WHERE id=? AND status='pending'", (row['work_id'],))

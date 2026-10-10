@@ -183,6 +183,90 @@ def test_backend_pid_reuse_cannot_keep_dead_work_alive(verified):
     assert status(first, 'model_requests', 'id', request) == 'interrupted'
 
 
+@pytest.mark.parametrize('live_work', [False, True])
+async def test_noop_recovery_does_not_wait_for_the_schema_writer(verified, live_work):
+    from app.db import database
+
+    broker, _ = verified
+    app = broker()
+    if live_work:
+        pending(app, 'owned work')
+    recovering = None
+    try:
+        with app.state.store.connect() as writer:
+            writer.begin_write()
+            # A real exclusive schema lock must not block a healthy scan.
+            recovering = asyncio.create_task(database(app.state.broker_requests.work.recover))
+            assert await asyncio.wait_for(asyncio.shield(recovering), 2) == 0
+    finally:
+        if recovering:
+            await asyncio.gather(recovering, return_exceptions=True)
+
+
+async def test_dead_recovery_skips_busy_schema_without_blocking_other_sessions(verified):
+    from app.db import database
+
+    broker, _ = verified
+    old, replacement = broker(), broker()
+    request, context = pending(old, 'dead owner')
+    old.state.store.database.owner.close()
+    store = replacement.state.store
+    held = store.create_run('writer held open', '', 'modal', [])['id']
+    independent = store.create_run('unrelated writer', '', 'modal', [])['id']
+    recovering = None
+    try:
+        with store.connect(write_scope=held) as writer:
+            writer.begin_write()
+            recovering = asyncio.create_task(database(replacement.state.broker_requests.work.recover))
+            assert await asyncio.wait_for(asyncio.shield(recovering), 2) == 0
+            # Recovery must not queue an exclusive lock ahead of this second
+            # real session writer while the first transaction is still open.
+            await asyncio.wait_for(database(store.update_run, independent, summary='continued'), 2)
+            assert status(replacement, 'model_requests', 'id', request) == 'pending'
+    finally:
+        if recovering:
+            await asyncio.gather(recovering, return_exceptions=True)
+    assert store.run(independent)['summary'] == 'continued'
+    assert await database(replacement.state.broker_requests.work.recover) == 3
+    assert status(replacement, 'model_requests', 'id', request) == 'interrupted'
+    assert status(replacement, 'context_jobs', 'operation_id', context) == 'interrupted'
+    assert status(replacement, 'approvals', 'id', request) == 'uncertain'
+    assert not store.rows('SELECT 1 FROM broker_work_owners')
+
+
+def test_recovery_rechecks_receipts_and_new_backend_identity_after_read_probe(verified, monkeypatch):
+    from app.database import PostgresConnection
+
+    broker, settings = verified
+    old, recovering = broker(), broker()
+    request, context = pending(old, 'transferred receipt')
+    old.state.store.database.owner.close()
+    original = PostgresConnection.execute
+    reassigned = False
+
+    def join_before_write(conn, statement, params=()):
+        nonlocal reassigned
+        if (not reassigned and conn.schema == settings.moyai_database_schema
+                and 'pg_try_advisory_xact_lock(726941,' in statement):
+            reassigned = True
+            # Deterministically place a real new PostgreSQL backend and receipt
+            # transfer between the read probe and recovery's write lock. Only
+            # the timing is instrumented; ownership/locks/queries remain real.
+            joined = broker()
+            owner = joined.state.broker_requests.work
+            joined.state.store.execute('UPDATE broker_work_owners SET owner_pid=?,owner_started=?',
+                                       (owner.pid, owner.started))
+        return original(conn, statement, params)
+
+    monkeypatch.setattr(PostgresConnection, 'execute', join_before_write)
+    assert recovering.state.broker_requests.work.recover() == 0
+    assert reassigned
+    assert status(recovering, 'model_requests', 'id', request) == 'pending'
+    assert status(recovering, 'context_jobs', 'operation_id', context) == 'running'
+    assert status(recovering, 'approvals', 'id', request) == 'executing'
+    assert len(recovering.state.store.rows('SELECT 1 FROM broker_work_owners')) == 3
+
+
 async def test_existing_native_stream_finishes_while_replacement_handles_new_inference(verified, monkeypatch):
     import httpx
     from app.security import digest

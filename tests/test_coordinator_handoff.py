@@ -13,6 +13,7 @@ import pytest
 from app import main, runtime_compatibility, schema_migrations
 from app.coordinator_handoff import coordinator_owner
 from app.database import DatabaseError
+from app.db import database
 from test_api_lifecycle import client_for
 from test_postgres_runtime import target  # noqa: F401
 from test_separate_broker import split_settings  # noqa: F401
@@ -134,6 +135,86 @@ def test_old_owner_retains_fence_until_shutdown_finishes(handoff_settings, monke
             shutdown.result(timeout=5)
         wait_leader(second)
         second.state.slack.recover.assert_called_once()
+
+
+@pytest.mark.parametrize('cancellations,drain_failure', [(1, False), (3, False), (3, True)])
+async def test_cancelled_lifespan_drains_admitted_send_before_handoff(handoff_settings, monkeypatch, cancellations, drain_failure):
+    first = main.create_app(handoff_settings)
+    second = main.create_app(handoff_settings.model_copy(update={'moyai_build_sha': 'b' * 40}))
+    first_stop, second_stop = asyncio.Event(), asyncio.Event()
+    draining, finish_send, receipt = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    close = first.state.slack.shutdown
+    monkeypatch.setattr(first.state.store, 'close', Mock(wraps=first.state.store.close))
+    monkeypatch.setattr(second.state.slack, 'recover', Mock(wraps=second.state.slack.recover))
+
+    async def shutdown(**kwargs):
+        draining.set()
+        await close(**kwargs)
+        if drain_failure:
+            raise RuntimeError('Cleanup failed after receipt')
+    monkeypatch.setattr(first.state.slack, 'shutdown', shutdown)
+
+    async def lifetime(app, stop):
+        async with app.router.lifespan_context(app):
+            await stop.wait()
+
+    async def leader(app):
+        async with asyncio.timeout(5):
+            while app.state.coordinator_handoff.status != 'leader':
+                await asyncio.sleep(.01)
+
+    old = asyncio.create_task(lifetime(first, first_stop))
+    new = asyncio.create_task(lifetime(second, second_stop))
+    send = None
+    try:
+        await leader(first)
+        store = first.state.store
+        run = await database(store.create_run, 'Admitted Slack send', '', 'demo', [])
+        await database(store.execute,
+            "INSERT INTO slack_events(event_id,run_id,channel,thread_ts,user_id,created_at,reply_status) "
+            "VALUES('cancelled-handoff',?,'fixture-channel','1.1','fixture-user','2026-01-01','sending')", (run['id'],))
+
+        async def admitted_send():
+            # Stand in for an already admitted Slack request. Its normal job
+            # shutdown must finish the response and saved receipt, not cancel it.
+            await finish_send.wait()
+            await database(store.execute,
+                "UPDATE slack_events SET reply_status='sent' WHERE event_id='cancelled-handoff'")
+            receipt.set()
+
+        send = asyncio.create_task(admitted_send())
+        first.state.slack.jobs.add(send)
+        first_stop.set()
+        await asyncio.wait_for(draining.wait(), 5)
+        for _ in range(cancellations):
+            old.cancel()
+            await asyncio.sleep(.02)
+            assert not old.done()
+            assert first.state.coordinator_handoff.task.cancelling() == 0
+            assert not send.done()
+            assert first.state.store.database.coordinator_owner
+            first.state.store.close.assert_not_called()
+            assert second.state.coordinator_handoff.status == 'standby'
+            second.state.slack.recover.assert_not_called()
+        finish_send.set()
+        with pytest.raises(asyncio.CancelledError) as error:
+            await old
+        if drain_failure:
+            assert isinstance(error.value.__cause__, RuntimeError)
+            assert str(error.value.__cause__) == 'Cleanup failed after receipt'
+        assert receipt.is_set() and not send.cancelled()
+        first.state.store.close.assert_called_once()
+        await leader(second)
+        second.state.slack.recover.assert_called_once()
+        assert await database(second.state.store.rows,
+            "SELECT reply_status FROM slack_events WHERE event_id='cancelled-handoff'") == [{'reply_status': 'sent'}]
+    finally:
+        finish_send.set()
+        first_stop.set()
+        second_stop.set()
+        await asyncio.gather(old, new, return_exceptions=True)
+        if send:
+            await asyncio.gather(send, return_exceptions=True)
 
 
 @pytest.mark.parametrize('response', [{'ok': True}, {'response_action': 'errors', 'errors': {'score': 'Please select a score'}}])

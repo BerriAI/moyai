@@ -237,11 +237,24 @@ class CoordinatorHandoff:
             self.stop.set()
             # Do not cancel supervisor: it must finish each background close
             # before releasing the singleton lock and database owner session.
-            try:
-                await asyncio.shield(self.task)
-            except asyncio.CancelledError:
-                await self.task
-                raise
+            cancelled = None
+            while True:
+                try:
+                    await asyncio.shield(self.task)
+                    break
+                except asyncio.CancelledError as exc:
+                    if self.task.cancelled():
+                        raise
+                    # A second cancellation must not reach the supervisor's
+                    # background drain or release its ownership prematurely.
+                    if cancelled is None:
+                        cancelled = exc
+                except BaseException as exc:
+                    if cancelled is not None:
+                        raise cancelled from exc
+                    raise
+            if cancelled is not None:
+                raise cancelled
 
 
 class CoordinatorIngressMiddleware:
