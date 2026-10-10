@@ -1468,6 +1468,11 @@ test('retained workspace tabs and toolbar actions survive focus updates and repe
 
 for (const width of [1440, 320]) test(`conversation space retains the composer through updates and releases on navigation at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'conversation-space', width);
+  await page.route('**/api/runs/*/files', route => route.fulfill({ json: {
+    files: ['release-checks.md', 'reconnect.test.js'].map(name => ({
+      name, path: name, archive_path: `new-files/${name}`, kind: 'text', size: 128,
+    })),
+  } }));
   await page.evaluate(() => {
     const mount = MoyaiSpace.mount;
     window.conversationSpaceLifecycle = { mounts: 0, cleanups: 0 };
@@ -1479,6 +1484,31 @@ for (const width of [1440, 320]) test(`conversation space retains the composer t
     };
     return openRun('1'.repeat(32));
   });
+  const toolbar = page.locator('.conversation-toolbar');
+  const activity = toolbar.locator('#toggle-details');
+  const files = toolbar.locator('#files-button');
+  const panel = page.locator('#workspace-panel');
+  assert.equal(await activity.getAttribute('aria-controls'), 'workspace-panel');
+  assert.equal(await activity.getAttribute('aria-expanded'), 'false');
+  assert.equal(await files.isVisible(), false, 'Files stays hidden until the session has saved results');
+  await activity.focus();
+  await activity.press('Enter');
+  await panel.getByRole('heading', { name: 'Session activity', exact: true }).waitFor();
+  assert.equal(await activity.getAttribute('aria-expanded'), 'true');
+  assert.equal(await panel.getByRole('tab', { name: 'Activity', exact: true }).getAttribute('aria-selected'), 'true');
+  await panel.getByRole('button', { name: 'Hide workspace panel', exact: true }).click();
+  await panel.waitFor({ state: 'hidden' });
+  assert.equal(await activity.getAttribute('aria-expanded'), 'false');
+  await page.evaluate(() => updateChat({ ...state.chatRun, has_artifact: true }));
+  await toolbar.getByRole('button', { name: 'Files · 2', exact: true }).waitFor();
+  await files.focus();
+  await files.press('Enter');
+  await panel.getByRole('searchbox', { name: 'Find a saved file', exact: true }).waitFor();
+  assert.equal(await panel.locator('.panel-file-choice').count(), 2);
+  assert.equal(await panel.getByRole('tab', { name: 'Files', exact: true }).getAttribute('aria-selected'), 'true');
+  assert.equal(await activity.getAttribute('aria-expanded'), 'false');
+  await panel.getByRole('button', { name: 'Hide workspace panel', exact: true }).click();
+  await panel.waitFor({ state: 'hidden' });
   const input = page.locator('#followup');
   await input.fill('Keep my unfinished reply');
   await page.evaluate(() => {

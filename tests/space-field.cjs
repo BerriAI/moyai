@@ -175,3 +175,24 @@ test('late fonts realign the hub but do not redraw a disposed scene', async () =
   await pendingFonts.ready;
   assert.equal(detachedScene.draws(), 1);
 });
+
+
+test('quiet workspaces redraw on layout changes without starting ambient animation', () => {
+  const scene = setup();
+  const dispose = scene.mount({ animate: false });
+  assert.equal(scene.draws(), 1);
+  assert.equal(scene.frames.size, 0);
+  scene.observers[0].callback();
+  assert.equal(scene.draws(), 2);
+  scene.motion.emit('change');
+  scene.document.hidden = true;
+  scene.document.emit('visibilitychange');
+  scene.document.hidden = false;
+  scene.document.emit('visibilitychange');
+  assert.equal(scene.frames.size, 0);
+  assert.equal(scene.draws(), 4);
+  dispose();
+  scene.observers[0].callback();
+  assert.equal(scene.draws(), 4);
+  assert.equal(scene.document.listeners.size, 0);
+});

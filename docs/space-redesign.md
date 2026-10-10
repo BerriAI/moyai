@@ -35,10 +35,11 @@ production authentication, and connected-provider operations are not exercised.
 
 ## Motion and accessibility
 
-The canvas follows the rendered hub through resizing and late font loading,
-caps its backing scale at 2×, and paints at no more than 30 frames per second.
-It pauses in hidden tabs, renders a static frame for reduced motion, and releases
-animation/listeners when leaving either screen. It is hidden from assistive
+The canvas follows its rendered anchor through resizing and late font loading
+and caps its backing scale at 2×. Home animates at no more than 30 frames per
+second, pauses in hidden tabs, and renders a static frame for reduced motion.
+Conversations always use a static frame so code and output remain the focus.
+Both release canvas listeners on navigation. The artwork is hidden from assistive
 technology and cannot intercept clicks. Functional focus outlines and semantic
 success, warning, and error colors remain visible on dark surfaces.
 
@@ -77,11 +78,14 @@ provider operations were not tested in this visual change.
 
 ## Conversation workspace
 
-The same deterministic field now frames conversations, with a quiet dark veil
-behind the transcript, a compact Moyai hub, glass user bubbles, and a glass reply
-composer. Assistant identity, model labels, activity, feedback, and semantic
-error colors remain readable. The canvas stays mounted during transcript updates
-and is released on navigation or when a cached conversation loses access.
+The same deterministic field quietly frames conversations as a static backdrop.
+A compact toolbar shows the actual repository or session reference alongside
+Files and Activity. Aligned request rows, tighter transcript spacing, rectangular
+code panels, and visible tool-action counts prioritize the work. The composer
+and shared navigation use restrained borders and compact controls; identity and
+model metadata use Geist Mono. Assistant identity, feedback, and semantic error
+colors remain readable. The canvas stays mounted during transcript updates and
+is released on navigation or when a cached conversation loses access.
 
 Use `/?fixture=conversation-space#run=11111111111111111111111111111111`
 on the fixture preview for the four-message synthetic conversation below. These
@@ -95,6 +99,8 @@ The comparison uses the same data and 1440 × 1000 viewport, scrolled to the sta
 ![Conversation at 320 × 812](assets/conversation-space/mobile.jpg)
 
 Conversation regressions cover retained draft/focus/composer/canvas across
-transcript refreshes and canvas disposal on navigation at 1440px and 320px.
+transcript refreshes, keyboard access to Activity, populated Files controls,
+and canvas disposal on navigation at 1440px and 320px. Canvas unit tests verify
+that static mode redraws when needed without scheduling animation frames.
 The real local demo session suite also verifies sending, persistence, sender
 labels, renaming, and session actions with simulated execution.

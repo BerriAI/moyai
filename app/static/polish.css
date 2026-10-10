@@ -171,40 +171,49 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .icon-button { width: 28px; height: 28px; border-radius: 6px; color: var(--text); }
 .icon-button:hover { background: var(--soft); color: var(--text); }
 
-/* Sidebar */
-.rail { background: var(--surface); border-right: 1px solid #ececec; padding: 0 6px 6px; }
-.rail-brand { height: 44px; margin: 0; padding: 0 2px 0 6px; display: flex; align-items: center; justify-content: space-between; }
-.brand { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 14.5px; font-weight: 600; min-width: 0; }
+/* Sidebar: a compact workspace rail. Scoped geometry stays independent of the
+   ambient branding used by the new-session and conversation canvases. */
+aside.rail { border-right: 1px solid var(--line); padding: 10px; }
+.rail .rail-brand { height: 44px; margin: 0 0 10px; padding: 0 4px; display: flex; align-items: center; justify-content: space-between; }
+.rail .brand { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 16px; font-weight: 550; letter-spacing: -.3px; min-width: 0; }
+.rail .brand img { width: 26px; height: 26px; flex-basis: 26px; border-radius: 6px; box-shadow: none; }
+.rail .brand #workspace-name { margin-top: 3px; font-size: 12px; letter-spacing: 0; }
 .brand .avatar { width: 20px; height: 20px; flex: 0 0 20px; border-radius: 5px; background: var(--soft); color: var(--text); font-size: 11px; font-weight: 600; }
 .brand #workspace-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .rail-tools { display: flex; gap: 2px; }
 #close-sidebar { display: grid; }
-.new-task, .nav-button { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: transparent; padding: 7px 8px; border-radius: 7px; color: var(--text); font-size: 14px; font-weight: 400; text-align: left; }
-.new-task { margin-top: 2px; }
+.new-task, .nav-button { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: transparent; padding: 7px 8px; border-radius: 6px; color: var(--text); font-size: 14px; font-weight: 400; text-align: left; }
+.rail .new-task { min-height: 34px; margin-top: 2px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; }
+.rail .new-task:hover { background: var(--soft); border-color: var(--muted); }
+.rail > .nav-button, .rail .rail-links .nav-button { min-height: 34px; padding: 6px 10px; font-size: 13px; }
+.rail #command-menu { margin-top: 6px; font-size: 12px; }
 .new-task:hover, .nav-button:hover { background: var(--soft); }
 .nav-button.active { background: var(--soft); color: var(--text); }
 .nav-icon { color: var(--text); display: grid; place-items: center; width: 18px; }
-.new-task kbd { margin-left: auto; font: 11px var(--mono); color: var(--muted); opacity: 0; transition: opacity .15s; }
+.rail .new-task kbd { margin-left: auto; font: 12px var(--mono); color: var(--muted); opacity: 1; }
 .new-task:hover kbd, .new-task:focus-visible kbd { opacity: 1; }
-.session-search { display: flex; flex-shrink: 0; margin: 2px 6px 8px; padding: 8px; gap: 10px; border-radius: 7px; color: var(--text); background: var(--surface); box-shadow: inset 0 0 0 1px #e3e3e3; }
+.session-search { display: flex; flex-shrink: 0; margin: 2px 6px 8px; padding: 8px; gap: 10px; border-radius: 6px; color: var(--text); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
 .session-search[hidden] { display: none; }
 .session-search input { font-size: 14px; padding: 0; border-radius: 0; }
 .session-search-snippet { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
 .sidebar-empty button { font-size: inherit; text-decoration: underline; }
 .session-search:focus-within input { box-shadow: none; }
-.rail-links { padding: 0; border: 0; margin: 0; }
-.sessions-label { display: flex; align-items: center; padding: 12px 8px 4px; font-size: 14px; font-weight: 500; color: var(--text); }
+.rail .rail-links { padding: 0 0 10px; border-bottom: 1px solid var(--line); margin: 4px 0 0; }
+.rail .sessions-label { display: flex; align-items: center; padding: 14px 4px 8px; gap: 8px; font-size: 14px; font-weight: 500; color: var(--text); }
+.rail .sessions-label [data-styled] [data-slot="select-trigger"] { border-radius: 6px; }
 .sessions-label #task-count { margin-left: 0; color: var(--muted); font-size: 12px; }
 .sessions-label .folder-add { margin-left: auto; color: var(--muted); }
-.session-list { padding-bottom: 8px; scrollbar-color: #e0e0e0 transparent; }
+.session-list { padding-bottom: 8px; scrollbar-color: var(--border) transparent; }
 /* Reserve the action column at every depth so status indicators share one edge. */
-.parent-session { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: start; border-radius: 8px; }
+.rail .parent-session { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: start; border-radius: 6px; }
 .parent-session:hover { background: var(--soft); }
-.parent-session:has(.selected), .parent-session:has(.selected):hover { background: var(--soft); }
+.rail .parent-session:has(.selected), .rail .parent-session:has(.selected):hover { background: var(--soft); box-shadow: inset 2px 0 var(--accent); }
 .session-link, .session-link:hover, .session-link.selected { background: transparent; }
-.session-link-title { font-size: 14px; color: var(--text); line-height: 20px; }
-.session-link small { font-size: 12.5px; color: var(--muted); margin-top: 1px; line-height: 18px; }
+.rail .session-link { min-height: 44px; padding-block: 4px; border-radius: 6px; }
+.rail .session-link-title { font-size: 13px; color: var(--text); line-height: 20px; }
+.rail .session-link small, .rail .session-link-meta { font-size: 12px; color: var(--muted); margin-top: 1px; line-height: 16px; }
+.rail .session-link-context { font-size: 12px; }
 .agent-disclosure, .agent-disclosure-space { display: grid; place-items: center; width: 24px; margin-top: 4px; height: 24px; }
 .agent-disclosure { color: var(--muted); font-size: 14px; }
 .agent-disclosure svg { display: block; width: 16px; height: 16px; }
@@ -216,9 +225,22 @@ body { color: var(--text); letter-spacing: -0.006em; }
 .session-dot.waiting_credential, .session-dot.awaiting_approval { background: #e8883a; }
 .session-dot.failed { background: #d9605f; }
 .session-move { display: grid; place-items: center; margin-top: 4px; width: 24px; min-width: 24px; height: 24px; color: var(--muted); }
+.rail .agent-disclosure, .rail .agent-disclosure-space, .rail .session-move { margin-top: 2px; }
 .child-sessions { margin-left: 24px; border-left-color: var(--line); }
-.folder-toggle { font-size: 13px; color: var(--muted); }
-.unfiled-heading { font-size: 13px; color: var(--muted); margin: 8px 8px 4px; }
+.rail .folder-toggle { font-size: 12px; color: var(--muted); }
+.rail .folder-count { font: 12px var(--mono); }
+.rail .unfiled-heading { font-size: 12px; color: var(--muted); margin: 8px 8px 4px; }
+.rail .session-section-heading { min-height: 32px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+.rail .session-personal-section + .session-personal-section { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.rail .rail-foot { padding: 10px 4px 0; }
+.rail .rail-foot .rail-identity { font-size: 12px; }
+
+@media (max-width: 850px), (pointer: coarse) {
+  .rail .new-task, .rail > .nav-button, .rail .rail-links .nav-button,
+  .rail .session-section-heading { min-height: 44px; }
+  .rail .session-link { padding-block: 6px; }
+  .rail .agent-disclosure, .rail .agent-disclosure-space, .rail .session-move { margin-top: 4px; }
+}
 
 /* Header */
 .workspace { grid-template-rows: 44px minmax(0, 1fr); }

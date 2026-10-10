@@ -339,7 +339,7 @@ test('reply feedback is shown only for completed assistant messages when Lens is
     {id:2,role:'assistant',status:'completed',content:'Answer'},
   ]};
   f.context.updateChat(structuredClone(run),true);
-  assert.match(f.node('#conversation').innerHTML,/class="feedback-message primary"/);
+  assert.match(f.node('#conversation').innerHTML,/data-feedback-message="2"/);
   run.messages[1].feedback={score:8,comment:'Helpful',status:'pending'};
   f.context.updateChat(structuredClone(run));
   assert.ok(f.node('#conversation').innerHTML.includes('8/10'));

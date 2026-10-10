@@ -154,7 +154,7 @@
     });
   }
 
-  function mount(canvas, { anchor } = {}) {
+  function mount(canvas, { anchor, animate = true } = {}) {
     if (!canvas || typeof canvas.getContext !== 'function') return NOOP;
     mounts.get(canvas)?.();
     const context = canvas.getContext('2d', { alpha: true });
@@ -212,7 +212,7 @@
 
     function tick(time) {
       animation = null;
-      if (disposed || document.hidden || reducedMotion.matches) return;
+      if (disposed || document.hidden || !animate || reducedMotion.matches) return;
       if (!canvas.isConnected) {
         cleanup();
         return;
@@ -231,7 +231,7 @@
       cancel();
       if (disposed || document.hidden) return;
       draw();
-      if (!reducedMotion.matches) animation = requestAnimationFrame(tick);
+      if (animate && !reducedMotion.matches) animation = requestAnimationFrame(tick);
     }
 
     function resize() {
@@ -285,7 +285,7 @@
     document.fonts?.ready.then(resize);
     mounts.set(canvas, cleanup);
     resize();
-    if (!document.hidden && !reducedMotion.matches) animation = requestAnimationFrame(tick);
+    if (animate && !document.hidden && !reducedMotion.matches) animation = requestAnimationFrame(tick);
     return cleanup;
   }
 
