@@ -285,3 +285,92 @@ def test_feed_runs_database_projection_off_the_event_loop(swarm_api, monkeypatch
     monkeypatch.setattr(projection, 'read_page', checked)
     chat(client, root)
     assert calls == [True]
+
+
+def test_delivery_sequence_handles_postgres_transactions_committing_out_of_id_order(swarm_api):
+    app, client = swarm_api
+    store = app.state.store
+    if not store.database:
+        pytest.skip('PostgreSQL allows independent session transactions to commit out of allocation order.')
+    root = start_swarm(client)
+    child_a, child_b = [row['id'] for row in roster(app, root)[:2]]
+    turn_a, turn_b = store.claim_message(child_a), store.claim_message(child_b)
+    initial = chat(client, root)
+    with store.connect(write_scope=child_a) as early:
+        early.begin_write()
+        store.save_answer_in(early, child_a, turn_a['id'], 'The earlier ID commits last.', 'completed')
+        early_id = early.execute('SELECT id FROM messages WHERE run_id=? AND response_to_id=?',
+                                 (child_a, turn_a['id'])).fetchone()[0]
+        with store.connect(write_scope=child_b) as later:
+            later.begin_write()
+            store.save_answer_in(later, child_b, turn_b['id'], 'The later ID commits first.', 'completed')
+            later_id = later.execute('SELECT id FROM messages WHERE run_id=? AND response_to_id=?',
+                                     (child_b, turn_b['id'])).fetchone()[0]
+        assert later_id > early_id
+        # This read must not acquire the held member write lock or wait for it.
+        visible = chat(client, root, after=initial['next_cursor'])
+        assert [item['id'] for item in visible['items']] == [f"response:{child_b}:{turn_b['id']}"]
+    following = chat(client, root, after=visible['next_cursor'])
+    assert [item['id'] for item in following['items']] == [f"response:{child_a}:{turn_a['id']}"]
+    assert chat(client, root, after=following['next_cursor'])['items'] == []
+
+
+def test_large_projection_backfill_is_bounded_resumable_and_opens_latest_history(swarm_api, monkeypatch):
+    import app.swarm_chat as projection
+    app, client = swarm_api
+    store = app.state.store
+    root = start_swarm(client)
+    monkeypatch.setattr(projection, 'PROJECTION_BATCH_SIZE', 5)
+    monkeypatch.setattr(projection, 'MAX_PROJECTION_BATCHES', 2)
+    ids = [add_message(store, root, f'Public response {index}') for index in range(14)]
+    response = client.get(f'/api/runs/{root}/swarm/chat', params={'limit': 3})
+    assert response.status_code == 503
+    assert response.headers['Retry-After'] == '1'
+    assert response.json()['detail'] == projection.PREPARING_HISTORY
+    assert len(store.rows('SELECT id FROM swarm_chat_entries WHERE root_id=?', (root,))) == 10
+    page = chat(client, root, limit=3)
+    assert [item['id'] for item in page['items']] == [f'message:{identity}' for identity in ids[-3:]]
+    assert page['has_more']
+    entries = store.rows('SELECT * FROM swarm_chat_entries WHERE root_id=? ORDER BY id', (root,))
+    assert len(entries) == 15
+    assert all(set(entry) == {'id', 'root_id', 'run_id', 'source', 'source_id', 'created_at'} for entry in entries)
+    generation = store.generation
+    assert chat(client, root, after=page['next_cursor'])['items'] == []
+    assert store.rows('SELECT * FROM swarm_chat_entries WHERE root_id=? ORDER BY id', (root,)) == entries
+    assert store.generation == generation  # An unchanged poll does not manufacture a write.
+
+
+def test_concurrent_projectors_deduplicate_and_still_filter_current_deleted_sources(swarm_api):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.main import public_messages
+    from app.swarm_chat import read_page
+    app, client = swarm_api
+    root = start_swarm(client)
+    store = app.state.store
+    child = roster(app, root)[0]['id']
+    ids = [add_message(store, child, f'Public response {index}') for index in range(8)]
+    post_id = add_post(store, child, 'Public board post')
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        pages = list(pool.map(lambda _: read_page(store, root, public_messages), range(4)))
+    assert pages == [pages[0]] * 4
+    assert len(store.rows('SELECT id FROM swarm_chat_entries WHERE root_id=?', (root,))) == 10
+    store.execute("UPDATE messages SET status='deleted' WHERE id=?", (ids[0],))
+    store.execute('DELETE FROM swarm_posts WHERE id=?', (post_id,))
+    page = chat(client, root, watch=f'message:{ids[0]}')
+    assert page['removed_ids'] == [f'message:{ids[0]}']
+    assert f'message:{ids[0]}' not in {item['id'] for item in page['items']}
+    assert f'board:{post_id}' not in {item['id'] for item in page['items']}
+    store.execute('UPDATE runs SET deletion_requested_at=? WHERE id=?', (now(), child))
+    assert [item['kind'] for item in chat(client, root)['items']] == ['human']
+
+
+def test_projection_write_requires_auth_and_valid_room_and_cursor(swarm_api):
+    app, client = swarm_api
+    root = start_swarm(client)
+    store = app.state.store
+    assert client.get(f'/api/runs/{root}/swarm/chat', params={'after': 'invalid'}).status_code == 422
+    assert client.get(f"/api/runs/{roster(app, root)[0]['id']}/swarm/chat").status_code == 404
+    assert store.rows('SELECT * FROM swarm_chat_entries') == []
+    client.cookies.clear()
+    assert client.get(f'/api/runs/{root}/swarm/chat').status_code == 401
+    assert store.rows('SELECT * FROM swarm_chat_entries') == []

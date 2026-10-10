@@ -1,9 +1,9 @@
-"""Bounded public conversation for one swarm, projected from durable sources.
+"""Bounded public conversation with a durable, commit-safe delivery sequence.
 
-History uses a timestamp/source/id key. Incremental cursors separately track
-message and board IDs: a late insert sharing an earlier source's timestamp
-must not disappear behind a different source's tail. Cursors convey no access;
-every query resolves and checks the requested root and its current subtree.
+Source IDs may be allocated before another transaction commits, so they cannot
+be stream watermarks. A room-scoped projector assigns delivery IDs only after
+public source rows are visible. Current subtree permissions still apply to every
+read; the projection stores identifiers, never another copy of message content.
 """
 import base64
 import binascii
@@ -17,7 +17,10 @@ from fastapi import HTTPException
 MAX_PAGE_SIZE = 100
 MAX_CONTENT_CHARACTERS = 16000
 MAX_LIVE_ITEMS = 100
-_CURSOR_VERSION = 1
+PROJECTION_BATCH_SIZE = 500
+MAX_PROJECTION_BATCHES = 4
+PREPARING_HISTORY = 'Preparing saved team messages. Please try again shortly.'
+_CURSOR_VERSION = 2
 
 _TREE = '''WITH RECURSIVE members(id) AS (
     SELECT id FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''
@@ -39,6 +42,70 @@ _POSTS = '''SELECT 'board' AS source,p.id AS source_id,p.created_at,p.member_id 
         AND (p.target_id='' OR EXISTS(SELECT 1 FROM members target WHERE target.id=p.target_id))'''
 _TIMELINE = _TREE + ', timeline AS (' + _MESSAGES + ' UNION ALL ' + _POSTS + ')'
 
+_DELIVERY_TIMELINE = _TIMELINE + ''', delivered AS (
+    SELECT timeline.source,timeline.source_id,entry.created_at,timeline.run_id,entry.id AS delivery_id FROM timeline
+    JOIN swarm_chat_entries entry ON entry.source=timeline.source AND entry.source_id=timeline.source_id
+    WHERE entry.root_id=?
+)'''
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS swarm_chat_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        root_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK(source IN ('message','board')),
+        source_id INTEGER NOT NULL, created_at TEXT NOT NULL,
+        UNIQUE(root_id,source,source_id))''')
+    store.execute('CREATE INDEX IF NOT EXISTS idx_swarm_chat_delivery ON swarm_chat_entries(root_id,id)')
+    store.execute('CREATE INDEX IF NOT EXISTS idx_swarm_chat_history ON swarm_chat_entries(root_id,created_at,source,source_id)')
+
+
+def _require_root(conn, root: str):
+    run = conn.execute('SELECT parent_run_id,deleted_at,deletion_requested_at FROM runs WHERE id=?', (root,)).fetchone()
+    if (not run or run['parent_run_id'] or run['deleted_at'] or run['deletion_requested_at']
+            or not conn.execute('SELECT 1 FROM swarm_missions WHERE run_id=?', (root,)).fetchone()):
+        raise HTTPException(404, 'Swarm conversation not found.')
+
+
+_UNSEEN = ''' FROM timeline WHERE NOT EXISTS(SELECT 1 FROM swarm_chat_entries entry WHERE entry.root_id=?
+    AND entry.source=timeline.source AND entry.source_id=timeline.source_id)'''
+
+
+def _has_unprojected(conn, root: str) -> bool:
+    return conn.execute(_TIMELINE + ' SELECT 1' + _UNSEEN + ' LIMIT 1', (root, root, root)).fetchone() is not None
+
+
+def _project(store, root: str):
+    # Each batch holds only this room's projection lock, never a member's write
+    # lock. Writers in this and other rooms can commit while we discover keys.
+    # Do not replace NOT EXISTS with a source-ID watermark: a lower allocated
+    # ID can become visible after a higher ID on PostgreSQL.
+    for _ in range(MAX_PROJECTION_BATCHES):
+        with store.connect(write_scope='swarm-chat:' + root) as conn:
+            conn.begin_write()
+            _require_root(conn, root)
+            # Avoid marking unchanged polls as writes. Insert the bounded batch
+            # in one statement, not one network round trip per source row.
+            if not _has_unprojected(conn, root):
+                return
+            inserted = conn.execute(_TIMELINE + ''' INSERT INTO swarm_chat_entries
+                (root_id,run_id,source,source_id,created_at)
+                SELECT ?,run_id,source,source_id,created_at''' + _UNSEEN + '''
+                ORDER BY created_at,source,source_id LIMIT ?
+                ON CONFLICT(root_id,source,source_id) DO NOTHING RETURNING id''',
+                (root, root, root, root, PROJECTION_BATCH_SIZE)).fetchall()
+        # A cursor is issued only after the existing backlog has been indexed.
+        # Large histories make resumable progress without monopolizing a request.
+        if len(inserted) < PROJECTION_BATCH_SIZE:
+            return
+    with store.connect() as conn:
+        conn.begin_read()
+        _require_root(conn, root)
+        if not _has_unprojected(conn, root):
+            return
+    raise HTTPException(503, PREPARING_HISTORY, headers={'Retry-After': '1'})
+
 
 def _cursor(root: str, **values) -> str:
     raw = json.dumps({'v': _CURSOR_VERSION, 'root': root, **values}, separators=(',', ':')).encode()
@@ -50,11 +117,11 @@ def _read_cursor(value: str, root: str, mode: str) -> dict:
         if len(value) > 1024:
             raise ValueError
         payload = json.loads(base64.b64decode(value + '=' * (-len(value) % 4), altchars=b'-_', validate=True))
-        fields = {'v', 'root', 'mode', 'message', 'board'} | ({'key'} if mode == 'before' else set())
+        fields = {'v', 'root', 'mode', 'delivery'} | ({'key'} if mode == 'before' else set())
         if (not isinstance(payload, dict) or set(payload) != fields or payload['v'] != _CURSOR_VERSION
                 or payload['root'] != root or payload['mode'] != mode
                 or any(type(payload[name]) is not int or not 0 <= payload[name] < 2**63
-                       for name in ('message', 'board'))):
+                       for name in ('delivery',))):
             raise ValueError
         if mode == 'before':
             key = payload['key']
@@ -71,18 +138,15 @@ def _key(row) -> tuple:
     return row['created_at'], row['source'], row['source_id']
 
 
-def _tail(conn, root: str) -> dict:
-    row = conn.execute(_TIMELINE + ''' SELECT
-        COALESCE(MAX(CASE WHEN source='message' THEN source_id END),0) AS message,
-        COALESCE(MAX(CASE WHEN source='board' THEN source_id END),0) AS board
-        FROM timeline''', (root, root)).fetchone()
-    return {'message': row['message'], 'board': row['board']}
+def _tail(conn, root: str) -> int:
+    row = conn.execute('SELECT COALESCE(MAX(id),0) AS delivery FROM swarm_chat_entries WHERE root_id=?',
+                       (root,)).fetchone()
+    return row['delivery']
 
 
-def _history(conn, root: str, marks: dict, before: dict | None, limit: int) -> tuple[list, bool]:
-    params = [root, root, marks['message'], marks['board']]
-    query = _TIMELINE + ''' SELECT * FROM timeline
-        WHERE ((source='message' AND source_id<=?) OR (source='board' AND source_id<=?))'''
+def _history(conn, root: str, mark: int, before: dict | None, limit: int) -> tuple[list, bool]:
+    params = [root, root, root, mark]
+    query = _DELIVERY_TIMELINE + ' SELECT * FROM delivered WHERE delivery_id<=?'
     if before:
         stamp, source, identity = before['key']
         query += ''' AND (created_at<? OR (created_at=? AND source<?)
@@ -93,28 +157,12 @@ def _history(conn, root: str, marks: dict, before: dict | None, limit: int) -> t
     return sorted(rows[:limit], key=_key), len(rows) > limit
 
 
-def _newer(conn, root: str, marks: dict, limit: int) -> tuple[list, dict, bool]:
-    # Read each source in ID order. Reserve a fair share when both are busy,
-    # then sort the bounded display batch; timestamps never advance a watermark.
-    # Even backdated inserts or identical cross-source timestamps remain visible.
-    pending = {}
-    for source, query in (('message', _MESSAGES), ('board', _POSTS)):
-        params = [root, root] if source == 'message' else [root]
-        statement = _TREE + ', source_items AS (' + query + ') SELECT * FROM source_items WHERE source_id>? ORDER BY source_id LIMIT ?'
-        pending[source] = [dict(row) for row in conn.execute(statement, (*params, marks[source], limit + 1))]
-    selected = []
-    counts = {'message': 0, 'board': 0}
-    while len(selected) < limit and any(pending.values()):
-        for source in ('message', 'board'):
-            if pending[source] and len(selected) < limit:
-                selected.append(pending[source].pop(0))
-                counts[source] += 1
-    updated = dict(marks)
-    for source in counts:
-        taken = [row['source_id'] for row in selected if row['source'] == source]
-        if taken:
-            updated[source] = max(taken)
-    return sorted(selected, key=_key), updated, any(pending.values())
+def _newer(conn, root: str, mark: int, limit: int) -> tuple[list, int, bool]:
+    rows = [dict(row) for row in conn.execute(_DELIVERY_TIMELINE + ''' SELECT * FROM delivered
+        WHERE delivery_id>? ORDER BY delivery_id LIMIT ?''', (root, root, root, mark, limit + 1))]
+    selected = rows[:limit]
+    updated = selected[-1]['delivery_id'] if selected else mark
+    return sorted(selected, key=_key), updated, len(rows) > limit
 
 
 def _author(row, root: str, *, human=False) -> dict:
@@ -246,7 +294,7 @@ def _revalidate(conn, root: str, identities: list[str], live: list[dict]) -> tup
 
 def read_page(store, root: str, public_messages: Callable, *, limit: int = 50,
               after: str | None = None, before: str | None = None, watch: str | None = None) -> dict:
-    """Latest/older history or new source IDs, plus current public reply upserts.
+    """Latest/older history or new deliveries, plus current public reply upserts.
 
     Initial/before ``has_more`` means older history; after means more new items.
     ``watch`` revalidates up to 100 visible mutable message IDs, returning
@@ -259,20 +307,18 @@ def read_page(store, root: str, public_messages: Callable, *, limit: int = 50,
     watching = _watch_ids(watch)
     cursor = _read_cursor(after, root, 'after') if after is not None else (
         _read_cursor(before, root, 'before') if before is not None else None)
+    _project(store, root)
     with store.connect() as conn:
         conn.begin_read()
-        run = conn.execute('SELECT parent_run_id,deleted_at,deletion_requested_at FROM runs WHERE id=?', (root,)).fetchone()
-        if (not run or run['parent_run_id'] or run['deleted_at'] or run['deletion_requested_at']
-                or not conn.execute('SELECT 1 FROM swarm_missions WHERE run_id=?', (root,)).fetchone()):
-            raise HTTPException(404, 'Swarm conversation not found.')
-        marks = {name: cursor[name] for name in ('message', 'board')} if cursor else _tail(conn, root)
+        _require_root(conn, root)
+        mark = cursor['delivery'] if cursor else _tail(conn, root)
         if after is not None:
-            keys, marks, has_more = _newer(conn, root, marks, limit)
+            keys, mark, has_more = _newer(conn, root, mark, limit)
         else:
-            keys, has_more = _history(conn, root, marks, cursor, limit)
+            keys, has_more = _history(conn, root, mark, cursor, limit)
         items = _items(conn, root, keys)
         live = _live_items(conn, root, public_messages)
         updated, removed = _revalidate(conn, root, watching, live)
     return {'items': items, 'live_items': live, 'updated_items': updated, 'removed_ids': removed, 'has_more': has_more,
-            'next_cursor': _cursor(root, mode='after', **marks),
-            'previous_cursor': _cursor(root, mode='before', key=list(_key(keys[0])), **marks) if keys else None}
+            'next_cursor': _cursor(root, mode='after', delivery=mark),
+            'previous_cursor': _cursor(root, mode='before', key=list(_key(keys[0])), delivery=mark) if keys else None}
