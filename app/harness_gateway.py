@@ -16,6 +16,7 @@ from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, private_compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
 from .broker_diagnostics import model_gateway_error, upstream_headers
+from .model_selection import ASTRA_ULTRAFAST, gateway_payload
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -25,6 +26,8 @@ def authorized_payload(body, route, model, context):
     """Apply server policy without changing the provider's native schema."""
     if not isinstance(body, dict):
         raise HTTPException(422, 'Expected a JSON object.')
+    if model == ASTRA_ULTRAFAST and route != '/v1/responses':
+        raise HTTPException(422, 'GPT-6 Astra Ultrafast requires the Responses API. Use Codex or regular GPT-6 Astra.')
     field = 'messages' if route == '/v1/messages' else 'input'
     if not isinstance(body.get(field), (list, str) if field == 'input' else list):
         raise HTTPException(422, f'{field} is required.')
@@ -55,8 +58,6 @@ def authorized_payload(body, route, model, context):
             payload['instructions'] = context + '\n\n' + (payload.get('instructions') or '')
     if route == '/v1/responses':
         payload['store'] = False
-        if model == 'openai/gpt-6-astra':
-            payload['service_tier'] = 'ultrafast'
     return payload
 
 
@@ -313,7 +314,8 @@ class HarnessGateway:
             base = self.settings.litellm_api_base.rstrip('/')
             upstream_route = '/v1/chat/completions' if compact else route
             url = base + upstream_route.removeprefix('/v1') if base.endswith('/v1') else base + upstream_route
-            upstream = await client.send(client.build_request('POST', url, json=payload, headers=headers), stream=True)
+            upstream = await client.send(client.build_request('POST', url,
+                json=gateway_payload(payload, upstream_route), headers=headers), stream=True)
             gateway_id = self.spend.headers(request_id, upstream, capture.streaming)
             if upstream.status_code >= 400:
                 raw_error = bytearray()

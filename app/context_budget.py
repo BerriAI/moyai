@@ -9,6 +9,7 @@ import time
 import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from .model_selection import gateway_model
 
 
 class ModelContextLimits(BaseModel):
@@ -122,6 +123,9 @@ class ContextBudget:
 
     async def limits(self, model):
         configured = self.settings.model_context_limits.get(model)
+        model = gateway_model(model)
+        if configured is None:
+            configured = self.settings.model_context_limits.get(model)
         if configured is not None:
             return ModelContextLimits.model_validate(configured)
         key = (self.base, hashlib.sha256(self.settings.litellm_api_key.encode()).digest(), model)
@@ -215,7 +219,7 @@ class ContextBudget:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 response = await client.post(self.base + '/utils/token_counter', params={'call_endpoint': 'true'},
-                    headers=self.headers, json={'model': payload['model'], 'messages': messages})
+                    headers=self.headers, json={'model': gateway_model(payload['model']), 'messages': messages})
                 response.raise_for_status()
                 value = response.json()
                 count = positive(value.get('total_tokens'))

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .db import now
 from .model_preferences import save_model
+from .harnesses import validate_harness
 
 
 class Listing(BaseModel):
@@ -66,6 +67,7 @@ class ModelTools:
             if name == 'model_list':
                 return self.state(fresh)
             selected = self.settings.resolve_model(args.model)
+            validate_harness(fresh['harness'], selected)
             operation = (run['id'], args.turn_id, args.request_key)
             prior = conn.execute('SELECT model FROM model_switch_operations WHERE run_id=? AND turn_id=? AND request_key=?', operation).fetchone()
             if prior:

@@ -33,6 +33,7 @@ from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
 from .model_preferences import preferred_model, save_model
+from .model_selection import ASTRA_ULTRAFAST, gateway_model
 from .access_logging import configure_access_logging
 from .broker_diagnostics import BrokerDiagnosticsMiddleware, model_gateway_error, upstream_headers
 from .workspace_diagnostics import DIAGNOSTIC_TOOL, DiagnosticArgs, inspect_workspace
@@ -1094,7 +1095,7 @@ def _create_app(settings, store):
     @app.get("/broker/{run_id}/v1/models")
     async def models(run_id: str, request: Request):
         run = require_run(run_id, request)
-        return {"object": "list", "data": [{"id": run['active_model'] or run['model'] or settings.agent_model, "object": "model", "owned_by": "workspace"}]}
+        return {"object": "list", "data": [{"id": gateway_model(run['active_model'] or run['model'] or settings.agent_model), "object": "model", "owned_by": "workspace"}]}
 
     @app.get('/broker/{run_id}/attachments/{attachment_id}')
     async def broker_attachment(run_id: str, attachment_id: str, request: Request):
@@ -1180,6 +1181,8 @@ def _create_app(settings, store):
             # precedence. Skill definitions never enter sandbox tool results,
             # conversation snapshots, event logs or Temporal workflow history.
             payload['messages'] = [{'role':'system','content':skill_context}, *payload['messages']]
+        if selected_model == ASTRA_ULTRAFAST:
+            raise HTTPException(422, 'GPT-6 Astra Ultrafast requires the Responses API. Use Codex or regular GPT-6 Astra.')
         payload["model"] = selected_model
         for field in ("max_tokens", "max_completion_tokens"):
             if field in payload:

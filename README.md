@@ -31,7 +31,9 @@ continue through the agent normally.
 
 New sessions automatically use **Codex SDK** for `openai/` models and **Claude Agent SDK** for `anthropic/` models, including new model versions. Other model prefixes fall back to Claude Agent SDK. You can pick a different harness for each session: **Hermes, Claude Agent SDK, Codex, OpenCode, Deep Agents, Tool Loop, or Pi**. Every harness runs in the same isolated workspace with the same tools and permissions. See [supported combinations and custom harnesses](docs/harnesses.md).
 
-GPT-6 Astra (`openai/gpt-6-astra`) uses [Ultrafast mode](https://docs.litellm.ai/docs/providers/openai/ultrafast) for Responses API requests, including the default Codex harness. This requires upstream Ultrafast access and uses its pricing and rate limits. Messages, Chat Completions, and context summaries keep their existing processing mode.
+**GPT-6 Astra** uses normal processing by default. Choose **GPT-6 Astra Ultrafast** in the model picker to opt into [Ultrafast mode](https://docs.litellm.ai/docs/providers/openai/ultrafast). The choice is saved to your account immediately, survives sign-out and server restarts, and becomes the default for new sessions, just like choosing Opus. Choose regular **GPT-6 Astra** to opt out. Existing sessions and already queued messages retain their own model choices.
+
+Ultrafast automatically selects Codex for new sessions because it requires the Responses API. An explicitly selected incompatible harness is rejected with guidance to choose Codex or regular Astra. The saved ID `openai/gpt-6-astra-ultrafast` is a Moyai preference: requests still use the existing gateway model `openai/gpt-6-astra`, with `service_tier: "ultrafast"` only for opted-in Responses requests and `"default"` for regular Astra Responses requests. No new gateway deployment or database migration is needed. Ultrafast requires upstream access and uses its pricing and rate limits; context summaries and memory review retain normal processing.
 
 ## Models and providers
 

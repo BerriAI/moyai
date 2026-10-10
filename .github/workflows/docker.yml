@@ -47,6 +47,8 @@ jobs:
         run: uv run --python 3.13 pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_codex_tool_readiness.py tests/test_codex_catalog.py tests/test_codex_tool_search.py tests/test_codex_runtime.py tests/test_tool_schema_cache.py tests/test_workspace_diagnostics.py tests/test_config.py tests/test_models.py tests/test_claude_sdk.py
       - name: Test active input delivery and queue ownership
         run: uv run --python 3.13 pytest -q --tb=line tests/test_steering_latency.py tests/test_active_steering.py tests/test_message_queue.py tests/test_send_now_interrupt.py
+      - name: Test saved model choices and opt-in processing tiers
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py
       - name: Test model trace content and parallel exports
         run: uv run --python 3.13 pytest -q --tb=line tests/test_tracing.py tests/test_trace_outbox.py tests/test_parallel_tracing.py
       - name: Test persistent context and real SDK continuation

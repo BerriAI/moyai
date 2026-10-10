@@ -15,6 +15,7 @@ from pydantic import Field
 from .db import now
 from .memory import Form, KINDS, Note, check_content, fingerprint, search_terms
 from .spend import UsageCapture
+from .model_selection import gateway_model
 
 log = logging.getLogger(__name__)
 MAX_ATTEMPTS = 3
@@ -229,7 +230,7 @@ class MemoryReview:
     async def extract(self, job, source, sources, notes, detailed):
         model = self.settings.resolve_model(fallback=self.settings.memory_review_model or source['model'])
         run = {**self.store.run(job['run_id']), 'active_user_id': job['actor_id'], 'active_message_id': job['message_id']}
-        payload = {'model': model, 'stream': False, 'max_completion_tokens': 2048,
+        payload = {'model': gateway_model(model), 'stream': False, 'max_completion_tokens': 2048,
             'response_format': {'type': 'json_object'}, 'messages': [
                 {'role': 'system', 'content': INSTRUCTIONS},
                 {'role': 'user', 'content': json.dumps({'repository': source['repo_url'], 'messages': sources,

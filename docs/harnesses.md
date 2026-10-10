@@ -11,7 +11,10 @@ overrides these model defaults; remove an old `AGENT_HARNESS=claude-agent-sdk` s
 to enable automatic pairing. The new-session picker shows the effective automatic
 choice and supports an explicit override. Explicitly
 selected harnesses remain available: Hermes, Codex, OpenCode, Deep Agents,
-Tool Loop and Pi. All configured models remain selectable with every harness. The configured
+Tool Loop and Pi. Regular model choices remain selectable with every harness.
+**GPT-6 Astra Ultrafast** is an opt-in processing mode that requires Codex and
+automatically selects it, including when `AGENT_HARNESS` sets another default.
+An explicit incompatible harness selection is rejected. The configured
 `AGENT_MODEL` is preserved, including GPT-6 Astra. The gateway must support the
 selected model and tool calls through the runtime's native API (Responses for
 Codex, Messages for Claude); selecting it does not establish provider compatibility.

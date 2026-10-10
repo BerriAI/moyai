@@ -40,6 +40,8 @@ jobs:
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py tests/test_durable.py tests/test_automation_concurrency.py tests/test_harness_gateway.py tests/test_broker_transport.py tests/test_adoption.py tests/test_identities.py tests/test_slack_chat.py tests/test_slack_web_mirror.py tests/test_activity.py
       - name: Demonstrate real HTTP requests across two server processes
         run: uv run --frozen --python 3.13 python scripts/postgres_runtime_smoke.py
+      - name: Verify saved model choices and opt-in tiers on Postgres
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py
   scheduling:
     # The broad runtime suite already approaches its job timeout. Keep the
     # real Temporal/lock-wait regressions independent so neither delays the other.

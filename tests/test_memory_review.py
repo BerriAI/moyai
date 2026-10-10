@@ -11,6 +11,7 @@ from app.db import Store
 from app.main import create_app
 from app.memory import Note
 from app.model_slots import ModelSlots
+from app.model_selection import ASTRA, ASTRA_ULTRAFAST
 
 
 @pytest.fixture
@@ -365,3 +366,14 @@ async def test_shutdown_drains_in_flight_review_cleanup(review_app, monkeypatch,
     async with asyncio.timeout(3):
         async with service.slots:
             pass
+
+
+async def test_ultrafast_memory_review_uses_the_base_gateway_model(review_app):
+    app = review_app
+    run, message_id = turn(app)
+    app.state.store.execute('UPDATE messages SET model=? WHERE id=?', (ASTRA_ULTRAFAST, message_id))
+    requests = []
+    await process(app, lambda request: requests.append(request) or completion([]))
+    assert jobs(app)[0]['status'] == 'completed'
+    body = json.loads(requests[0].content)
+    assert body['model'] == ASTRA and 'service_tier' not in body

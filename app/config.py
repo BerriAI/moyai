@@ -7,12 +7,14 @@ from urllib.parse import urlsplit
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from .context_budget import ModelContextLimits
+from .model_selection import ASTRA_ULTRAFAST
 
 
 # Keep picker IDs and labels in code so a stale deployment environment cannot
 # hide models added by a release. AGENT_MODEL only chooses the default.
 MODEL_CATALOG: dict[str, str] = {
     'openai/gpt-6-astra': 'GPT-6 Astra',
+    ASTRA_ULTRAFAST: 'GPT-6 Astra Ultrafast',
     'openai/gpt-6.1-sol': 'GPT-6.1 Sol',
     'anthropic/claude-opus-5-5': 'Claude Opus 5.5',
     'fireworks_ai/glm-5p3': 'GLM-5.3',
@@ -378,8 +380,10 @@ class Settings(BaseSettings):
         return resolve(value).id
 
     def default_harness(self, value: str | None = None) -> str:
-        """Choose once for a new session; explicit deployment settings win."""
+        """Choose once for a new session, honoring processing-mode requirements."""
         model = self.resolve_model(value)
+        if model == ASTRA_ULTRAFAST:
+            return 'codex'  # Ultrafast requires the native Responses API.
         if 'agent_harness' in self.model_fields_set:
             return self.agent_harness
         # Resolve aliases first, then use the provider namespace so new catalog
@@ -400,6 +404,9 @@ class Settings(BaseSettings):
         aliases = {
             'astra': 'openai/gpt-6-astra', '6-astra': 'openai/gpt-6-astra',
             'openai/6-astra': 'openai/gpt-6-astra', 'gpt-6-astra': 'openai/gpt-6-astra',
+            'astra-ultrafast': ASTRA_ULTRAFAST, '6-astra-ultrafast': ASTRA_ULTRAFAST,
+            'gpt-6-astra-ultrafast': ASTRA_ULTRAFAST,
+            'astra ultrafast': ASTRA_ULTRAFAST, '6-astra ultrafast': ASTRA_ULTRAFAST,
             'sol': 'openai/gpt-6.1-sol', '6.1-sol': 'openai/gpt-6.1-sol',
             'openai/6.1-sol': 'openai/gpt-6.1-sol', 'gpt-6.1-sol': 'openai/gpt-6.1-sol',
             'gpt 6.1 sol': 'openai/gpt-6.1-sol',

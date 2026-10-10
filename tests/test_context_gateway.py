@@ -6,11 +6,12 @@ import pytest
 
 from app.context_compaction import compaction_payload, private_compaction_payload, compaction_result
 from app.security import digest
+from app.model_selection import ASTRA_ULTRAFAST, gateway_model
 from sandbox.broker_transport import seal, CONTENT_TYPE
 from test_workspace import workspace
 
 
-@pytest.mark.parametrize('model', ['openai/gpt-6-astra', 'fireworks_ai/glm-5p3', 'anthropic/claude-opus-5-5'])
+@pytest.mark.parametrize('model', ['openai/gpt-6-astra', ASTRA_ULTRAFAST, 'fireworks_ai/glm-5p3', 'anthropic/claude-opus-5-5'])
 @pytest.mark.parametrize('error_fields', [{}, {'error': None}])
 def test_summary_route_pins_model_excludes_injections_and_accounts(workspace, monkeypatch, model, error_fields):
     app, client = workspace
@@ -21,7 +22,7 @@ def test_summary_route_pins_model_excludes_injections_and_accounts(workspace, mo
         body = json.loads(request.content)
         seen.append(body)
         assert request.url == 'https://gateway.example/v1/chat/completions'
-        assert body['model'] == model and body['stream'] is False
+        assert body['model'] == gateway_model(model) and body['stream'] is False
         assert set(body) == {'model', 'stream', 'messages'}
         assert 'caller system injection' not in json.dumps(body)
         assert 'private marker' not in json.dumps(body)

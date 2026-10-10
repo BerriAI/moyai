@@ -206,7 +206,7 @@ def test_native_gateway_preserves_protocol_stream_and_pins_access(workspace, mon
         assert payload['model'] == model
         assert payload['stream'] is True
         if route == 'responses' and model == 'openai/gpt-6-astra':
-            assert payload['service_tier'] == 'ultrafast'
+            assert payload['service_tier'] == 'default'
         else:
             assert 'service_tier' not in payload
         assert 'api_base' not in payload and 'api_key' not in payload
@@ -454,7 +454,7 @@ def test_native_nonstream_service_tier_policy(workspace, monkeypatch, route, mod
     def upstream(request):
         payload = json.loads(request.content)
         if route == 'responses' and model == 'openai/gpt-6-astra':
-            assert payload['service_tier'] == 'ultrafast'
+            assert payload['service_tier'] == 'default'
         else:
             assert 'service_tier' not in payload
         return httpx.Response(200, content=wire)

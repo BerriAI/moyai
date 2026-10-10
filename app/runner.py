@@ -14,6 +14,7 @@ from .security import digest
 from .message_queue import MessageQueue
 from .modal_clients import ModalClients
 from .runtime_files import sync_runtime
+from .model_selection import gateway_model
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 CAPTURE_RELEASE_TIMEOUT = 35
@@ -416,7 +417,7 @@ class RunManager:
                 "github_repository_id": run.get("github_repository_id"),
                 "github_enabled": "github" in run["plugins"],
                 "broker_url": f"{self.settings.public_url.rstrip('/')}/broker/{run_id}",
-                "model": self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or ''), "max_iterations": self.settings.max_agent_iterations,
+                "model": gateway_model(self.settings.resolve_model(fallback=run.get('active_model') or run.get('model') or '')), "max_iterations": self.settings.max_agent_iterations,
                 "timeout": self.settings.run_timeout_seconds - 90 if self.settings.run_timeout_seconds else None,
                 "transport_recovery_seconds": self.settings.transport_recovery_seconds,
                 "rotation_seconds": self.settings.sandbox_rotation_seconds if not self.settings.run_timeout_seconds and run.get("chat_enabled") else 0,
