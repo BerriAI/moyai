@@ -222,11 +222,21 @@ def _create_app(settings, store):
     connectors.github_requester_match = credentials.same_requester
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
-    from .model_slots import ModelSlots
-    model_slots = ModelSlots(settings.max_concurrent_model_requests)
+    from .model_slots import ModelSlots, PostgresModelSlots
+    overlap_broker = settings.moyai_runtime_role == 'broker' and not store.schema_updates
+    broker_work = None
+    if overlap_broker:
+        from .broker_ownership import BrokerWork
+        broker_work = store.broker_work = BrokerWork(store)
+    model_slots = (PostgresModelSlots(settings.max_concurrent_model_requests, store.database)
+                   if overlap_broker else ModelSlots(settings.max_concurrent_model_requests))
     from .memory_review import MemoryReview
     memory_review = MemoryReview(memory, settings, spend, model_slots)
     memory.reviewer = store.memory_review = memory_review
+    broker_requests = None
+    if overlap_broker:
+        from .broker_ownership import BrokerMaintenance, BrokerRequests
+        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery))
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     lens_feedback = LensFeedback(store, settings)
@@ -254,6 +264,67 @@ def _create_app(settings, store):
     login_attempts, all_login_failures = Throttle(10), Throttle(300)
     owns_inference = settings.moyai_runtime_role == 'broker' or (
         settings.moyai_runtime_role in {'standalone', 'coordinator'} and not settings.moyai_separate_broker)
+
+    handoff = None
+    hook_inbox = None
+    if settings.moyai_runtime_role == 'coordinator' and settings.moyai_coordinator_handoff:
+        from .coordinator_handoff import CoordinatorHandoff, HookInbox
+        handoff = CoordinatorHandoff(store, manager)
+        hook_inbox = HookInbox(store, slack, lambda: missing_cloud())
+
+    @asynccontextmanager
+    async def background_lifespan():
+        watcher = None
+        try:
+            await manager.recover()
+            if handoff:
+                await manager.wait_ready()
+            session_lifecycle.start()
+            await checkpoints.flush()
+            slack.recover()
+            identities.start()
+            environments.start()
+            automations.start()
+            if owns_inference:
+                spend.recovery.start()
+                memory_review.start()
+            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+            tracing.start()
+            lens_feedback.start()
+            infrastructure.start()
+            session_titles.start()
+            if hook_inbox:
+                hook_inbox.start()
+            yield
+        finally:
+            await close_background(watcher)
+
+    async def close_background(watcher=None):
+        # Stop intake processing before the singleton consumers it wakes.
+        # Attempt every close even if one fails; ownership is retained until
+        # each component has drained its own tasks.
+        errors = []
+        if handoff:
+            slack.chat.begin_drain()
+        closes = ([hook_inbox.close] if hook_inbox else []) + [
+            session_lifecycle.close, memory_review.close, spend.recovery.close,
+            harness_gateway.maintenance.close, harness_gateway.live_context.close,
+            computer.close, session_pull_requests.close, session_titles.close,
+            infrastructure.close, automations.close, environments.close,
+            identities.close, lambda: slack.shutdown(graceful=bool(handoff)), manager.shutdown,
+            manager.modal_clients.close, tracing.close, lens_feedback.close,
+        ]
+        for close in closes:
+            try:
+                await close()
+            except BaseException as exc:
+                errors.append(exc)
+        if watcher:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+        await checkpoints.flush()
+        if errors:
+            raise errors[0]
 
     @asynccontextmanager
     async def lifespan(app):
@@ -285,8 +356,9 @@ def _create_app(settings, store):
             if settings.moyai_runtime_role == 'worker':
                 # Workers consume Temporal work only. They must not interrupt
                 # gateway streams or take over singleton background recovery.
-                await manager.recover()
                 try:
+                    await manager.recover()
+                    await manager.wait_ready()
                     yield
                 finally:
                     await manager.shutdown()
@@ -297,74 +369,54 @@ def _create_app(settings, store):
                 return
             # Only the process holding the inference fence may recover model
             # attempts or compaction. An API restart must leave live calls alone.
-            if owns_inference:
+            if owns_inference and not overlap_broker:
                 store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
                 harness_gateway.maintenance.recover()
             if settings.moyai_runtime_role == 'broker':
                 try:
                     # External tool writes also live on /broker/*; an API restart
                     # must not mark an in-flight broker action ambiguous.
-                    store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
+                    if not overlap_broker:
+                        store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
                     await manager.recover()
                     await manager.wait_ready()
-                    spend.recovery.start()
-                    memory_review.start()
+                    if broker_requests:
+                        await broker_requests.start()
+                    else:
+                        spend.recovery.start()
+                        memory_review.start()
                     yield
                 finally:
-                    await memory_review.close()
-                    await spend.recovery.close()
-                    await harness_gateway.maintenance.close()
-                    await harness_gateway.live_context.close()
-                    await manager.shutdown()
-                    await manager.modal_clients.close()
-                    await environments.close()
-                    await session_lifecycle.close()
-                    await computer.close()
-                    await session_pull_requests.close()
-                    await tracing.close()
+                    errors = []
+                    closes = ([broker_requests.close] if broker_requests else []) + [
+                        memory_review.close, spend.recovery.close,
+                        harness_gateway.maintenance.close, harness_gateway.live_context.close,
+                        manager.shutdown, manager.modal_clients.close, environments.close,
+                        session_lifecycle.close, computer.close, session_pull_requests.close, tracing.close,
+                    ]
+                    for close in closes:
+                        try:
+                            await close()
+                        except BaseException as exc:
+                            errors.append(exc)
+                    if broker_requests:
+                        await broker_requests.drain()
+                    if errors:
+                        raise errors[0]
                 return
-            await manager.recover()
-            session_lifecycle.start()
-            await checkpoints.flush()
-            slack.recover()
-            identities.start()
-            environments.start()
-            automations.start()
-            if owns_inference:
-                spend.recovery.start()
-                memory_review.start()
-            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
-            tracing.start()
-            lens_feedback.start()
-            infrastructure.start()
-            session_titles.start()
-            try:
-                yield
-            finally:
-                await session_lifecycle.close()
-                await memory_review.close()
-                await spend.recovery.close()
-                await harness_gateway.maintenance.close()
-                await harness_gateway.live_context.close()
-                await computer.close()
-                await session_pull_requests.close()
-                await session_titles.close()
-                await infrastructure.close()
-                await automations.close()
-                await environments.close()
-                await identities.close()
-                await slack.shutdown()
+            if handoff:
                 try:
-                    await manager.shutdown()
+                    async with handoff.lifespan(background_lifespan):
+                        yield
                 finally:
-                    await manager.modal_clients.close()
-                await tracing.close()
-                await lens_feedback.close()
-                if watcher:
-                    watcher.cancel()
-                    await asyncio.gather(watcher, return_exceptions=True)
-                await checkpoints.flush()
+                    if not handoff.started:
+                        await close_background()
+                return
+            async with background_lifespan():
+                yield
         finally:
+            if overlap_broker:
+                await asyncio.to_thread(model_slots.close)
             await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
@@ -379,6 +431,15 @@ def _create_app(settings, store):
     if settings.moyai_runtime_role == 'api':
         from .runtime_coordination import ApiRoleMiddleware
         app.add_middleware(ApiRoleMiddleware)
+    if handoff:
+        from .coordinator_handoff import CoordinatorIngressMiddleware
+        app.add_middleware(CoordinatorIngressMiddleware, ownership=handoff)
+    app.state.coordinator_handoff = handoff
+    app.state.hook_inbox = hook_inbox
+    if broker_requests:
+        from .broker_ownership import BrokerOwnershipMiddleware
+        app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
+    app.state.broker_requests = broker_requests
     app.state.session_lifecycle = session_lifecycle
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
@@ -491,11 +552,19 @@ def _create_app(settings, store):
         # The release probe correlates the actual HTTP process with its database
         # owner; an SSH shell may land on either instance during Render overlap.
         headers = {}
-        if settings.moyai_runtime_role == 'api':
+        if store.database and settings.moyai_runtime_role in {'api', 'worker', 'broker', 'coordinator'}:
             headers = {'X-Moyai-Build': settings.moyai_build_sha,
-                       'X-Moyai-API-Release': '1',
                        'X-Moyai-Owner': str(store.database.owner_pid),
-                       'Cache-Control': 'no-store'}
+                       'X-Moyai-Role': settings.moyai_runtime_role,
+                       'X-Moyai-Rolling-Release': '1', 'Cache-Control': 'no-store'}
+        if settings.moyai_runtime_role == 'api':
+            headers['X-Moyai-API-Release'] = '1'
+        if handoff:
+            headers['X-Moyai-Coordinator-State'] = handoff.status
+        if broker_requests:
+            headers['X-Moyai-Broker-Draining'] = str(broker_requests.draining).lower()
+            if broker_requests.draining:
+                raise HTTPException(503, 'Broker ownership is unavailable.', headers=headers)
         if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
             raise HTTPException(503, 'Runtime is connecting to Temporal.', headers=headers)
         if store.database:
@@ -1321,10 +1390,14 @@ def _create_app(settings, store):
 
     @app.post('/hooks/slack/interactions')
     async def slack_interactions(request: Request):
+        if hook_inbox:
+            return await hook_inbox.receive_interaction(request)
         return await slack.feedback.receive(request)
 
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
+        if hook_inbox:
+            return await hook_inbox.receive_event(request)
         return await slack.receive(request, missing_cloud())
 
     from .harness_gateway import HarnessGateway
@@ -1367,7 +1440,7 @@ def _create_app(settings, store):
         # Reject before reading/charging an inference. Waiting on this server
         # would retain large request bodies and could expire sealed envelopes.
         # The sandbox retries only this explicit, unbilled admission response.
-        if model_slots.locked():
+        if await model_slots.is_full():
             model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
