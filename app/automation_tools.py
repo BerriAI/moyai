@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .automations import Definition, Save, Toggle, SCHEDULE_VERSION
+from .automation_history import History, DESCRIPTION as HISTORY_DESCRIPTION, read_history
 from .automation_events import WebhookSetup
 from .connector_errors import ConnectorError
 
@@ -56,6 +57,7 @@ class WebhookConfigure(Target):
 
 
 SPECS = {
+    'automation_history': (History, HISTORY_DESCRIPTION),
     'automation_environments': (EnvironmentListing, 'List reusable organization project environments for automation setup, including their last validated build and setup blockers. Select an id as definition.environment_id to reuse installed tools and services such as PostgreSQL/Prisma. Does not build or enable environments or grant repository access. Ask an administrator to prepare a missing environment; keep setup scripts in its versioned recipe, not automation prompts or metadata.'),
     'automation_webhook_info': (WebhookRead, 'Inspect the current requester’s automation receiver URLs, provider configuration and recent deliveries. Readiness means a receiver secret exists, not that a provider webhook has been registered. Never returns secrets.'),
     'automation_webhook_setup': (WebhookConfigure, 'Configure or rotate a webhook RECEIVER owned by the current requester. First obtain a non-expiring persistent generic credential using credentials_request, name=webhook-signing-secret, format=env, input_fields=[{name: WEBHOOK_SECRET, label: Webhook signing secret}]. Pass its request_id only. The user must permit persistent reuse: this copies the secret into durable automation configuration. Configuring pauses the automation and increments its revision. It affects all triggers for that provider. Register the same secret and returned callback URL at the provider separately; this tool does not register GitHub or other remote webhooks. Use the current revision and a stable request_key for identical retries. No secrets are returned.'),
@@ -77,12 +79,15 @@ class AutomationTools:
         if self.store.schema_updates:
             initialize_schema(self.store)
 
-    def actor(self, run, turn_id=None):
-        run = self.store.run(run['id'])
+    def actor(self, run, turn_id=None, *, history=False):
+        caller, run = run, self.store.run(run['id'])
         if (not run or not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}):
             raise HTTPException(403, 'Automation controls require an authenticated chat turn.')
-        if run.get('parent_run_id') or self.store.rows('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)):
+        if any(run[key] != caller[key] for key in ('active_message_id', 'active_user_id', 'token_hash')):
+            raise HTTPException(409, 'The requester, turn or execution changed. Use the current chat.')
+        source = self.history_source(run)
+        if (run.get('parent_run_id') or source) and not (history and source):
             raise HTTPException(403, 'Manage schedules from a direct user chat, not a delegated or automated run.')
         if turn_id is not None and turn_id != run['active_message_id']:
             raise HTTPException(409, 'The requester or turn changed. Use automation_list again.')
@@ -97,8 +102,16 @@ class AutomationTools:
             raise HTTPException(403, 'Sign in with Google first. Slack scheduling also needs a fresh verified matching profile.')
         return run, matches[0]['id']
 
-    def unchanged(self, run, actor):
-        fresh, current_actor = self.actor(run, run['active_message_id'])
+    def history_source(self, run):
+        rows = self.store.rows('''SELECT a.automation_id,d.owner_id FROM run_ancestry tree
+            JOIN automation_runs a ON a.run_id=tree.ancestor_id JOIN automations d ON d.id=a.automation_id
+            WHERE tree.run_id=?''', (run['id'],))
+        if len(rows) > 1:
+            raise HTTPException(409, 'Automation ancestry is ambiguous.')
+        return rows[0] if rows else None
+
+    def unchanged(self, run, actor, *, history=False):
+        fresh, current_actor = self.actor(run, run['active_message_id'], history=history)
         if current_actor != actor or fresh['active_user_id'] != run['active_user_id']:
             raise HTTPException(409, 'The requester changed. Use automation_list again.')
 
@@ -106,12 +119,20 @@ class AutomationTools:
         try:
             self.actor(run)
         except HTTPException:
-            return []
+            try:
+                _, actor = self.actor(run, history=True)
+                source = self.history_source(run)
+                if not source or source['owner_id'] != actor:
+                    return []
+            except HTTPException:
+                return []
+            return [{'name': 'automation_history', 'description': HISTORY_DESCRIPTION, 'inputSchema': History.model_json_schema(),
+                     'annotations': {'readOnlyHint': True, 'idempotentHint': True}}]
         # Reading one automation also synchronizes its remote schedules. Only
         # these observational catalogs can replay after an unknown outcome.
         return [{'name': name, 'description': description, 'inputSchema': schema.model_json_schema(),
-                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments'},
-                                 'idempotentHint': name in {'automation_webhook_info', 'automation_environments'}}}
+                 'annotations': {'readOnlyHint': name in {'automation_list', 'automation_webhook_info', 'automation_environments', 'automation_history'},
+                                 'idempotentHint': name in {'automation_webhook_info', 'automation_environments', 'automation_history'}}}
                 for name, (schema, description) in SPECS.items()]
 
     def owned(self, automation_id, actor):
@@ -215,7 +236,18 @@ class AutomationTools:
                         {'field': '.'.join(str(part) for part in error['loc']) or 'arguments',
                          'type': error['type'], 'message': error['msg']}
                         for error in exc.errors(include_input=False, include_context=False, include_url=False)]}
-        run, actor = self.actor(run, getattr(args, 'turn_id', None))
+        run, actor = self.actor(run, getattr(args, 'turn_id', None), history=name == 'automation_history')
+        if name == 'automation_history':
+            source = self.history_source(run)
+            target = args.automation_id or (source['automation_id'] if source else '')
+            if not target:
+                raise HTTPException(422, 'Select an automation_id from automation_list.')
+            if source and (source['owner_id'] != actor or target != source['automation_id']):
+                raise HTTPException(403, 'This execution can read only its own automation history.')
+            self.owned(target, actor)
+            result = read_history(self.store, target, cursor=args.cursor, limit=args.limit)
+            self.unchanged(run, actor, history=True)
+            return result
         if name == 'automation_environments':
             environments = self.service.environments
             catalog = environments.catalog()

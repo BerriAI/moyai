@@ -427,3 +427,31 @@ prerequisite readiness and owner-granted automation self-management remain open.
 The schema remains revision 9. All four role protocols are now revision 4 because
 older workers interpret agent-generated inputs as human messages. Drain old roles
 and use a coordinated release; rebuilding only the broker is not sufficient.
+
+## Complete automation history and scoped session reads (WP2/WP7; not deployed)
+
+Automated work receives a complete history reference rather than three summaries
+clipped to 1,000 characters. `automation_history` returns full public answers using
+keyset cursors, including tied timestamps. `sessions_read` now permits delegated
+work to inspect its session family, and automation descendants to inspect prior
+runs of their own automation. Every message includes its input kind and provenance.
+Unrelated session search still requires a direct authenticated chat; active
+requester, turn, capability and deletion checks protect reads across awaits.
+
+Settings history can load earlier runs and retains loaded rows during refresh.
+The editor preserves complete instructions and metadata and permits more than
+twenty triggers or metadata entries. Saved workflows have no fixed count ceiling.
+Configured invocation and execution capacity still apply.
+
+Validation: 272 broader automation, session, workspace and delegation cases passed;
+two catalog failures exposed an incorrect removed import and were corrected.
+The apparent duplicate `READ_TOOL` names were different tools (`history_read` and
+`sessions_read`); both remain available. Sixty-four contracts passed on PostgreSQL,
+sixteen Node cases passed, and the real UI with synthetic API fixtures passed at
+1440/768/320 pixels, including 26 history entries and complete editor saves.
+Rendered automation documentation passed desktop/mobile overflow checks.
+The frozen runtime-foundation suite finished with 5,114 passes, 296 skips, and one
+fixture failure already repaired and covered by the delegation suite.
+
+Owner-granted automation self-management remains the next implementation step.
+These are source and local behavioral checks, not deployment or model-quality proof.
