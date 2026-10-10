@@ -236,11 +236,34 @@ class UpdateSecret(Arguments):
         return self
 
 
+# Loaded with credentials_run instead of occupying every task's system prompt.
+ONEPASSWORD_GUIDANCE = (
+    'Before asking for a provider key, inspect credential_sources from credentials_list for saved generic '
+    '1password-shared access, even when the provider-specific credentials list is empty. If authorized Shared access '
+    'exists, request it with provider=generic, name=1password-shared, format=env and input_fields=[{name: '
+    'OP_SERVICE_ACCOUNT_TOKEN, label: Service account token}]. Use credentials_run for all op commands; the token is '
+    'injected into that subprocess only and authenticates the CLI automatically, without interactive sign-in. If Shared '
+    'access has not been connected, offer the secure Settings > Secrets > Connect 1Password flow; never claim to have '
+    'checked the vault. Verify op whoami and op vault list first, then op item list --vault Shared. Scope all item '
+    'operations and secret references to Shared. Account permissions are enforced by 1Password, not by the vault name in '
+    'these instructions. Prefer a dedicated service account with Shared read_items/write_items only and no '
+    'vault-creation permission. Keep vault values out of all tool output and chat. To use a provider key, set only a '
+    'nonsecret op://Shared/<item>/credential reference in the command environment and use op run -- <process>, keeping '
+    'its output masking enabled. Never use --no-masking. For other reads, capture op read directly in memory inside the '
+    'same credentials_run command and pass it straight to the intended process; never print it. The generic executor '
+    'redacts the service-account token but cannot automatically redact newly read vault values. Before adding a key, '
+    'search Shared for an existing matching item and edit it; if matches are ambiguous, clarify the intended item. Only '
+    'create or edit vault items when the task authorizes it. Feed secret JSON templates to op item create/edit through '
+    'standard input, never arguments or on-disk templates. Capture their output in memory and report only nonsecret item '
+    'metadata. Do not copy a token from another agent or broaden vault permissions. An administrator supplies or rotates '
+    'the token through the secure credential form. '
+)
+
 TOOLS = {
     'credentials_list': (ListCredentials, 'Check existing personal and organization access before asking for access. Returns authorized credential metadata, pending request IDs/generations, and available credential_sources including Shared vault access even with a provider filter; never secret values. Inspect an available Shared vault before asking for another provider key.'),
     'credentials_resolve': (ResolveExternal, 'Close one pending request after verifying access through the current browser session or existing authorized credentials, including 1Password. First verify the actual access; a user saying signed in is not verification. Use the exact request_id and generation from credentials_list. This records that the secret form is no longer needed; it does not store, grant, or transfer credentials. Continue using the verified access path. Never resolve unrelated requests or include secret values.'),
     'credentials_request': (CredentialRequest, 'Obtain access needed to complete the task. Check credentials_list first and reuse authorized personal or organization access; secret_id can select a matching saved connection. A lookup_required result means check the returned 1Password credential_sources through credentials_run before asking the user. If lookup or verification fails, retry with source_checks reporting the observed outcomes; working vault access needs no new key or form. Use provider=generic and a stable capability name for any service; format=env accepts a secure environment-variable map. Always declare input_fields with exact environment names and human-readable labels so the form renders a masked Access token box or separate AWS fields instead of asking users to write JSON; format=file accepts a secure file and requires its environment variable name. Explain the needed capability. Include setup_instructions explaining how to obtain access and a verified official service setup_url when known. Use the actual account access method; do not assume a new long-lived key is needed or invent URLs. Never include secrets in setup guidance or ask for credentials in chat. Only a pending result checkpoints and pauses for a secure form. The user chooses personal or organization sharing and this session or future sessions independently. Use this tool alone in its round. Organization sharing is admin-managed.'),
-    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication.'),
+    'credentials_run': (RunCredential, 'Run a foreground sandbox command with approved generic access. Use request_ids from credentials_request; environment values and credential files exist only for this command. Output is bounded and redacted. Never print credentials or copy them to ordinary files. A failed command is not replayed automatically. If authentication fails, report the returned credential revision through credentials_report_failure; distinguish missing permissions from invalid or expired authentication. ' + ONEPASSWORD_GUIDANCE),
     'credentials_report_failure': (ReportFailure, 'Report an observed access failure with the request ID and revision returned by credentials_run. Expired or invalid authentication tries alternative saved access, then requires checking available credential_sources before opening a replacement form. No failed operation is replayed. Missing permissions reopen only this request so the user can grant access; they do not invalidate the shared credential. Never guess expiry from a generic command error and never repeat potentially completed writes automatically.'),
     'credentials_http_request': (Invoke, 'Use an authorized inference-key request for a non-streaming inference or model-list API call. The server supplies authentication to fixed provider origins and paths. Responses contain no key. Provider usage is billed to that separate key, outside Moyai gateway spend.'),
 }

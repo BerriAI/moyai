@@ -488,16 +488,24 @@ def _create_app(settings, store):
 
     @app.get("/health")
     async def health():
+        # The release probe correlates the actual HTTP process with its database
+        # owner; an SSH shell may land on either instance during Render overlap.
+        headers = {}
+        if settings.moyai_runtime_role == 'api':
+            headers = {'X-Moyai-Build': settings.moyai_build_sha,
+                       'X-Moyai-API-Release': '1',
+                       'X-Moyai-Owner': str(store.database.owner_pid),
+                       'Cache-Control': 'no-store'}
         if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
-            raise HTTPException(503, 'Runtime is connecting to Temporal.')
+            raise HTTPException(503, 'Runtime is connecting to Temporal.', headers=headers)
         if store.database:
             from .database import DatabaseError
             try:
                 from .db import database
                 await database(store.rows, 'SELECT 1')
             except DatabaseError:
-                raise HTTPException(503, 'Database is unavailable.') from None
-        return {"status": "ok"}
+                raise HTTPException(503, 'Database is unavailable.', headers=headers) from None
+        return JSONResponse({"status": "ok"}, headers=headers)
 
     @app.get("/api/session")
     async def session(request: Request):

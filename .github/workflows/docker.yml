@@ -19,7 +19,7 @@ jobs:
       - name: Test Cloudflare identity gate and sandbox transport
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py
       - name: Test personal memory ownership, capture and privacy
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py tests/test_initial_context.py
       - name: Test Slack requester identity and DM delivery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
@@ -41,7 +41,7 @@ jobs:
           uv run --python 3.13 pytest -q --tb=line tests/test_artifacts.py tests/test_artifact_files.py tests/test_slack_file_links.py tests/test_google_sso.py
       - name: Test PR correlation and leaderboard
         run: |
-          uv run --python 3.13 pytest -q --tb=line tests/test_pr_analytics.py tests/test_pr_delivery.py tests/test_personal_spend.py
+          uv run --python 3.13 pytest -q --tb=line tests/test_pr_analytics.py tests/test_pr_delivery.py tests/test_pr_milestones.py tests/test_github_ci.py tests/test_personal_spend.py
           node --test tests/test_spend.cjs
       - name: Test native Codex runtime and model defaults
         run: uv run --python 3.13 pytest -q --tb=line tests/test_codex_sdk.py tests/test_codex_sdk_transport.py tests/test_codex_tool_readiness.py tests/test_codex_catalog.py tests/test_codex_tool_search.py tests/test_codex_runtime.py tests/test_tool_schema_cache.py tests/test_workspace_diagnostics.py tests/test_config.py tests/test_models.py tests/test_claude_sdk.py

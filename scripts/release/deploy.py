@@ -28,7 +28,7 @@ REPOSITORY = 'BerriAI/moyai'
 COORDINATOR = 'srv-db41eiqj9qps73fpuan0'
 WORKER = 'srv-db4s0b142hec73epgpt0'
 BROKER = 'srv-db4tlsajnfac738gigb0'
-SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'broker': 'moyai-broker'}
+SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'broker': 'moyai-broker', 'api': 'moyai-api'}
 MUTABLE = {'MOYAI_BUILD_SHA', 'MAINTENANCE_DRAIN', 'RENDER_MIGRATION_STAGE'}
 ACTIVE_DEPLOYS = {'created', 'queued', 'build_in_progress', 'pre_deploy_in_progress', 'update_in_progress'}
 FAILED_DEPLOYS = {'build_failed', 'pre_deploy_failed', 'update_failed', 'canceled', 'deactivated'}
@@ -180,8 +180,8 @@ class Service:
 
 
 class SSHProbe:
-    def __init__(self, key: Path):
-        self.key = key
+    def __init__(self, key: Path, *, source: Path = ROOT / 'probe.py'):
+        self.key, self.source = key, source
 
     def __call__(self, service: Service):
         options = json.dumps(service.probe_options(), separators=(',', ':'))
@@ -196,7 +196,7 @@ class SSHProbe:
                 '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=2',
                 service.id + '@ssh.oregon.render.com', command]
         try:
-            result = subprocess.run(args, input=(ROOT / 'probe.py').read_text(), text=True,
+            result = subprocess.run(args, input=self.source.read_text(), text=True,
                                     capture_output=True, timeout=50)
             if result.returncode:
                 return {'ok': False}
@@ -445,11 +445,14 @@ class Release:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, default=Path('release-receipt.json'))
+    parser.add_argument('--release-type', choices=['coordinated', 'api'], default='coordinated')
     parser.add_argument('--preflight', action='store_true', default=os.environ.get('PREFLIGHT_ONLY') == 'true',
                         help='Check CI, credentials and the current topology without changing production.')
     args = parser.parse_args()
     if os.environ.get('GITHUB_REPOSITORY') != REPOSITORY or os.environ.get('GITHUB_REF') != 'refs/heads/main':
         raise ReleaseError('Production deployment may only run from main in BerriAI/moyai.')
+    if args.release_type == 'coordinated' and os.environ.get('MOYAI_API_SERVICE_ID'):
+        raise ReleaseError('The dedicated API topology requires API releases or a separately planned maintenance transition. No changes made.')
     key = os.environ.pop('RENDER_DEPLOY_SSH_KEY', '')
     if not key:
         raise ReleaseError('RENDER_DEPLOY_SSH_KEY is missing; no production changes made.')
@@ -464,7 +467,13 @@ def main():
         render = API('https://api.render.com/v1', os.environ.pop('RENDER_DEPLOY_API_KEY', ''))
         github = GitHub(API('https://api.github.com', os.environ.pop('GH_TOKEN', '')),
                         os.environ['GITHUB_RUN_ID'], os.environ.get('GITHUB_SHA', ''))
-        release = Release(render, github, SSHProbe(key_path), args.receipt, preflight_only=args.preflight)
+        if args.release_type == 'api':
+            from scripts.release.api_deploy import APIRelease
+            release = APIRelease(render, github, SSHProbe(key_path, source=ROOT / 'api_probe.py'),
+                                 args.receipt, api_service_id=os.environ.get('MOYAI_API_SERVICE_ID', ''),
+                                 preflight_only=args.preflight)
+        else:
+            release = Release(render, github, SSHProbe(key_path), args.receipt, preflight_only=args.preflight)
         try:
             release.run()
         finally:
@@ -475,7 +484,7 @@ def main():
                     if 'commit' in release.record:
                         output.write(f"Commit: `{release.record['commit']}`\n\n")
                     if release.record['status'] not in {'success', 'preflight_passed'}:
-                        output.write('Inspect the release-receipt artifact and Render before retrying. Do not deploy only one service or resume mismatched builds.\n')
+                        output.write('Inspect the release-receipt artifact and Render before retrying. Follow docs/production-deploy.md for this release type.\n')
 
 
 if __name__ == '__main__':

@@ -18,7 +18,8 @@ def trace_content(value, *, secrets=(), limit=16000):
         if depth > 12:
             return '[depth limit]'
         if isinstance(item, dict):
-            if item.get('type') in {'image_url', 'image', 'input_image', 'thinking', 'reasoning'}:
+            kind = item.get('type')
+            if isinstance(kind, str) and kind in {'image_url', 'image', 'input_image', 'thinking', 'reasoning'}:
                 return '[image or private reasoning omitted]'
             return {str(k)[:100]: '[redacted]' if PRIVATE_FIELDS.search(str(k)) else clean(v, depth + 1)
                     for k, v in list(item.items())[:100]}

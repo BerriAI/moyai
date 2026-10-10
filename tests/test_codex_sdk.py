@@ -44,6 +44,31 @@ def sdk_event(method, body):
     return SimpleNamespace(method=method, payload=SimpleNamespace(model_dump=lambda **kwargs: body))
 
 
+@pytest.mark.parametrize('broken_formatter', [False, True])
+def test_search_schema_receipt_survives_activity_formatting(codex_agent, monkeypatch, broken_formatter):
+    from app.github import RulesetReviewers
+    from agent import activity
+    agent, events, store = codex_agent
+    if broken_formatter:
+        def fail(*args, **kwargs):
+            raise TypeError('private-payload-must-not-leak')
+        monkeypatch.setattr(activity, 'tool_details', fail)
+    call = {'type': 'tool_search_call', 'call_id': 'ci-search', 'execution': 'client',
+            'arguments': {'query': '+moyai github checks workflow status', 'limit': 1}}
+    agent.record_item(call, completed=False)
+    agent.record_item({'type': 'tool_search_output', 'call_id': 'ci-search', 'execution': 'client',
+        'status': 'completed', 'tools': [{'type': 'namespace', 'name': 'mcp__moyai', 'tools': [
+            {'type': 'function', 'name': 'github_update_ruleset_reviewers',
+             'parameters': RulesetReviewers.model_json_schema()}]}]}, completed=True)
+    assert not agent.journal.pending and 'ci-search' in agent.completed
+    assert agent.journal.messages[-1]['role'] == 'tool'
+    assert [event[2]['phase'] for event in events if event[0] == 'tool'] == ['started', 'completed']
+    assert 'private-payload-must-not-leak' not in json.dumps(events)
+    if broken_formatter:
+        assert 'formatting failed' in events[1][2]['details_notice']
+    assert agent.before_model(json.dumps({'input': [{'type': 'tool_search_output', 'call_id': 'ci-search'}]}))
+
+
 def install_codex_client(monkeypatch, agent, stream, late_items=(), late_notifications=None):
     observed = SimpleNamespace(homes=[], prompts=[], thread_options=[], steers=[], steer_error=None, exits=[])
 

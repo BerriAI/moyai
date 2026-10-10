@@ -1,10 +1,10 @@
 name: Production release rehearsal
 on:
   pull_request:
-    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
+    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/runtime_compatibility.py', 'app/schema_migrations.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
   push:
     branches: [main]
-    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
+    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/runtime_compatibility.py', 'app/schema_migrations.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
 permissions:
   contents: read
 jobs:
@@ -29,4 +29,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Verify release ordering, failures and real PostgreSQL drain guards
-        run: uv run --frozen --python 3.13 pytest -q tests/release
+        run: uv run --frozen --python 3.13 pytest -q tests/release tests/test_render.py

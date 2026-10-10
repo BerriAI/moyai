@@ -101,6 +101,7 @@ TOOLS = {
 RETRY_SAFE_READS = frozenset({
     'github_rulesets', 'github_ruleset', 'github_repositories', 'github_repository',
     'github_checkout', 'github_pull_request', 'github_pull_request_comments',
+    'github_ci_checks', 'github_workflow_runs', 'github_workflow_jobs', 'github_job_logs',
     'linear_my_issues', 'linear_teams', 'linear_search', 'linear_issue',
     'slack_search', 'slack_thread', 'slack_me', 'notion_search', 'notion_page',
 })

@@ -56,8 +56,14 @@ historical import. Demo, failed, cancelled, subagent and automation turns are
 excluded. The Memory page shows pending reviews and whether the most recent
 review saved notes, found nothing new, or failed.
 
-- `memory_search` retrieves up to five relevant notes, with an 8,000-character
-  total payload budget. Nothing from the library loads until the agent searches.
+- Before the first inference, the broker supplies up to three notes within a
+  4,000-character serialized budget: task keyword matches rank first, followed
+  by preferences/corrections and recency. Project/reference notes require a
+  keyword match. Ranking uses the current requester's message and acknowledged
+  steering; it never uses another participant's messages or tool output.
+- `memory_search` retrieves up to five relevant notes. Searched notes take
+  priority; automatic recall fills remaining space without duplicates. The
+  combined list stays within five notes and 8,000 serialized characters.
 - `memory_save` creates or updates a short note immediately. User-backed writes
   require an exact supporting quote from the current requester’s message, including
   acknowledged steering inputs. Observations instead require bounded scope and
@@ -66,11 +72,15 @@ review saved notes, found nothing new, or failed.
 - `memory_forget` removes a selected note when its owner asks. Deletion clears its
   stored body and active references; opaque tombstones prevent retry resurrection.
 
-These tools use Hermes tool search. Ownership comes from authenticated Google
+These tools use the selected runtime's tool discovery. Ownership comes from authenticated Google
 identity or a fresh, eligible Slack email match, never an accounting link or a
 model-supplied user ID. Each model call rechecks requester, settings, expiry,
 repository scope and current note revisions. Subagents and automation runs can
 recall authorized notes, but cannot automatically write personal memories.
+Pausing memory removes all recall; re-enabling it permits automatic recall again.
+Automatic selection does not write search selections or call a model. It scans
+the current owner's bounded library on each inference to honor edits, deletion,
+expiry and scope changes immediately. Repository mentions do not select a repo.
 
 Rejected memory tool arguments, scope, permission or revision checks return an
 error receipt so the agent can correct supported arguments or continue without
