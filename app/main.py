@@ -249,6 +249,67 @@ def _create_app(settings, store):
     owns_inference = settings.moyai_runtime_role == 'broker' or (
         settings.moyai_runtime_role in {'standalone', 'coordinator'} and not settings.moyai_separate_broker)
 
+    handoff = None
+    hook_inbox = None
+    if settings.moyai_runtime_role == 'coordinator' and settings.moyai_coordinator_handoff:
+        from .coordinator_handoff import CoordinatorHandoff, HookInbox
+        handoff = CoordinatorHandoff(store, manager)
+        hook_inbox = HookInbox(store, slack, lambda: missing_cloud())
+
+    @asynccontextmanager
+    async def background_lifespan():
+        watcher = None
+        try:
+            await manager.recover()
+            if handoff:
+                await manager.wait_ready()
+            session_lifecycle.start()
+            await checkpoints.flush()
+            slack.recover()
+            identities.start()
+            environments.start()
+            automations.start()
+            if owns_inference:
+                spend.recovery.start()
+                memory_review.start()
+            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+            tracing.start()
+            lens_feedback.start()
+            infrastructure.start()
+            session_titles.start()
+            if hook_inbox:
+                hook_inbox.start()
+            yield
+        finally:
+            await close_background(watcher)
+
+    async def close_background(watcher=None):
+        # Stop intake processing before the singleton consumers it wakes.
+        # Attempt every close even if one fails; ownership is retained until
+        # each component has drained its own tasks.
+        errors = []
+        if handoff:
+            slack.chat.begin_drain()
+        closes = ([hook_inbox.close] if hook_inbox else []) + [
+            session_lifecycle.close, memory_review.close, spend.recovery.close,
+            harness_gateway.maintenance.close, harness_gateway.live_context.close,
+            computer.close, session_pull_requests.close, session_titles.close,
+            infrastructure.close, automations.close, environments.close,
+            identities.close, lambda: slack.shutdown(graceful=bool(handoff)), manager.shutdown,
+            manager.modal_clients.close, tracing.close, lens_feedback.close,
+        ]
+        for close in closes:
+            try:
+                await close()
+            except BaseException as exc:
+                errors.append(exc)
+        if watcher:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+        await checkpoints.flush()
+        if errors:
+            raise errors[0]
+
     @asynccontextmanager
     async def lifespan(app):
         try:
@@ -318,47 +379,16 @@ def _create_app(settings, store):
                     await session_pull_requests.close()
                     await tracing.close()
                 return
-            await manager.recover()
-            session_lifecycle.start()
-            await checkpoints.flush()
-            slack.recover()
-            identities.start()
-            environments.start()
-            automations.start()
-            if owns_inference:
-                spend.recovery.start()
-                memory_review.start()
-            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
-            tracing.start()
-            lens_feedback.start()
-            infrastructure.start()
-            session_titles.start()
-            try:
-                yield
-            finally:
-                await session_lifecycle.close()
-                await memory_review.close()
-                await spend.recovery.close()
-                await harness_gateway.maintenance.close()
-                await harness_gateway.live_context.close()
-                await computer.close()
-                await session_pull_requests.close()
-                await session_titles.close()
-                await infrastructure.close()
-                await automations.close()
-                await environments.close()
-                await identities.close()
-                await slack.shutdown()
+            if handoff:
                 try:
-                    await manager.shutdown()
+                    async with handoff.lifespan(background_lifespan):
+                        yield
                 finally:
-                    await manager.modal_clients.close()
-                await tracing.close()
-                await lens_feedback.close()
-                if watcher:
-                    watcher.cancel()
-                    await asyncio.gather(watcher, return_exceptions=True)
-                await checkpoints.flush()
+                    if not handoff.started:
+                        await close_background()
+                return
+            async with background_lifespan():
+                yield
         finally:
             await asyncio.to_thread(store.close)
 
@@ -374,6 +404,11 @@ def _create_app(settings, store):
     if settings.moyai_runtime_role == 'api':
         from .runtime_coordination import ApiRoleMiddleware
         app.add_middleware(ApiRoleMiddleware)
+    if handoff:
+        from .coordinator_handoff import CoordinatorIngressMiddleware
+        app.add_middleware(CoordinatorIngressMiddleware, ownership=handoff)
+    app.state.coordinator_handoff = handoff
+    app.state.hook_inbox = hook_inbox
     app.state.session_lifecycle = session_lifecycle
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
@@ -489,6 +524,13 @@ def _create_app(settings, store):
         if settings.moyai_runtime_role == 'api':
             headers = {'X-Moyai-Build': settings.moyai_build_sha,
                        'X-Moyai-API-Release': '1',
+                       'X-Moyai-Owner': str(store.database.owner_pid),
+                       'Cache-Control': 'no-store'}
+        if handoff:
+            headers = {'X-Moyai-Build': settings.moyai_build_sha,
+                       'X-Moyai-Coordinator-State': handoff.status,
+                       'X-Moyai-Role': 'coordinator',
+                       'X-Moyai-Rolling-Release': '1',
                        'X-Moyai-Owner': str(store.database.owner_pid),
                        'Cache-Control': 'no-store'}
         if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
@@ -1274,10 +1316,14 @@ def _create_app(settings, store):
 
     @app.post('/hooks/slack/interactions')
     async def slack_interactions(request: Request):
+        if hook_inbox:
+            return await hook_inbox.receive_interaction(request)
         return await slack.feedback.receive(request)
 
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
+        if hook_inbox:
+            return await hook_inbox.receive_event(request)
         return await slack.receive(request, missing_cloud())
 
     from .harness_gateway import HarnessGateway

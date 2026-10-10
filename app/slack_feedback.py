@@ -21,6 +21,10 @@ class SlackFeedback:
     async def receive(self, request):
         body = await request.body()
         self.owner.verify_signature(body, request.headers)
+        return await self.receive_payload(self.parse_payload(body))
+
+    @staticmethod
+    def parse_payload(body):
         try:
             if len(body) > 65536:
                 raise ValueError()
@@ -32,6 +36,9 @@ class SlackFeedback:
                 raise ValueError()
         except (ValueError, KeyError, TypeError, AttributeError):
             raise HTTPException(400, 'Invalid Slack access action.') from None
+        return payload
+
+    async def receive_payload(self, payload):
         if payload.get('type') == 'block_actions' and self.feedback_action(payload):
             return await self.open(payload)
         if payload.get('type') == 'view_submission':

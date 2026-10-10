@@ -47,3 +47,7 @@ def background_fingerprint(settings, role):
         'schema': SCHEMA_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
     }, sort_keys=True).encode()).hexdigest()
+
+
+def coordinator_fingerprint(settings):
+    return background_fingerprint(settings, 'coordinator')

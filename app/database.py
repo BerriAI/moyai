@@ -24,7 +24,7 @@ class IntegrityError(DatabaseError):
 RUNTIME_SETTINGS = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
              'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
              'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
-             'moyai_separate_broker', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
+             'moyai_separate_broker', 'moyai_coordinator_handoff', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
 
 
 def runtime_fingerprint(settings):
@@ -134,12 +134,13 @@ def row_factory(cursor):
 
 
 class PostgresConnection:
-    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy='', api_policy='', worker_policy='', broker_policy='', schema_updates=True):
+    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy='', api_policy='', worker_policy='', broker_policy='', coordinator_policy='', schema_updates=True):
         self.raw, self.schema, self.owner_pid = raw, schema, owner_pid
         self.write_scope, self.policy = write_scope, policy
         self.api_policy = api_policy
         self.worker_policy = worker_policy
         self.broker_policy = broker_policy
+        self.coordinator_policy = coordinator_policy
         self.changed = False
         self.write_locked = False
         self.owner_checked = False
@@ -175,6 +176,14 @@ class PostgresConnection:
             AND objsubid=2 AND granted''', (self.owner_pid, self.schema)).fetchone()
         if not owned:
             raise DatabaseError('Postgres ownership was lost. Restart this application process.')
+        from .coordinator_handoff import coordinator_owner
+        leader = coordinator_owner.get()
+        if leader is not None:
+            if leader != (self.schema, self.owner_pid) or not self.raw.execute('''SELECT 1 FROM pg_locks
+                    WHERE locktype='advisory' AND pid=%s AND classid=726943
+                    AND objid=%s::regnamespace::oid AND objsubid=2 AND granted''',
+                    (self.owner_pid, self.schema)).fetchone():
+                raise DatabaseError('Coordinator ownership was lost. Background work is fenced.')
         if self.policy and not self.raw.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=%s', (self.policy,)).fetchone():
             raise DatabaseError('Runtime configuration changed. Restart workers with the coordinator configuration.')
         if self.api_policy:
@@ -197,6 +206,12 @@ class PostgresConnection:
                 WHERE id=1 AND cluster_fingerprint=%s AND fingerprint=%s''' + lock,
                 (self.policy, self.broker_policy)).fetchone():
                 raise DatabaseError('Broker compatibility changed. Restart with a compatible broker release.')
+        if self.coordinator_policy:
+            lock = ' FOR SHARE' if lock_compatibility else ''
+            if not self.raw.execute('''SELECT 1 FROM runtime_coordinator_policy
+                WHERE id=1 AND cluster_fingerprint=%s AND fingerprint=%s''' + lock,
+                (self.policy, self.coordinator_policy)).fetchone():
+                raise DatabaseError('Coordinator compatibility changed. Restart with a compatible coordinator release.')
         self.owner_checked = True
 
     def begin_read(self):
@@ -274,6 +289,9 @@ class PostgresDatabase:
         self.api_policy = ''
         self.worker_policy = ''
         self.broker_policy = ''
+        self.coordinator_policy = ''
+        self.coordinator_owner = False
+        self.coordinator_handoff = bool(runtime_settings and runtime_settings.moyai_coordinator_handoff)
         self.broker_owner = False
         self.startup_exclusive = False
         self.pool = None
@@ -283,6 +301,9 @@ class PostgresDatabase:
             raise ValueError('Schema migration requires exclusive application ownership.')
         if runtime_role == 'api' and schema_mode != 'verify':
             raise DatabaseError('API replicas require verified schema startup.')
+        if self.coordinator_handoff and (schema_mode != 'verify' or not runtime_settings.moyai_separate_broker
+                or not runtime_settings.temporal_enabled):
+            raise DatabaseError('Coordinator handoff requires verified schema, Temporal and a separate broker.')
         self.schema_updates = schema_mode != 'verify'
         if application_instance and runtime_role != 'standalone' and runtime_settings is None:
             raise DatabaseError('Distributed application startup requires its runtime configuration before schema setup.')
@@ -303,9 +324,11 @@ class PostgresDatabase:
                 locked = self.owner.execute(f'SELECT {function}(726940, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]
                 if not locked:
                     raise DatabaseError('Another Moyai instance owns this Postgres schema. Keep a single application instance.')
-                if runtime_role == 'coordinator' and not self.owner.execute(
-                        'SELECT pg_try_advisory_lock(726943, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]:
-                    raise DatabaseError('Another coordinator owns this Postgres schema.')
+                compatible_coordinator = (runtime_role == 'coordinator' and self.coordinator_handoff
+                                          and self.admit_coordinator(runtime_settings))
+                if runtime_role == 'coordinator' and not compatible_coordinator:
+                    if not self.acquire_coordinator():
+                        raise DatabaseError('Another coordinator owns this Postgres schema.')
                 if runtime_settings is not None and runtime_role != 'standalone':
                     # Reject incompatible builds/keys and duplicate brokers before
                     # even CREATE IF NOT EXISTS or legacy data backfills can run.
@@ -351,6 +374,9 @@ class PostgresDatabase:
             self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_broker_policy (
                 id INTEGER PRIMARY KEY CHECK(id=1), cluster_fingerprint TEXT NOT NULL,
                 fingerprint TEXT NOT NULL)''')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_coordinator_policy (
+                id INTEGER PRIMARY KEY CHECK(id=1), cluster_fingerprint TEXT NOT NULL,
+                fingerprint TEXT NOT NULL)''')
             self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
                 LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
             self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
@@ -376,6 +402,7 @@ class PostgresDatabase:
                 yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy,
                                          api_policy=self.api_policy, worker_policy=self.worker_policy,
                                          broker_policy=self.broker_policy,
+                                         coordinator_policy=self.coordinator_policy,
                                          schema_updates=self.schema_updates)
         except psycopg.IntegrityError:
             raise IntegrityError('Database constraint rejected the change.') from None
@@ -398,6 +425,10 @@ class PostgresDatabase:
             return self.admit_api(settings)
         if self.runtime_role == 'worker' and not self.schema_updates and settings.moyai_separate_broker:
             return self.admit_worker(settings)
+        if self.runtime_role == 'coordinator' and self.coordinator_policy:
+            if not self.admit_coordinator(settings):
+                raise DatabaseError('Coordinator requires a compatible protocol and shared runtime configuration.')
+            return self.policy
         owns_broker = self.runtime_role == 'broker' or (
             self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
         if owns_broker and self.owner_pid is not None and not self.broker_owner:
@@ -408,7 +439,8 @@ class PostgresDatabase:
         if self.runtime_role == 'broker' and not self.schema_updates and settings.moyai_separate_broker:
             return self.admit_broker(settings)
         policy = runtime_fingerprint(settings)
-        if self.stored_policy() != policy:
+        if self.stored_policy() != policy or (self.runtime_role == 'coordinator' and self.coordinator_handoff
+                                             and not self.coordinator_policy):
             if self.runtime_role != 'coordinator':
                 raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
             if not self.startup_exclusive:
@@ -472,10 +504,40 @@ class PostgresDatabase:
         self.policy, self.broker_policy = row[0], fingerprint
         return self.policy
 
+    def admit_coordinator(self, settings):
+        from .runtime_compatibility import coordinator_fingerprint
+
+        schema = identifier(self.schema)
+        if not self.owner.execute('SELECT to_regclass(%s)', (f'{schema}.runtime_coordinator_policy',)).fetchone()[0]:
+            return False
+        fingerprint = coordinator_fingerprint(settings)
+        row = self.owner.execute(f'''SELECT p.fingerprint FROM {schema}.runtime_policy p
+            JOIN {schema}.runtime_coordinator_policy c ON c.id=p.id AND c.cluster_fingerprint=p.fingerprint
+            WHERE p.id=1 AND c.fingerprint=%s''', (fingerprint,)).fetchone()
+        if not row or (self.policy and self.policy != row[0]) or (self.coordinator_policy and self.coordinator_policy != fingerprint):
+            return False
+        self.policy, self.coordinator_policy = row[0], fingerprint
+        return True
+
+    def acquire_coordinator(self):
+        if self.coordinator_owner:
+            return True
+        self.coordinator_owner = bool(self.owner.execute(
+            'SELECT pg_try_advisory_lock(726943, %s::regnamespace::oid::int)', (self.schema,)).fetchone()[0])
+        return self.coordinator_owner
+
+    def release_coordinator(self):
+        # Only the lifecycle owner calls this, after every background task ends.
+        if self.coordinator_owner:
+            self.owner.execute('SELECT pg_advisory_unlock(726943, %s::regnamespace::oid::int)', (self.schema,))
+            self.coordinator_owner = False
+
     def configure_runtime(self, settings):
         if self.runtime_role == 'standalone':
             return
         policy = self.admit_runtime(settings)
+        if self.runtime_role == 'coordinator' and self.coordinator_policy:
+            return  # Joining releases never replace the baseline cluster contract.
         try:
             with self.connect() as conn:
                 if self.runtime_role == 'coordinator':
@@ -495,9 +557,18 @@ class PostgresDatabase:
                         conn.execute('DELETE FROM runtime_api_policy')
                         conn.execute('DELETE FROM runtime_worker_policy')
                         conn.execute('DELETE FROM runtime_broker_policy')
+                    if self.coordinator_handoff:
+                        from .runtime_compatibility import coordinator_fingerprint
+                        conn.execute('''INSERT INTO runtime_coordinator_policy VALUES(1,?,?) ON CONFLICT(id)
+                            DO UPDATE SET cluster_fingerprint=excluded.cluster_fingerprint,fingerprint=excluded.fingerprint''',
+                            (policy, coordinator_fingerprint(settings)))
+                    else:
+                        conn.execute('DELETE FROM runtime_coordinator_policy')
                 elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
                     raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
             self.policy = policy
+            if self.runtime_role == 'coordinator' and self.coordinator_handoff:
+                self.coordinator_policy = coordinator_fingerprint(settings)
         finally:
             if self.startup_exclusive:
                 self.owner.execute('SELECT pg_advisory_unlock(726940, %s::regnamespace::oid::int)', (self.schema,))

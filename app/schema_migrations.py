@@ -19,7 +19,7 @@ COMPONENTS = (
     'user_preferences', 'environments', 'infrastructure_costs', 'spend', 'agents',
     'tracing', 'credentials', 'skills', 'memory', 'memory_review', 'lens_feedback',
     'session_titles', 'automations', 'automation_events', 'automation_tools',
-    'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup',
+    'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup', 'coordinator_handoff',
 )
 
 
