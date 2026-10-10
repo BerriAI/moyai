@@ -238,3 +238,56 @@ def test_read_only_maintenance_requires_owner_before_sqlite_open(tmp_path, monke
             maintenance.plan(tmp_path)
         else:
             maintenance.backup(tmp_path, MemoryObjects())
+
+
+@pytest.mark.parametrize('leftover', ['unknown', 'symlink'])
+def test_verification_rejects_files_which_worker_startup_would_reject(tmp_path, leftover):
+    store = Store(tmp_path)
+    store.objects = MemoryObjects()
+    root = store.artifacts.root
+    root.mkdir()
+    if leftover == 'unknown':
+        (root / 'unacknowledged.zip').write_bytes(b'preserve me')
+    else:
+        (root / 'linked').symlink_to(tmp_path)
+    report = maintenance.plan(tmp_path)
+    assert report['legacy_artifacts']['pending'] == 0
+    assert report['local_inventory']['unmanifested' if leftover == 'unknown' else 'symlinks'] == 1
+    with pytest.raises(maintenance.MaintenanceError, match='unmanifested'):
+        maintenance.verify(store)
+
+
+def test_verification_rechecks_objects_and_detects_reference_changes(tmp_path):
+    store = Store(tmp_path)
+    attachment = legacy_attachment(store)
+    store.objects = objects = MemoryObjects()
+    maintenance.migrate(store)
+    assert maintenance.verify(store)['verified_objects'] == 2
+    original = objects.verify
+
+    def change(reference, size):
+        original(reference, size)
+        store.execute('UPDATE attachments SET data_ref=? WHERE id=?', (objects.put(b'new data'), attachment))
+
+    objects.verify = change
+    with pytest.raises(maintenance.MaintenanceError, match='inventory changed'):
+        maintenance.verify(store)
+
+
+@pytest.mark.parametrize('field', ['data', 'preview'])
+def test_missing_legacy_bytes_are_pending_and_cannot_be_verified(tmp_path, field):
+    store = Store(tmp_path)
+    attachment = legacy_attachment(store)
+    store.execute(f"UPDATE attachments SET {field}=? WHERE id=?", (b'', attachment))
+    store.objects = MemoryObjects()
+    assert maintenance.plan(tmp_path)['attachments']['pending'] == 1
+    with pytest.raises(maintenance.MaintenanceError, match='missing'):
+        maintenance.migrate(store)
+
+
+def test_empty_attachment_is_migrated_as_a_verified_empty_object(tmp_path):
+    store = Store(tmp_path)
+    store.attachments.save(uuid4().hex, 'owner', 'empty.txt', b'', ('text/plain', b'', ''), 1024)
+    store.objects = MemoryObjects()
+    assert maintenance.migrate(store)['attachments_published'] == 1
+    assert maintenance.verify(store)['verified_objects'] == 1

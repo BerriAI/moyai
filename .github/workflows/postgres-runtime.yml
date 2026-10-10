@@ -1,13 +1,37 @@
 name: PostgreSQL runtime
 on:
   pull_request:
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
 jobs:
+  storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-storage-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-storage-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify maintenance and payload behavior on SQLite and PostgreSQL
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_storage_maintenance.py tests/test_postgres_storage_maintenance.py tests/test_blob_storage.py tests/test_artifact_files.py
+      - name: Migrate through the CLI and restore in a replacement process with no local files
+        run: uv run --frozen --python 3.13 python scripts/shared_storage_smoke.py
   runtime:
     runs-on: ubuntu-latest
     timeout-minutes: 35

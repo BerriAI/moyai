@@ -1,6 +1,6 @@
 # Private file storage and database backups
 
-Moyai keeps sessions, messages, permissions, spending records and file metadata in SQLite. With private object storage configured, new upload originals, image previews, result ZIPs and browser captures go to an S3-compatible bucket. SQLite holds their references. Existing authenticated Moyai URLs, draft ownership, agent scope and media range requests continue to work.
+Moyai keeps sessions, messages, permissions, spending records and file metadata in its configured SQLite or PostgreSQL database. With private object storage configured, new upload originals, image previews, result ZIPs and browser captures go to an S3-compatible bucket. The database holds their references. Existing authenticated Moyai URLs, draft ownership, agent scope and media range requests continue to work.
 
 Without this configuration, the existing local storage behavior remains. Increasing the Render disk to 10 GB gives recovery headroom; it does not move existing bytes or set up object storage. SQLite still grows with structured history. Monitor database volume usage separately.
 
@@ -23,36 +23,44 @@ Object references bind the endpoint, bucket and prefix, so preserve those values
 
 ## Roll out without losing legacy files
 
-1. Keep the existing disk, database and encryption/session keys. Upgrade **all app writers** to the object-storage-aware release and configure the same private destination for them. Keep the single-instance SQLite deployment requirement. Do not start an older binary against this database after publishing remote references; it cannot read those files.
+1. Keep the existing disk, database and encryption/session keys. Upgrade **all app writers** to the object-storage-aware release and configure the same private destination for them. Keep the existing standalone deployment until file migration is verified; SQLite always requires one app instance. Do not start an older binary against this database after publishing remote references; it cannot read those files.
 2. Verify a new upload, image preview, archive download and browser recording through Moyai, then restart and verify them again. The deployment configuration alone does not prove credentials, bucket policy or persistence.
 3. Make a verified external database backup before migrating existing payloads. Preserve any legacy artifact directory and existing operator backup/audit files separately until they are verified externally too.
 4. Inspect the migration plan, then run bounded batches. Default migration preserves every source BLOB and local file. Repeated runs resume safely; already-published references are skipped. Only acknowledged run ZIPs, frozen agent handoff ZIPs and valid run capture filenames are considered. Temporary files, symlinks and unrelated files are excluded.
 
-Run these commands as the database file's owner (UID 10001 in the Docker/Render deployment), with the application's configuration. Even a read-only root SQLite connection can create WAL/SHM sidecars with the wrong owner, so every operation checks ownership before opening the database. Use the deployed environment or a correctly configured operator environment:
+Run these commands on the **original file disk**, as the data directory's application owner (UID 10001 in the Docker/Render deployment), with the application's configuration. SQLite additionally checks database file ownership before opening it. On Render use `runuser -u workspace -- /app/.venv/bin/python ...`. Use the deployed environment or a correctly configured operator environment:
 
 ```sh
 python -m app.storage_maintenance plan --data-dir /var/data/moyai
-python -m app.storage_maintenance backup --data-dir /var/data/moyai
 python -m app.storage_maintenance migrate --data-dir /var/data/moyai --limit 100
+python -m app.storage_maintenance verify --data-dir /var/data/moyai
 ```
 
-Omitting the operation defaults to `plan`. The plan opens the existing SQLite database read-only, does not upgrade its schema and does not contact object storage. `schema_ready: false` means the storage-aware application must be deployed before migration. Plan byte counts are logical payload sizes; frozen hard links can be counted under more than one name, and database allocation, WAL and unrelated maintenance files are not included.
+Omitting the operation defaults to `plan`. With `MOYAI_DATABASE_URL` configured, `plan`, `migrate` and `verify` use that Postgres database and `MOYAI_DATABASE_SCHEMA`. They never open, create or fall back to `workspace.db`. Without that URL, they use the existing SQLite database. No command starts the application, takes its process ownership, or creates/upgrades tables. `plan` opens a read-only transaction and does not contact object storage. `schema_ready: false` means the storage-aware application must be deployed before migration. Plan byte counts are logical payload sizes; frozen hard links can be counted under more than one name, and database allocation, WAL and unrelated maintenance files are not included.
 
 Migration uploads and reads back each payload before publishing references. It rechecks the attachment row or artifact revision under the database writer lock; a concurrent newer version wins. Network operations occur before that lock. A failed batch can leave verified earlier records and unreferenced objects; rerunning the command is safe. An error does not establish that the whole batch rolled back. The JSON result contains progress and the remaining plan. Continue until the attachment and legacy-artifact `pending` counts reach zero.
 
+Before removing disk dependence, drain file writers and run `verify`. It downloads every published original, preview and artifact, checks content hashes and sizes, and rejects missing payloads, changed references, unmanifested local files or symlinks. Inspect the plan's `local_inventory` and resolve excluded files separately; zero migratable records alone is insufficient. The receipt covers only the database and directory supplied, so compare the file count with your original-disk inventory. An empty directory on a replacement cannot prove the original disk is migrated. Verify authorized downloads from an isolated replacement with an empty local artifact directory before detaching the disk. No command deletes source files.
+
+For a repeatable local test using real PostgreSQL, the CLI in separate processes and a local S3-protocol HTTP fixture, set `MOYAI_TEST_POSTGRES_URL` to a disposable database and run `uv run --frozen python scripts/shared_storage_smoke.py`. This validates byte preservation and reads from a replacement without local files; it does not certify a cloud bucket's credentials or access policy.
+
 ## Reclaim existing local space separately
 
-Once externally verified backups and restored-download checks pass, an operator can explicitly clear retained SQLite attachment BLOBs:
+Once externally verified backups and restored-download checks pass, an operator can explicitly clear retained attachment bytes in either database:
 
 ```sh
 python -m app.storage_maintenance migrate --data-dir /var/data/moyai --limit 100 --clear-attachment-blobs
 ```
 
-This re-verifies the remote bytes, rechecks the current row and then atomically clears only the matching retained BLOBs. It preserves metadata, messages, users, remote objects and local artifact files. Repeat until `retained_bytes` for attachments is zero. It does **not** shrink the SQLite file: freed pages are available for subsequent database writes.
+This re-verifies the remote bytes, rechecks the current row and then atomically clears only the matching retained bytes. It preserves metadata, messages, users, remote objects and local artifact files. Repeat until `retained_bytes` for attachments is zero. It does **not** compact either database or guarantee an immediate reduction in allocated disk space.
 
 No command here removes local artifact files, deletes object-store content or runs `VACUUM`. If physical disk reclamation is needed, schedule separate offline maintenance after obtaining a verified external backup and confirming enough free temporary space. Stop every database writer before compaction. For each local artifact selected for removal, confirm a current manifest entry, verify its corresponding object and account for frozen hard links; do not delete an entire artifact tree merely because some files migrated. Preserve uncertain or unacknowledged files for inspection. Session deletion continues to retain historical payloads under the existing retention behavior.
 
 ## Backup and restore
+
+With Postgres configured, `backup` refuses to run, even if the old SQLite file still exists. Use managed Postgres backups/PITR or a verified `pg_dump` instead. The retained SQLite copy becomes stale after cutover and must never be presented as a backup of live Postgres writes. Keep database backups, object storage and original encryption/session keys together as a recoverable set.
+
+For SQLite only, run `python -m app.storage_maintenance backup --data-dir /var/data/moyai` before payload migration. The following snapshot/restore procedure is SQLite-specific.
 
 `backup` uses SQLite's backup API, including committed WAL contents, then integrity-checks the snapshot, compresses it and uploads it privately. Staging uses the system temporary directory, never `DATA_DIR`. On Render, keep `TMPDIR` off the persistent `/var/data` mount and provide enough temporary capacity for an uncompressed snapshot plus its compressed copy. The command verifies the uploaded object's full size and hash before returning a JSON receipt with `reference`, `sha256`, `size`, `format` and `created_at`. Save that receipt outside the database volume. The receipt contains no credentials.
 

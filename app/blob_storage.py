@@ -1,4 +1,4 @@
-"""Private payload storage; SQLite owns references, never remote credentials."""
+"""Private payload storage; the database owns references, never remote credentials."""
 import base64
 import hashlib
 import os
@@ -134,12 +134,13 @@ class TemporaryDownload(FileResponse):
 class ArtifactStore:
     """Durable archive/capture inventory with legacy local-file compatibility."""
 
-    def __init__(self, store, directory: Path):
+    def __init__(self, store, directory: Path, *, initialize: bool = True):
         self.store = store
         self.root = directory / 'artifacts'
-        store.execute('''CREATE TABLE IF NOT EXISTS artifact_objects (
-            name TEXT PRIMARY KEY, reference TEXT NOT NULL, size INTEGER NOT NULL,
-            sha256 TEXT NOT NULL, created_at TEXT NOT NULL)''')
+        if initialize:
+            store.execute('''CREATE TABLE IF NOT EXISTS artifact_objects (
+                name TEXT PRIMARY KEY, reference TEXT NOT NULL, size INTEGER NOT NULL,
+                sha256 TEXT NOT NULL, created_at TEXT NOT NULL)''')
 
     @staticmethod
     def validate_name(name: str) -> tuple[str, ...]:
