@@ -21,7 +21,7 @@ class SlackCredentials:
         pending = {row['id']: row for row in vault.pending_rows(conn, binding['run_id'], include_children=True)}
         for row in pending.values():
             self.queue_in(conn, binding, row, 'pending')
-        for card in conn.execute("SELECT * FROM slack_outbox WHERE run_id=? AND json_extract(metadata,'$.credential_request_id') IS NOT NULL", (binding['run_id'],)).fetchall():
+        for card in conn.execute("SELECT * FROM slack_outbox WHERE run_id=? AND json_text(metadata,'credential_request_id') IS NOT NULL", (binding['run_id'],)).fetchall():
             request_id = json.loads(card['metadata'])['credential_request_id']
             if request_id not in pending:
                 row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
@@ -68,7 +68,7 @@ class SlackCredentials:
 
     def payload(self, card_id, binding, identity):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             card, request = self.current_in(conn, card_id, binding, identity)
             data = json.loads(card['metadata'])
         label = self.owner.manager.credentials.request_label(request)
@@ -128,7 +128,7 @@ class SlackCredentials:
                 or team != bot.get('team_id') or user == bot.get('user_id') or ('*' not in users and user not in users)):
             raise HTTPException(403, 'This Slack access action is unavailable.')
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             card = conn.execute("""SELECT o.* FROM slack_outbox o JOIN slack_threads t ON t.run_id=o.run_id
                 WHERE o.dedupe_key=? AND o.slack_ts=? AND t.team_id=? AND t.channel=? AND t.paused=0""",
                 ('credential:' + value['request_id'], timestamp, team, channel)).fetchone()

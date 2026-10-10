@@ -63,7 +63,7 @@ class ContextMaintenance:
         # One row bounds retained work per session. BEGIN IMMEDIATE is the
         # storage admission owner, including simultaneous/retried submissions.
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT operation_id,status FROM context_jobs WHERE run_id=?', (run_id,)).fetchone()
             if current and (current['operation_id'] != ack or current['status'] == 'running'):
                 return self.read(run_id)

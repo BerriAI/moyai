@@ -58,7 +58,7 @@ def inspect_workspace(store, connectors, run, catalog):
             'enabled': policy['enabled'], 'read_only': policy['read_only'],
             'available_tools': [name for name in names if name in TOOLS and TOOLS[name][0] == provider]})
     rows = store.rows("SELECT id,created_at,data FROM events WHERE run_id=? AND kind='error' "
-                      "AND json_extract(data, '$.phase') IN ('broker_failure','sdk_failure') "
+                      "AND json_text(data,'phase') IN ('broker_failure','sdk_failure') "
                       'ORDER BY id DESC LIMIT 20', (run['id'],))
     revision = os.environ.get('RENDER_GIT_COMMIT', '')
     return {

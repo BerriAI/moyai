@@ -80,7 +80,7 @@ class SessionLifecycle:
 
     def request_delete(self, run_id, actor, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             self.require_delete(run, actor, admin)
             if not run['deleted_at'] and not run['deletion_requested_at']:
@@ -162,23 +162,24 @@ class SessionLifecycle:
 
     def metadata(self, run, actor, admin, archives=None):
         archives = self.archives(actor) if archives is None else archives
-        return {'archived': self.store.root_id(run['id']) in archives,
+        root_id = self.store.root_id(run['id']) if run['parent_run_id'] else run['id']
+        return {'archived': root_id in archives,
                 'can_delete': self.can_delete(run, actor, admin),
-                'deletion_error': self.deletion_error(run['id'])}
+                'deletion_error': self.deletion_errors.get(root_id, '')}
 
     def deletion_error(self, run_id):
         return self.deletion_errors.get(self.store.root_id(run_id), '')
 
     def archive(self, run_id, actor, archived):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run or run['deleted_at']:
                 raise HTTPException(404, 'Session not found.')
             if run['parent_run_id']:
                 raise HTTPException(422, 'Archive the parent session to keep its agents together.')
             if archived:
-                conn.execute('INSERT OR IGNORE INTO session_archives VALUES(?,?,?)', (actor, run_id, now()))
+                conn.execute('INSERT INTO session_archives VALUES(?,?,?) ON CONFLICT DO NOTHING', (actor, run_id, now()))
             else:
                 conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?', (actor, run_id))
         return {'id': run_id, 'archived': archived}
@@ -187,12 +188,12 @@ class SessionLifecycle:
         # Shared with enqueue's BEGIN IMMEDIATE: one commits first, and the
         # other observes either queued work or the retained deletion marker.
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             self.require_delete(run, actor, admin)
             if not run['deleted_at']:
                 family = conn.execute('SELECT id,status FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)', (run_id,)).fetchall()
-                durable = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_sessions'").fetchone()
+                durable = 'durable_sessions' in conn.table_names()
                 for member in family:
                     pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected') LIMIT 1", (member['id'],)).fetchone()
                     sending = conn.execute("SELECT 1 FROM slack_outbox WHERE run_id=? AND status='sending' LIMIT 1", (member['id'],)).fetchone()

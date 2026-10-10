@@ -39,9 +39,9 @@ class SlackMentions:
         if not re.fullmatch(r'T[A-Z0-9]{7,30}', team or ''):
             return
         users = list(dict.fromkeys(MENTION.findall(content)))[:MAX_MENTIONS]
-        conn.executemany('INSERT OR IGNORE INTO slack_mention_names(team_id,user_id) VALUES(?,?)',
+        conn.executemany('INSERT INTO slack_mention_names(team_id,user_id) VALUES(?,?) ON CONFLICT DO NOTHING',
                          [(team, user) for user in users])
-        conn.executemany('INSERT OR IGNORE INTO slack_message_mentions VALUES(?,?,?)',
+        conn.executemany('INSERT INTO slack_message_mentions VALUES(?,?,?) ON CONFLICT DO NOTHING',
                          [(message_id, team, user) for user in users])
 
     def decorate(self, messages):

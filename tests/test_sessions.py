@@ -530,6 +530,7 @@ def test_followup_api_keeps_one_session_and_enforces_auth_csrf_and_legacy_bounda
         assert client.post(endpoint,json=message).status_code == 401
 
 
+@pytest.mark.sqlite_only
 async def test_checkpoints_replace_latest_session_archive_and_restore_chat(tmp_path):
     settings = Settings(_env_file=None, data_dir=tmp_path/'data', checkpoint_dir=tmp_path/'checkpoints')
     store = Store(settings.data_dir)
@@ -826,8 +827,8 @@ def test_deleted_session_rejects_replayed_creation_and_side_chat_source(workspac
 def activity_event(store, run_id, kind, message, data=None):
     from app.db import now
     with store.connect() as connection:
-        return connection.execute('INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)',
-                                  (run_id, kind, message, json.dumps(data or {}), now())).lastrowid
+        return connection.execute('INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?) RETURNING id',
+                                  (run_id, kind, message, json.dumps(data or {}), now())).fetchone()[0]
 
 
 def test_chat_summary_defers_completed_bodies_and_keeps_live_activity(workspace):

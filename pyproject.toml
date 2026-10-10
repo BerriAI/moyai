@@ -23,6 +23,7 @@ dependencies = [
   "opentelemetry-sdk>=1.39,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
   "boto3>=1.43.109,<2",
+  "psycopg[binary,pool]>=3.2,<4",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +49,7 @@ eval = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["sqlite_only: validates SQLite file or checkpoint behavior"]
 
 [tool.uv.sources]
 agentchat = { git = "https://github.com/BerriAI/agentchat.git", rev = "8876e361c4071b4906916452ff3e6c35b1a9c78b" }

@@ -23,6 +23,7 @@ Follow the [installation walkthrough](getting-started.md) to deploy Moyai on Mod
 | [Install and run a real task](getting-started.md) | Account setup, credentials, Modal deployment, first task, GitHub, and troubleshooting |
 | [Cloud setup and deployment](deployment.md) | Modal or Substrate sandboxes, Render, Docker, migration, and backups |
 | [PostgreSQL migration rehearsal](postgres-migration.md) | Verified database copies and the path toward overlapping deployments |
+- [Postgres runtime](postgres-runtime.md) — application storage, ownership, verification, and cutover prerequisites.
 | [AWS Lambda MicroVMs](aws-lambda-microvms.md) | AWS sandbox setup, durable S3 checkpoints, rotation, and conformance tests |
 | [Sign-in and user roles](authentication.md) | Google Workspace SSO and administrators |
 | [App connections](integrations.md) | Linear, Slack, Notion, GitHub, and repository rulesets |

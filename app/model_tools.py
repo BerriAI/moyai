@@ -61,7 +61,7 @@ class ModelTools:
     def call(self, run, name, arguments):
         args = SPECS[name][0].model_validate(arguments)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             fresh = self.current(conn, run, getattr(args, 'turn_id', None))
             if name == 'model_list':
                 return self.state(fresh)

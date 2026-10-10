@@ -273,7 +273,7 @@ class AutomationTools:
         digest = hashlib.sha256(json.dumps({'name': name, 'arguments': fingerprint},
                                            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             fresh, fresh_actor = self.actor(run, args.turn_id)
             if fresh_actor != actor or fresh['active_user_id'] != run['active_user_id']:
                 raise HTTPException(409, 'The requester changed. Use automation_list again.')

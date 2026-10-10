@@ -55,8 +55,8 @@ class TraceOutbox:
     def enqueue_payload(self, span, payload, connection=None):
         values = (format(span.context.trace_id, '032x'), format(span.context.span_id, '016x'),
                   payload, time.time())
-        sql = f'''INSERT OR IGNORE INTO {self.table}(trace_id,span_id,payload,created_at)
-                  VALUES(?,?,?,?)'''
+        sql = f'''INSERT INTO {self.table}(trace_id,span_id,payload,created_at)
+                  VALUES(?,?,?,?) ON CONFLICT DO NOTHING'''
         if connection is not None:
             connection.execute(sql, values)
         else:
@@ -104,9 +104,9 @@ class TraceOutbox:
 
     async def export_once(self):
         async with self.lock:
-            pending = self.store.rows(f'''SELECT rowid AS queue_id,length(payload) AS payload_bytes
+            pending = self.store.rows(f'''SELECT trace_id,span_id,length(payload) AS payload_bytes
                 FROM {self.table} WHERE delivered_at IS NULL AND next_attempt_at<=?
-                ORDER BY created_at,rowid LIMIT 64''', (time.time(),))
+                ORDER BY created_at,trace_id,span_id LIMIT 64''', (time.time(),))
             queue_ids, size = [], 0
             for row in pending:
                 row_size = row['payload_bytes'] + self.batch_row_overhead
@@ -114,14 +114,14 @@ class TraceOutbox:
                     break
                 # An existing oversized span is still attempted unchanged by
                 # itself. Do not strand it or silently discard trace content.
-                queue_ids.append(row['queue_id'])
+                queue_ids.append((row['trace_id'], row['span_id']))
                 size += row_size
             if not queue_ids:
                 return False
             # Read payloads only after selecting a byte-bounded batch; 64 large
             # spans must not all be loaded into memory to send just a few.
             rows = self.store.rows(f'''SELECT * FROM {self.table}
-                WHERE rowid IN ({','.join('?' for _ in queue_ids)}) ORDER BY created_at,rowid''', tuple(queue_ids))
+                WHERE (trace_id,span_id) IN (VALUES {','.join('(?,?)' for _ in queue_ids)}) ORDER BY created_at,trace_id,span_id''', tuple(value for pair in queue_ids for value in pair))
             error = ''
             retry_after = 0
             try:

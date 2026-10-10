@@ -56,7 +56,7 @@ class UserRoles:
 
     def directory(self):
         with self.store.connect() as conn:
-            conn.execute('BEGIN')
+            conn.begin_read()
             assignments = {row['email']: dict(row) for row in conn.execute('SELECT * FROM user_roles')}
             people = {email: {'email': email, 'name': '', 'has_signed_in': False, 'last_seen': None}
                       for email in set(self.settings.google_admins()) | assignments.keys() if self.eligible(email)}
@@ -85,7 +85,7 @@ class UserRoles:
         with self.store.connect() as conn:
             # Serialize authorization, the last-admin check, and the write. Two
             # concurrent demotions must never remove both remaining admins.
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             if actor.get('method') in {'google', 'cloudflare'}:
                 actor_email = actor['identity']['email'].strip().lower()
                 if not self.eligible(actor_email) or self.role_in(conn, actor_email) != 'admin':

@@ -26,6 +26,29 @@ async function pageFor(t, route = 'tasks', fixture = 'populated', width = 1440) 
   return page;
 }
 
+for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'member']) test(`Settings gear survives tooltip updates for ${fixture} at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', fixture, width);
+  const gear = page.getByRole('button', { name: 'Settings', exact: true });
+  const tooltip = page.getByRole('tooltip', { name: 'Settings', exact: true });
+  for (const activation of ['mouse', 'Enter', 'Space']) {
+    if (width <= 850) await page.getByRole('button', { name: 'Open sidebar', exact: true }).click();
+    if (activation === 'mouse') await gear.hover();
+    else await gear.focus();
+    await tooltip.waitFor();
+    if (activation === 'mouse') await gear.click();
+    else await gear.press(activation);
+    await page.waitForURL(url => url.hash === '#settings', { timeout: 3000 });
+    await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
+    assert.equal(await page.locator('#content h1').evaluate(el => el === document.activeElement), true);
+    if (width <= 850) {
+      assert.equal(await page.locator('body').evaluate(el => el.classList.contains('sidebar-open')), false);
+      await page.getByRole('button', { name: 'Open sidebar', exact: true }).click();
+    }
+    await page.getByRole('link', { name: 'Back to workspace' }).click();
+    await page.locator('#prompt').waitFor();
+  }
+});
+
 for (const width of [1440, 768, 320]) for (const composer of ['new', 'reply']) test(`skill picker rows stay aligned in the ${composer} composer at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'skill-picker', width);
   if (composer === 'reply') await page.goto(`${base}/?fixture=skill-picker#run=${'a'.repeat(32)}`);

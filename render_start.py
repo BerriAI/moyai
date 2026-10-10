@@ -97,6 +97,8 @@ async def import_checkpoint(directory: Path, volume):
 async def bootstrap():
     from app.config import Settings
     settings = Settings(_env_file=None)
+    if settings.moyai_database_url:
+        return
     if (settings.data_dir / "workspace.db").exists():
         return
     source = os.environ.get("BOOTSTRAP_MODAL_VOLUME", "")

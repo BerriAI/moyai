@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def restore_checkpoint(settings):
-    if not settings.checkpoint_dir:
+    if settings.moyai_database_url or not settings.checkpoint_dir:
         return
     source = settings.checkpoint_dir / "workspace.db"
     target = settings.data_dir / "workspace.db"
@@ -35,6 +35,8 @@ class Checkpoints:
         self.lock = asyncio.Lock()
         self.saved_generation = -1
         self.commit = commit
+        if store.database and settings.checkpoint_dir:
+            raise ValueError('SQLite checkpoints cannot be used with Postgres.')
         if settings.checkpoint_dir and commit is None:
             if not settings.modal_volume_name:
                 raise ValueError("MODAL_VOLUME_NAME is required for checkpoints")
@@ -44,6 +46,8 @@ class Checkpoints:
         directory = self.settings.checkpoint_dir
         if not directory:
             return
+        if self.store.database:
+            raise ValueError("SQLite checkpoints cannot be used with Postgres.")
         async with self.lock:
             generation = self.store.generation
             if generation == self.saved_generation:

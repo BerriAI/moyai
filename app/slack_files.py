@@ -75,7 +75,7 @@ class SlackFiles:
         if not source or source['context_status'] != 'ready':
             return
         with store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             message = conn.execute("SELECT id,status FROM messages WHERE run_id=? AND role='user' ORDER BY id LIMIT 1", (run_id,)).fetchone()
             if not message or message['id'] != run.get('active_message_id') or message['status'] != 'running':
                 return
@@ -128,7 +128,7 @@ class SlackFiles:
                 except Exception:
                     errors.append('Could not read this Slack attachment. Upload it again or describe its contents.')
             with store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 current = conn.execute('SELECT status FROM messages WHERE id=?', (row['message_id'],)).fetchone()
                 if not current or current['status'] != 'running':
                     return

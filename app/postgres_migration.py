@@ -17,6 +17,8 @@ import struct
 import tempfile
 
 from .storage_maintenance import MaintenanceError, source_database
+from .database_schema import (REVOKE_TRIGGER, REVOKE_FUNCTION, REVOKE_POSTGRES,
+                              SQLITE_OCCUPIED_INDEX, POSTGRES_OCCUPIED_INDEX)
 
 
 DESTINATION_ENV = 'MOYAI_MIGRATION_DATABASE_URL'
@@ -32,25 +34,6 @@ DDL_NODES = frozenset('''Create Index Identifier Table IndexParameters Ordered
 TYPES = {'INTEGER': ('BIGINT', int), 'TEXT': ('TEXT', str),
          'REAL': ('DOUBLE', float), 'BLOB': ('BYTEA', bytes)}
 
-# An explicit port of the permission-revocation trigger, guarded against drift.
-# SQLite removes IF NOT EXISTS when it saves this definition in sqlite_schema.
-REVOKE_TRIGGER = '''CREATE TRIGGER revoke_github_write_access
-    AFTER UPDATE OF status,deleted_at ON runs
-    WHEN NEW.status IN ('stopping','cancelled') OR NEW.deleted_at!=''
-    BEGIN UPDATE github_write_access SET status='revoked'
-    WHERE run_id=NEW.id AND status IN ('pending','approved'); END'''
-REVOKE_FUNCTION = '''CREATE FUNCTION revoke_github_write_access_fn() RETURNS trigger
-    LANGUAGE plpgsql SET search_path FROM CURRENT AS $moyai$
-    BEGIN
-        UPDATE github_write_access SET status='revoked'
-        WHERE run_id=NEW.id AND status IN ('pending','approved');
-        RETURN NEW;
-    END
-    $moyai$'''
-REVOKE_POSTGRES = '''CREATE TRIGGER revoke_github_write_access
-    AFTER UPDATE OF status,deleted_at ON runs FOR EACH ROW
-    WHEN (NEW.status IN ('stopping','cancelled') OR NEW.deleted_at!='')
-    EXECUTE FUNCTION revoke_github_write_access_fn()'''
 
 
 @dataclass(frozen=True)
@@ -143,6 +126,11 @@ def inspect_schema(source: sqlite3.Connection) -> Schema:
             if ' '.join(ddl.split()) != ' '.join(REVOKE_TRIGGER.split()):
                 raise MaintenanceError('Unknown or changed SQLite trigger; port its behavior before copying.')
             triggers.extend([REVOKE_FUNCTION, REVOKE_POSTGRES])
+            continue
+        if kind == 'index' and name == 'idx_durable_sessions_occupied':
+            if ' '.join(ddl.split()) != ' '.join(SQLITE_OCCUPIED_INDEX.split()):
+                raise MaintenanceError('Changed durable admission index; port its predicate before copying.')
+            indexes.append(POSTGRES_OCCUPIED_INDEX)
             continue
         tree = postgres_ddl(ddl)
         if kind == 'index':

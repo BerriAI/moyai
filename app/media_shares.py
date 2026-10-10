@@ -251,7 +251,7 @@ class MediaShares:
         reference = self.store.objects.put(raw)
         token, share_id = secrets.token_urlsafe(32), secrets.token_hex(16)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             self.active(conn, run)
             previous = self.prior(conn, run, args)
             if previous:
@@ -269,7 +269,7 @@ class MediaShares:
 
     def revoke(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             self.active(conn, run)
             row = conn.execute('SELECT * FROM media_shares WHERE id=? AND run_id=?', (args.share_id, run['id'])).fetchone()
             if row is None:

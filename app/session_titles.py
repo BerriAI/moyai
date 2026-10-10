@@ -86,7 +86,7 @@ class SessionTitles:
         async def rename(run_id: str, body: SessionTitleEdit, request: Request) -> dict[str, str]:
             security.require(request, mutation=True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 run = conn.execute('SELECT parent_run_id FROM runs WHERE id=?', (run_id,)).fetchone()
                 if not run:
                     raise HTTPException(404, 'Session not found.')

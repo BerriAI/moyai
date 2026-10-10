@@ -874,7 +874,7 @@ def test_pending_recovery_cannot_adopt_another_requester(workspace):
 
 def select(vault, request_id, scope, actor='google:alice', generation=0):
     with vault.store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         return vault.select_scope_in(conn, request_id, generation, scope, actor)
 
 

@@ -183,7 +183,7 @@ class Spend:
                 CREATE INDEX IF NOT EXISTS idx_model_requests_org_run ON model_requests(run_id);
                 CREATE INDEX IF NOT EXISTS idx_model_requests_user_time ON model_requests(user_id,created_at);
             ''')
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(model_requests)')}
+            columns = conn.column_names('model_requests')
             if 'cost_source' not in columns:
                 conn.execute("ALTER TABLE model_requests ADD COLUMN cost_source TEXT NOT NULL DEFAULT ''")
             for name in ('cache_read_input_tokens', 'cache_creation_input_tokens'):
@@ -374,7 +374,7 @@ class Spend:
             self.security.require(request, mutation=True, admin=True)
             actor = self.store.identity(self.security.session_info(request))
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 source = conn.execute("SELECT id,linked_user_id FROM users WHERE id=? AND kind='slack'", (body.slack_user_id,)).fetchone()
                 target = conn.execute("SELECT id FROM users WHERE id=? AND kind IN ('google','cloudflare')", (body.google_user_id,)).fetchone()
                 if not source or not target:

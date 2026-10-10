@@ -3,7 +3,6 @@ import asyncio
 import hmac
 import json
 import re
-import sqlite3
 from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
@@ -12,6 +11,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
+from .database import Connection, DatabaseRow
 from .db import now
 from .identities import PROFILE_MAX_AGE_SECONDS
 
@@ -291,7 +291,7 @@ class Credentials:
                     'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
                     'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
             }.items():
-                columns = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+                columns = conn.column_names(table)
                 for field, declaration in fields.items():
                     if field not in columns:
                         conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
@@ -420,7 +420,7 @@ class Credentials:
         secret_id = uuid4().hex
         fields.update(id=secret_id, owner_id=user_id, encrypted=self.security.encrypt(value), created_at=now(), client_id=body.client_id)
         columns = ','.join(fields)
-        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join(":" + key for key in fields)})', fields)
+        conn.execute(f'INSERT INTO provider_secrets({columns}) VALUES({",".join("?" for key in fields)})', tuple(fields.values()))
         self.audit_in(conn, user_id, secret_id, 'saved ' + body.scope + ' ' + body.lifetime, root_id)
         return secret_id
 
@@ -458,10 +458,10 @@ class Credentials:
         suffix = '' if request['provider'] == 'anthropic' else '/v1'
         return {**result, 'instructions': 'Use credentials_http_request with this request_id. For Python SDKs, base_url=os.environ["MOYAI_CREDENTIAL_PROXY_URL"] + "/' + request['id'] + suffix + '", api_key=os.environ["WORKSPACE_RUN_TOKEN"]. Set max_retries=0 and stream=False. The endpoint is rebuilt each turn; do not hard-code it. No raw provider key is available. Provider charges are separate from Moyai gateway spend.'}
 
-    def pending_rows(self, conn: sqlite3.Connection, run_id: str, *, include_children: bool = False) -> list[sqlite3.Row]:
+    def pending_rows(self, conn: Connection, run_id: str, *, include_children: bool = False) -> list[DatabaseRow]:
         # Pending access belongs to the session and requester, not its latest turn.
         return conn.execute(f"""SELECT q.* FROM credential_requests q JOIN runs r ON r.id=q.run_id
-            WHERE (r.id=? OR (? AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))) AND r.deleted_at=''
+            WHERE (r.id=? OR (?=1 AND r.id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))) AND r.deleted_at=''
             AND r.status IN ({','.join('?' for _ in ACCESSIBLE)}) AND q.status='pending'
             ORDER BY q.created_at,q.id""", (run_id, include_children, run_id, *ACCESSIBLE)).fetchall()
 
@@ -582,7 +582,7 @@ class Credentials:
 
     def request(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             actor = run['active_user_id']
             if not actor or not run['active_message_id']:
                 raise ValueError('Start an authenticated chat session before requesting access.')
@@ -644,7 +644,7 @@ class Credentials:
                        **args.model_dump(exclude={'secret_id', 'source_checks'}), 'input_fields': input_fields, 'status': 'provided' if secret else 'pending', 'secret_id': secret['id'] if secret else '',
                        'created_at': now(), 'resolved_at': now() if secret else '', 'generation': 0, 'failure': '',
                        'revision': 1, 'secret_revision': secret['revision'] if secret else 1}
-                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join(":" + key for key in row)})', row)
+                conn.execute(f'INSERT INTO credential_requests({",".join(row)}) VALUES({",".join("?" for key in row)})', tuple(row.values()))
                 self.audit_in(conn, actor, row['secret_id'], 'reused' if secret else 'requested', run['id'])
             if row['status'] in {'provided', 'declined', 'satisfied'}:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
@@ -678,7 +678,7 @@ class Credentials:
         if not self.store.rows('SELECT 1 FROM credential_requests WHERE run_id=? AND resolution_pending=1 LIMIT 1', (run_id,)):
             return
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if not run:
                 return
@@ -728,7 +728,7 @@ class Credentials:
 
     def resolve_external(self, run: dict[str, object], args: ResolveExternal) -> dict[str, object]:
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             current = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
             if (not current or current['deleted_at'] or current['status'] != 'running'
                     or not current['active_user_id'] or not current['token_hash']
@@ -753,7 +753,7 @@ class Credentials:
 
     def resolve(self, request_id, body, user_id, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM credential_requests WHERE id=?', (request_id,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Credential request not found.')
@@ -829,7 +829,7 @@ class Credentials:
 
     def materialize(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             accepted = []
             for request_id in args.request_ids:
                 row, secret = self.authorized_request(conn, run, request_id)
@@ -850,7 +850,7 @@ class Credentials:
                 self.acknowledge_in(conn, run['id'], run['active_message_id'], row['id'], row['generation'])
             for _, secret in accepted:
                 if secret['name'] == '1password-shared' and secret['format'] == 'env':
-                    conn.execute('INSERT OR IGNORE INTO credential_source_uses VALUES(?,?,?,?)',
+                    conn.execute('INSERT INTO credential_source_uses VALUES(?,?,?,?) ON CONFLICT DO NOTHING',
                                  (run['id'], run['active_message_id'], secret['id'], secret['revision']))
             return {'status': 'ready', 'bindings': [{'request_id': row['id'], 'revision': row['revision'],
                     'name': secret['name'], 'format': secret['format'], 'env_var': secret['env_var'],
@@ -858,7 +858,7 @@ class Credentials:
 
     def report_failure(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row, secret = self.authorized_request(conn, run, args.request_id)
             if (row['status'] != 'provided' or not secret or row['revision'] != args.revision
                     or row['secret_revision'] != secret['revision']):
@@ -906,7 +906,7 @@ class Credentials:
 
     async def invoke(self, run, args):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             request, secret = self.authorized_request(conn, run, args.request_id)
             if secret:
                 request = self.binding_in(conn, request, secret)
@@ -956,7 +956,7 @@ class Credentials:
 
     def update_secret(self, secret_id, body, user_id, admin):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM provider_secrets WHERE id=? AND revoked_at=\'\'', (secret_id,)).fetchone()
             if not row or (row['scope'] == 'organization' and not admin) or (row['scope'] != 'organization' and row['owner_id'] != user_id):
                 raise HTTPException(404, 'Credentials not found.')
@@ -987,7 +987,7 @@ class Credentials:
                 values['invalid_reason'] = ''
             values['label'] = values['label'].strip()
             fields = ('label', 'scope', 'lifetime', 'root_id', 'expires_at', 'owner_id', 'client_id', 'encrypted', 'invalid_reason')
-            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=:' + key for key in fields) + ',revision=revision+1 WHERE id=:id', values)
+            conn.execute('UPDATE provider_secrets SET ' + ','.join(key + '=?' for key in fields) + ',revision=revision+1 WHERE id=?', (*(values[key] for key in fields), secret_id))
             self.audit_in(conn, user_id, secret_id, 'updated', values['root_id'])
             saved = dict(conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone())
         return self.metadata(saved, user_id, admin)
@@ -1019,7 +1019,7 @@ class Credentials:
                 if body.scope == 'personal' and not self.same_requester(user, root['active_user_id']):
                     raise HTTPException(403, 'Choose your own session for personal credentials.')
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 identity = self.insert_secret(conn, body, user, admin)
             return {'id': identity, 'saved': True}
 
@@ -1032,7 +1032,7 @@ class Credentials:
         async def revoke_key(secret_id: str, request: Request):
             user, admin = actor(request, True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM provider_secrets WHERE id=?', (secret_id,)).fetchone()
                 if not row or not (row['owner_id'] == user or (row['scope'] == 'organization' and admin)):
                     raise HTTPException(404, 'Credentials not found.')

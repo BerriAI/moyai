@@ -3,9 +3,9 @@
 [Deployment](deployment.md) · [Architecture](architecture.md)
 
 This is the first step toward overlapping Moyai deployments: a verified copy of
-the SQLite database into an isolated PostgreSQL schema. **The application still
-uses SQLite. This command does not switch the application to Postgres or enable
-multiple web instances.** Keep the existing single-instance deployment.
+the SQLite database into an isolated PostgreSQL schema. **SQLite remains the default. This command does not switch the application to Postgres or enable
+multiple web instances.** See [Postgres runtime](postgres-runtime.md) for the opt-in
+single-instance backend and the separately coordinated cutover. Keep the existing single-instance deployment.
 
 ## What the command does
 
@@ -110,9 +110,9 @@ and removes only its own randomly named Postgres schema afterward. Add
 
 ## Remaining work before overlapping deployments
 
-1. **Port the application storage boundary.** Replace SQLite-specific runtime SQL,
-   transaction locking, schema upgrades and checkpoint assumptions with explicit
-   Postgres behavior. Preserve single-instance operation for the first cutover.
+1. **Rehearse and cut over the application database.** The [Postgres runtime](postgres-runtime.md)
+   supports normal application reads/writes and explicit transactions. Verify the
+   actual production copy and preserve single-instance operation for the first cutover.
 2. **Move durable files and establish ownership.** Finish object-storage migration;
    make job claiming and recovery safe across processes. Current startup recovery
    globally interrupts pending model requests and assumes the previous process

@@ -214,3 +214,18 @@ def test_credentials_and_driver_payloads_are_not_printed(source, monkeypatch, ca
 def test_destination_schema_is_explicit_and_restricted(schema):
     with pytest.raises(migration.MaintenanceError):
         migration.destination_schema(schema)
+
+
+def test_temporal_admission_index_is_ported_and_checked_for_drift(source, target):
+    from app.temporal_runtime import TemporalRunManager
+    store = source.state.store
+    TemporalRunManager(store, source.state.settings)
+    url, name = target
+    assert migration.transfer(store.path.parent, url, name)['verified']
+    with psycopg.connect(url) as conn:
+        assert conn.execute('SELECT 1 FROM pg_indexes WHERE schemaname=%s AND indexname=%s',
+                            (name, 'idx_durable_sessions_occupied')).fetchone()
+    store.execute('DROP INDEX idx_durable_sessions_occupied')
+    store.execute('CREATE INDEX idx_durable_sessions_occupied ON durable_sessions(run_id) WHERE revision>0')
+    with pytest.raises(migration.MaintenanceError, match='admission index'):
+        migration.plan(store.path.parent)
