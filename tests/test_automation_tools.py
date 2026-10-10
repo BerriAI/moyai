@@ -19,7 +19,7 @@ def definition(**changes):
 
 
 def call(client, run, name, **arguments):
-    if name not in {'automation_list', 'automation_webhook_info', 'automation_environments', 'automation_history'}:
+    if name not in {'automation_list', 'automation_webhook_info', 'automation_environments', 'automation_history', 'automation_self_read'}:
         arguments.setdefault('turn_id', run['active_message_id'])
     return client.post(f"/broker/{run['id']}/tools/call", headers={'Authorization': 'Bearer capability'},
                        json={'name': name, 'arguments': arguments})

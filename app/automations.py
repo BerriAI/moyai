@@ -17,6 +17,7 @@ from temporalio.client import (Schedule, ScheduleActionStartWorkflow, ScheduleAl
 from temporalio.service import RPCError, RPCStatusCode
 
 from .automation_history import read_history
+from .automation_permissions import SelfManagement
 from .automation_workflow import AutomationWorkflow
 from .automation_templates import templates
 from .automation_events import AutomationEvents, EventTrigger, EVENT_CHOICES
@@ -108,6 +109,8 @@ class Definition(BaseModel):
     max_runs_per_hour: int | None = Field(default=50, ge=1)
     queue_events: bool = False
     metadata: dict[Annotated[str, Field(min_length=1)], str] = Field(default_factory=dict)
+    self_management: SelfManagement = Field(default_factory=SelfManagement,
+        description='Owner-authorized changes this automation and its workers may make to its own instructions or existing schedules. Enable only when the owner requests this. Other definition fields remain fixed.')
     repo_url: str = Field(default='', max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
     environment_id: str = Field(default='auto', pattern=r'^(auto|none|[0-9a-f]{32})$',
@@ -281,7 +284,7 @@ class Automations:
                                                         repository_id=event.repository_id)
                 event.repository_id, event.repository = identity, github.repository_name(identity)
 
-    def save(self, body, owner_id, automation_id=None, *, connection=None):
+    def save(self, body, owner_id, automation_id=None, *, connection=None, preserve_state=False):
         harness = body.definition.harness
         if 'harness' not in body.definition.model_fields_set:
             harness = (Definition.model_validate_json(self.row(automation_id)['definition']).harness
@@ -310,9 +313,10 @@ class Automations:
                 for key in conn.execute('SELECT provider FROM automation_webhooks WHERE automation_id=?', (automation_id,)).fetchall():
                     if key['provider'] not in providers:
                         conn.execute('DELETE FROM automation_webhooks WHERE automation_id=? AND provider=?', (automation_id, key['provider']))
-                # Editing pauses the schedule so revised instructions are reviewed before enabling.
-                conn.execute('UPDATE automations SET definition=?,revision=revision+1,paused=1,updated_at=?,sync_error=\'\' WHERE id=?',
-                             (definition.model_dump_json(), stamp, automation_id))
+                # Owner-authorized scoped edits preserve the current pause state;
+                # an in-flight worker cannot re-enable a user-paused schedule.
+                conn.execute('UPDATE automations SET definition=?,revision=revision+1,paused=?,updated_at=?,sync_error=\'\' WHERE id=?',
+                             (definition.model_dump_json(), row['paused'] if preserve_state else 1, stamp, automation_id))
             else:
                 if body.revision:
                     raise HTTPException(409, 'A new automation starts at revision zero.')
@@ -421,8 +425,11 @@ class Automations:
                         VALUES(?,?,?,?,'queued',?,?,?,1,?,?,?,?,?,?,?,?)''',
                         (run_id, prompt, definition.repo_url, definition.mode, json.dumps(definition.plugins), stamp, stamp,
                          definition.model, definition.model, row['owner_id'], row['owner_id'], definition.environment_id, 'Automation · ' + definition.name, definition.harness, definition.github_repository_id))
-                    conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)",
-                                 (run_id, prompt, stamp, definition.model, row['owner_id']))
+                    conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,input_kind,source_json) VALUES(?,'user',?,'queued','initial',?,?,?,'automation',?)",
+                                 (run_id, prompt, stamp, definition.model, row['owner_id'], json.dumps({
+                                     'kind': 'automation', 'automation_id': automation_id, 'revision': revision,
+                                     'occurrence': occurrence, 'owner_id': row['owner_id'],
+                                     'instructions': definition.prompt})))
                     conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,'{}',?)", (run_id, 'Started by event automation' if event else 'Started by automation', stamp))
                     conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (self.settings.sandbox_provider, run_id))
                     conn.execute('INSERT INTO automation_runs VALUES(?,?,?,?,?,?,?)', (occurrence, automation_id, revision, run_id, 'started', '', stamp))

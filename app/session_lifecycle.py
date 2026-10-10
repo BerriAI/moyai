@@ -144,7 +144,13 @@ class SessionLifecycle:
                 JOIN run_ancestry target ON target.ancestor_id=prior_run.run_id
                 WHERE current_run.run_id=? AND a.owner_id=? AND target.run_id=?''', (root, actor, target_id))
             if not family and not previous:
-                raise HTTPException(403, 'This execution can read its session family and its own automation history. Use a direct chat for unrelated shared sessions.')
+                from .automation_permissions import AutomationPermissions
+                with self.store.connect() as conn:
+                    grants = AutomationPermissions.targets(conn, fresh, actor)
+                    sources = conn.execute('''SELECT a.automation_id FROM automation_runs a
+                        JOIN run_ancestry target ON target.ancestor_id=a.run_id WHERE target.run_id=?''', (target_id,)).fetchall()
+                if not any(row['automation_id'] in grants for row in sources):
+                    raise HTTPException(403, 'This execution can read its session family and its own or owner-granted automation history. Use a direct chat for unrelated shared sessions.')
         return actor
 
     def search_actor(self, run):

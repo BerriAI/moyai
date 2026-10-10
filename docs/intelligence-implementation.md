@@ -461,3 +461,40 @@ Python cases (one optional skip) and 40 Node/browser cases. The two corrected
 catalog cases and schema manifest check also passed. Main now requires schema 10
 (shared swarm chat) and role protocols 6 (complete automation-history references).
 Use a coordinated release of all roles; no deployment was performed.
+
+## Owner-granted automation self-management (WP7/S21; not deployed)
+
+Owners can select instruction and existing-schedule permissions in the editor or
+the saved definition. Automated runs and their descendants inspect the current
+grant with `automation_self_read`, then use `automation_self_update` to change
+only those fields. Scoped edits retain the current pause state, existing trigger
+IDs, event sources, connections, runtime, ownership and budgets. They use the
+existing scheduler and mutation receipts; concurrent owner edits produce a
+revision conflict, and retries cannot create another schedule.
+
+A direct human chat can grant the same fields to its workers with
+`automation_grant`. The durable grant references the authorizing owner, run and
+input; reads and writes recheck that source, active turn, requester, execution
+and automation revision. Parent waiting preserves the grant; a new turn,
+requester, stop, deletion or explicit revocation removes it. Granted workers can
+read the selected workflow's complete history and linked sessions. Agent and
+event inputs cannot mint grants or expand them.
+
+Scheduled inputs now carry explicit automation provenance and the immutable saved
+instructions. The UI labels them Scheduled workflow. Goal authorization reads
+only those owner-authored instructions, excluding event/history data in the
+rendered prompt, while ordinary human follow-ups retain their own attribution.
+
+Validation: 98 management/history cases and 276 broader automation, event, goal,
+session and package cases passed. Fifty-one history/permission contracts passed
+against PostgreSQL and 76 migration/role checks passed. Three additional
+revocation/provenance/manifest checks passed. The real local Temporal scheduler
+confirmed a scoped timezone/time change, retained exactly one schedule and
+reconciled the identical retry. Eleven Node/browser checks passed, including
+editing both permission fields at 1440/768/320 pixels. The rendered operator and
+automation guides passed desktop/mobile checks. Tests use synthetic account and
+provider data; deployed provider quality and latency remain unqualified.
+
+Current source requires schema 11 and all four role protocols 7. Earlier schema
+digests are preserved; revision 11 adds owner grants. Release all roles together
+after the offline migration. No deployment was performed.

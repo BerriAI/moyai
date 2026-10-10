@@ -87,6 +87,20 @@ class Goals:
                 source['provenance'] = {'kind': 'slack', **dict(receipt)}
                 source['original_content'] = source['content']
                 source['content'] = source['content'].removeprefix(f"Slack reply from {receipt['user_id']}:\n")
+        # Scheduled work retains its immutable owner-authored instructions.
+        # Event payloads and previous outcomes in the rendered prompt cannot
+        # authorize a goal or change its budget/control state.
+        workflow = conn.execute('''SELECT m.id,m.user_id,m.source_json,a.automation_id,a.revision
+            FROM messages m JOIN automation_runs a ON a.run_id=m.run_id
+            WHERE m.run_id=? AND m.id=? AND m.input_kind='automation' ''',
+            (caller['id'], caller['active_message_id'])).fetchone() if 'automation_runs' in self.store.table_names() else None
+        if workflow:
+            saved = json.loads(workflow['source_json'])
+            if (saved.get('automation_id') == workflow['automation_id'] and saved.get('revision') == workflow['revision']
+                    and saved.get('owner_id') == workflow['user_id'] and isinstance(saved.get('instructions'), str)):
+                sources.append({'id': workflow['id'], 'content': saved['instructions'], 'user_id': workflow['user_id'],
+                                'provenance': {'kind': 'owner_saved_automation', 'automation_id': workflow['automation_id'],
+                                               'revision': workflow['revision']}})
         if not sources and not caller['active_message_id'] and caller['owner_id'] and not caller.get('parent_run_id'):
             sources.append({'id': 'run:' + caller['id'], 'content': caller['prompt'], 'user_id': caller['owner_id'],
                             'provenance': {'kind': 'authorized_initial_run'}})

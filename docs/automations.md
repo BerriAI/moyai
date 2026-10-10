@@ -52,11 +52,41 @@ launches immediately; it does not stop already running sessions.
 Chat tools manage only the current requester’s automations, including in shared
 Slack threads. Slack needs a fresh eligible profile matching an independently
 verified Google identity. An accounting link alone grants no access. Subagents
-and automated runs cannot create or manage schedules. Administrators retain the
+and automated runs can revise only the fields explicitly granted by the owner,
+as described below. Administrators retain the
 existing ability to pause other owners’ work in Settings. Connection selections,
 GitHub repository grants, runtime readiness and webhook requirements still apply;
 these tools cannot grant new access. Mutations check the active turn and revision
 and journal a stable `request_key`, so retries do not duplicate or replay changes.
+
+### Let an automation improve its workflow
+
+In **Settings → Automations → Edit → Self-management**, select either or both:
+
+- **May revise its instructions** lets this automation and its workers update the saved workflow instructions.
+- **May adjust existing schedules** lets them change the timing of existing schedule triggers. A higher frequency can increase usage within the saved invocation limit.
+
+Both permissions default off. Save, then enable the workflow when ready. Its agent
+uses `automation_self_read` to inspect the allowed fields and current revision,
+then `automation_self_update` to apply an authorized change. These edits preserve
+the current enabled or paused state. They cannot create another automation, add
+triggers, change event sources, connections, repositories, recipients or budgets,
+or expand the self-management grant. A concurrent owner edit produces a revision
+conflict instead of being overwritten. Remove a permission in the editor to
+revoke it for current and future work.
+
+In a direct chat, the owner can authorize a worker to make the same scoped changes.
+The parent uses `automation_grant` with the chosen fields before delegating. That
+grant also permits reading the selected workflow's history and expires when the
+authorizing human turn or requester changes, or the parent stops. An empty
+permission list revokes it immediately. This temporary grant does not enable
+persistent self-management. Event data, observations and agent messages cannot
+create new grants.
+
+Scheduled inputs are labeled **Scheduled workflow**. The agent retains the
+immutable owner-authored instructions separately from event and history data;
+only the saved instructions can authorize a goal for that occurrence. Scheduler
+confirmation is still required before reporting a changed next-run time.
 
 ### Reusing database setup
 

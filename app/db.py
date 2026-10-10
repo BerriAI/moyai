@@ -664,7 +664,7 @@ class Store:
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
-            CASE WHEN m.input_kind='observation' THEN 'Slack observation' WHEN m.input_kind='delegation' THEN 'Agent guidance' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
+            CASE WHEN m.input_kind='observation' THEN 'Slack observation' WHEN m.input_kind='delegation' THEN 'Agent guidance' WHEN m.input_kind='automation' THEN 'Scheduled workflow' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),

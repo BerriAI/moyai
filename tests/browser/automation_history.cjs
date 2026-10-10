@@ -19,6 +19,7 @@ for(const width of [1440,768,320]) test(`complete automation editor and history 
     if(url.pathname.endsWith('/history'))return route.fulfill({json:{history:history.slice(20),next_cursor:null}});
     const response=await route.fetch(),data=await response.json();
     data.automations[0].history=history.slice(0,20);data.automations[0].history_cursor='fixture-cursor';
+    data.automations[0].definition.self_management={instructions:true,schedule:false};
     await route.fulfill({json:data});
   });
   await page.goto(base+'/#automations');
@@ -32,6 +33,12 @@ for(const width of [1440,768,320]) test(`complete automation editor and history 
   if(process.env.AUTOMATION_SCREENSHOT_DIR)await page.screenshot({path:`${process.env.AUTOMATION_SCREENSHOT_DIR}/history-${width}.png`});
   await card.getByRole('button',{name:'Edit',exact:true}).click();
   const dialog=page.locator('[data-slot="dialog-content"]'),prompt=dialog.locator('[name=prompt]');
+  assert.equal(await dialog.locator('[name=self_instructions]').isChecked(),true);
+  assert.equal(await dialog.locator('[name=self_schedule]').isChecked(),false);
+  await dialog.getByText('May adjust existing schedules',{exact:true}).click();
+  assert.equal(await dialog.locator('[name=self_schedule]').isChecked(),true);
+  await dialog.getByRole('heading',{name:'Self-management',exact:true}).scrollIntoViewIfNeeded();
+  if(process.env.AUTOMATION_SCREENSHOT_DIR)await page.screenshot({path:`${process.env.AUTOMATION_SCREENSHOT_DIR}/self-management-${width}.png`});
   const text='Complete instructions 漢🙂 '.repeat(1300)+'END';
   assert.equal(await prompt.getAttribute('maxlength'),null);
   await prompt.fill(text);
@@ -51,4 +58,5 @@ for(const width of [1440,768,320]) test(`complete automation editor and history 
   assert.equal(saved.definition.metadata['key-0'],'Complete metadata '.repeat(1200)+'END');
   assert.equal(Object.keys(saved.definition.metadata).length,21);
   assert.equal(saved.definition.triggers.length,21);
+  assert.deepEqual(saved.definition.self_management,{instructions:true,schedule:true});
 });
