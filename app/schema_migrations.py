@@ -11,11 +11,11 @@ import json
 
 from .database import DatabaseError, identifier
 
-SCHEMA_REVISION = 8
+SCHEMA_REVISION = 9
 # Dependency order; optional features are prepared even when disabled at runtime.
 COMPONENTS = (
     'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',
-    'github', 'session_pull_requests', 'durable_runner', 'prepared_sandboxes',
+    'github', 'repository_context', 'session_pull_requests', 'durable_runner', 'prepared_sandboxes',
     'user_preferences', 'environments', 'infrastructure_costs', 'spend', 'agents',
     'tracing', 'credentials', 'skills', 'memory', 'memory_review', 'lens_feedback',
     'session_titles', 'automations', 'automation_events', 'automation_tools',

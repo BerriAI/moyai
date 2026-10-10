@@ -17,7 +17,7 @@ from app.security import digest
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
-                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01)
+                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, repository_context_enabled=False)
     app = create_app(settings)
     # Existing endpoint tests use synthetic providers. Keep the real budget
     # check, but supply fixture limits/counting instead of external metadata.
@@ -99,7 +99,8 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
         workspace_diagnostics history_read bundled_skill_read artifacts_list artifact_read'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
-    read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file'''.split())
+    read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file
+        repository_context_search repository_context_read'''.split())
     writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
         automation_update automation_enable automation_pause automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request

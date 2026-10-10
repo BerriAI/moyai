@@ -23,6 +23,7 @@ from .db import now
 from .github_repositories import GitHubRepositories
 from .github_write_access import GitHubWriteAccess
 from .github_ci import GitHubCI
+from .repository_context import RepositoryContext, TOOLS as CONTEXT_TOOLS
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
@@ -187,6 +188,7 @@ class Update(Changes):
 
 
 TOOLS = {
+    **CONTEXT_TOOLS,
     'github_ci_checks': ('github', False, CIChecks, 'Read check runs and commit statuses for an exact PR head SHA from github_pull_request. Follow next_page until null; an empty list does not mean CI passed. No writes.'),
     'github_workflow_runs': ('github', False, WorkflowRuns, 'List GitHub Actions workflow runs, optionally filtered by exact head_sha or branch. Follow next_page until null. Returns run IDs for github_workflow_jobs. No reruns or cancellation.'),
     'github_workflow_jobs': ('github', False, WorkflowJobs, 'Read jobs and step conclusions for the latest attempt of one workflow run. Follow next_page until null. Use job IDs with github_job_logs. No writes.'),
@@ -217,6 +219,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
         self.init_write_access()
         if store.schema_updates:
             initialize_schema(store)
+        self.context_index = RepositoryContext(self)
 
     def app_config(self):
         rows = self.store.rows('SELECT encrypted FROM github_app WHERE id=1')
@@ -324,6 +327,8 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 'url': repo['html_url'], 'private': repo['private']}
 
     async def call(self, run, name, arguments):
+        if name in CONTEXT_TOOLS:
+            return await self.context_index.call(run, name, arguments)
         if name not in TOOLS:
             raise ConnectorError('This GitHub operation is not available.')
         if name in {'github_ci_checks', 'github_workflow_runs', 'github_workflow_jobs', 'github_job_logs'}:
