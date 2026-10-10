@@ -859,7 +859,8 @@ document.addEventListener('pointerover',event=>{
 });
 document.addEventListener('pointerout',()=>clearTimeout(navigationIntent));
 document.addEventListener('focusin',event=>prefetchNavigation(event.target));
-document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view).catch(showError));
+// Tooltip rerenders own the React onclick property; keep controller listeners separate.
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.view).catch(showError)));
 $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
 $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};

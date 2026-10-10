@@ -153,6 +153,9 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
 - Use `MoyaiUI.render` for replacement, `insert` for incremental insertion, and
   `replace` for replacing a loading region. All commit synchronously so controllers
   can bind handlers immediately.
+- Bind controller click handlers on tooltip triggers with `addEventListener`,
+  not the DOM `onclick` property. React updates that property when the tooltip
+  opens or closes; native listeners survive those component updates.
 - Regions are replaced in full, matching the former `innerHTML` behavior. Do not
   call `root.render` to reconcile DOM owned by a controller. Nested roots are
   disposed before their parent, and a removal observer releases detached regions.
