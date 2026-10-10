@@ -868,13 +868,16 @@ def test_superseded_model_wait_never_submits_another_gateway_call(monkeypatch):
 
 
 def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
+    import base64
+    import hashlib
+    from sandbox.broker_transport import send_payload
     received = []
     payload = {'name': 'github_create_pull_request', 'arguments': {'content': 'x' * (6 * 1024 * 1024)}}
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_POST(self):
             raw = self.rfile.read(int(self.headers['Content-Length']))
-            received.append(json.loads(unseal('runtime-token', self.path, raw)))
+            received.append((self.path, json.loads(unseal('runtime-token', self.path, raw))))
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -886,8 +889,18 @@ def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
     try:
         with httpx.Client(base_url=relay.url, timeout=10) as client:
             headers = {'Authorization': 'Bearer runtime-token'}
-            assert client.post('/tools/call', json=payload, headers=headers).json() == {'ok': True}
+            def send(path, body):
+                response = client.post(path, json=body, headers=headers)
+                assert response.status_code == 200, response.text
+                return response.json()
+            assert send_payload('/tools/call', payload, send) == {'ok': True}
             assert client.post('/v1/chat/completions', json=payload, headers=headers).status_code == 413
-        assert received == [payload]
+        parts, (path, manifest) = received[:-1], received[-1]
+        assert path == '/tools/call' and manifest['name'] == payload['name']
+        assert all(path == '/payloads' for path, _ in parts)
+        complete = b''.join(base64.b64decode(value['data']) for _, value in parts)
+        assert len(parts) == manifest['moyai_payload']['parts']
+        assert hashlib.sha256(complete).hexdigest() == manifest['moyai_payload']['digest']
+        assert json.loads(complete) == payload
     finally:
         relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
