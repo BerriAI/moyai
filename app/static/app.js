@@ -376,6 +376,7 @@ async function submitTask(e){
   try{attachment_ids=files.ids();}catch(error){toast(error.message);return;}
   const input=$('#prompt'),submittedPrompt=input.value;
   const body={prompt:input.value.trim()||(attachment_ids.length?'Please respond to the attached files and audio transcripts.':''),repo_url:$('#repo').value,environment_id:$('#project-environment').value,mode:$('#mode').value,model:$('#new-model').value,harness:$('#new-harness').value||undefined,plugins:[...document.querySelectorAll('[name="plugin"]:checked')].map(x=>x.value),attachment_ids};
+  if(!body.prompt){toast('Enter a message or attach a file.');input.focus();return;}
   const signature=JSON.stringify(body);if(state.pendingNew?.signature!==signature)state.pendingNew={signature,client_id:crypto.randomUUID()};
   const pending=state.pendingNew;
   // Keep the draft and upload identities until acknowledgement, including a
@@ -397,7 +398,10 @@ async function submitTask(e){
       // Sidebar availability must never gate an accepted conversation. Leaving
       // this page while creation is pending must not navigate the user back.
       refreshRuns().catch(showError);
-      if(current())await openRun(run.id,'#run='+run.id,body);
+      if(current()){
+        await openRun(run.id,'#run='+run.id,body);
+        if(state.selected===run.id&&document.activeElement===document.body)$('#followup')?.focus();
+      }
     }catch(error){
       if(!current()){toast(error.message);return;}
       renderSessionSubmission(body,error.message,true);
