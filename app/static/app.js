@@ -933,7 +933,12 @@ $('#command-menu').onclick=()=>commandPalette.open();
 $('#search-sessions').setAttribute('aria-controls','command-palette');
 $('#search-sessions').setAttribute('aria-haspopup','dialog');
 $('#search-sessions').setAttribute('aria-expanded','false');
-const wideRail=()=>!matchMedia('(max-width:850px)').matches;$('#open-sidebar').onclick=()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);};$('#search-sessions').addEventListener('click',()=>commandPalette.open('sessions'));$('#close-sidebar').onclick=()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);};$('#sidebar-scrim').onclick=()=>setSidebar(false);
+const wideRail=()=>!matchMedia('(max-width:850px)').matches;
+// Tooltip updates must not replace the sidebar controls' native handlers.
+$('#open-sidebar').addEventListener('click',()=>{if(wideRail())document.body.classList.remove('rail-collapsed');else setSidebar(true);});
+$('#search-sessions').addEventListener('click',()=>commandPalette.open('sessions'));
+$('#close-sidebar').addEventListener('click',()=>{if(wideRail()){document.body.classList.add('rail-collapsed');$('#open-sidebar').focus();}else setSidebar(false);});
+$('#sidebar-scrim').onclick=()=>setSidebar(false);
 window.addEventListener('keydown',e=>{
   if(e.defaultPrevented||e.isComposing||e.repeat)return;
   const shortcut=(e.metaKey||e.ctrlKey)&&!e.altKey;

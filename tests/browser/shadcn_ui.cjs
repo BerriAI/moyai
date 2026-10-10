@@ -49,6 +49,26 @@ for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'membe
   }
 });
 
+for (const width of [1440, 768, 320]) test(`sidebar toggles survive tooltip updates at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'member', width);
+  const firstOpen = width <= 850;
+  for (const open of [firstOpen, !firstOpen, firstOpen, !firstOpen]) {
+    // The mobile scrim also has the Close sidebar name; test the tooltip button.
+    const button = page.locator(open ? '#open-sidebar' : '#close-sidebar');
+    await button.hover();
+    await page.getByRole('tooltip', { name: open ? 'Show sidebar' : 'Hide sidebar', exact: true }).waitFor();
+    await button.click();
+    await page.waitForFunction(({ width, open }) => {
+      const classes = document.body.classList;
+      return (width <= 850 ? classes.contains('sidebar-open') : !classes.contains('rail-collapsed')) === open;
+    }, { width, open });
+    if (open) {
+      const box = await page.locator('#sidebar').boundingBox();
+      assert.ok(box.x >= 0 && box.x + box.width <= width, 'The opened sidebar is inside the viewport');
+    }
+  }
+});
+
 for (const width of [1440, 768, 320]) for (const composer of ['new', 'reply']) test(`skill picker rows stay aligned in the ${composer} composer at ${width}px`, async t => {
   const page = await pageFor(t, 'tasks', 'skill-picker', width);
   if (composer === 'reply') await page.goto(`${base}/?fixture=skill-picker#run=${'a'.repeat(32)}`);
