@@ -244,7 +244,7 @@ class GitHubRepositories:
                 if identity in labels:
                     conn.execute('UPDATE runs SET github_repository_id=?,repo_url=? WHERE id=?',
                                  (identity, 'https://github.com/' + labels[identity], run['id']))
-            tables = {r['name'] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            tables = conn.table_names()
             for table in ('environments', 'environment_builds'):
                 if table in tables:
                     for row in conn.execute(f'SELECT id,recipe FROM {table}').fetchall():

@@ -108,7 +108,7 @@ class AgentCoordinator:
         store.execute('''CREATE TABLE IF NOT EXISTS agent_retries (
             group_id TEXT NOT NULL REFERENCES agent_groups(id), request_key TEXT NOT NULL,
             payload TEXT NOT NULL, PRIMARY KEY(group_id,request_key))''')
-        if 'result_snapshot' not in {r['name'] for r in store.rows('PRAGMA table_info(agent_groups)')}:
+        if 'result_snapshot' not in store.column_names('agent_groups'):
             store.execute("ALTER TABLE agent_groups ADD COLUMN result_snapshot TEXT NOT NULL DEFAULT ''")
 
     def available(self, run):
@@ -193,7 +193,7 @@ class AgentCoordinator:
 
     def handoff(self, parent_id, group_id):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             group = conn.execute('SELECT * FROM agent_groups WHERE id=? AND parent_id=?', (group_id, parent_id)).fetchone()
             if not group:
                 raise ValueError('Agent group does not belong to this session.')
@@ -208,7 +208,7 @@ class AgentCoordinator:
 
     def enqueue_child(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             message, created = self.enqueue_child_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=True)
         if created:
             child = self.store.run(run_id)
@@ -274,7 +274,7 @@ class AgentCoordinator:
             validate_harness(run.get('harness', 'hermes'), model)
             payload = json.dumps(args.model_dump(), sort_keys=True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 existing = conn.execute('SELECT * FROM agent_groups WHERE parent_id=? AND message_id=? AND request_key=?',
                                         (parent_id, run['active_message_id'], args.request_key)).fetchone()
                 if existing:
@@ -301,7 +301,7 @@ class AgentCoordinator:
             snapshot = group['snapshot_id'] or await self.manager.snapshot_for_children(run)
             self.check_parent(parent_id)  # A stop may have arrived during snapshot.
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 group = conn.execute('SELECT * FROM agent_groups WHERE id=?', (group_id,)).fetchone()
                 if group['status'] != 'preparing':
                     raise ValueError('Delegation was cancelled while the workspace was saving.')
@@ -330,7 +330,7 @@ class AgentCoordinator:
             self.group(run['id'], args.group_id)
             payload = json.dumps(args.model_dump(), sort_keys=True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 old = conn.execute('SELECT payload FROM agent_retries WHERE group_id=? AND request_key=?', (args.group_id, args.request_key)).fetchone()
                 if old:
                     if old['payload'] != payload:

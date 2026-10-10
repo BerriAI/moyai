@@ -5,7 +5,7 @@ const vm = require('./helpers/ui-vm.cjs');
 
 function setup(scope = 'personal') {
   const elements = new Map(), calls = [];
-  const element=key=>{if(!elements.has(key))elements.set(key,{focus(){},setSelectionRange(){}});return elements.get(key);};
+  const element=key=>{if(!elements.has(key))elements.set(key,{isConnected:true,focus(){},setSelectionRange(){},replaceWith(){}});return elements.get(key);};
   const total = {spend:'1.25', requests:2, sessions:1, pending_costs:0, missing_costs:0, total_tokens:120, prompt_tokens:100, completion_tokens:20};
   const user = {id:'google:maya', kind:'google', email:'maya@example.com', name:'Maya', ...total};
   const data = {scope, start:'2026-10-01', end:'2026-10-07', total, priced_requests:2,
@@ -88,7 +88,7 @@ test('admin Spend retains organization, infrastructure, user filters and identit
   const {context, elements, calls} = setup('organization');
   context.state.role = 'member';
   await context.renderSpend();
-  assert.deepEqual(calls, ['/api/spend?', '/api/admin/identities/status']);
+  assert.deepEqual(calls, ['/api/spend?'],'unrelated account settings do not block the overview');
   const html = elements.get('#content').innerHTML;
   for (const text of ['Spend &amp;', 'Organization totals', 'Usage history']) {
     assert.ok(html.includes(text) || html.includes(text.replace('&amp;', '&')), text);
@@ -100,7 +100,7 @@ test('admin Spend retains organization, infrastructure, user filters and identit
   vm.runInContext("spendAnalyticsState.tab='infrastructure'", context);
   await context.renderSpend();
   assert.match(elements.get('#content').innerHTML, /Infrastructure costs/);
-  assert.match(elements.get('#content').innerHTML, /Slack identities/);
+  assert.match(elements.get('#spend-identities').innerHTML, /Slack identities/);
   assert.equal(typeof elements.get('#refresh-identities').onclick, 'function');
 });
 
@@ -527,7 +527,7 @@ for(const background of [false,true])test(`same-range ${background?'automatic':'
   assert.match(e.get('#spend-panel').innerHTML,/Pull requests · Maya/);
 });
 
-for(const endpoint of ['spend','identities','pull-requests'])test(`${endpoint} refresh failure retains data and retry recovers`,async()=>{
+for(const endpoint of ['spend','pull-requests'])test(`${endpoint} refresh failure retains data and retry recovers`,async()=>{
   const {context:c,elements:e}=setup('organization');
   await c.renderSpend();selectTab(e,'leaderboard');await settle();
   const mounted=e.get('#content').innerHTML;
@@ -542,6 +542,22 @@ for(const endpoint of ['spend','identities','pull-requests'])test(`${endpoint} r
   c.api=original;await c.renderSpend();await settle();
   assert.match(e.get('#spend-panel').innerHTML,/Maya/);
   assert.equal(e.get('#spend-export').disabled,false);
+});
+
+test('slow or failed account settings never block spend charts and remain independently retryable',async()=>{
+  const {context:c,elements:e}=setup('organization');const original=c.api;
+  let reject;const waiting=new Promise((_,fail)=>{reject=fail;});
+  c.api=url=>url==='/api/admin/identities/status'?waiting:original(url);
+  await c.renderSpend();
+  assert.match(e.get('#content').innerHTML,/Organization totals/);
+  vm.runInContext("spendAnalyticsState.tab='infrastructure'",c);
+  const rendering=c.renderSpend();await settle();
+  assert.match(e.get('#content').innerHTML,/Infrastructure costs/);
+  assert.match(e.get('#content').innerHTML,/Loading account links/);
+  reject(Error('Temporarily unavailable'));await rendering;
+  assert.match(e.get('#spend-identities-notice').innerHTML,/Could not load account links/);
+  c.api=original;await e.get('#spend-identities-retry').onclick();
+  assert.match(e.get('#spend-identities').innerHTML,/Slack identities/);
 });
 
 for(const status of [401,403])test(`authorization ${status} clears retained report`,async()=>{
@@ -766,5 +782,93 @@ for(const foreground of [false,true])test('deferred shared PR response survives 
   assert.equal(count,1,'completed response is reused, not fetched again');
   assert.match(e.get('#spend-panel').innerHTML,/42/);
   assert.equal(e.get('#spend-export').disabled,false);
+  assert.equal(clock.timers.size,0);
+});
+
+async function identityRefreshFixture(){
+  const fixture=setup('organization'),{context:c,elements:e}=fixture,clock=fakeTimers(c);
+  c.interacting=false;c.settingsInteractionActive=()=>c.interacting;
+  await c.renderSpend();selectTab(e,'infrastructure');await settle();
+  assert.match(e.get('#spend-identities').innerHTML,/Automatic matching is disabled/);
+  const original=c.api,requests=[];
+  c.api=url=>url==='/api/admin/identities/status'?new Promise((resolve,reject)=>requests.push({resolve,reject})):original(url);
+  async function defer(status={enabled:true,ready:true,missing_scopes:[]},reason='interaction'){
+    c.interacting=false;c.document.hidden=false;
+    const render=c.renderSpend(true);await settle();
+    if(reason==='hidden')c.document.hidden=true;else c.interacting=true;
+    requests.at(-1).resolve(status);await render;
+  }
+  return {...fixture,clock,requests,original,defer};
+}
+
+for(const reason of ['interaction','hidden'])test(`deferred identity updates survive repeated ${reason} checks after cost polling ends`,async()=>{
+  const {context:c,elements:e,clock,requests,defer}=await identityRefreshFixture();
+  await defer(undefined,reason);
+  for(let i=0;i<3;i++){
+    assert.match(e.get('#spend-identities').innerHTML,/Automatic matching is disabled/);
+    assert.equal(clock.timers.size,1);
+    await clock.tick(250);
+  }
+  c.interacting=false;c.document.hidden=false;await clock.tick(250);
+  assert.match(e.get('#spend-identities').innerHTML,/Automatic matching is on/);
+  assert.equal(requests.length,1,'reuse the completed response');
+  assert.equal(clock.timers.size,0,'no dependency on a future cost poll');
+});
+
+const cancelIdentityContext={
+  navigation:c=>{c.state.view='settings';},
+  'leave and return':c=>{c.state.pageVersion++;},
+  account:c=>{c.state.userId='another-account';},
+  role:c=>{c.state.role='member';},
+  scope:c=>vm.runInContext("spendState.scope='personal'",c),
+  dates:c=>vm.runInContext("spendState.start='2026-10-02'",c),
+  'removed panel':c=>{c.$('#spend-identities').isConnected=false;},
+};
+for(const [reason,cancel] of Object.entries(cancelIdentityContext))test(`deferred identities are cancelled by ${reason}`,async()=>{
+  const {context:c,elements:e,clock,defer}=await identityRefreshFixture();
+  await defer();cancel(c);c.interacting=false;await clock.tick(250);
+  assert.match(e.get('#spend-identities').innerHTML,/Automatic matching is disabled/);
+  assert.equal(clock.timers.size,0);
+});
+
+test('only the newest deferred account response is painted',async()=>{
+  const {context:c,elements:e,clock,defer,requests}=await identityRefreshFixture();
+  await defer();
+  await defer({enabled:true,ready:false,missing_scopes:['users:read']});
+  assert.equal(clock.timers.size,1,'superseded callbacks are removed');
+  c.interacting=false;await clock.tick(250);
+  assert.match(e.get('#spend-identities').innerHTML,/Reconnect Slack/);
+  assert.doesNotMatch(e.get('#spend-identities').innerHTML,/Automatic matching is on/);
+  assert.equal(requests.length,2);assert.equal(clock.timers.size,0);
+});
+
+test('an old in-flight identity request cannot replace a newer completed refresh',async()=>{
+  const {context:c,elements:e,requests}=await identityRefreshFixture();
+  const old=c.renderSpend(true);await settle();
+  const newer=c.renderSpend();await settle();
+  requests[1].resolve({enabled:true,ready:false,missing_scopes:['users:read']});await newer;
+  requests[0].resolve({enabled:true,ready:true,missing_scopes:[]});await old;
+  assert.match(e.get('#spend-identities').innerHTML,/Reconnect Slack/);
+});
+
+for(const status of [401,403,503])test(`a newer identity error ${status} supersedes any deferred success`,async()=>{
+  const {context:c,elements:e,requests,clock,defer}=await identityRefreshFixture();
+  await defer();c.interacting=false;
+  const rendering=c.renderSpend(true);await settle();c.interacting=true;
+  requests.at(-1).reject(Object.assign(Error('Lookup unavailable'),{status}));await rendering;
+  assert.match(e.get('#spend-identities-notice').innerHTML,/Lookup unavailable/);
+  if(status===503)assert.match(e.get('#spend-identities').innerHTML,/Automatic matching is disabled/);
+  else assert.equal(e.get('#spend-identities').innerHTML,'','access failures clear even during interaction');
+  assert.equal(clock.timers.size,0);
+});
+
+for(const deferred of [false,true])test(`profile writes invalidate ${deferred?'deferred':'in-flight'} identity reads`,async()=>{
+  const {context:c,elements:e,requests,clock,defer}=await identityRefreshFixture();
+  let rendering;
+  if(deferred)await defer();else {rendering=c.renderSpend(true);await settle();}
+  c.api=async()=>({});
+  await e.get('#refresh-identities').onclick();
+  if(!deferred){requests[0].resolve({enabled:true,ready:true,missing_scopes:[]});await rendering;}
+  assert.match(e.get('#spend-identities').innerHTML,/Automatic matching is disabled/);
   assert.equal(clock.timers.size,0);
 });

@@ -21,12 +21,12 @@ function memoryReviewSummary(review, prefs) {
     'Finished sessions are reviewed after a short idle period. Recent sessions are checked when background review starts.';
   return `${review.pending ? `${review.pending} finished ${review.pending===1?'turn is':'turns are'} waiting for review. ` : ''}${result}`;
 }
-async function renderMemory() {
+async function renderMemory(recent=false) {
   const version=state.pageVersion;
   MoyaiUI.render($('#content'), '<p class="subtext" role="status">Loading your memories…</p>');
   let data;
-  try { data=await api('/api/memory'); }
-  catch(error) { if(version===state.pageVersion) { MoyaiUI.render($('#content'), `<section class="memory-page"><h1>Memory</h1><div role="alert"><p class="subtext">${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="memory-retry">Try again</button></section>`); $('#memory-retry').onclick=renderMemory; } return; }
+  try { data=await api('/api/memory',{recent}); }
+  catch(error) { if(version===state.pageVersion) { MoyaiUI.render($('#content'), `<section class="memory-page"><h1>Memory</h1><div role="alert"><p class="subtext">${esc(error.message)}</p><p>Check your connection and try again.</p></div><button id="memory-retry">Try again</button></section>`); $('#memory-retry').onclick=()=>renderMemory(); } return; }
   if(version!==state.pageVersion)return;
   const prefs=data.preferences;
   MoyaiUI.render($('#content'), `<section class="memory-page">

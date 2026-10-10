@@ -17,7 +17,7 @@ class UserPreferences:
                 user_id TEXT PRIMARY KEY REFERENCES users(id),
                 send_immediately INTEGER NOT NULL DEFAULT 0 CHECK(send_immediately IN (0,1))
             )''')
-            if 'omit_private_tool_payloads' not in {row[1] for row in conn.execute('PRAGMA table_info(user_preferences)')}:
+            if 'omit_private_tool_payloads' not in conn.column_names('user_preferences'):
                 conn.execute('''ALTER TABLE user_preferences ADD COLUMN omit_private_tool_payloads
                     INTEGER NOT NULL DEFAULT 0 CHECK(omit_private_tool_payloads IN (0,1))''')
 

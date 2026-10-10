@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
 import logging
-import sqlite3
+from .database import INTEGRITY_ERRORS
 from typing import TYPE_CHECKING
 
 import httpx
@@ -131,7 +131,7 @@ class SpendRecovery:
             raise
         except ReceiptError as exc:
             await database(self.defer, row, str(exc))
-        except sqlite3.IntegrityError:
+        except INTEGRITY_ERRORS:
             await database(self.defer, row, 'receipt_already_used')
         except (httpx.HTTPError, TimeoutError):
             await database(self.defer, row, 'gateway_unavailable')

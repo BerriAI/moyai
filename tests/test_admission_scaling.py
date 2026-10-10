@@ -50,7 +50,26 @@ async def test_admission_work_does_not_grow_with_retained_history(durable, occup
             conn.set_progress_handler(budget, 1000)
             yield conn
 
-    manager.store.connect = bounded_connection
+    if manager.store.database:
+        manager.store.execute('ANALYZE durable_sessions')
+        rows = manager.store.rows
+
+        def indexed_rows(sql, params=()):
+            plan = rows('EXPLAIN (ANALYZE, FORMAT JSON) ' + sql, params)[0]['QUERY PLAN'][0]['Plan']
+
+            def check(node):
+                if node.get('Relation Name') == 'durable_sessions':
+                    assert node['Node Type'] in {'Index Scan', 'Index Only Scan', 'Bitmap Heap Scan'}
+                    assert node['Actual Rows'] + node.get('Rows Removed by Filter', 0) <= 100
+                for child in node.get('Plans', []):
+                    check(child)
+
+            check(plan)
+            return rows(sql, params)
+
+        manager.store.rows = indexed_rows
+    else:
+        manager.store.connect = bounded_connection
     async with manager.admission_lock:
         assert await manager.make_capacity(run_id) is (occupied < 100)
     assert len(manager.locks) <= 100

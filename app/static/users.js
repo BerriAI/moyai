@@ -24,20 +24,24 @@ function applyUserSession(session) {
   state.preferences = {send_immediately: session.preferences?.send_immediately === true,
     omit_private_tool_payloads: session.preferences?.omit_private_tool_payloads === true};
   restoreSessionScope();
-  if(changed){if(typeof commandPalette!=='undefined')commandPalette?.close();++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
+  if(changed){state.navigationCache?.clear();state.navigationCache?.put('/api/session',session);if(typeof commandPalette!=='undefined')commandPalette?.close();++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
   if (session.identity) $('.rail-foot small').title = state.role === 'admin' ? 'Organization admin' : 'Internal user';
 }
 
-async function renderUsers() {
+async function renderUsers(recent=false) {
   const version = state.pageVersion;
-  const session = await api('/api/session');
+  const actor=state.userId;
+  // The server authorizes the directory independently; overlap known-admin reads.
+  const directory=state.role==='admin'?api('/api/admin/users',{recent}).then(data=>({data}),error=>({error})):null;
+  const [session,result] = await Promise.all([api('/api/session',{recent}),directory]);
   if (version !== state.pageVersion) return;
   applyUserSession(session);
   if (state.role !== 'admin') {
     MoyaiUI.render($('#content'), '<div class="page-heading"><div><h1>Users</h1><p class="subtext">Only administrators can manage workspace roles.</p></div></div>');
     return;
   }
-  const data = await api('/api/admin/users');
+  if(actor===state.userId&&result?.error)throw result.error;
+  const data = (actor===state.userId&&result?.data) || await api('/api/admin/users',{recent});
   if (version !== state.pageVersion) return;
   const admins = data.users.filter(user => user.role === 'admin').length;
   MoyaiUI.render($('#content'), `<section class="users-page">

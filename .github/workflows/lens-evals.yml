@@ -26,9 +26,10 @@ jobs:
       LENS_BASE_URL: ${{ vars.LENS_BASE_URL }}
       MOYAI_EVAL_NAME: ${{ vars.MOYAI_EVAL_NAME || 'moyai-python-coding-regressions' }}
       LITELLM_API_BASE: ${{ vars.MOYAI_EVAL_GATEWAY_URL }}
+      # Controlled-model code/SDK comparison. Production-only model setting
+      # changes need their own configuration comparison and are not covered here.
       AGENT_MODEL: ${{ vars.MOYAI_EVAL_MODEL }}
       LITELLM_TRACE_ENDPOINT: ${{ vars.LENS_TRACE_ENDPOINT }}
-      MOYAI_EVAL_HARNESS: codex
       CARGO_BUILD_JOBS: '2'
       BASE_SHA: ${{ github.event.pull_request.base.sha }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -60,7 +61,10 @@ jobs:
       - name: Install the pinned Lens SDK and agent runtime
         run: uv sync --frozen --group dev --group eval
       - name: Validate Python integration without model calls
-        run: uv run --frozen --group dev --group eval pytest tests/test_python_evals.py tests/test_lens_evals.py -q
+        run: |
+          uv run --frozen --group dev --group eval pytest -q \
+            tests/test_python_evals.py tests/test_lens_evals.py \
+            tests/test_lens_eval_runtime.py
       - name: Lens is running
         id: announce
         env:
@@ -86,7 +90,8 @@ jobs:
           LENS_REPORT_PATH: ${{ github.workspace }}/lens-results/before.json
         run: |
           cd "$RUNNER_TEMP/moyai-before"
-          "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest evals/test_moyai.py -q --tb=short
+          UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/moyai-before/.venv" \
+            uv run --frozen --group dev --group eval pytest evals/test_moyai.py -q --tb=short
       - name: After — evaluate the PR head commit
         id: candidate
         continue-on-error: true

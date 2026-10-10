@@ -125,12 +125,12 @@ class TemporalRunManager(DurableRunner):
                     rpc_timeout=timedelta(seconds=10),
                 )
                 await database(self.store.execute,
-                    'UPDATE durable_sessions SET delivered=MAX(delivered,?) WHERE run_id=?',
+                    'UPDATE durable_sessions SET delivered=greatest(delivered,?) WHERE run_id=?',
                     (row['revision'], row['run_id']))
                 record('session_wake_delivered', run_id=row['run_id'], revision=row['revision'],
                        duration_ms=elapsed_ms(delivery_started))
         rows = await database(self.store.rows,
-            'SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY rowid LIMIT 200')
+            'SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY run_id LIMIT 200')
         results = await asyncio.gather(*(deliver(row) for row in rows), return_exceptions=True)
         if rows:
             record('session_wake_batch', count=len(rows), failed=sum(isinstance(r, BaseException) for r in results),

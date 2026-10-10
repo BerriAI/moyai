@@ -96,7 +96,7 @@ async function loadSpendPRReport(data,tab,request,refresh=false,background=false
   if(spendPRState.data&&!refresh&&!spendPRState.promise){bindSpendPRControls(data,tab,request);scheduleSpendPRRefresh(data,tab,request);return;}
   $('#spend-export').disabled=true;
   const query=new URLSearchParams({start:data.start,end:data.end});
-  const promise=spendPRState.promise||(spendPRState.promise=api('/api/admin/pull-requests?'+query));
+  const promise=spendPRState.promise||(spendPRState.promise=api('/api/admin/pull-requests?'+query,{recent:!refresh}));
   try{
     const report=await promise;
     if(!spendPRCurrent(data,tab,request)||spendPRState.promise!==promise)return;

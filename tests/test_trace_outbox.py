@@ -185,7 +185,7 @@ async def test_large_trace_backlog_is_delivered_in_byte_bounded_batches(tmp_path
         stamp = time.time_ns()
         tracing.emit(run, message['id'], 'chat test', f'large-{index}', stamp, stamp,
                      {'openinference.span.kind': 'LLM', 'input.value': content, 'output.value': ''})
-    queued = store.rows('SELECT span_id,length(payload) AS size FROM trace_outbox ORDER BY created_at,rowid')
+    queued = store.rows('SELECT span_id,length(payload) AS size FROM trace_outbox ORDER BY created_at,trace_id,span_id')
     assert sum(row['size'] for row in queued) > 16 * 1024 * 1024
     delivered, sizes = [], []
 
@@ -214,7 +214,7 @@ async def test_failed_byte_bounded_batch_only_retries_attempted_rows(tmp_path, m
         stamp = time.time_ns()
         tracing.emit(run, message['id'], 'chat test', f'batch-{index}', stamp, stamp,
                      {'openinference.span.kind': 'LLM', 'input.value': 'hello', 'output.value': ''})
-    queued = store.rows('SELECT * FROM trace_outbox ORDER BY created_at,rowid')
+    queued = store.rows('SELECT * FROM trace_outbox ORDER BY created_at,trace_id,span_id')
     monkeypatch.setattr('app.trace_outbox.MAX_BATCH_BYTES', len(queued[0]['payload']))
     delivered = []
 
@@ -224,7 +224,7 @@ async def test_failed_byte_bounded_batch_only_retries_attempted_rows(tmp_path, m
 
     await transport(tracing, gateway)
     assert not await tracing.outboxes[0].export_once()
-    rows = store.rows('SELECT * FROM trace_outbox ORDER BY created_at,rowid')
+    rows = store.rows('SELECT * FROM trace_outbox ORDER BY created_at,trace_id,span_id')
     assert [row['attempts'] for row in rows] == [1, 0, 0]
     assert rows[0]['next_attempt_at'] > time.time()
     assert [row['next_attempt_at'] for row in rows[1:]] == [0, 0]
@@ -232,7 +232,7 @@ async def test_failed_byte_bounded_batch_only_retries_attempted_rows(tmp_path, m
     store.execute('UPDATE trace_outbox SET next_attempt_at=0')
     assert await tracing.outboxes[0].export_once()
     assert delivered[0] == delivered[1] == queued[0]['payload']
-    assert [row['attempts'] for row in store.rows('SELECT attempts FROM trace_outbox ORDER BY created_at,rowid')] == [2, 0, 0]
+    assert [row['attempts'] for row in store.rows('SELECT attempts FROM trace_outbox ORDER BY created_at,trace_id,span_id')] == [2, 0, 0]
     while await tracing.outboxes[0].export_once():
         pass
     assert [span.span_id.hex() for payload in delivered[1:] for span in spans(payload)] == [row['span_id'] for row in queued]
@@ -263,7 +263,7 @@ async def test_raindrop_batch_budget_includes_json_framing_and_unicode(tmp_path,
         tracing.emit(run, message['id'] + index, 'moyai', '', stamp, stamp,
                      {'openinference.span.kind': 'AGENT', 'input.value': 'Evidence 📖 ' * 100,
                       'output.value': 'Done', 'moyai.status': 'completed'}, root=True)
-    queued = store.rows('SELECT payload FROM trace_outbox_raindrop_events ORDER BY created_at,rowid')
+    queued = store.rows('SELECT payload FROM trace_outbox_raindrop_events ORDER BY created_at,trace_id,span_id')
     budget = sum(len(row['payload']) for row in queued) + 3
     monkeypatch.setattr('app.trace_outbox.MAX_BATCH_BYTES', budget)
     delivered = []

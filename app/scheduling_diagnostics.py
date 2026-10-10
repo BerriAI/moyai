@@ -28,7 +28,7 @@ def age_ms(stamp):
         return None
 
 
-def slow_database(started):
+def slow_database(started, *, backend):
     global _database_warning_at
     duration = elapsed_ms(started)
     if duration < 100:
@@ -47,7 +47,7 @@ def slow_database(started):
         on_event_loop = False
     stack = [{'file': Path(frame.filename).name, 'function': frame.name, 'line': frame.lineno}
              for frame in traceback.extract_stack(limit=8)[:-1]]
-    log.warning(json.dumps({'event': 'slow_database', 'version': 1, 'duration_ms': duration,
+    log.warning(json.dumps({'event': 'slow_database', 'version': 1, 'backend': backend, 'duration_ms': duration,
                            'on_event_loop': on_event_loop, 'stack': stack}))
 
 

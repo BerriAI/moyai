@@ -104,12 +104,12 @@
       }
       payloadSignature=signature;
     }
-    async function read(){
+    async function read(force=false){
       const request=++epoch;
       if(!alive||!active)return;
       refresh.disabled=true;status.textContent=data?'Refreshing…':'Loading pull request…';
       try{
-        const result=await load();
+        const result=await load({refresh:force});
         if(!alive||!active||request!==epoch)return;
         data=result;render();onStatus(data);status.textContent='';
       }catch(error){
@@ -120,7 +120,7 @@
         status.textContent=(data?'Could not refresh. Showing the previous version. ':'')+error.message+' Use Refresh to try again.';
       }finally{if(alive&&active&&request===epoch)refresh.disabled=false;}
     }
-    refresh.onclick=read;
+    refresh.onclick=()=>read(true);
     element.querySelectorAll('[data-section]').forEach(button=>button.onclick=()=>{
       if(!alive||section===button.dataset.section)return;
       scroll[section]=content.scrollTop;section=button.dataset.section;

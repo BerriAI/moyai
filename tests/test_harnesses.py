@@ -309,7 +309,7 @@ def test_native_images_are_not_translated():
     assert result['messages'] == messages
 
 
-@pytest.mark.parametrize('transport_failure', [False, True])
+@pytest.mark.parametrize('transport_failure', [False, 502, 400])
 def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, monkeypatch, transport_failure):
     from types import SimpleNamespace
     from threading import Event
@@ -330,9 +330,10 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
             if transport_failure:
                 journal.tool_started('write-once', 'Write', {})
                 journal.tool_finished('write-once', 'Saved receipt')
-                relay.last_error = 'HTTP 502'
-                relay.last_failure = {'version': 1, 'route': '/v1/messages', 'http_status': 502,
-                                      'transient': True, 'response_started': False, 'request_id': 'failure-fixture'}
+                relay.last_error = ('The model provider rejected this request under its cybersecurity policy '
+                                    '(cyber_policy; HTTP 400).' if transport_failure == 400 else 'HTTP 502')
+                relay.last_failure = {'version': 1, 'route': '/v1/messages', 'http_status': transport_failure,
+                                      'transient': transport_failure == 502, 'response_started': False, 'request_id': 'failure-fixture'}
                 return {'failed': True, 'messages': journal.messages}
             journal.finish('SDK result')
             return {'completed': True, 'final_response': 'SDK result',
@@ -352,15 +353,20 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     monkeypatch.chdir(tmp_path)
     spec = {'run_id': 'harness-test', 'harness': 'claude-agent-sdk', 'broker_url': 'http://test', 'repo_url': '', 'model': OPUS,
             'prompt': 'test request', 'chat_enabled': True, 'max_iterations': 2, 'timeout': None}
-    assert agent.run_agent(spec, relay) == (75 if transport_failure else 0)
+    assert agent.run_agent(spec, relay) == (75 if transport_failure == 502 else 1 if transport_failure == 400 else 0)
     assert next(e[2] for e in events if e[0] == 'final')['transport_attempt'] == 2
     if transport_failure:
         final = next(e[2] for e in events if e[0] == 'final')
         assert not final['completed'] and not final['continuation']
-        assert final['transport_retry']['failure']['request_id'] == 'failure-fixture'
+        if transport_failure == 502:
+            assert final['transport_retry']['failure']['request_id'] == 'failure-fixture'
+        else:
+            assert 'transport_retry' not in final
+            assert next(e[1] for e in events if e[0] == 'final') == relay.last_error
         from sandbox.context_store import ContextStore
         saved = ContextStore(tmp_path / 'session/context.sqlite3', 'harness-test')
-        assert saved.checkpoint() == final['transport_retry']['checkpoint']
+        if transport_failure == 502:
+            assert saved.checkpoint() == final['transport_retry']['checkpoint']
         assert 'Saved receipt' in saved.history()[0]['content'] and not saved.pending
         saved.close()
         return

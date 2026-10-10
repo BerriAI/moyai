@@ -15,15 +15,23 @@ from test_workspace import workspace  # noqa: F401
 
 
 @pytest.mark.parametrize('steering', [False, True])
-async def test_control_poll_does_not_block_event_loop_during_sqlite_write(tmp_path, steering):
-    result = await probe(tmp_path, steering=steering, hold_seconds=0.7)
+@pytest.mark.parametrize('contention', ['writer', 'pool'])
+async def test_control_poll_does_not_block_event_loop_during_database_wait(tmp_path, steering, contention, request):
+    postgres = request.config.getoption('--postgres-backend')
+    if contention == 'pool' and not postgres:
+        pytest.skip('Connection pool contention requires --postgres-backend.')
+    result = await probe(tmp_path, steering=steering, contention=contention, hold_seconds=0.7)
+    assert result['backend'] == ('postgresql' if postgres else 'sqlite')
+    assert result['sqlite_file_created'] is not postgres
     assert result['http_status'] == 200
     assert result['correction_delivered'] is steering
     # The old endpoint stalls for the entire lock hold (~700 ms). Allow ample
     # scheduling jitter while still detecting a synchronous writer-lock wait.
     assert result['max_event_loop_lag_ms'] < 300
-    if not steering:
+    if not steering and contention == 'writer':
         assert result['control_ms'] < 500
+    else:
+        assert result['control_ms'] >= 500  # Confirm the real database wait happened.
 
 
 def test_poll_hint_rechecks_turn_before_locking_message(tmp_path, monkeypatch):
@@ -64,6 +72,7 @@ async def test_control_revalidates_capability_after_body_read(workspace):
 async def test_database_stall_logs_locations_without_sql_or_values(tmp_path, caplog, monkeypatch):
     store = Store(tmp_path)
     monkeypatch.setattr(diagnostics, '_database_warning_at', 0)
+    caplog.clear()
     caplog.set_level('INFO', logger=diagnostics.log.name)
     with store.connect() as conn:
         conn.execute("SELECT 'private-sql-value'")
@@ -73,6 +82,7 @@ async def test_database_stall_logs_locations_without_sql_or_values(tmp_path, cap
     records = [json.loads(r.message) for r in caplog.records if r.name == diagnostics.log.name]
     assert len(records) == 1  # Repeated slow operations are rate limited.
     assert records[0]['on_event_loop'] and records[0]['duration_ms'] >= 100
+    assert records[0]['backend'] == ('postgresql' if store.database else 'sqlite')
     assert any(frame['file'] == 'test_scheduling_diagnostics.py' for frame in records[0]['stack'])
     assert 'private-sql-value' not in json.dumps(records)
 
@@ -99,6 +109,7 @@ def test_claim_timing_includes_followups_and_omits_content(tmp_path, caplog):
     store.execute('UPDATE messages SET created_at=? WHERE id=?',
                   ((datetime.now(timezone.utc) - timedelta(seconds=12)).isoformat(), followup['id']))
     caplog.set_level('INFO', logger=diagnostics.log.name)
+    caplog.clear()
     store.claim_message(run['id'])
     record = json.loads(next(r.message for r in caplog.records if r.name == diagnostics.log.name))
     assert record['message_id'] == followup['id'] and record['queue_wait_ms'] >= 12000

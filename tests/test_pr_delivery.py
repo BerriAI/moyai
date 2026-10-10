@@ -142,7 +142,9 @@ def test_native_pr_keeps_bounded_projection_and_permanent_identity_across_rename
     github = app.state.connectors.github
     provider.repos[202].update(full_name='BerriAI/renamed', html_url='https://github.com/BerriAI/renamed')
     github.remember_repository(provider.repos[202], github.saved_credentials())
-    app.state.store.execute('UPDATE github_publications SET result=json_set(result, \'$.repository_id\', 202) WHERE run_id=?', (run_id,))
+    for row in app.state.store.rows('SELECT id,result FROM github_publications WHERE run_id=?', (run_id,)):
+        result = {**json.loads(row['result']), 'repository_id': 202}
+        app.state.store.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), row['id']))
     renamed = url.replace('BerriAI/moyai', 'BerriAI/renamed')
     state['pr'].update(html_url=renamed, body='b' * 20001, changed_files=101)
     state['files'] = [{'filename': f'{n}.py', 'status': 'modified', 'additions': 1, 'deletions': 0,
@@ -316,7 +318,7 @@ def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(wo
     if remote:
         store.objects.fail = True
     with store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         selected = pr_delivery.select_captures(app.state.settings, run_id, answer, store=store, conn=conn)
     if remote:
         assert store.objects.reads == 0

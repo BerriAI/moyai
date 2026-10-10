@@ -15,7 +15,7 @@ from .spend import UsageCapture
 from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, private_compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
-from .broker_diagnostics import upstream_headers
+from .broker_diagnostics import model_gateway_error, upstream_headers
 
 
 NATIVE_ROUTES = {'/v1/messages', '/v1/responses'}
@@ -288,8 +288,8 @@ class HarnessGateway:
             admitted = self.store.execute(
                 "UPDATE runs SET model_calls=model_calls+1,turn_model_calls=turn_model_calls+1 "
                 "WHERE id=? AND (?=0 OR (CASE WHEN chat_enabled=1 THEN turn_model_calls ELSE model_calls END)<?) "
-                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS ? "
-                "AND active_user_id IS ? AND active_model IS ? AND (coalesce(active_model,'')!='' OR model IS ?)",
+                "AND status IN ('running','reconnecting','awaiting_approval') AND token_hash=? AND active_message_id IS NOT DISTINCT FROM ? "
+                "AND active_user_id IS NOT DISTINCT FROM ? AND active_model IS NOT DISTINCT FROM ? AND (coalesce(active_model,'')!='' OR model IS NOT DISTINCT FROM ?)",
                 (run_id, self.settings.max_agent_iterations, self.settings.max_agent_iterations * 3,
                  run['token_hash'], run['active_message_id'], run['active_user_id'], run['active_model'], run['model']))
             if not admitted:
@@ -333,8 +333,7 @@ class HarnessGateway:
                     transient = upstream.status_code in {408, 429, 500, 502, 503, 504}
                     raise SummaryFailure('upstream_unavailable' if transient else 'upstream_rejected',
                                          retryable=transient, transient=transient)
-                raise HTTPException(502, f'Model gateway rejected the request ({upstream.status_code}).',
-                                    headers=upstream_headers(request_id, upstream))
+                raise model_gateway_error(request_id, upstream, raw_error)
             if not capture.streaming:
                 raw = bytearray()
                 async for chunk in upstream.aiter_bytes():

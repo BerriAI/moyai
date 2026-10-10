@@ -84,7 +84,7 @@ async def test_or_matching_queues_once_and_cap_is_shared_with_manual_and_schedul
     for i in range(3):
         assert client.post(f"/hooks/automations/{b['id']}/webhook",**signed('webhook',{'body':'bug'},delivery=f'b{i}')).json()['status']=='accepted'
         await service.events.dispatch()
-        newest=app.state.store.rows('SELECT run_id FROM automation_runs WHERE automation_id=? ORDER BY rowid DESC',(b['id'],))[0]['run_id']
+        newest=app.state.store.rows('SELECT run_id FROM automation_runs WHERE automation_id=? ORDER BY created_at DESC,occurrence DESC',(b['id'],))[0]['run_id']
         complete(app,newest)
     assert len(app.state.store.rows("SELECT 1 FROM automation_runs WHERE automation_id=? AND outcome='started'",(b['id'],)))==3
     assert len(app.state.store.rows('SELECT * FROM automation_webhooks WHERE automation_id=?',(a['id'],)))==2

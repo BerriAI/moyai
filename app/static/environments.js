@@ -12,7 +12,7 @@ function environmentCard(item) {
     ${item.activate_on_ready?'<p class="environment-fallback">After checks pass, new sessions for this repository use its prepared environment automatically.</p>':''}
     <label class="environment-refresh"><input type="checkbox" data-refresh-environment="${esc(item.id)}" ${item.refresh_daily?'checked':''} ${item.active_build?'':'disabled'}> Refresh daily and after recipe edits</label><div class="environment-card-actions"><button class="small" data-edit-environment="${esc(item.id)}">Edit recipe</button><button class="small" data-rebuild-environment="${esc(item.id)}" ${busy?'disabled':''}>${item.active_build?'Rebuild':'Build environment'}</button>${busy?`<button class="quiet small" data-cancel-build="${esc(build.id)}">Cancel build</button>`:''}${item.active_build||item.activate_on_ready?`<button class="quiet small" data-toggle-environment="${esc(item.id)}">${item.activate_on_ready?'Disable automatic setup':item.enabled?'Disable':'Enable'}</button>${item.active_build&&!item.is_default?`<button class="quiet small" data-default-environment="${esc(item.id)}">Use by default</button>`:''}`:''}</div></article>`;
 }
-async function renderEnvironments(background = false) {
+async function renderEnvironments(background = false,recent=false) {
   clearTimeout(environmentRefresh);
   if (background && state.view !== 'environments') return;
   if (background && settingsInteractionActive()) {
@@ -22,7 +22,7 @@ async function renderEnvironments(background = false) {
   const explanationOpen = document.querySelector('.environments-page .settings-hint')?.open;
   const version=state.pageVersion;
   if(state.role!=='admin') {MoyaiUI.render($('#content'), '<div class="page-heading"><h1>Project environments</h1><p>Ask an administrator to configure your project environments.</p></div>');return;}
-  const data=await api('/api/admin/environments');
+  const data=await api('/api/admin/environments',{recent});
   if(version!==state.pageVersion||state.view!=='environments')return;
   if (background && settingsInteractionActive()) {
     environmentRefresh=setTimeout(()=>renderEnvironments(true).catch(showError),4000);

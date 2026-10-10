@@ -5,10 +5,55 @@ import re
 import time
 from uuid import uuid4
 
+from fastapi import HTTPException
+import httpx
+
 from sandbox.broker_failure import BROKER_ROUTES, http_status, request_ids
 
 
 logger = logging.getLogger('uvicorn.error.moyai.broker')
+
+
+def model_gateway_error(request_id: str, upstream: httpx.Response, raw_error: bytes | bytearray) -> HTTPException:
+    """Keep terminal HTTP errors terminal without publishing provider payloads."""
+    reasons = {
+        'cyber_policy': 'The model provider rejected this request under its cybersecurity policy',
+        'content_policy_violation': 'The model provider rejected this request under its content policy',
+    }
+    code = ''
+    try:
+        value = json.loads(raw_error[:8192])
+        error = value.get('error') if isinstance(value, dict) else None
+        # LiteLLM can put the provider's JSON in error.message, with a numeric
+        # HTTP status in error.code. Decode one envelope, never match prose or
+        # forward its message, which can contain input, keys and private URLs.
+        for attempt in range(2):
+            if not isinstance(error, dict):
+                break
+            candidate = error.get('code')
+            if isinstance(candidate, str) and candidate in reasons:
+                code = candidate
+                break
+            message = error.get('message')
+            prefix = 'litellm.BadRequestError: OpenAIException - '
+            if attempt or not isinstance(message, str) or not message.startswith(prefix):
+                break
+            nested, _ = json.JSONDecoder().raw_decode(message[len(prefix):].lstrip())
+            error = nested.get('error') if isinstance(nested, dict) else None
+    except (ValueError, RecursionError):
+        pass
+    status = upstream.status_code
+    fallback = {
+        400: 'The model gateway rejected an invalid request',
+        401: 'The model gateway rejected authentication',
+        403: 'The model gateway denied access to this request',
+        404: 'The model gateway could not find the requested model or endpoint',
+        422: 'The model gateway could not process this request',
+        429: 'The model gateway rate-limited this request',
+    }
+    reason = reasons[code] if code else fallback.get(status, 'The model gateway request failed')
+    detail = f'{reason} ({code + "; " if code else ""}HTTP {status}).'
+    return HTTPException(status, detail, headers=upstream_headers(request_id, upstream))
 
 
 def upstream_headers(request_id, upstream=None, *, error=None):

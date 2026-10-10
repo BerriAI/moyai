@@ -176,7 +176,7 @@ def save_skill(skills, run, args):
             row = skills.store.attachments.broker_row(run, attachment_id)
             imports[attachment_id] = (row, skills.store.attachments.payload(row))
     with skills.store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         prior = saved_result(skills, conn, operation, actor, admin, fingerprint)
         if prior is not None:
             return prior
@@ -233,7 +233,7 @@ def read_file(skills, run, args):
     loaded = skills.load(run, args.name)
     skill = skills.find(args.name, run['active_user_id'])
     with skills.store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         files = bundle(skills, conn, skill['id'], loaded['revision'])
         if args.path not in files:
             raise HTTPException(404, 'Supporting file not found in the loaded skill revision.')
@@ -246,9 +246,9 @@ def read_file(skills, run, args):
         end = min(len(content), offset + args.limit)
         if offset > len(content):
             raise HTTPException(422, 'The offset is past the end of this file.')
-        conn.execute('DELETE FROM skill_file_reads WHERE run_id=? AND message_id=? AND skill_id=? AND path=? AND offset=?',
+        conn.execute('DELETE FROM skill_file_reads WHERE run_id=? AND message_id=? AND skill_id=? AND path=? AND "offset"=?',
                      (run['id'], run['active_message_id'], skill['id'], args.path, offset))
-        conn.execute('INSERT INTO skill_file_reads(run_id,message_id,actor_id,skill_id,path,offset,length) VALUES(?,?,?,?,?,?,?)',
+        conn.execute('INSERT INTO skill_file_reads(run_id,message_id,actor_id,skill_id,path,"offset",length) VALUES(?,?,?,?,?,?,?)',
                      (run['id'], run['active_message_id'], run['active_user_id'], skill['id'], args.path, offset, end - offset))
         conn.execute('DELETE FROM skill_file_reads WHERE run_id=? AND message_id=? AND id NOT IN (SELECT id FROM skill_file_reads WHERE run_id=? AND message_id=? ORDER BY id DESC LIMIT 4)',
                      (run['id'], run['active_message_id'], run['id'], run['active_message_id']))

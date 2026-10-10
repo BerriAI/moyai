@@ -1,11 +1,12 @@
 /* Deterministic, local-only UI fixture. Never contacts a gateway or cloud service.
- * node scripts/settings_ui_preview.cjs [--root /path/to/baseline/app/static] [--port 8841]
+ * node scripts/settings_ui_preview.cjs [--root /path/to/baseline/app/static] [--port 8841] [--delay-ms 300]
  * /?fixture=empty, /?fixture=error, /?fixture=member exercise alternate states.
  * API responses are synthetic. This is visual evidence, not a backend integration test.
  */
 const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
 const arg=(name,fallback)=>process.argv.includes(name)?process.argv[process.argv.indexOf(name)+1]:fallback;
 const root=path.resolve(arg('--root',path.join(__dirname,'../app/static'))),port=Number(arg('--port','8840'));
+const delayMs=Math.max(0,Number(arg('--delay-ms','0'))||0);
 const stamp='2026-10-07T15:00:00Z';
 const agentSession=(number,prompt,status='idle',children=[])=>({id:number.toString(16).padStart(32,'0'),prompt,status,children,updated_at:stamp,created_at:stamp});
 const agentSessions=[
@@ -20,6 +21,7 @@ const agentSessions=[
 const model='openai/gpt-6-astra';
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
 let fixture='populated';
+let accountLinkPolls=0;
 const skills=[
  ['review-pr','Review a pull request for correctness, regressions, and missing tests.','organization'],
  ['benchmark-report','Compare benchmark runs and summarize changes in latency, throughput, and cost.','organization'],
@@ -105,6 +107,7 @@ const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
  if(p==='/'){
   fixture=url.searchParams.get('fixture')||'populated';
+  accountLinkPolls=0;
   let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
   res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
  }
@@ -113,6 +116,7 @@ const server=http.createServer(async(req,res)=>{
   res.writeHead(200,{'Content-Type':{'.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.png':'image/png'}[path.extname(file)]||'application/octet-stream','Cache-Control':'no-store'});return res.end(fs.readFileSync(file));
  }
  const role=fixture==='member'?'member':'admin',empty=fixture==='empty';
+ if(delayMs&&req.method==='GET'&&p.startsWith('/api/'))await new Promise(resolve=>setTimeout(resolve,delayMs));
  let body={};if(req.method!=='GET'){const chunks=[];for await(const chunk of req)chunks.push(chunk);try{body=JSON.parse(Buffer.concat(chunks).toString()||'{}');}catch{return json(res,400,{detail:'Invalid JSON'});}}
  const supportedWrite = (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
   (req.method==='POST' && p==='/api/memory') ||
@@ -168,9 +172,19 @@ const server=http.createServer(async(req,res)=>{
  }
  if(p==='/api/spend'){
   const data=spendFixture(url.searchParams,role!=='admin',empty);
+  if(data&&['account-links','account-links-final'].includes(fixture)&&role==='admin'){
+   data.identities=[...spendUsers.slice(0,2),{id:'slack:alex',kind:'slack',name:'Alex Morgan',email:'alex@example.com',link_status:'review'}];
+   data.total.pending_costs=fixture==='account-links-final'&&++accountLinkPolls>1?0:1;
+   data.infrastructure.pending=false;
+  }
   return json(res,data?200:422,data||{detail:'Choose a date range of up to 93 days, with start before end.'});
  }
- if(p==='/api/admin/identities/status')return json(res,200,{enabled:true,ready:true,missing_scopes:[]});
+ if(p==='/api/admin/identities/status'){
+  const updated=fixture==='account-links-final'&&accountLinkPolls>1;
+  // Leave time to open a menu after the cost poll, before its identity response.
+  if(updated)await new Promise(resolve=>setTimeout(resolve,2000));
+  return json(res,200,{enabled:!updated,ready:!updated,missing_scopes:[]});
+ }
  if(p==='/api/admin/adoption'){
   if(role!=='admin')return json(res,403,{detail:'Organization administrator access required.'});
   if(fixture==='activity-error')return json(res,503,{detail:'This preview simulates an activity report outage.'});

@@ -58,7 +58,7 @@ async def test_real_schedule_upgrade_allows_overlap_and_survives_replacement(tmp
             await asyncio.sleep(1.1)
             await handle.trigger()  # Launch another occurrence while the first remains active.
             await eventually(lambda:len(store.rows('SELECT * FROM automation_runs'))==2,seconds=25)
-            receipts=store.rows('SELECT occurrence,run_id FROM automation_runs ORDER BY rowid')
+            receipts=store.rows('SELECT occurrence,run_id FROM automation_runs ORDER BY created_at,occurrence')
             assert len({r['run_id'] for r in receipts})==2
             assert all(store.run(r['run_id'])['status']=='queued' for r in receipts)
             await manager.shutdown()

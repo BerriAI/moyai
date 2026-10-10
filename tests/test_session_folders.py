@@ -122,6 +122,7 @@ def test_filed_older_sessions_and_child_agents_remain_in_sidebar(users_app):
     assert client.get('/api/session-folders').json()['folders'][0]['session_count'] == 1
 
 
+@pytest.mark.sqlite_only
 def test_folders_survive_restart_and_database_checkpoint(users_app, tmp_path):
     app, client = users_app
     identity = sign_as(app, client, 'maya@berri.ai')['user_id']
@@ -199,6 +200,7 @@ def test_archive_filters_before_limit_and_keeps_agents_together(users_app):
     assert client.post('/api/runs/' + parent['id'] + '/archive', json={'archived': False}).status_code == 401
 
 
+@pytest.mark.sqlite_only
 def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, tmp_path):
     from app.session_lifecycle import SessionLifecycle
 

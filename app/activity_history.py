@@ -8,12 +8,12 @@ def markers(connection, run_id, cursor):
     # Lifecycle receipts retain durations and completion without reading tool
     # bodies or image previews just to open a conversation.
     rows = connection.execute('''SELECT id,run_id,kind,message,created_at,
-        json_object('message_id',json_extract(data,'$.message_id'),
-                    'response_complete',json_extract(data,'$.response_complete')) AS data
+        json_number(data,'message_id') AS message_id,
+        json_number(data,'response_complete') AS response_complete
         FROM events WHERE run_id=? AND id<=? AND kind='chat' ORDER BY id''', (run_id, cursor))
     receipts = [dict(row) for row in rows]
     for event in receipts:
-        event['data'] = json.loads(event['data'])
+        event['data'] = {'message_id': event.pop('message_id'), 'response_complete': event.pop('response_complete')}
         if event['data']['response_complete'] is not None:
             event['data']['response_complete'] = bool(event['data']['response_complete'])
     return receipts
@@ -64,7 +64,7 @@ def projection(connection, run, messages):
 
 def history_page(store, run_id, message_id, *, after=0, until=None, limit=200):
     with store.connect() as connection:
-        connection.execute('BEGIN')
+        connection.begin_read()
         message = connection.execute('''SELECT m.id,m.role,m.steering_parent_id FROM messages m
             JOIN runs r ON r.id=m.run_id WHERE m.run_id=? AND m.id=? AND m.status!='deleted'
             AND r.deleted_at='' ''', (run_id, message_id)).fetchone()
@@ -96,12 +96,11 @@ def _history_page(connection, run_id, turn, receipts, after, until, limit):
             current, start = None, None
     if current == turn:
         ranges.append([start, None])
-    rows = connection.execute('''SELECT e.* FROM events e WHERE e.run_id=? AND e.id>? AND e.id<=? AND (
-        (e.kind='chat' AND cast(json_extract(e.data,'$.message_id') AS TEXT)=?) OR
-        (e.kind!='chat' AND (cast(json_extract(e.data,'$.turn_id') AS TEXT)=? OR
-            (coalesce(cast(json_extract(e.data,'$.turn_id') AS TEXT),'0')='0' AND EXISTS (
-                SELECT 1 FROM json_each(?) AS range WHERE e.id>=json_extract(range.value,'$[0]')
-                AND (json_extract(range.value,'$[1]') IS NULL OR e.id<json_extract(range.value,'$[1]')))))))
+    range_sql = connection.event_ranges_predicate()
+    rows = connection.execute(f'''SELECT e.* FROM events e WHERE e.run_id=? AND e.id>? AND e.id<=? AND (
+        (e.kind='chat' AND cast(json_number(e.data,'message_id') AS TEXT)=?) OR
+        (e.kind!='chat' AND (cast(json_number(e.data,'turn_id') AS TEXT)=? OR
+            (coalesce(cast(json_number(e.data,'turn_id') AS TEXT),'0')='0' AND ({range_sql})))))
         ORDER BY e.id LIMIT ?''', (run_id, after, until, turn, turn, json.dumps(ranges), limit + 1)).fetchall()
     more = len(rows) > limit
     events = [dict(row) for row in rows[:limit]]

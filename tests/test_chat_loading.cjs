@@ -36,7 +36,7 @@ test('authenticated startup overlaps configuration, organization, sidebar and se
   assert.deepEqual(f.requests.map(item=>item.path),['/api/session'],'authentication remains the request boundary');
   f.request('/api/session').resolve({authenticated:true,local:true});await flush();
   assert.deepEqual(f.requests.slice(1).map(item=>item.path),[
-    '/api/config','/api/organization','/api/runs?scope=mine&focus='+runId,'/api/session-folders','/api/runs/'+runId+'?activity=summary']);
+    '/api/config','/api/organization','/api/runs?scope=mine&view=sidebar&focus='+runId,'/api/session-folders','/api/runs/'+runId+'?activity=summary']);
   assert.match(f.node('#content').innerHTML,/Loading conversation/);
   f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true});await flush();
   assert.deepEqual(f.rendered,[],'model controls still require configuration');
@@ -44,7 +44,7 @@ test('authenticated startup overlaps configuration, organization, sidebar and se
   assert.deepEqual(f.rendered,[runId],'neither organization nor session list delays the conversation');
   assert.equal(f.state.sessionSearchLoading,true);
   f.request('/api/organization').resolve({name:'Fixture'});
-  f.request('/api/runs?scope=mine&focus='+runId).resolve([{id:runId}]);
+  f.request('/api/runs?scope=mine&view=sidebar&focus='+runId).resolve([{id:runId}]);
   f.request('/api/session-folders').resolve({folders:[]});await flush();
   assert.equal(f.state.sessionSearchLoading,false);assert.equal(f.state.selected,runId);
   assert.deepEqual(f.errors,[]);
@@ -92,6 +92,30 @@ test('a slow conversation response cannot replace a newer selection or its loadi
   f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true});await first;
   assert.deepEqual(f.rendered,[otherId]);assert.equal(f.state.selected,otherId);
   assert.equal(f.context.location.hash,'#run='+otherId);
+});
+
+test('a recent conversation renders before the network settles and refreshes without remounting',async()=>{
+  const f=loadingFixture();f.state.runs=[{id:runId}];
+  f.state.navigationCache={get:()=>({id:runId,chat_enabled:true,messages:['saved']})};
+  const updates=[];f.context.updateChat=run=>updates.push(run);
+  const opening=f.context.openRun(runId);
+  assert.deepEqual(f.rendered,[runId],'cached content is visible synchronously');
+  assert.doesNotMatch(f.node('#content').innerHTML,/Loading conversation/);
+  f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true,messages:['new']});
+  await opening;assert.deepEqual(f.rendered,[runId],'the composer is not remounted');
+  assert.deepEqual(updates[0].messages,['new']);
+});
+
+test('a cached conversation refresh cannot overwrite a newer stream refresh or route',async()=>{
+  for(const supersede of ['stream','route']){
+    const f=loadingFixture();f.state.runs=[{id:runId}];
+    f.state.navigationCache={get:()=>({id:runId,chat_enabled:true})};
+    const updates=[];f.context.updateChat=run=>updates.push(run);
+    const opening=f.context.openRun(runId);
+    if(supersede==='stream')f.state.chatRefresh++;else f.state.pageVersion++;
+    f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true});await opening;
+    assert.equal(updates.length,0);
+  }
 });
 
 test('an initial linked-chat failure keeps its route Retry and retries only the conversation',async()=>{
@@ -149,10 +173,10 @@ test('delayed sidebar topology reveals all selected ancestors once and preserves
   f.request('/api/config').resolve({});f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true,parent_run_id:'worker',workflow_root_id:'root'});await boot;
   assert(f.state.expandedParents.has('worker'));
   f.state.expandedParents.delete('worker'); // A manual choice made while the rest of the tree is still loading.
-  f.request('/api/runs?scope=mine&focus='+runId).resolve(nestedRows(runId,''));f.request('/api/session-folders').resolve({folders:[]});await flush();
+  f.request('/api/runs?scope=mine&view=sidebar&focus='+runId).resolve(nestedRows(runId,''));f.request('/api/session-folders').resolve({folders:[]});await flush();
   assert(f.state.expandedParents.has('root'));assert(f.state.expandedParents.has('parent'));assert(!f.state.expandedParents.has('worker'));
   f.state.expandedParents.delete('root');const refresh=f.context.refreshRuns();
-  f.request('/api/runs?scope=mine&focus='+runId).resolve(nestedRows(runId,''));f.request('/api/session-folders').resolve({folders:[]});await refresh;
+  f.request('/api/runs?scope=mine&view=sidebar&focus='+runId).resolve(nestedRows(runId,''));f.request('/api/session-folders').resolve({folders:[]});await refresh;
   assert(!f.state.expandedParents.has('root'),'later polling must preserve the user collapse');
 });
 
@@ -161,12 +185,12 @@ test('a delayed list for a replaced route requests the missing current focus and
   f.request('/api/config').resolve({});f.request('/api/runs/'+runId+'?activity=summary').resolve({id:runId,chat_enabled:true,parent_run_id:'a-worker',workflow_root_id:'a-root'});await boot;
   const next=f.context.openRun(otherId);f.request('/api/runs/'+otherId+'?activity=summary').resolve({id:otherId,chat_enabled:true,parent_run_id:'b-worker',workflow_root_id:'b-root'});await next;
   f.state.expandedParents.clear();
-  f.request('/api/runs?scope=mine&focus='+runId).resolve(nestedRows(runId,'a-'));f.request('/api/session-folders').resolve({folders:[]});await flush();
-  const focused=f.request('/api/runs?scope=mine&focus='+otherId);assert(focused,'the current selection must not be omitted by an older focus response');
+  f.request('/api/runs?scope=mine&view=sidebar&focus='+runId).resolve(nestedRows(runId,'a-'));f.request('/api/session-folders').resolve({folders:[]});await flush();
+  const focused=f.request('/api/runs?scope=mine&view=sidebar&focus='+otherId);assert(focused,'the current selection must not be omitted by an older focus response');
   focused.resolve(nestedRows(otherId,'b-'));f.request('/api/session-folders').resolve({folders:[]});await flush();
   assert(f.state.expandedParents.has('b-root'));assert(f.state.expandedParents.has('b-parent'));
   assert(!f.state.expandedParents.has('a-root'));assert(!f.state.expandedParents.has('a-parent'));assert.equal(f.state.selected,otherId);
-  assert.equal(f.requests.filter(item=>item.path==='/api/runs?scope=mine&focus='+otherId).length,1);
+  assert.equal(f.requests.filter(item=>item.path==='/api/runs?scope=mine&view=sidebar&focus='+otherId).length,1);
 });
 
 function installHome(f){

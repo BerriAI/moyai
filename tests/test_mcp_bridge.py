@@ -97,12 +97,12 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
 
 
 @pytest.mark.parametrize('harness', ['stdio', 'deepagents', 'tool-loop'])
-@pytest.mark.parametrize('tool_family', ['skills', 'automations', 'memory-schema', 'memory-scope'])
+@pytest.mark.parametrize('tool_family', ['skills', 'skills-missing', 'automations', 'memory-schema', 'memory-scope'])
 def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harness, tool_family):
     app, client = workspace
     sign_in(app, client)
     run = active(app)
-    if tool_family == 'skills':
+    if tool_family.startswith('skills'):
         assert call(client, run, **form(files=[{'path': 'references/check.md', 'content': 'Read the evidence.'}])).json()['saved']
     capability = 'private-capability'
     app.state.store.update_run(run['id'], token_hash=digest(capability))
@@ -131,6 +131,8 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
     messages = [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call', 'params': {
         'name': 'skills_read_file', 'arguments': {'name': 'personal:team-review', 'path': path}}}
         for index, path in enumerate(['/private-input-marker/secret.md', 'references/check.md'], 1)]
+    if tool_family == 'skills-missing':
+        messages[0]['params']['arguments']['path'] = 'references/missing.md'
     if tool_family == 'automations':
         from test_automation_tools import definition
         messages = [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call', 'params': {
@@ -182,6 +184,10 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
             assert not recovered['isError']
             if tool_family == 'skills':
                 assert 'Invalid skill arguments' in rejected['content'][0]['text']
+                assert json.loads(recovered['content'][0]['text'])['loaded']
+            elif tool_family == 'skills-missing':
+                failure = json.loads(rejected['content'][0]['text'])
+                assert failure['status_code'] == 404 and failure['error']
                 assert json.loads(recovered['content'][0]['text'])['loaded']
             elif tool_family == 'automations':
                 failure = json.loads(rejected['content'][0]['text'])

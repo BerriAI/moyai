@@ -194,7 +194,7 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
             arguments_hash TEXT NOT NULL, branch TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '',
             result TEXT NOT NULL DEFAULT '', connection_version TEXT NOT NULL, created_at TEXT NOT NULL)''')
         with store.connect() as conn:
-            if 'attempted' not in {row['name'] for row in conn.execute('PRAGMA table_info(github_publications)')}:
+            if 'attempted' not in conn.column_names('github_publications'):
                 conn.execute('ALTER TABLE github_publications ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0')
                 conn.execute("UPDATE github_publications SET attempted=1 WHERE commit_sha!='' AND result=''")
 
@@ -529,8 +529,8 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
         identity = hashlib.sha256(f"{run['id']}:{args.request_key}".encode()).hexdigest()
         fingerprint = self.arguments_hash(args, target)
         branch = f"moyai/{run['id'][:12]}/{identity[:16]}"
-        self.store.execute('''INSERT OR IGNORE INTO github_publications
-            (id,run_id,message_id,arguments_hash,branch,connection_version,created_at) VALUES(?,?,?,?,?,?,?)''',
+        self.store.execute('''INSERT INTO github_publications
+            (id,run_id,message_id,arguments_hash,branch,connection_version,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING''',
             (identity, run['id'], run['active_message_id'] or 0, fingerprint, branch, version, now()))
         row = self.store.rows('SELECT * FROM github_publications WHERE id=?', (identity,))[0]
         self.upgrade_receipt_hash('github_publications', row, args, fingerprint)
@@ -656,7 +656,7 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
     def followup(self, run, tool, args, version, target):
         identity = hashlib.sha256(f"{run['id']}:{tool}:{args.request_key}".encode()).hexdigest()
         fingerprint = self.arguments_hash(args, target)
-        self.store.execute('INSERT OR IGNORE INTO github_followups(id,arguments_hash,connection_version) VALUES(?,?,?)',
+        self.store.execute('INSERT INTO github_followups(id,arguments_hash,connection_version) VALUES(?,?,?) ON CONFLICT DO NOTHING',
                            (identity, fingerprint, version))
         row = self.store.rows('SELECT * FROM github_followups WHERE id=?', (identity,))[0]
         self.upgrade_receipt_hash('github_followups', row, args, fingerprint)

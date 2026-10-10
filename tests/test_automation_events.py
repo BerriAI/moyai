@@ -321,7 +321,7 @@ def test_native_initial_followup_owner_context_and_restart(workspace, monkeypatc
     response = client.post(f'/api/runs/{source}/messages', json={'content':'Still broken', 'client_id':'followup-123'})
     assert response.status_code == 202, response.text
     asyncio.run(events.dispatch())
-    runs = app.state.store.rows('SELECT r.* FROM runs r JOIN automation_runs a ON a.run_id=r.id ORDER BY a.rowid')
+    runs = app.state.store.rows('SELECT r.* FROM runs r JOIN automation_runs a ON a.run_id=r.id ORDER BY a.created_at,a.occurrence')
     assert len(runs) == 2
     assert all(r['owner_id'] == owner for r in runs)
     assert 'Try the patch' in runs[1]['prompt'] and 'Still broken' in runs[1]['prompt']
@@ -550,8 +550,9 @@ def test_native_bounded_batch_and_indexed_range(workspace):
     source = human(app, a['owner_id'])
     with app.state.store.connect() as conn:
         conn.executemany("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant','skip','completed',?)", [(source['id'],datetime.now(timezone.utc).isoformat())]*101)
-        plan = conn.execute('EXPLAIN QUERY PLAN SELECT * FROM messages WHERE id>? ORDER BY id LIMIT 100', (0,)).fetchall()
-        assert any('INTEGER PRIMARY KEY' in row['detail'] for row in plan)
+        if not app.state.store.database:
+            plan = conn.execute('EXPLAIN QUERY PLAN SELECT * FROM messages WHERE id>? ORDER BY id LIMIT 100', (0,)).fetchall()
+            assert any('INTEGER PRIMARY KEY' in row['detail'] for row in plan)
     asyncio.run(app.state.automations.events.capture_sessions())
     assert cursor(app, a) == 100
     asyncio.run(app.state.automations.events.capture_sessions())

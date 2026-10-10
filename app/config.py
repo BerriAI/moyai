@@ -20,7 +20,7 @@ MODEL_CATALOG: dict[str, str] = {
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
@@ -28,6 +28,19 @@ class Settings(BaseSettings):
         # unrelated global gateway key. Containers do not contain the .env file.
         return init_settings, dotenv_settings, env_settings, file_secret_settings
     data_dir: Path = Path(".data")
+    moyai_database_url: str = Field(default='', repr=False)
+    moyai_database_initialize: bool = False
+    moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
+
+    @model_validator(mode='after')
+    def database_backend(self):
+        if self.moyai_database_url:
+            if urlsplit(self.moyai_database_url).scheme not in {'postgresql', 'postgres'}:
+                raise ValueError('MOYAI_DATABASE_URL must be a Postgres connection URL.')
+            if self.checkpoint_dir:
+                raise ValueError('SQLite CHECKPOINT_DIR cannot be used with Postgres; use database backups and retain durable file storage.')
+        return self
+
     attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
     media_share_storage_limit_mb: int = Field(default=1024, ge=64, le=100000)
     media_share_receipt_limit: int = Field(default=4096, ge=128, le=100000)

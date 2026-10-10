@@ -58,8 +58,10 @@ sandbox tool results or copied into workspace files. Search results replace the
 previous search selection and remain scoped to the current requester and turn.
 Each turn pins the revision it first loads, including across durable resumes;
 later turns use the latest revision. Permissions and archive status are checked
-again on every model call. At most five skills may be loaded per turn, with
-32,000 instruction characters per skill, 50 personal skills per user and 200 shared skills
+again on every model call. There is no per-turn skill-count limit; explicitly
+requested and tool-loaded skills remain available for that turn. The model's
+context budget still applies to the full request, including skill instructions.
+Library limits are 32,000 instruction characters per skill, 50 personal skills per user and 200 shared skills
 (including archived entries). Skills cannot bypass tool permissions, provide
 credentials, or approve writes. Personal skills do not make shared session
 outputs private; generated results keep the session's existing sharing.
@@ -77,3 +79,7 @@ Agent saves use a stable `request_id` per turn and an `expected_revision` for
 updates. The skill, reference bundle, audit entry and replay result commit in one
 transaction; an identical replay returns the original result, while conflicting
 edits fail without overwriting newer work. New turns pick up saved changes.
+Expected skill-tool rejections (such as unavailable skills, invalid content or
+revision conflicts) return an error receipt so the agent can correct or report
+the problem and continue. Authentication, server and checkpoint failures still
+stop the request.

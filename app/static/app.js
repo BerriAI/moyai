@@ -1,6 +1,6 @@
 const $ = (s) => document.querySelector(s);
 const esc = (s = '') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsRefresh:0, config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{}};
+const state = {view:'tasks', runs:[], folders:[], closedFolders:new Set(), runsRefresh:0, config:{missing:[]}, connections:[], organization:{}, role:'member', selected:null, source:null, csrf:'', drafts:{}, modelDrafts:{}, pendingMessages:{}, pageVersion:0, newDraft:{}, detailsOpen:false, sending:new Set(), expandedParents:new Set(), activeParentId:'',queueDrafts:{},navigationCache:MoyaiNavigationCache.create()};
 const terminal = new Set(['completed','failed','cancelled','interrupted','idle']);
 let workspacePanel;
 let commandPalette;
@@ -8,28 +8,38 @@ const savedFiles = MoyaiFiles.create({api,markdown:renderMarkdown,escape:esc,siz
 const computer = MoyaiComputer.create({api,escape:esc,onCaptures:()=>workspacePanel?.open('captures')});
 const providerNames = {linear:'Linear', slack:'Slack', notion:'Notion', github:'GitHub'};
 async function api(path, options = {}) {
-  const response = await fetch(path, {...options, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...options.headers}});
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const upload = options.method === 'PUT' && path.startsWith('/api/attachments/');
-    const fallback = upload ? (
-      response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
-      response.status === 413 ? 'This file is too large. Attach a file under 10 MB.' :
-      response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
-      response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
-      `Upload failed (HTTP ${response.status}). Retry this file.`
-    ) : `The request could not be completed (HTTP ${response.status}).`;
-    const error = new Error(typeof body.detail === 'string' ? body.detail : fallback);
-    error.status = response.status;
-    throw error;
-  }
-  return body;
+  const {recent=false,...requestOptions}=options;
+  const read=(requestOptions.method||'GET').toUpperCase()==='GET';
+  const load=async()=>{
+    const response = await fetch(path, {...requestOptions, headers:{'Content-Type':'application/json', 'X-CSRF-Token':state.csrf, ...requestOptions.headers}});
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const upload = options.method === 'PUT' && path.startsWith('/api/attachments/');
+      const fallback = upload ? (
+        response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
+        response.status === 413 ? 'This file is too large. Attach a file under 10 MB.' :
+        response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
+        response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
+        `Upload failed (HTTP ${response.status}). Retry this file.`
+      ) : `The request could not be completed (HTTP ${response.status}).`;
+      const error = new Error(typeof body.detail === 'string' ? body.detail : fallback);
+      error.status = response.status;
+      if(response.status===401||response.status===403)state.navigationCache?.clear();
+      throw error;
+    }
+    return body;
+  };
+  if(read)return state.navigationCache?state.navigationCache.read(path,load,{recent}):load();
+  // Clear at both boundaries: an overlapping read must not resurrect pre-edit data.
+  state.navigationCache?.clear();
+  try{return await load();}finally{state.navigationCache?.clear();}
 }
 function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
 function stopStream(){ resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.revealSessionAncestors=null; state.sessionHeaderRun = null; savedFiles.reset(); }
 async function showUnavailableSession(id){
+  state.navigationCache?.forget(`/api/runs/${id}?activity=summary`);
   if(state.selected!==id)return;
   MoyaiUI.render($('#content'), '<p role="status">This session is no longer available.</p>');
   toast('This session is no longer available.');
@@ -256,7 +266,7 @@ async function navigate(view,initialConfig) {
     $('#content').scrollTop=0;
   }
   try {
-  if(view==='settings')await renderSettings();else if(view==='automations')await renderAutomations();else if(view==='tasks')await renderHome(initialConfig);else if(view==='connections')await renderConnections();else if(view==='spend')await renderSpend();else if(view==='users')await renderUsers();else if(view==='environments')await renderEnvironments();else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills();else if(view==='memory')await renderMemory();else await renderRuntime();
+  if(view==='settings')await renderSettings(true);else if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else if(view==='memory')await renderMemory(true);else await renderRuntime(true);
   } catch(error) {
     if(version!==state.pageVersion)return;
     if(!settingsViews.has(view))throw error;
@@ -270,7 +280,7 @@ async function navigate(view,initialConfig) {
 }
 async function refreshRuns(){
   const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';
-  const params=new URLSearchParams({scope:sessionListScope()});
+  const params=new URLSearchParams({scope:sessionListScope(),view:'sidebar'});
   if(focus)params.set('focus',focus);
   try{
     const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);
@@ -332,12 +342,12 @@ async function changeSessionScope(){
   state.runs=[];state.sessionSearchLoading=true;state.sessionSearchError=false;renderSidebar();
   try{await refreshRuns();}catch(error){showError(error);}
 }
-async function renderHome(initialConfig){
+async function renderHome(initialConfig,recent=false){
   const version=state.pageVersion;
   await modelPreferenceSave;
   if(version!==state.pageVersion)return;
   if(!initialConfig)refreshRuns().catch(showError);
-  const [connections,environments,config]=await Promise.all([api('/api/connections'),api('/api/environments'),initialConfig||api('/api/config')]);
+  const [connections,environments,config]=await Promise.all([api('/api/connections',{recent}),api('/api/environments',{recent}),initialConfig||api('/api/config',{recent})]);
   if(version!==state.pageVersion)return;state.connections=connections;state.config=config;
   const apps=connections.filter(c=>c.connected&&c.enabled),draft=state.newDraft;
   MoyaiUI.render($('#content'), `<section class="new-conversation"><div class="welcome-mark"><img src="/static/favicon.svg?v=moyai-train-1" alt=""><span>Moyai</span></div><h1>What are we working on?</h1><p class="welcome-note">A teammate for your code, questions, and next steps.</p>
@@ -384,11 +394,26 @@ async function openRun(id,hash='#run='+id){
   history.replaceState(null,'',targetHash);
   const cachedTitle=sessionRows(state.runs).find(run=>run.id===id);
   setView('chat',cachedTitle?sessionTitle(cachedTitle):'Loading conversation');
-  MoyaiUI.render($('#content'), '<div class="chat-loading" role="status">Loading conversation…</div>');
+  const path=`/api/runs/${id}?activity=summary`;
+  const cached=(!state.configReady||state.configLoaded)&&!state.configError?state.navigationCache?.get(path,60000):null;
+  const preview=!!cached?.chat_enabled;
+  if(preview){
+    if(cachedTitle)cached.display_title=cachedTitle.display_title;
+    state.activeParentId=cached.parent_run_id?(cached.workflow_root_id||cached.parent_run_id):'';
+    state.view='tasks';renderChat(cached);
+  }else MoyaiUI.render($('#content'), '<div class="chat-loading" role="status">Loading conversation…</div>');
+  const refreshVersion=state.chatRefresh=(state.chatRefresh||0)+1;
   let run;
-  try{[run]=await Promise.all([api(`/api/runs/${id}?activity=summary`),state.configReady]);}catch(error){
+  try{[run]=await Promise.all([api(path,{recent:!preview}),state.configReady]);}catch(error){
     if(version!==state.pageVersion)return;
+    if(preview&&refreshVersion!==state.chatRefresh)return;
     if(error.status===404){await showUnavailableSession(id);return;}
+    if(preview&&error.status!==401&&error.status!==403){
+      MoyaiUI.insert($('.chat-panel'),'afterbegin','<p class="error-banner" data-chat-refresh-error role="status">Showing the saved conversation. Could not check for updates. <button data-retry-chat>Retry</button></p>');
+      $('[data-retry-chat]').onclick=()=>refreshChat(id).catch(showError);
+      return;
+    }
+    if(preview)stopStream();
     MoyaiUI.render($('#content'), '<div class="error-banner" role="alert">Could not load this conversation. <button data-retry-chat>Retry</button></div>');
     $('#content [data-retry-chat]').onclick=()=>(state.configError?boot():openRun(id,hash)).catch(showError);
     throw error;
@@ -412,8 +437,13 @@ async function openRun(id,hash='#run='+id){
   if(!state.sessionSearchLoading&&!state.runs.some(r=>r.id===(run.workflow_root_id||run.parent_run_id||id)))refreshRuns().catch(showError);
   if(sessionEdits!==(state.sessionEdits||0))return openRun(id,hash);
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
-  if(!document.hidden)markSessionRead(run);state.view='tasks';setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));history.replaceState(null,'',targetHash);
-  if(run.chat_enabled){renderChat(run);if(link?.fileRef)await openLinkedFile(link,version);return;}
+  if(!document.hidden)markSessionRead(run);state.view='tasks';
+  if(!preview||!run.chat_enabled)setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));
+  history.replaceState(null,'',targetHash);
+  if(run.chat_enabled){
+    if(preview){if(refreshVersion===state.chatRefresh)updateChat(run);}else renderChat(run);
+    if(link?.fileRef)await openLinkedFile(link,version);return;
+  }
   MoyaiUI.render($('#content'), `<button class="back-button" id="back">‹ All tasks</button><div class="page-heading"><div><div class="eyebrow">${run.mode==='demo'?'DEMO WORKSPACE':'CLOUD WORKSPACE'}</div><h1>Task activity</h1></div><div class="toolbar">${terminal.has(run.status) && !run.active?'<button id="retry" class="small">Run again</button>':'<button id="cancel" class="small danger">Stop task</button>'}</div></div>
   <div class="task-layout"><section class="task-main"><div class="task-intro"><span class="badge">${run.mode==='demo'?'Demo':esc(harnessName(run.harness))}</span><p class="prompt">${esc(run.prompt)}</p></div><div class="task-tabs"><span>Activity</span></div>${MoyaiActivity.terminalError(run)?`<div class="error-banner plain-text" role="alert">${esc(MoyaiActivity.terminalError(run))}</div>`:''}<div class="timeline" id="timeline">${MoyaiActivity.visibleEvents(run.events).map(eventHTML).join('')}</div><div id="approvals"></div><div id="pr-write-access"></div><div id="artifact-area"></div></section><aside class="details"><div class="card"><h3>Run details</h3><div class="detail-row"><span>Status</span><span id="run-status">${statusLabel(run.status)}</span></div><div class="detail-row"><span>Execution</span><span>${run.mode==='demo'?'Simulated':(run.sandbox_provider==='substrate'?'Substrate sandbox':'Modal sandbox')}</span></div><div class="detail-row"><span>Agent</span><span>${run.mode==='demo'?'Not started':esc(harnessName(run.harness))}</span></div><div class="detail-row"><span>Repository</span><span>${run.repo_url?esc(run.repo_url.replace('https://github.com/','')):'None'}</span></div><div class="detail-row"><span>Connections</span><span>${run.plugins.length?run.plugins.map(x=>providerNames[x]).join(', '):'None'}</span></div>${run.sandbox_id?`<div class="detail-row"><span>Sandbox</span><span>${esc(run.sandbox_id)}</span></div>`:''}</div><div class="note"><strong>${run.mode==='demo'?'A preview of the workflow':'An isolated workspace'}</strong>${run.mode==='demo'?'This run uses simulated events. No model, cloud machine, repository, or connected app is accessed.':'Moyai works inside a dedicated sandbox supplied by your selected provider.'}</div></aside></div>`);
   bindSessionHeaderActions(run);
@@ -664,7 +694,7 @@ async function refreshChat(id){
     if(error.status===404){await showUnavailableSession(id);return;}
     throw error;
   }
-  if(current()&&$('#conversation'))updateChat(run);
+  if(current()&&$('#conversation')){$('[data-chat-refresh-error]')?.remove();updateChat(run);}
 }
 async function loadActivity(turnId){
   const id=state.selected,page=state.pageVersion,run=state.chatRun;
@@ -713,8 +743,8 @@ function syncEventTimeline(target,events){
 function eventHTML(event){if(MoyaiActivity.isFocus(event))return '';const stamp=new Date(event.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});const detail=event.data?.command||event.data?.detail;return `<div class="event event-${esc(event.kind)}" data-event-id="${esc(event.id)}"><span class="event-marker">${event.kind==='result'?'✓':event.kind==='tool'?'⌘':'·'}</span><div class="event-heading"><strong>${esc(event.message)}</strong><time>${stamp}</time></div>${detail?`<details class="event-detail"><summary>Details</summary><pre>${esc(typeof detail==='string'?detail:JSON.stringify(detail,null,2))}</pre></details>`:''}</div>`;}
 function renderApprovals(approvals){ if(!$('#approvals'))return;MoyaiUI.render($('#approvals'), approvals.filter(a=>a.status==='pending').map(a=>`<div class="approval"><h3>Approval needed: ${esc(a.tool)}</h3><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>${state.role==='admin'?`<div class="approval-actions"><button data-approval="${a.id}" data-decision="approve" class="primary small">Approve once</button><button data-approval="${a.id}" data-decision="deny" class="small">Deny</button></div>`:'<p>An organization administrator must approve this action.</p>'}</div>`).join(''));document.querySelectorAll('[data-approval]').forEach(b=>b.onclick=async()=>{try{await api(`/api/approvals/${b.dataset.approval}`,{method:'POST',body:JSON.stringify({decision:b.dataset.decision})});await refreshApproval(state.selected);}catch(e){toast(e.message);}});}
 async function refreshApproval(id){if(state.selected!==id)return;const run=await api(`/api/runs/${id}`);if(state.selected===id){renderApprovals(run.approvals);MoyaiUI.render($('#run-status'), statusLabel(run.status));}}
-async function renderConnections(){
-  const version=state.pageVersion;const [connections,organization]=await Promise.all([api('/api/connections'),api('/api/organization')]);if(version!==state.pageVersion)return;state.connections=connections;state.organization=organization;renderSidebar();
+async function renderConnections(recent=false){
+  const version=state.pageVersion;const [connections,organization]=await Promise.all([api('/api/connections',{recent}),api('/api/organization',{recent})]);if(version!==state.pageVersion)return;state.connections=connections;state.organization=organization;renderSidebar();
   const admin=state.role==='admin', org=state.organization, slack=org.slack_sessions;
   MoyaiUI.render($('#content'), `<div class="page-heading"><div><h1>Connections</h1><p class="subtext">Bring your team’s tools into every session.</p></div><span class="badge">${admin?'Administrator':'Member'}</span></div>
     <div class="org-summary"><div><strong>Shared with your organization</strong><p>Each session chooses which apps it uses. Credentials stay on the server.</p></div><span>${state.connections.filter(c=>c.connected).length} of ${state.connections.length} connected</span></div>
@@ -794,9 +824,43 @@ function connectionDialog(provider){
   if($('#oauth-connect'))$('#oauth-connect').onclick=async()=>{try{const result=await api('/api/connections/'+provider+'/oauth',{method:'POST'});window.location.assign(result.url);}catch(e){$('#connection-error').textContent=e.message;}};
   $('#connection-dialog').showModal();
 }
-async function renderRuntime(){const version=state.pageVersion;const config=await api('/api/config');if(version!==state.pageVersion)return;state.config=config;const fields=['LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];MoyaiUI.render($('#content'), `<div class="page-heading"><div><h1>Runtime</h1><p class="subtext">Cloud readiness, session limits, and recovery.</p></div><span id="runtime-readiness" class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Model gateway + ${esc((config.harnesses||[]).find(h=>h.id===config.harness)?.name||config.harness)}</h2><p class="subtext">The selected agent uses your model gateway to plan work and use tools.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Session recovery</span><span>${esc(state.config.execution_engine||"Local worker")}${state.config.execution_connected===false?" · reconnecting":""}</span></div>${state.config.checkpoint_interval_seconds?`<div class="detail-row"><span>Save progress</span><span>Every ${Math.round(state.config.checkpoint_interval_seconds/60)} minutes between tool rounds</span></div>`:""}<div class="detail-row"><span>Maximum active + idle sandboxes</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Parallel agents</span><span>${state.config.parallel_agents_enabled?'Up to '+state.config.max_parallel_agents+' workers per group':'Requires Temporal'}</span></div><div class="detail-row"><span>Idle sessions</span><span>${state.config.sandbox_idle_seconds?Math.round(state.config.sandbox_idle_seconds/60)+' minutes of sandbox reuse':'No running sandbox'}</span></div><div class="detail-row"><span>Response time limit</span><span>${state.config.run_timeout_seconds?Math.round(state.config.run_timeout_seconds/60)+' minutes':'No app limit'}</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message. Long tasks automatically continue on a fresh machine at the configured rotation boundary.${state.config.sandbox_idle_seconds?' Idle sandboxes can be released sooner when another session needs capacity. Finished workers and coordinators waiting for workers release immediately.':''}</p></div></div>`);await renderSandboxConnection(version);}
+async function renderRuntime(recent=false){const version=state.pageVersion;const config=await api('/api/config',{recent});if(version!==state.pageVersion)return;state.config=config;const fields=['LITELLM_API_BASE','LITELLM_API_KEY','AGENT_MODEL',...state.config.missing.filter(x=>x.startsWith('PUBLIC_URL'))];MoyaiUI.render($('#content'), `<div class="page-heading"><div><h1>Runtime</h1><p class="subtext">Cloud readiness, session limits, and recovery.</p></div><span id="runtime-readiness" class="badge">${state.config.cloud_ready?'Cloud ready':'Setup needed'}</span></div><div class="setup-grid"><div class="card"><h2>Model gateway + ${esc((config.harnesses||[]).find(h=>h.id===config.harness)?.name||config.harness)}</h2><p class="subtext">The selected agent uses your model gateway to plan work and use tools.</p><ul class="config-list">${fields.map(key=>`<li><code>${key}</code><span class="${state.config.missing.includes(key)?'missing':'configured'}">${state.config.missing.includes(key)?'Not configured':'Configured'}</span></li>`).join('')}</ul></div><div class="card"><h2>Workspace settings</h2><div class="detail-row"><span>Session recovery</span><span>${esc(state.config.execution_engine||"Local worker")}${state.config.execution_connected===false?" · reconnecting":""}</span></div>${state.config.checkpoint_interval_seconds?`<div class="detail-row"><span>Save progress</span><span>Every ${Math.round(state.config.checkpoint_interval_seconds/60)} minutes between tool rounds</span></div>`:""}<div class="detail-row"><span>Maximum active + idle sandboxes</span><span>${state.config.max_concurrent_runs}</span></div><div class="detail-row"><span>Parallel agents</span><span>${state.config.parallel_agents_enabled?'Up to '+state.config.max_parallel_agents+' workers per group':'Requires Temporal'}</span></div><div class="detail-row"><span>Idle sessions</span><span>${state.config.sandbox_idle_seconds?Math.round(state.config.sandbox_idle_seconds/60)+' minutes of sandbox reuse':'No running sandbox'}</span></div><div class="detail-row"><span>Response time limit</span><span>${state.config.run_timeout_seconds?Math.round(state.config.run_timeout_seconds/60)+' minutes':'No app limit'}</span></div><div class="detail-row"><span>Model</span><span>${esc(state.config.model||'Choose in .env')}</span></div><p class="subtext" style="margin-top:25px">Your administrator manages the cloud connection. Each response runs in an isolated workspace and saves its files for the next message. Long tasks automatically continue on a fresh machine at the configured rotation boundary.${state.config.sandbox_idle_seconds?' Idle sandboxes can be released sooner when another session needs capacity. Finished workers and coordinators waiting for workers release immediately.':''}</p></div></div>`);await renderSandboxConnection(version);}
 function showError(error){toast(error.message);}
-document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>navigate(b.dataset.view).catch(showError));
+function prefetchNavigation(target){
+  if(!state.authenticated||document.hidden||navigator.connection?.saveData)return;
+  const prLink=target?.closest('a[href^="https://github.com/"]');
+  const pr=state.chatRun?.pull_requests?.find(item=>item.url===prLink?.getAttribute('href'));
+  if(pr){
+    if(state.navigationCache.pendingCount<3)api(`/api/runs/${state.selected}/pull-request?url=${encodeURIComponent(pr.url)}`,{recent:true}).catch(()=>{});
+    return;
+  }
+  const link=target?.closest('[data-run], [data-view], [data-spend-tab], a[href^="#"], #new-task');
+  if(!link)return;
+  const hash=link.getAttribute('href')||'';
+  const paths=MoyaiNavigationCache.pathsFor({
+    runId:link.dataset.run||parseSessionLink(hash)?.runId,
+    view:link.dataset.view||(link.id==='new-task'?'tasks':hash.slice(1)),
+    role:state.role,start:spendState.start,end:spendState.end,
+  });
+  if(state.view==='spend'&&spendState.scope==='organization'){
+    const tab=link.dataset.spendTab,query=new URLSearchParams({start:spendState.start,end:spendState.end});
+    if(tab==='users')paths.push('/api/admin/adoption?'+query);
+    if(tab==='prs'||tab==='leaderboard')paths.push('/api/admin/pull-requests?'+query);
+  }
+  for(const path of paths){
+    if(state.navigationCache.pendingCount>=3)break;
+    api(path,{recent:true}).catch(()=>{});
+  }
+}
+let navigationIntent;
+document.addEventListener('pointerover',event=>{
+  clearTimeout(navigationIntent);
+  navigationIntent=setTimeout(()=>prefetchNavigation(event.target),80);
+});
+document.addEventListener('pointerout',()=>clearTimeout(navigationIntent));
+document.addEventListener('focusin',event=>prefetchNavigation(event.target));
+// Tooltip rerenders own the React onclick property; keep controller listeners separate.
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>navigate(b.dataset.view).catch(showError)));
 $('#new-task').onclick=()=>navigate('tasks').then(()=>$('#prompt')?.focus()).catch(showError);
 $('#new-folder').onclick=()=>editSessionFolder();
 $('#session-list').onclick=e=>{const folderToggle=e.target.closest('[data-toggle-folder]');if(folderToggle){toggleSessionFolder(folderToggle.dataset.toggleFolder);return;}const folderEdit=e.target.closest('[data-edit-folder]');if(folderEdit){const folder=state.folders.find(f=>f.id===folderEdit.dataset.editFolder);if(folder)editSessionFolder(folder);return;}const actions=e.target.closest('[data-session-actions]');if(actions){const run=state.runs.find(r=>r.id===actions.dataset.sessionActions);if(run)showSessionActions(run,actions);return;}const toggle=e.target.closest('[data-toggle-agents]');if(toggle){const id=toggle.dataset.toggleAgents;if(state.expandedParents.has(id))state.expandedParents.delete(id);else state.expandedParents.add(id);renderSidebar();return;}const button=e.target.closest('[data-run]');if(button)openRun(button.dataset.run).catch(showError);};
@@ -847,8 +911,8 @@ async function boot(){
     // Select owns its permission-derived disabled state through the native bridge.
     document.querySelectorAll('.rail button:not([data-slot="select-trigger"])').forEach(b=>b.disabled=false);
     state.sessionSearchLoading=!state.runs.length;renderSidebar();
-    state.configError=null;
-    state.configReady=api('/api/config').then(config=>{state.config=config;}).catch(error=>{state.configError=error;throw error;});
+    state.configError=null;state.configLoaded=false;
+    state.configReady=api('/api/config').then(config=>{state.config=config;state.configLoaded=true;}).catch(error=>{state.configError=error;throw error;});
     api('/api/organization').then(value=>{state.organization=value;renderSidebar();}).catch(showError);
     refreshRuns().catch(showError);
     $('#logout').hidden=!!session.local;

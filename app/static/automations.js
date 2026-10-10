@@ -10,7 +10,7 @@ function automationTiming(t) {
   return (t.frequency==='hourly'?`Every hour at :${t.time.slice(3)}`:t.frequency==='weekdays'?`Weekdays at ${t.time}`:t.frequency==='weekly'?`${days[t.weekday]} at ${t.time}`:`Every day at ${t.time}`)+` · ${t.timezone}`;
 }
 
-async function renderAutomations(background = false) {
+async function renderAutomations(background = false,recent=false) {
   clearTimeout(automationRefresh);
   if (background && state.view !== 'automations') return;
   if (background && settingsInteractionActive()) {
@@ -19,7 +19,7 @@ async function renderAutomations(background = false) {
   }
   const openHistory=new Set([...document.querySelectorAll('.automation-history[open],.automation-workflow[open]')].map(e=>e.dataset.history));
   const version=state.pageVersion;
-  const data=await api('/api/automations');
+  const data=await api('/api/automations',{recent});
   if(version!==state.pageVersion)return;
   if (background && settingsInteractionActive()) {
     automationRefresh=setTimeout(()=>renderAutomations(true).catch(showError),5000);

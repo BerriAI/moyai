@@ -4,6 +4,10 @@
 
 For a new installation, follow [Install Moyai and run your first real task](getting-started.md). Use this reference to operate the service or choose another host. The dated reports below record checks on earlier deployments.
 
+For the opt-in, single-instance PostgreSQL backend and its separate cutover procedure,
+see [Postgres runtime](postgres-runtime.md). The existing SQLite deployment recipes
+below remain the defaults; keep the attached disk and one instance in this phase.
+
 ## Enable cloud runs
 
 Modal is the default sandbox provider. To connect an existing Substrate cluster, follow [Substrate sandboxes](substrate.md). The web app deployment and persistent data directory are independent of the sandbox provider.

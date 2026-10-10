@@ -204,7 +204,7 @@ class Memory:
 
     def save(self, owner, body, *, source=None, run=None, note_id=''):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             result = self.save_in(conn, owner, body, source=source, run=run, note_id=note_id)
             if source is None and run is None:
                 self.capture_barrier_in(conn, owner)
@@ -269,7 +269,7 @@ class Memory:
 
     def forget(self, owner, note_id, revision):
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = self.get(conn, owner, note_id)
             if row['revision'] != revision:
                 raise HTTPException(409, 'This memory changed. Review it before deleting.')
@@ -303,7 +303,7 @@ class Memory:
                 selected.append(note)
                 size += length
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             conn.execute('DELETE FROM memory_selections WHERE run_id=?', (run['id'],))
             for note in selected:
                 conn.execute('INSERT INTO memory_selections VALUES(?,?,?,?,?)',
@@ -418,7 +418,7 @@ class Memory:
         async def preferences(body: Preferences, request: Request):
             owner = actor(request, True)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 if self.preferences(owner, conn)['revision'] != body.revision:
                     raise HTTPException(409, 'Memory settings changed. Refresh before saving.')
                 conn.execute('INSERT INTO memory_preferences VALUES(?,?,?,?) ON CONFLICT(owner_id) DO UPDATE SET enabled=excluded.enabled,auto_save=excluded.auto_save,revision=excluded.revision',

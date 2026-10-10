@@ -246,6 +246,7 @@ def test_sandbox_restores_originals_verifies_download_and_preserves_safe_paths(t
         prepare_attachments({**spec, 'attachments': [{**item, 'name': '../outside'}]}, 'capability', root=root)
 
 
+@pytest.mark.sqlite_only
 async def test_database_checkpoint_also_restores_uploaded_bytes(workspace, tmp_path):
     app, client = workspace
     file = upload(client).json()

@@ -1,7 +1,8 @@
 """Answer unambiguous requests for this session's ID without an agent turn."""
 import json
 import re
-import sqlite3
+
+from .database import Connection
 
 
 _SESSION = r"(?:session|chat|conversation|run)"
@@ -29,7 +30,7 @@ def session_id_response(run_id: str) -> str:
     return f'Session ID: `{run_id}`'
 
 
-def complete_in(conn: sqlite3.Connection, run_id: str, message_id: int, stamp: str, *, initial: bool = False) -> None:
+def complete_in(conn: Connection, run_id: str, message_id: int, stamp: str, *, initial: bool = False) -> None:
     """Save the input, answer and browser notification in the caller's transaction.
 
     Existing agent state (including approvals, steering and the current result)

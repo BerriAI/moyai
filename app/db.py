@@ -3,13 +3,13 @@ from collections.abc import Callable
 import hashlib
 import json
 import os
-import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .database import PostgresDatabase, sqlite_connection
 from .attachments import Attachments
 from .blob_storage import ArtifactStore, ObjectStorage
 from .slack_mentions import SlackMentions
@@ -21,13 +21,13 @@ from .scheduling_diagnostics import age_ms, record, slow_database
 SESSION_SEARCH_CTE = """WITH search_input(term) AS (VALUES {terms}),
     searchable_sessions AS (
         SELECT r.id,r.parent_run_id,roots.root_id,term,
-            instr(unicode_lower(r.display_title || ' ' || r.agent_label || ' ' || r.prompt || ' ' || r.summary),term)>0 AS title_match,
-            (SELECT substr(m.content,max(1,instr(unicode_lower(m.content),term)-50),200)
+            strpos(unicode_lower(r.display_title || ' ' || r.agent_label || ' ' || r.prompt || ' ' || r.summary),term)>0 AS title_match,
+            (SELECT substr(m.content,greatest(1,strpos(unicode_lower(m.content),term)-50),200)
              FROM messages m WHERE m.run_id=r.id AND m.status!='deleted'
-                AND m.role IN ('user','assistant') AND instr(unicode_lower(m.content),term)>0
+                AND m.role IN ('user','assistant') AND strpos(unicode_lower(m.content),term)>0
              ORDER BY m.id DESC LIMIT 1) AS message_match,
-            CASE WHEN instr(unicode_lower(r.summary),term)>0
-                 THEN substr(r.summary,max(1,instr(unicode_lower(r.summary),term)-50),200) END AS summary_match
+            CASE WHEN strpos(unicode_lower(r.summary),term)>0
+                 THEN substr(r.summary,greatest(1,strpos(unicode_lower(r.summary),term)-50),200) END AS summary_match
         FROM runs r JOIN run_roots roots ON roots.run_id=r.id CROSS JOIN search_input WHERE r.deleted_at=''
     ), session_matches AS (
         SELECT id,parent_run_id,root_id,term,coalesce(message_match,summary_match,'') AS search_snippet
@@ -59,7 +59,19 @@ def require_database_owner(path: Path) -> None:
 
 
 class Store:
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None):
+    # The sidebar does not display saved answers, errors or sandbox state. Keep
+    # the original prompt for title fallback/search and pending_result for the
+    # same saving/deleting status projection used by session detail.
+    SIDEBAR_COLUMNS = ('id', 'prompt', 'repo_url', 'mode', 'status', 'created_at',
+                       'updated_at', 'owner_id', 'active_user_id', 'chat_enabled',
+                       'model', 'parent_run_id', 'agent_group_id', 'agent_label',
+                       'display_title', 'active_message_id', 'side_chat_of',
+                       'deletion_requested_at', 'deleted_at', 'pending_result')
+    SIDEBAR_CHILD_COLUMNS = ('id', 'parent_run_id', 'agent_label', 'status', 'mode',
+                             'created_at', 'updated_at', 'active_message_id',
+                             'deletion_requested_at', 'deleted_at', 'pending_result')
+
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False):
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
@@ -68,9 +80,19 @@ class Store:
         self.memory_review = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
+        self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize, application_instance=application_instance) if database_url else None
+        try:
+            self._initialize(directory, default_model, object_storage)
+        except BaseException:
+            if self.database:
+                self.database.close()
+            raise
+
+    def _initialize(self, directory, default_model, object_storage):
         with self.connect() as conn:
+            if not self.database:
+                conn.execute('PRAGMA journal_mode=WAL')
             conn.executescript("""
-                PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS runs (
                     id TEXT PRIMARY KEY, prompt TEXT NOT NULL, repo_url TEXT NOT NULL,
                     mode TEXT NOT NULL, status TEXT NOT NULL, plugins TEXT NOT NULL,
@@ -174,7 +196,6 @@ class Store:
                     run_id TEXT PRIMARY KEY REFERENCES runs(id), status TEXT NOT NULL DEFAULT '',
                     refreshed_at REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0
                 );
-                PRAGMA optimize;
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, email TEXT NOT NULL DEFAULT '',
                     name TEXT NOT NULL, linked_user_id TEXT REFERENCES users(id),
@@ -203,19 +224,19 @@ class Store:
                     pinned_at TEXT NOT NULL, PRIMARY KEY(owner_id, run_id)
                 );
             """)
-            if 'metadata' not in {row['name'] for row in conn.execute('PRAGMA table_info(slack_outbox)')}:
+            if 'metadata' not in conn.column_names('slack_outbox'):
                 conn.execute("ALTER TABLE slack_outbox ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
             for table, names in [('runs', ('owner_id', 'active_user_id')), ('messages', ('user_id',))]:
-                existing = {row['name'] for row in conn.execute(f'PRAGMA table_info({table})')}
+                existing = conn.column_names(table)
                 for name in names:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-            if 'github_repository_id' not in {r['name'] for r in conn.execute('PRAGMA table_info(runs)')}:
+            if 'github_repository_id' not in conn.column_names('runs'):
                 conn.execute('ALTER TABLE runs ADD COLUMN github_repository_id INTEGER')
             for name, default in [('environment_id', 'auto'), ('environment_build_id', ''), ('harness', 'hermes'), ('sandbox_provider', 'modal')]:
-                if name not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+                if name not in conn.column_names('runs'):
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(users)')}
+            columns = conn.column_names('users')
             for name in ('link_method', 'link_status', 'profile_checked_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE users ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
@@ -224,15 +245,15 @@ class Store:
                     conn.execute(f'ALTER TABLE users ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
             # Every pre-existing link was explicitly chosen by an administrator.
             conn.execute("UPDATE users SET link_method='manual',link_status='manual' WHERE linked_user_id IS NOT NULL AND link_method=''")
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(identity_audit)')}
+            columns = conn.column_names('identity_audit')
             for name in ('reason', 'previous_target_id'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE identity_audit ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
-            if 'active_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+            if 'active_message_id' not in conn.column_names('runs'):
                 conn.execute('ALTER TABLE runs ADD COLUMN active_message_id INTEGER')
-            if "model_calls" not in {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}:
+            if "model_calls" not in conn.column_names('runs'):
                 conn.execute("ALTER TABLE runs ADD COLUMN model_calls INTEGER NOT NULL DEFAULT 0")
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(runs)")}
+            columns = conn.column_names('runs')
             for name in ("chat_enabled", "turn_model_calls"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
@@ -245,20 +266,20 @@ class Store:
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent ON runs(parent_run_id)')
             # Durable direct-parent edges own ancestry. UNION bounds corrupt
             # cycles; rootless/orphaned chains never gain another root's scope.
-            conn.execute("""CREATE VIEW IF NOT EXISTS run_ancestry AS
+            conn.create_view('run_ancestry', """
                 WITH RECURSIVE tree(ancestor_id,run_id) AS (
                     SELECT id,id FROM runs UNION
                     SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
                 ) SELECT ancestor_id,run_id FROM tree""")
-            conn.execute("""CREATE VIEW IF NOT EXISTS run_roots AS
+            conn.create_view('run_roots', """
                 SELECT a.run_id,r.id AS root_id FROM run_ancestry a JOIN runs r ON r.id=a.ancestor_id
                 WHERE r.parent_run_id=''""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_title_backfill ON runs(created_at DESC,id DESC) WHERE chat_enabled=1 AND parent_run_id='' AND agent_label='' AND display_title='' AND title_attempted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_side_chat ON runs(side_chat_of,created_at)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_parent_updated ON runs(parent_run_id,updated_at DESC,created_at DESC,id DESC)')
-            if 'model' not in {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}:
+            if 'model' not in conn.column_names('messages'):
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-            columns = {row['name'] for row in conn.execute('PRAGMA table_info(messages)')}
+            columns = conn.column_names('messages')
             for name in ('revision', 'queue_locked', 'send_immediately'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
@@ -267,17 +288,18 @@ class Store:
                 conn.execute("UPDATE messages SET started_at=created_at WHERE status!='queued'")
             if 'steering_parent_id' not in columns:
                 conn.execute('ALTER TABLE messages ADD COLUMN steering_parent_id INTEGER')
-            if 'steer_message_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(runs)')}:
+            if 'steer_message_id' not in conn.column_names('runs'):
                 conn.execute('ALTER TABLE runs ADD COLUMN steer_message_id INTEGER')
             if default_model:
                 conn.execute("UPDATE runs SET model=? WHERE model=''", (default_model,))
                 conn.execute("UPDATE runs SET active_model=model WHERE active_model='' AND status NOT IN ('idle','completed','failed','cancelled','interrupted')")
                 conn.execute("UPDATE messages SET model=(SELECT model FROM runs WHERE runs.id=messages.run_id) WHERE model='' AND status IN ('queued','running')")
-            columns = {row["name"] for row in conn.execute("PRAGMA table_info(slack_events)")}
+            columns = conn.column_names('slack_events')
             for name, default in (("mention_ts", ""), ("context_status", "legacy"), ("context_json", "{}")):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
-        self.path.chmod(0o600)
+        if not self.database:
+            self.path.chmod(0o600)
         self.objects = object_storage if object_storage is not None else ObjectStorage()
         self.artifacts = ArtifactStore(self, directory)
         self.attachments = Attachments(self)
@@ -286,19 +308,39 @@ class Store:
     @contextmanager
     def connect(self):
         started = time.monotonic()
-        require_database_owner(self.path)
-        conn = sqlite3.connect(self.path, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.create_function('unicode_lower', 1, str.lower, deterministic=True)
-        conn.execute("PRAGMA foreign_keys=ON")
         try:
-            with conn:
-                yield conn
-            if conn.total_changes:
-                self.generation += 1
+            if self.database:
+                with self.database.connect() as conn:
+                    yield conn
+                if conn.changed:
+                    self.generation += 1
+                return
+            require_database_owner(self.path)
+            conn = sqlite_connection(self.path)
+            try:
+                with conn:
+                    yield conn
+                if conn.total_changes:
+                    self.generation += 1
+            finally:
+                conn.close()
         finally:
-            conn.close()
-            slow_database(started)
+            # Include pool acquisition, lock waits, commit/rollback and close
+            # for either backend, including failed connection attempts.
+            slow_database(started, backend='postgresql' if self.database else 'sqlite')
+
+    def close(self):
+        self.objects.close()
+        if self.database:
+            self.database.close()
+
+    def column_names(self, table):
+        with self.connect() as conn:
+            return conn.column_names(table)
+
+    def table_names(self):
+        with self.connect() as conn:
+            return conn.table_names()
 
     def execute(self, sql, params=()):
         with self.connect() as conn:
@@ -340,7 +382,7 @@ class Store:
         return result
 
     @staticmethod
-    def session_view_owner_in(conn: sqlite3.Connection, user_id: str) -> str:
+    def session_view_owner_in(conn, user_id: str) -> str:
         """Resolve shared-workspace view links, never authentication or authorship."""
         linked = conn.execute("""SELECT target.id FROM users source JOIN users target
             ON target.id=source.linked_user_id AND target.kind IN ('google','cloudflare')
@@ -384,7 +426,7 @@ class Store:
             if search_folders and archive_owner is not None and archived is False:
                 missing += """ AND NOT EXISTS(SELECT 1 FROM session_folder_memberships m
                     JOIN session_folders f ON f.id=m.folder_id AND f.owner_id=m.owner_id
-                    WHERE m.run_id=runs.id AND m.owner_id=? AND instr(unicode_lower(f.name),needle.term)>0)"""
+                    WHERE m.run_id=runs.id AND m.owner_id=? AND strpos(unicode_lower(f.name),needle.term)>0)"""
                 params.append(archive_owner)
             predicate += ' AND NOT EXISTS(SELECT 1 FROM search_input needle WHERE ' + missing + ')'
         query = prefix + 'SELECT id FROM runs WHERE ' + predicate
@@ -430,15 +472,28 @@ class Store:
     def subtree(self, run_id: str):
         return self.subtrees([run_id])
 
-    def subtrees(self, run_ids):
+    def subtrees(self, run_ids, *, sidebar=False):
         rows = []
+        columns = ','.join('r.' + key for key in self.SIDEBAR_CHILD_COLUMNS) if sidebar else 'r.*'
         for offset in range(0, len(run_ids), 400):
             batch = run_ids[offset:offset + 400]
             rows.extend(self.rows("""WITH RECURSIVE tree(ancestor_id,run_id) AS (
                 SELECT id,id FROM runs WHERE id IN (""" + ','.join('?' for _ in batch) + """) UNION
                 SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
-            ) SELECT r.*,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
+            ) SELECT """ + columns + """,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
         return rows
+
+    def runs_by_ids(self, run_ids, *, sidebar=False):
+        """Read a bounded batch while retaining the caller's recency ordering."""
+        rows = {}
+        columns = ','.join(self.SIDEBAR_COLUMNS) if sidebar else '*'
+        for offset in range(0, len(run_ids), 400):
+            batch = run_ids[offset:offset + 400]
+            for row in self.rows('SELECT ' + columns + ' FROM runs WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch):
+                if not sidebar:
+                    row['plugins'] = json.loads(row['plugins'])
+                rows[row['id']] = row
+        return [rows[run_id] for run_id in run_ids if run_id in rows]
 
     def run(self, run_id: str, *, connection=None):
         rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,), connection=connection)
@@ -456,7 +511,7 @@ class Store:
         from .harnesses import validate_harness
         validate_harness(harness, model)
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             if client_id:
                 previous = conn.execute("SELECT m.*,r.repo_url,r.github_repository_id,r.mode,r.plugins,r.environment_id,r.side_chat_of,r.harness,r.sandbox_provider,r.deleted_at,r.deletion_requested_at FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.client_id=? AND m.user_id=? AND m.role='user'", ('new:' + client_id, user_id)).fetchone()
                 if previous:
@@ -493,7 +548,7 @@ class Store:
             if side_chat_of:
                 conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))
             if chat_enabled:
-                message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?)", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).lastrowid
+                message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?) RETURNING id", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).fetchone()[0]
                 self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
                 if metadata_request:
                     from .session_metadata import complete_in
@@ -512,7 +567,7 @@ class Store:
         from .harnesses import validate_harness
         validate_harness(harness, model)
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin_write()
             if conn.execute("SELECT 1 FROM slack_events WHERE event_id=?", (event_id,)).fetchone():
                 return None
             actor_id = self.slack_identity_in(conn, team_id, user_id)
@@ -522,7 +577,7 @@ class Store:
             conn.execute("INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,model,owner_id,harness) VALUES(?,?,'','modal','queued',?,?,?,1,?,?,?)",
                          (run_id, prompt, json.dumps(plugins), stamp, stamp, model, actor_id, harness))
             conn.execute('UPDATE runs SET sandbox_provider=? WHERE id=?', (getattr(self, 'sandbox_provider', lambda: 'modal')(), run_id))
-            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?)", (run_id, prompt, stamp, model, actor_id)).lastrowid
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued','initial',?,?,?) RETURNING id", (run_id, prompt, stamp, model, actor_id)).fetchone()[0]
             self.slack_mentions.queue_in(conn, message_id, team_id, prompt)
             if file_ids:
                 message_id = conn.execute('SELECT id FROM messages WHERE run_id=?', (run_id,)).fetchone()[0]
@@ -554,7 +609,7 @@ class Store:
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
-                (SELECT substr(m.user_id,7,instr(substr(m.user_id,7),':')-1) FROM slack_events e
+                (SELECT substr(m.user_id,7,strpos(substr(m.user_id,7),':')-1) FROM slack_events e
                  WHERE e.run_id=m.run_id AND m.client_id='initial'
                    AND m.user_id LIKE 'slack:%:'||e.user_id LIMIT 1)) AS slack_message_team,
             (SELECT r.user_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
@@ -590,7 +645,7 @@ class Store:
 
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin_write()
             result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=True)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
@@ -616,8 +671,8 @@ class Store:
                 raise ValueError('This session allows 100 turns. Start a new session.')
             stamp = now()
             model = model if model is not None else row['model'] or self.default_model
-            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?)",
-                                     (run_id, content, client_id, stamp, model, user_id)).lastrowid
+            message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?) RETURNING id",
+                                     (run_id, content, client_id, stamp, model, user_id)).fetchone()[0]
             complete_in(conn, run_id, message_id, stamp)
             return {'id': message_id, 'status': 'completed', 'model': model}, True
         if row["status"] == "stopping":
@@ -634,7 +689,7 @@ class Store:
         model = model if model is not None else row['model'] or self.default_model
         from .harnesses import validate_harness
         validate_harness(row['harness'], model)
-        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?)", (run_id, content, client_id, stamp, model, user_id, send_immediately)).lastrowid
+        message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?) RETURNING id", (run_id, content, client_id, stamp, model, user_id, send_immediately)).fetchone()[0]
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         if restore_archived:
             conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?',
@@ -653,7 +708,7 @@ class Store:
 
     def claim_message(self, run_id):
         with self.connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            conn.begin_write()
             run = conn.execute("SELECT status,steer_message_id,deleted_at,deletion_requested_at FROM runs WHERE id=?", (run_id,)).fetchone()
             if not run or run['deleted_at'] or run['deletion_requested_at'] or run["status"] in {"stopping", "cancelled", "interrupted"}:
                 return None
@@ -708,7 +763,7 @@ class Store:
             name = 'Local preview' if info.get('method') == 'local' else 'Shared password sign-in'
         stamp = now()
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             old = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
             conn.execute('INSERT INTO users(id,kind,email,name,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name,updated_at=excluded.updated_at',
                          (user_id, kind, email, name, stamp, stamp))
@@ -727,7 +782,7 @@ class Store:
         issuer, subject, email = identity['issuer'], identity['sub'], identity['email']
         stamp = now()
         with self.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             binding = conn.execute('SELECT * FROM access_identities WHERE issuer=? AND subject=?',
                                    (issuer, subject)).fetchone()
             if binding:
@@ -789,7 +844,7 @@ class Store:
     @staticmethod
     def slack_identity_in(conn, team, user):
         user_id, stamp = f'slack:{team}:{user}', now()
-        conn.execute("INSERT OR IGNORE INTO users(id,kind,name,created_at,updated_at) VALUES(?,'slack',?,?,?)", (user_id, 'Slack ' + user, stamp, stamp))
+        conn.execute("INSERT INTO users(id,kind,name,created_at,updated_at) VALUES(?,'slack',?,?,?) ON CONFLICT DO NOTHING", (user_id, 'Slack ' + user, stamp, stamp))
         return user_id
 
     def update_run(self, run_id: str, **fields):
@@ -812,13 +867,13 @@ class Store:
         if kind == 'status' and data.get('phase') == 'focus':
             from .progress import record_focus
             with self.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 record_focus(conn, run_id, message, data, now())
             return
         if kind == 'message' and data.get('phase') != 'processing':
             from .progress import record
             with self.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 record(conn, run_id, message, data, now())
             return
         if kind != 'chat':
@@ -847,7 +902,7 @@ class Store:
 
     def goal(self, run_id: str):
         rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
-                         "AND json_extract(data, '$.goal_version')=1 AND json_extract(data, '$.phase')='goal' "
+                         "AND json_number(data,'goal_version')=1 AND json_text(data,'phase')='goal' "
                          "ORDER BY id DESC LIMIT 1", (run_id,))
         return json.loads(rows[0]['data']).get('goal') if rows else None
 

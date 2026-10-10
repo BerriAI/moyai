@@ -161,7 +161,7 @@
             const previous=MoyaiPullRequest.presentation(t.prStatus).state;t.prStatus=data;
             if(MoyaiPullRequest.presentation(data).state!==previous)draw();
           },
-          load:()=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`)}));return;
+          load:({refresh=false}={})=>api(`/api/runs/${run.id}/pull-request?url=${encodeURIComponent(t.url)}`,{recent:!refresh})}));return;
       }
       if(t.kind==='computer'){t.activate=()=>computer.open(run.id,t.element);t.deactivate=()=>computer.close();return;}
       if(t.kind==='captures'){mountCaptures(t);return;}

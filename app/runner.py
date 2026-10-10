@@ -174,7 +174,7 @@ class RunManager:
         await self.cleanup(self.store.run(run_id), run_id)
 
     async def recover(self):
-        if self.store.rows("SELECT 1 FROM sqlite_master WHERE type='table' AND name='durable_sessions'"):
+        if 'durable_sessions' in self.store.table_names():
             if any(json.loads(row['state']).get('phase', 'idle') != 'idle'
                    for row in self.store.rows('SELECT state FROM durable_sessions')):
                 raise RuntimeError('Drain Temporal sessions before disabling Temporal; unfinished work was preserved')

@@ -29,6 +29,30 @@ composer. Both use the production picker against synthetic data.
 unread, running, approval and failure indicators. Expand the first session and
 its Explore agent to inspect disclosure, title and status alignment.
 
+`?fixture=account-links#spend` provides synthetic Slack/Google accounts and pending
+costs. Open Infrastructure, expand Administrator overrides, choose an account,
+then click the top bar to leave the form idle. The five-second cost poll keeps the
+account-link controls mounted, retains the selection and disclosure, and fetches
+updated status independently. Transient lookup errors retain usable controls;
+authorization failures remove them. The navigation browser suite also covers
+changed account data, retries, an open Select and leaving the route mid-refresh.
+
+Completed account-link updates have their own deferred paint, independent of
+pending costs. While a menu is open or the tab is hidden, one local timer checks
+every 250 ms and retains the response without making more requests. Once the view is idle,
+it captures the current drafts and applies that response. New refreshes and
+account actions supersede older updates; route, account, role, scope, date and
+mounted-panel checks fence both in-flight responses and deferred paints. Access
+failures clear the controls immediately. The regression for the last cost poll
+fails against `0f579cf` and passes with this lifecycle.
+
+`?fixture=account-links-final#spend` settles costs on the first background poll
+and changes the identity status two seconds later. Open Infrastructure and
+Administrator overrides, then click the top bar. After the five-second refresh,
+open the account menu during that lookup delay. It stays open when the response
+arrives; choose an account and click the top bar to see the deferred status apply
+without another cost poll or network request. Reload to restart the fixture.
+
 The production bundle lives in `app/static/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.
@@ -41,6 +65,53 @@ SESSION_UI_URL=http://127.0.0.1:8830 node --test tests/browser/session_ui.cjs
 ```
 
 Install the test browser once with `npx playwright install chromium`.
+
+Navigation reads reuse a bounded, in-memory cache in `navigation-cache.js`:
+40 responses, an 8 MiB serialized-data budget, and a 15-second reuse window.
+Conversation snapshots may paint for up to 60 seconds while a fresh request and
+the event stream update them without remounting the composer. Responses are
+copied before controllers mutate them. Nothing is persisted in browser storage.
+Writes invalidate at both request boundaries; account/role changes and access
+errors clear the cache. Explicit Refresh and background polls still fetch fresh
+data. Secrets and credential forms are excluded from the allowlist.
+
+The sidebar requests the compact `view=sidebar` session list, with batched root
+reads and lightweight agent rows. See [session list performance](session-list-performance.md)
+for the real API demo, before/after measurements and database-wait regression.
+
+Hover intent (80 ms) and keyboard focus preload the chosen page, analytics tab,
+conversation, or a PR linked to the current session. Speculative reads stop when
+three cacheable requests are in flight and are disabled in hidden tabs or with
+the browser's Save-Data preference. PR diffs share the same cache; Refresh always
+revalidates. Spend charts do not wait for Infrastructure's account-link settings.
+
+For a populated navigation demo with controlled transport latency:
+
+```sh
+node scripts/settings_ui_preview.cjs --port 8840 --delay-ms 300
+node --test tests/browser/navigation_loading.cjs
+```
+
+The browser test starts its own fixture server. The preview URL is localhost only
+and uses synthetic API responses. `--root /path/to/baseline/app/static` serves
+the same data and latency with another frontend. In one 1440px Chromium comparison
+against `cb077b4`, click-to-next-frame timings were: Users return 608 → 14 ms,
+Leaderboard return 916 → 16 ms, first Spend 618 → 317 ms, and a preloaded PR report
+319 → 37 ms. These are local samples, not production percentiles or a cold-load
+guarantee; expired/oversized entries and missing preloads still require a request.
+
+With the chat and PR demo servers below running, also run:
+
+```sh
+CHAT_LOADING_URL=http://127.0.0.1:8877 PR_LOADING_URL=http://localhost:8880 \
+  node --test tests/browser/navigation_sessions.cjs
+```
+
+This verifies a usable cached conversation while revalidation is held, draft and
+composer retention, shared hover/click PR reads, reopening a diff, and explicit
+Refresh. With real local APIs and synthetic GitHub reads, a 40-file PR reopened
+in 25 ms versus 576 ms; a conversation returned in 15 ms versus 298 ms. These
+samples used the demo's 250 ms delays, not production GitHub or SSO.
 
 To reproduce loading and sidebar behavior with real local session APIs:
 
@@ -86,6 +157,9 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
 - Use `MoyaiUI.render` for replacement, `insert` for incremental insertion, and
   `replace` for replacing a loading region. All commit synchronously so controllers
   can bind handlers immediately.
+- Bind controller click handlers on tooltip triggers with `addEventListener`,
+  not the DOM `onclick` property. React updates that property when the tooltip
+  opens or closes; native listeners survive those component updates.
 - Regions are replaced in full, matching the former `innerHTML` behavior. Do not
   call `root.render` to reconcile DOM owned by a controller. Nested roots are
   disposed before their parent, and a removal observer releases detached regions.

@@ -76,13 +76,13 @@ class Environments:
             commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
         with store.connect() as conn:
-            if 'sandbox_provider' not in {r['name'] for r in conn.execute('PRAGMA table_info(environment_builds)')}:
+            if 'sandbox_provider' not in conn.column_names('environment_builds'):
                 conn.execute("ALTER TABLE environment_builds ADD COLUMN sandbox_provider TEXT NOT NULL DEFAULT 'modal'")
-            columns = {r['name'] for r in conn.execute('PRAGMA table_info(environments)')}
+            columns = conn.column_names('environments')
             for name in ('refresh_daily', 'activate_on_ready'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
-            if 'resolved_recipe' not in {r['name'] for r in conn.execute('PRAGMA table_info(environment_builds)')}:
+            if 'resolved_recipe' not in conn.column_names('environment_builds'):
                 conn.execute("ALTER TABLE environment_builds ADD COLUMN resolved_recipe TEXT NOT NULL DEFAULT ''")
 
     async def sync_repositories(self):
@@ -94,7 +94,7 @@ class Environments:
         credentials = await self.connectors.github.ensure_connection()
         repositories = self.connectors.github.repository_options(credentials)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             existing = list(conn.execute('SELECT id,recipe FROM environments'))
             for option in repositories:
                 repository, repository_id = option['full_name'], option['id']
@@ -106,8 +106,8 @@ class Environments:
                 else:
                     recipe = Recipe(name=repository.split('/')[1][:68] + ' development', repository=repository, repository_id=repository_id,
                                     ref='HEAD', clone_access='github', setup_mode='detect', verify='git rev-parse --verify HEAD')
-                conn.execute('''INSERT OR IGNORE INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
-                    VALUES(?,?,1,1,?,?)''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
+                conn.execute('''INSERT INTO environments(id,recipe,revision,activate_on_ready,updated_by,updated_at)
+                    VALUES(?,?,1,1,?,?) ON CONFLICT DO NOTHING''', (identity, recipe.model_dump_json(), 'Repository discovery', now()))
 
     async def prepare(self, run_id):
         run = self.store.run(run_id)
@@ -140,7 +140,7 @@ class Environments:
                 if not selected['active_build'] or self.build(selected['active_build']).get('sandbox_provider', 'modal') != run['sandbox_provider']:
                     if self.settings.missing_sandbox(run['sandbox_provider']):
                         raise HTTPException(503, 'Configure the sandbox provider before preparing this repository.')
-                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? AND sandbox_provider=? ORDER BY rowid DESC LIMIT 1',
+                    recent = self.store.rows('SELECT * FROM environment_builds WHERE environment_id=? AND revision=? AND sandbox_provider=? ORDER BY created_at DESC,id DESC LIMIT 1',
                                              (selected['id'], selected['revision'], run['sandbox_provider']))
                     build = recent[0] if recent else self.enqueue(selected['id'], selected['revision'], 'First session', provider=run['sandbox_provider'])
                     if build['phase'] == 'failed':
@@ -175,7 +175,7 @@ class Environments:
                 value['activate_on_ready'] = row['activate_on_ready']
                 value['recipe'] = recipe
                 value['builds'] = self.store.rows('''SELECT id,revision,phase,commit_sha,error,created_at,finished_at
-                    FROM environment_builds WHERE environment_id=? ORDER BY rowid DESC LIMIT 10''', (row['id'],))
+                    FROM environment_builds WHERE environment_id=? ORDER BY created_at DESC,id DESC LIMIT 10''', (row['id'],))
             if admin or row['activate_on_ready'] or (row['enabled'] and row['active_build']):
                 items.append(value)
         return items
@@ -193,7 +193,7 @@ class Environments:
         if any(not re.fullmatch(r'[a-z0-9][a-z0-9+.-]{0,79}', p) for p in body.recipe.apt_packages):
             raise HTTPException(422, 'Use Debian package names without flags or versions.')
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             old = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
             if (old['revision'] if old else 0) != body.revision:
                 raise HTTPException(409, 'This environment changed. Reload before saving.')
@@ -210,7 +210,7 @@ class Environments:
     def enqueue(self, identity, revision, actor, provider=None):
         provider = provider or self.settings.sandbox_provider
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             row = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Project environment not found.')
@@ -273,7 +273,7 @@ class Environments:
         selected = self.choose(selection, repo_url, repository_id)
         if not selected or selected['active_build']:
             return ''
-        recent = self.store.rows('SELECT phase FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY rowid DESC LIMIT 1',
+        recent = self.store.rows('SELECT phase FROM environment_builds WHERE environment_id=? AND revision=? ORDER BY created_at DESC,id DESC LIMIT 1',
                                  (selected['id'], selected['revision']))
         if not recent:
             return ''  # The first session still initiates automatic preparation.
@@ -380,7 +380,7 @@ class Environments:
             return
         snapshot = await sandbox.snapshot_filesystem.aio(timeout=self.settings.snapshot_timeout_seconds)
         with self.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             # Respect a cancellation that arrived while snapshotting.
             if conn.execute('SELECT phase FROM environment_builds WHERE id=?', (identity,)).fetchone()['phase'] == 'cancelling':
                 return
@@ -404,7 +404,7 @@ class Environments:
                     pass  # Connection setup is shown in Connections; retry discovery later.
                 self.last_sync = time.monotonic()
             self.queue_refreshes()
-            builds = self.store.rows("SELECT * FROM environment_builds WHERE phase NOT IN ('ready','failed') OR sandbox_id!='' ORDER BY rowid LIMIT 1")
+            builds = self.store.rows("SELECT * FROM environment_builds WHERE phase NOT IN ('ready','failed') OR sandbox_id!='' ORDER BY created_at,id LIMIT 1")
             for build in builds:
                 try:
                     if build['phase'] not in {'ready', 'failed', 'cancelling'} and time.time() - datetime.fromisoformat(build['created_at']).timestamp() > 3900:
@@ -423,7 +423,7 @@ class Environments:
 
     def queue_refreshes(self):
         for row in self.store.rows('SELECT * FROM environments WHERE enabled=1 AND refresh_daily=1'):
-            recent = self.store.rows('SELECT revision,created_at FROM environment_builds WHERE environment_id=? ORDER BY rowid DESC LIMIT 1', (row['id'],))
+            recent = self.store.rows('SELECT revision,created_at FROM environment_builds WHERE environment_id=? ORDER BY created_at DESC,id DESC LIMIT 1', (row['id'],))
             if (not recent or recent[0]['revision'] != row['revision'] or
                     time.time() - datetime.fromisoformat(recent[0]['created_at']).timestamp() >= 86400):
                 self.enqueue(row['id'], row['revision'], 'Automatic refresh')
@@ -484,7 +484,7 @@ class Environments:
         async def policy(identity: str, body: Policy, request: Request):
             actor(request)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 row = conn.execute('SELECT * FROM environments WHERE id=?', (identity,)).fetchone()
                 if not row:
                     raise HTTPException(404, 'Project environment not found.')
@@ -508,7 +508,7 @@ class Environments:
             actor(request)
             self.build(identity)
             with self.store.connect() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+                conn.begin_write()
                 if conn.execute("UPDATE environment_builds SET phase='cancelling' WHERE id=? AND phase NOT IN ('ready','failed')", (identity,)).rowcount:
                     conn.execute('UPDATE environments SET activate_on_ready=0 WHERE id=(SELECT environment_id FROM environment_builds WHERE id=?)', (identity,))
             return {'ok': True}

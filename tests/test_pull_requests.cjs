@@ -359,10 +359,16 @@ function nativePanel(){
   vm.runInContext(fs.readFileSync('app/static/pull-request.js','utf8'),dom.context);
   const lifecycle=dom.context.MoyaiPullRequest.mount({element:dom.element,url,escape,markdown:value=>{markdownCalls.push(value);return escape(value);},
     onStatus:data=>statuses.push(native.presentation(data).state),
-    load:()=>new Promise((resolve,reject)=>requests.push({resolve,reject}))});
+    load:options=>new Promise((resolve,reject)=>requests.push({resolve,reject,options}))});
   return {...dom,requests,markdownCalls,statuses,...lifecycle};
 }
 async function initialPR(data=details){const f=nativePanel(),first=f.activate();f.requests[0].resolve(data);await first;f.calls.length=0;return f;}
+
+test('PR activation may reuse recent data, while the Refresh button always requests fresh details',async()=>{
+  const f=await initialPR();assert.equal(f.requests[0].options.refresh,false);
+  const refresh=f.node('[data-refresh]').onclick();assert.equal(f.requests[1].options.refresh,true);
+  f.requests[1].resolve(details);await refresh;
+});
 async function refreshPR(f,data=details){const read=f.node('[data-refresh]').onclick();f.requests.at(-1).resolve(data);await read;}
 function toggleFile(f,index,open){const detail=f.element.querySelectorAll('[data-file]')[index];detail.open=open;detail.ontoggle();return detail;}
 test('PR refresh revalidates but an identical payload preserves mounted headings and diff rows',async()=>{

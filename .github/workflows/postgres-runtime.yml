@@ -1,0 +1,46 @@
+name: PostgreSQL runtime
+on:
+  pull_request:
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+  push:
+    branches: [main]
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+permissions:
+  contents: read
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-runtime-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-runtime-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Preserve the default SQLite behavior
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py tests/test_sessions.py tests/test_slack_web_mirror.py tests/test_spend.py
+      - name: Verify import, transactions, ownership and restart
+        run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py tests/test_postgres_migration.py
+      - name: Verify existing chat, queue, attachment and trace behavior on Postgres
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_workspace.py tests/test_sessions.py tests/test_session_list_performance.py tests/test_pr_delivery.py tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
+      - name: Verify credentials, permissions, automations and settings on Postgres
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_credentials.py tests/test_skills.py tests/test_memory.py tests/test_automations.py tests/test_automation_events.py tests/test_environments.py tests/test_infrastructure_costs.py tests/test_session_folders.py tests/test_spend.py tests/test_github_write_access.py
+      - name: Verify durable admission, gateway, identities and Slack recovery on Postgres
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py tests/test_durable.py tests/test_automation_concurrency.py tests/test_harness_gateway.py tests/test_broker_transport.py tests/test_adoption.py tests/test_identities.py tests/test_slack_chat.py tests/test_slack_web_mirror.py tests/test_activity.py
+      - name: Verify scheduling under Postgres contention and real Temporal restart
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_scheduling_diagnostics.py tests/test_temporal_integration.py tests/test_active_steering.py tests/test_steering_latency.py tests/test_automation_environments.py tests/test_automation_parity.py tests/test_automation_temporal.py
+      - name: Demonstrate responsive scheduling during Postgres writer and pool waits
+        run: uv run --frozen --python 3.13 python scripts/scheduling_stall_demo.py
+      - name: Demonstrate real HTTP requests across two server processes
+        run: uv run --frozen --python 3.13 python scripts/postgres_runtime_smoke.py

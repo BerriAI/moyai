@@ -77,7 +77,7 @@ def test_failed_environment_holds_events_across_restart_and_resumes_once_ready(b
         asyncio.run(service.events.dispatch())
     assert not store.rows('SELECT id FROM runs')
     assert not store.rows('SELECT occurrence FROM automation_runs')
-    pending = store.rows('SELECT * FROM automation_events')
+    pending = store.rows('SELECT * FROM automation_events ORDER BY received_at,occurrence')
     assert all(e['status'] == 'pending' and 'Complaint' in e['context'] for e in pending)
     assert 'Project setup failed' in pending[0]['detail']
     public = client.get('/api/automations').json()['automations'][0]
@@ -92,7 +92,7 @@ def test_failed_environment_holds_events_across_restart_and_resumes_once_ready(b
     store.execute('UPDATE environments SET enabled=1,activate_on_ready=0,active_build=?', (build['id'],))
     assert client.get('/api/automations').json()['automations'][0]['environment_blocker'] == ''
     asyncio.run(service.events.dispatch())
-    runs = store.rows('SELECT * FROM runs ORDER BY rowid')
+    runs = store.rows('SELECT * FROM runs ORDER BY created_at,id')
     assert len(runs) == 3
     for number, run in enumerate(runs):
         assert f'Complaint {number}' in run['prompt']

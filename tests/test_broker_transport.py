@@ -139,7 +139,8 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend(na
 
 @pytest.mark.parametrize('status,upstream,transient', [(502, 401, False), (502, 403, False),
     (502, 429, True), (502, 503, True), (429, None, False), (425, None, True),
-    (524, None, True), (502, 524, True), (525, None, False)])
+    (524, None, True), (502, 524, True), (525, None, False), (400, None, False),
+    (403, None, False), (429, 429, True), (503, 503, True)])
 def test_failure_classification_uses_original_upstream_status(status, upstream, transient):
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
@@ -149,6 +150,7 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
             if upstream:
                 self.send_header('X-Moyai-Upstream-Status', str(upstream))
             self.send_header('X-Moyai-Model-Request-ID', 'ledger-id')
+            self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"detail":"Model gateway rejected the request."}')
     with diagnostic_relay(Edge) as (relay, client, diagnostics):
@@ -157,6 +159,7 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
         assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
         assert relay.last_failure['transient'] is transient
         assert relay.resume_model(relay.last_failure) is transient
+        assert bool(relay.last_error) is (not transient)
 
 
 @pytest.mark.parametrize('route,uncertain_tool', [('/v1/messages', False), ('/tools/call', True),
