@@ -1090,7 +1090,7 @@ def _create_app(settings, store):
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
@@ -1104,6 +1104,14 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in {'slack_context', 'slack_participation'}:
+            try:
+                operation = slack.sources.read if body.name == 'slack_context' else slack.sources.participation
+                result = await asyncio.to_thread(operation, run, body.arguments)
+            except (ValidationError, HTTPException) as exc:
+                return {'outcome': 'rejected', 'dispatched': False, 'error': str(exc) if isinstance(exc, ValidationError) else exc.detail}
+            await checkpoints.flush()
+            return result
         if body.name == 'goal':
             try:
                 args = GoalArgs.model_validate(body.arguments)
@@ -1306,6 +1314,7 @@ def _create_app(settings, store):
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
         model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
 
+    from .slack_sources import TOOL as SLACK_CONTEXT_TOOL, SILENCE_TOOL as SLACK_PARTICIPATION_TOOL
     from .goals import Goals, GoalArgs, TOOL as GOAL_TOOL
     goals = Goals(store)
     store.goals = goals

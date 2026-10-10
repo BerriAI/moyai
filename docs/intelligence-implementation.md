@@ -42,7 +42,7 @@ Composer controls and APIs accept longer messages; the shared contenteditable
 editor recognizes an absent maximum. Steering text is neutral rather than labeling
 every input a correction.
 
-This requires schema revision 5 and API protocol revision 2. Follow the coordinated
+This requires schema revision 6 and API protocol revision 2. Follow the coordinated
 migration procedure; the change is not an API-only mixed-version deployment.
 
 Validation so far:
@@ -139,3 +139,31 @@ GitHub CI, diagnostics, and API-only deployments; these are preserved.
 
 The new three-hour complaint is covered by D08–D10, D24, and D27, with S08/S09/S12/S23 as explicit release gates. It is a lifecycle-and-delivery requirement, not merely a larger timeout setting.
 
+
+## Slack observation and participation (WP3; not deployed)
+
+Signed source events and complete attributed message versions now persist separately
+from user inputs. Peer bots, humans, edits, deletions and reactions are retained.
+Unmentioned activity coalesces wakeups, while direct inputs retain individual
+receipts. Ambient silence is explicit; only an authorized human source can be
+adopted as a requester. Direct requests and active goal reports cannot be silenced.
+Own posts use installed identity or signed outgoing provenance to avoid reply loops.
+
+Live backfill follows all cursors, retains partial progress and reports incomplete
+coverage. Source versions support paging/ranges, survive computer replacement and
+respect execution/installation fencing. Delayed older messages and reactions do not
+overwrite newer source state. The shared source view carries a durable watermark;
+private file-download locations stay in raw source storage and files use stable IDs.
+
+Removed the frozen mention-time view, peer-message exclusions, 16K inbound cut,
+50-message/three-page source cap and bounded attachment-text extraction. Updated
+Slack docs and the existing source panel; schema revision 6 records the migration.
+
+Validation: 516 broader Slack/journal cases passed, with four optional PostgreSQL
+pool cases skipped. The remaining failure was an exact old backfill-parameter
+fixture; its corrected focused case passes. Ten new source/collector contracts
+pass against PostgreSQL, and all 20 migration cases pass against PostgreSQL.
+Three browser cases pass at 1440/768/320, with the mobile screenshot inspected;
+the UI bundle builds. These are local contract/fixture tests, not a live Slack
+behavioral parity benchmark. Raw event retention/operational quotas, large source
+view efficiency and the non-durable adapter context path remain release concerns.

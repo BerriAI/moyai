@@ -119,14 +119,31 @@ class ContextStore:
         if message.get('role') == 'tool':
             self.db.execute('DELETE FROM pending WHERE call_id=?', (message.get('tool_call_id'),))
 
+    def source_view(self, source):
+        """Only replay newer Slack versions; earlier full views stay in history."""
+        with self.lock:
+            cursor = self.db.execute("SELECT coalesce(max(json_extract(message,'$.slack_source_through_seq')),0) FROM journal").fetchone()[0]
+            through = source.get('through_seq')
+            if type(through) is not int:
+                return source  # Legacy snapshots lack trustworthy version IDs.
+            self.pending_source_watermark = through
+            return {**source, 'after_seq': cursor,
+                    'messages': [m for m in source.get('messages', []) if m.get('seq', through) > cursor],
+                    'prior_context': 'Earlier source versions remain in saved history and slack_context.'}
+
     def append(self, message):
         with self.lock, self.db:
+            source_mark = getattr(self, 'pending_source_watermark', None) if message.get('role') == 'user' else None
+            if source_mark is not None:
+                message = {**message, 'slack_source_through_seq': source_mark}
             if self.relay is not None:
                 receipt = self.relay.journal({'action': 'append', 'entries': [
                     {'id': uuid4().hex, 'message': scrub_memory_history([message])[0]}]})
                 if receipt['seq'] != self.checkpoint()['seq'] + 1:
                     raise ContextUnavailable('Saved conversation advanced. Reconnect before continuing.')
             self._append(message)
+            if source_mark is not None:
+                self.pending_source_watermark = None
 
     def connect(self, relay, *, allow_import=True):
         """Import once, then hydrate the disposable cache from the durable owner."""

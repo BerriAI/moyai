@@ -439,7 +439,9 @@ class RunManager:
         from .progress import active_input
         with self.store.connect() as conn:
             activity_input_id = active_input(conn, run_id, run.get('message_id') or 0)
-        spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
+        inputs = self.store.rows('SELECT input_kind,source_json FROM messages WHERE id=? AND run_id=?', (run.get('message_id'), run_id))
+        source_input = inputs[0] if inputs else {'input_kind': 'user', 'source_json': '{}'}
+        spec = {'input_kind': source_input['input_kind'], 'input_source': json.loads(source_input['source_json']), "run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "attachments": uploads, "harness": run.get('harness', 'hermes'),
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
                 "github_repository_id": run.get("github_repository_id"),

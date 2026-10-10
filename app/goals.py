@@ -77,7 +77,7 @@ class Goals:
         return row
 
     def sources(self, conn, caller):
-        sources = [dict(r) for r in conn.execute("""SELECT id,content,user_id FROM messages WHERE run_id=? AND role='user'
+        sources = [dict(r) for r in conn.execute("""SELECT id,content,user_id FROM messages WHERE run_id=? AND role='user' AND input_kind='user'
             AND (id=? OR (steering_parent_id=? AND status='injected')) ORDER BY id""",
             (caller['id'], caller['active_message_id'], caller['active_message_id'])).fetchall()]
         for source in sources:
@@ -196,7 +196,7 @@ class Goals:
             sources = self.sources(conn, caller)
             index = [dict(r) for r in conn.execute('SELECT seq,size,digest FROM session_items WHERE run_id=? ORDER BY seq', (caller['id'],)).fetchall()]
             return {'goal': state, 'authenticated_inputs': sources, 'journal_index': index,
-                    'input_watermark': conn.execute("SELECT coalesce(max(id),0) FROM messages WHERE run_id=? AND role='user'", (caller['id'],)).fetchone()[0],
+                    'input_watermark': conn.execute("SELECT coalesce(max(id),0) FROM messages WHERE run_id=? AND role='user' AND input_kind='user'", (caller['id'],)).fetchone()[0],
                     'trigger': args.action, 'claim': args.note, 'remaining': args.remaining}
 
     async def review(self, caller, args, assess):
@@ -233,7 +233,7 @@ class Goals:
             state = self.current(conn, caller['id'])
             current_seq = conn.execute('SELECT coalesce(max(seq),0) FROM session_items WHERE run_id=?', (caller['id'],)).fetchone()[0]
             before_seq = snapshot['journal_index'][-1]['seq'] if snapshot['journal_index'] else 0
-            watermark = conn.execute("SELECT coalesce(max(id),0) FROM messages WHERE run_id=? AND role='user'", (caller['id'],)).fetchone()[0]
+            watermark = conn.execute("SELECT coalesce(max(id),0) FROM messages WHERE run_id=? AND role='user' AND input_kind='user'", (caller['id'],)).fetchone()[0]
             if (watermark != snapshot['input_watermark'] or state['id'] != snapshot['goal']['id'] or state['directive_revision'] != snapshot['goal']['directive_revision'] or
                     self.sources(conn, caller) != snapshot['authenticated_inputs'] or current_seq != before_seq):
                 return {'goal': state, 'review': {'verdict': 'continue', 'reasons': 'New inputs or work arrived during review. Incorporate them before requesting completion.'}}
@@ -251,7 +251,7 @@ class Goals:
         elif state['status'] == 'active':
             state.update(status='paused' if status == 'cancelled' else 'interrupted', reason='Execution ended: ' + status + '.')
         elif state['status'] == 'wrapping':
-            watermark = conn.execute("SELECT coalesce(max(id),0) FROM messages WHERE run_id=? AND role='user'", (run_id,)).fetchone()[0]
+            watermark = conn.execute("SELECT coalesce(max(id),0) FROM messages WHERE run_id=? AND role='user' AND input_kind='user'", (run_id,)).fetchone()[0]
             if state.get('terminal_reason') == 'completed' and watermark > (state.get('review') or {}).get('input_watermark', 0):
                 state.update(status='active', reason='New user input arrived after completion review; work remains pending.', review=None)
                 state.pop('terminal_reason', None)

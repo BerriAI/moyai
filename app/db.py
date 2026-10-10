@@ -300,6 +300,9 @@ class Store:
             if 'model' not in conn.column_names('messages'):
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             columns = conn.column_names('messages')
+            for name, default in (('input_kind', 'user'), ('source_json', '{}'), ('reply_policy', 'respond')):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             for name in ('revision', 'queue_locked', 'send_immediately'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
@@ -623,12 +626,14 @@ class Store:
             context.update(kind='thread', messages=messages,
                            truncated=any(item.get('text_truncated') for item in messages),
                            warning='Neighboring channel messages are excluded.')
+        elif getattr(self, 'slack_sources', None):
+            context.update(self.slack_sources.snapshot(run_id))
         return {**context, **row}
 
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
-            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,
-            COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
+            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
+            CASE WHEN m.input_kind='observation' THEN 'Slack observation' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),

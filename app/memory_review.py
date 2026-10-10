@@ -78,7 +78,7 @@ class MemoryReview:
             FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?''', (message_id,)).fetchone()
 
     def allowed_in(self, conn, source, *, owner='', revision=None):
-        if (not source or source['role'] != 'user' or source['status'] != 'completed'
+        if (not source or source['role'] != 'user' or source['input_kind'] != 'user' or source['status'] != 'completed'
                 or source['steering_parent_id'] or not source['chat_enabled'] or source['parent_run_id']
                 or source['deleted_at'] or source['automated'] or source['mode'] == 'demo'):
             return None
@@ -112,7 +112,7 @@ class MemoryReview:
         with self.store.connect() as conn:
             conn.begin_write()
             rows = conn.execute('''SELECT m.id FROM messages m JOIN runs r ON r.id=m.run_id
-                WHERE m.role='user' AND m.status='completed' AND m.steering_parent_id IS NULL
+                WHERE m.role='user' AND m.input_kind='user' AND m.status='completed' AND m.steering_parent_id IS NULL
                 AND m.created_at>=? AND r.chat_enabled=1 AND r.parent_run_id='' AND r.deleted_at=''
                 AND r.mode!='demo' AND NOT EXISTS(SELECT 1 FROM automation_runs a WHERE a.run_id=r.id)
                 ORDER BY m.id DESC LIMIT ?''', (since, self.settings.memory_review_backfill_limit)).fetchall()
@@ -158,7 +158,7 @@ class MemoryReview:
 
     def inputs(self, job):
         sources, remaining = [], 24000
-        for row in self.store.rows('''SELECT id,content FROM messages WHERE run_id=? AND user_id=? AND role='user'
+        for row in self.store.rows('''SELECT id,content FROM messages WHERE run_id=? AND user_id=? AND role='user' AND input_kind='user'
             AND status='completed' AND (id=? OR steering_parent_id=?) ORDER BY id''',
                 (job['run_id'], job['actor_id'], job['message_id'], job['message_id'])):
             text = row['content'][:remaining]

@@ -71,7 +71,11 @@ def test_every_requester_sends_as_bot(sender, channel, actor):
     result = invoke(sender, arguments={'channel': channel, 'text': 'Requested message'})
     assert result['message']['user'] == 'U99999999'
     assert len(requests) == 1 and requests[0].headers['Authorization'] == f'Bearer {BOT}'
-    assert json.loads(requests[0].content) == {'channel': channel, 'text': ('Tin' if actor == 'google:bob' else 'Moe') + ': Requested message',
+    from app.slack_origin import is_self
+    payload = json.loads(requests[0].content)
+    assert is_self(app.state.connectors, payload, channel)
+    payload.pop('metadata')
+    assert payload == {'channel': channel, 'text': ('Tin' if actor == 'google:bob' else 'Moe') + ': Requested message',
                                               'unfurl_links': False, 'unfurl_media': False}
     assert USER not in client.get(f'/api/runs/{run_id}').text
     assert BOT not in client.get(f'/api/runs/{run_id}').text

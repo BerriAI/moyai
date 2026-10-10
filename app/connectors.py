@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .db import Store, now
 from .connector_errors import ConnectorError
 from .github import GitHub, TOOLS as GITHUB_TOOLS
+from .slack_origin import metadata as slack_metadata
 
 
 class Args(BaseModel):
@@ -192,7 +193,7 @@ class Connectors:
         credentials = json.loads(self.security.decrypt(rows[0]["encrypted"]))
         bot = credentials.get("bot", {})
         return {"installed": bool(bot.get("access_token")), "team_id": bot.get("team", {}).get("id"),
-                "user_id": bot.get("bot_user_id"), "scopes": bot.get("scope", "").split(",")}
+                "user_id": bot.get("bot_user_id"), "bot_id": bot.get("bot_id"), "app_id": bot.get("app_id"), "scopes": bot.get("scope", "").split(",")}
 
     async def slack_bot_token(self):
         async with self.locks["slack"]:
@@ -399,7 +400,7 @@ class Connectors:
         if not self.allowed('slack_send'):
             raise ConnectorError("This operation is disabled by your organization's connection policy.")
         return await self.request('POST', 'https://slack.com/api/chat.postMessage', headers=headers,
-                                  json={'channel': channel, 'text': text,
+                                  json={'channel': channel, 'text': text, 'metadata': slack_metadata(self, channel, text),
                                         'unfurl_links': False, 'unfurl_media': False})
 
     def authorization_url(self, provider, state):
@@ -443,7 +444,7 @@ class Connectors:
             # by Slack search. User-token refresh must not erase the bot grant.
             user = result["authed_user"]
             if result.get("access_token"):
-                user["bot"] = {key: result[key] for key in ("access_token", "refresh_token", "expires_in", "bot_user_id", "team", "scope") if key in result}
+                user["bot"] = {key: result[key] for key in ("access_token", "refresh_token", "expires_in", "bot_user_id", "app_id", "bot_id", "team", "scope") if key in result}
                 if user["bot"].get("expires_in"):
                     user["bot"]["expires_at"] = time.time() + user["bot"]["expires_in"]
             result = user

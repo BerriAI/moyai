@@ -19,6 +19,7 @@ from agentchat.channels.slack_media import rich_payload, upload_slack_files
 from fastapi import HTTPException
 
 from . import captures, pr_delivery
+from .slack_origin import metadata as slack_metadata
 
 
 class MissingFileScope(RuntimeError):
@@ -223,7 +224,8 @@ class SlackWebhookChannel:
         payload, timestamp, metadata = self.owner.access.payload(card_id, binding, identity)
         target = {'ts': timestamp} if timestamp else {'thread_ts': binding['thread_ts']}
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/' + ('chat.update' if timestamp else 'chat.postMessage'),
-            headers={'Authorization': f'Bearer {token}'}, json={**payload, 'channel': binding['channel'], **target})
+            headers={'Authorization': f'Bearer {token}'}, json={**payload, 'channel': binding['channel'], **target,
+                'metadata': slack_metadata(self.owner.connectors, binding['channel'], payload['text'])})
         sent = response.get('ts')
         if response.get('ok') is not True or not isinstance(sent, str) or not sent or (timestamp and sent != timestamp):
             raise RuntimeError('Slack access card delivery could not be confirmed.')
@@ -238,7 +240,8 @@ class SlackWebhookChannel:
         binding = self.destination(source, identity)
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={**rich_payload(content),
-                'channel': binding['channel'], 'thread_ts': binding['thread_ts']})
+                'channel': binding['channel'], 'thread_ts': binding['thread_ts'],
+                'metadata': slack_metadata(self.owner.connectors, binding['channel'], rich_payload(content)['text'])})
         timestamp = response.get('ts')
         if response.get('ok') is not True or not isinstance(timestamp, str) or not timestamp:
             raise RuntimeError('Slack reply delivery could not be confirmed.')
@@ -276,6 +279,7 @@ class SlackWebhookChannel:
         response = await self.owner.connectors.request('POST', 'https://slack.com/api/chat.postMessage',
             headers={'Authorization': f'Bearer {token}'}, json={
                 **payload, 'channel': binding['channel'],
+                'metadata': slack_metadata(self.owner.connectors, binding['channel'], payload['text']),
                 'thread_ts': binding['thread_ts'],
             })
         if not response.get('ts'):

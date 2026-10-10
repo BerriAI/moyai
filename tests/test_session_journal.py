@@ -194,3 +194,17 @@ def test_real_relay_envelope_chunks_large_item_and_recovers_lost_commit_ack(jour
     assert receipt['seq'] == 1
     assert actions.count('upload') > 1 and actions.count('commit_upload') == 2
     assert relay.journal({'action': 'read'})['entries'][0]['message'] == message
+
+
+def test_slack_source_watermark_survives_computer_loss_without_repeating_old_context(journal, tmp_path):
+    _, caller, _, relay = journal
+    first = open_context(tmp_path / 'first', {'run_id': caller['id']}, relay)
+    source = {'through_seq': 10, 'messages': [{'seq': 8, 'text': 'Old peer reply'}, {'seq': 10, 'text': 'Latest source'}]}
+    assert len(first.source_view(source)['messages']) == 2
+    first.append({'role': 'user', 'content': 'Current task with the complete source view: ' + json.dumps(source)})
+    first.close()
+    second = open_context(tmp_path / 'renewed', {'run_id': caller['id']}, relay)
+    new_source = {**source, 'through_seq': 12, 'messages': [*source['messages'], {'seq': 12, 'text': 'Later edit'}]}
+    assert second.source_view(new_source)['messages'] == [{'seq': 12, 'text': 'Later edit'}]
+    assert 'Old peer reply' in json.dumps(second.history())
+    second.close()
