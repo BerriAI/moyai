@@ -81,7 +81,7 @@ def test_native_tool_search_preserves_broker_scope_and_direct_writes(workspace, 
     url = f'http://127.0.0.1:{server.server_port}'
     config = hermes_config({'model': 'test-model', 'broker_url': url}, url, tmp_path)
     # Only filesystem/executable locations differ from the sandbox config.
-    config['mcp_servers']['workspace'].update(command=python, args=[str(root / 'sandbox/mcp_bridge.py')])
+    config['mcp_servers']['workspace'].update(command=python, args=[str(root / 'agent/tools/mcp_bridge.py')])
     (profile / 'config.yaml').write_text(json.dumps(config))
     env = {key: os.environ[key] for key in ('PATH', 'HOME', 'TMPDIR') if key in os.environ}
     env.update(HERMES_HOME=str(profile), PYTHONPATH=source, HERMES_RUNTIME_DIR=str(tmp_path / 'runtimes'))

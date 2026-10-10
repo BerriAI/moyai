@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from .db import now
+from .runtime_files import RUNTIME_COMMAND, RUNTIME_ROOT, SANDBOX_PYTHON
 from .environment_templates import TEMPLATES
 from .connector_errors import ConnectorError
 
@@ -294,7 +295,8 @@ class Environments:
         return {**recipe, 'build_id': identity, 'snapshot_id': build['snapshot_id'], 'commit_sha': build['commit_sha']}
 
     async def rpc(self, sandbox, action, *, token=''):
-        proc = await sandbox.exec.aio('/usr/local/bin/python', '/opt/workspace-runner/environment_build.py', action,
+        proc = await sandbox.exec.aio(SANDBOX_PYTHON, '-I', '-c', RUNTIME_COMMAND,
+                                      RUNTIME_ROOT, 'environment_build.py', action,
                                       timeout=30, env={'MOYAI_CLONE_TOKEN': token} if token else {})
         output, _ = await asyncio.gather(proc.stdout.read.aio(), proc.stderr.read.aio())
         if await proc.wait.aio() != 0:

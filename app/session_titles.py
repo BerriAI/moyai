@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .db import now
+from .db import now, database
 
 log = logging.getLogger(__name__)
 INPUT_LIMIT = 4000
@@ -73,6 +73,7 @@ class SessionTitles:
         self.client = None
         self.agent = None
         self.running = False
+        self.poller = None
         if store.schema_updates:
             initialize_schema(store)
 
@@ -122,6 +123,8 @@ class SessionTitles:
                 retry=ModelRetrySettings(max_retries=0), extra_body={'stream': False}))
 
     def start(self):
+        if self.settings.moyai_runtime_role == 'api':
+            return
         if self.running or not (self.settings.session_titles_enabled
                 and self.settings.litellm_api_base.strip() and self.settings.litellm_api_key.strip()):
             return
@@ -133,17 +136,52 @@ class SessionTitles:
             self.running = True
             self.workers = [asyncio.create_task(self._worker(), name='session-title')
                             for _ in range(self.settings.session_title_concurrency)]
+            self.load_pending()
+            self.poller = asyncio.create_task(self.watch_pending(), name='session-title-requests')
             for row in self.store.rows(f'SELECT id FROM runs WHERE {ELIGIBLE} ORDER BY created_at DESC,id DESC LIMIT ?',
                                        (self.settings.session_title_backfill_limit,)):
                 self.schedule(row['id'])
         except Exception:
             log.warning('Session title startup unavailable')
 
+    def save_request(self, run_id):
+        api = self.settings.moyai_runtime_role == 'api'
+        if not self.running and not (api and self.settings.session_titles_enabled
+                and self.settings.litellm_api_base.strip() and self.settings.litellm_api_key.strip()):
+            return False
+        # Save the intent before queueing: API shutdown or a full local queue
+        # must not lose work owned by the coordinator. One request per session.
+        self.store.execute(f'INSERT INTO session_title_requests(run_id) SELECT id FROM runs WHERE id=? AND {ELIGIBLE} ON CONFLICT DO NOTHING', (run_id,))
+        return True
+
     def schedule(self, run_id):
-        if not self.running or run_id in self.pending or self.queue.full():
-            return
-        self.pending.add(run_id)
-        self.queue.put_nowait(run_id)
+        if self.save_request(run_id) and self.settings.moyai_runtime_role != 'api':
+            self.enqueue(run_id)
+
+    async def request(self, run_id):
+        # Keep database waits off the request loop; queue operations stay on it.
+        if await database(self.save_request, run_id) and self.settings.moyai_runtime_role != 'api':
+            self.enqueue(run_id)
+
+    def enqueue(self, run_id):
+        if run_id not in self.pending and not self.queue.full():
+            self.pending.add(run_id)
+            self.queue.put_nowait(run_id)
+
+    def load_pending(self):
+        for row in self.store.rows('SELECT run_id FROM session_title_requests ORDER BY run_id LIMIT ?', (QUEUE_LIMIT,)):
+            self.enqueue(row['run_id'])
+
+    async def watch_pending(self):
+        while True:
+            try:
+                rows = await database(self.store.rows,
+                    'SELECT run_id FROM session_title_requests ORDER BY run_id LIMIT ?', (QUEUE_LIMIT,))
+                for row in rows:
+                    self.enqueue(row['run_id'])
+            except Exception:
+                log.warning('Session title requests will retry')
+            await asyncio.sleep(1)
 
     async def _worker(self):
         while True:
@@ -151,14 +189,16 @@ class SessionTitles:
             try:
                 async with asyncio.timeout(self.settings.session_title_timeout_seconds):
                     await self._generate(run_id)
+                await database(self.store.execute, 'DELETE FROM session_title_requests WHERE run_id=?', (run_id,))
             except Exception:
-                # Do not log prompts, gateway errors, output, or credentials.
+                # A saved attempt prevents replaying an ambiguous model call.
+                # An unclaimed request remains recoverable after a DB failure.
                 log.warning('Session title generation unavailable')
             finally:
                 self.pending.discard(run_id)
                 self.queue.task_done()
 
-    async def _generate(self, run_id):
+    def claim(self, run_id):
         with self.store.connect() as conn:
             claimed = conn.execute(f'UPDATE runs SET title_attempted_at=? WHERE id=? AND {ELIGIBLE}',
                                    (now(), run_id)).rowcount
@@ -167,6 +207,10 @@ class SessionTitles:
             row = conn.execute("""SELECT substr(content,1,?) AS content FROM messages
                 WHERE run_id=? AND role='user' AND status!='deleted' ORDER BY id LIMIT 1""",
                                (INPUT_LIMIT, run_id)).fetchone()
+        return row
+
+    async def _generate(self, run_id):
+        row = await database(self.claim, run_id)
         await self.checkpoints.flush()
         if not row or not row['content'].strip():
             return
@@ -175,12 +219,16 @@ class SessionTitles:
         title = clean_title(result.final_output)
         if not title:
             return
-        self.store.execute("""UPDATE runs SET display_title=? WHERE id=? AND display_title=''
+        await database(self.store.execute, """UPDATE runs SET display_title=? WHERE id=? AND display_title=''
             AND agent_label='' AND parent_run_id=''""", (title, run_id))
         await self.checkpoints.flush()
 
     async def close(self):
         self.running = False
+        if self.poller:
+            self.poller.cancel()
+            await asyncio.gather(self.poller, return_exceptions=True)
+            self.poller = None
         for task in self.workers:
             task.cancel()
         await asyncio.gather(*self.workers, return_exceptions=True)
@@ -197,3 +245,4 @@ class SessionTitles:
 
 def initialize_schema(store):
     store.execute('CREATE TABLE IF NOT EXISTS session_title_settings (id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL)')
+    store.execute('CREATE TABLE IF NOT EXISTS session_title_requests (run_id TEXT PRIMARY KEY REFERENCES runs(id))')

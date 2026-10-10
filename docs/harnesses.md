@@ -21,7 +21,7 @@ Codex, Messages for Claude); selecting it does not establish provider compatibil
 
 ## Codex SDK
 
-`sandbox/codex_harness.py` uses the published Python `openai-codex==0.161.0`
+`agent/harnesses/codex_harness.py` uses the published Python `openai-codex==0.161.0`
 package and its pinned `openai-codex-cli-bin==0.161.0` app-server runtime directly.
 It replaces the LiteLLM harness wrapper for the existing `codex` selection.
 The SDK requires Python 3.10 or later; Moyai's sandbox uses Python 3.12 or later.
@@ -183,7 +183,7 @@ to block automatic restart.
 
 ## Claude Agent SDK
 
-`sandbox/claude_harness.py` calls the pinned Python **`ClaudeSDKClient`** directly.
+`agent/harnesses/claude_harness.py` calls the pinned Python **`ClaudeSDKClient`** directly.
 It does not use LiteLLM's harness wrapper or import/patch Hermes. The shared
 sandbox image retains Hermes and other runtimes for existing sessions and
 explicit selections. Claude runs inside that same isolated Modal machine.
@@ -248,11 +248,14 @@ enter the model request. Full request size still depends on the selected skills,
 notes, tools and history, not just the core prompt.
 
 Run `uv run python -m scripts.initial_context_demo --output /tmp/moyai-context-demo --delay 3`
-to record first-inference recall, direct skill loading and immediate revocation.
+to record first-inference recall, direct skill loading, memory-budget receipt
+agreement and immediate revocation.
 Open the generated `recording.html` to replay the timestamped output. This is a
 real local broker demonstration using disposable identities and a synthetic
 inference upstream; it does not evaluate model quality. Add `--baseline REF` to
-compare core Codex prompt characters against another local Git revision.
+compare core Codex prompt characters against another local Git revision. The demo
+uses the shared `agent.prompts.system_prompt` builder and accepts baselines from
+both before and after the agent-package extraction.
 
 The broker stores one encrypted, bounded native record per run, separately from
 public history, activity and downloadable artifacts. `/context/native` accepts
@@ -533,15 +536,17 @@ back to public context.
 
 ## Other runtimes and extension
 
-`sandbox/harness_registry.py` is the single catalog for API validation, UI model
+`agent/harnesses/harness_registry.py` is the single catalog for API validation, UI model
 choices, Slack selection and adapter creation. Each adapter implements
 `HarnessAgent`: `validate`, `run_conversation`, `interrupt` and `close`.
-`sandbox/agent.py` owns workspace preparation, shared prompts, goals, waits,
-checkpointing and delivery.
+`agent/agent.py` owns the shared conversation lifecycle, prompts, goals, waits,
+and saved context. Production and evaluations call it directly. `sandbox/agent.py`
+prepares the workspace and handles infrastructure and artifact collection. See
+[the agent directory](../agent/README.md) for prompts, tools, harnesses, and skills.
 
 OpenCode, Deep Agents, Tool Loop and Pi use `litellm.aagent_session`, or
 `litellm.aagent_resume` for eligible OpenCode and Pi conversations, with the named
-bindings in `sandbox/harness_bindings.py`. The pinned beta source
+bindings in `agent/harnesses/harness_bindings.py`. The pinned beta source
 is `36f96259f08d449bdc996ed36919c47b39ce527f`; the tested PyPI wheel alone does not
 contain that API. Claude Agent SDK stays pinned at `0.2.163`; the native Codex
 Python SDK and its bundled runtime are pinned at `0.161.0`. No upstream source

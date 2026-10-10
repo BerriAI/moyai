@@ -74,7 +74,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git worktree add --detach "$RUNNER_TEMP/moyai-before" "$BASE_SHA"
-          cp evals/agent.py evals/agent_worker.py evals/test_moyai.py evals/coding_cases.json "$RUNNER_TEMP/moyai-before/evals/"
+          cp evals/agent.py evals/test_moyai.py evals/coding_cases.json "$RUNNER_TEMP/moyai-before/evals/"
           mkdir -p "$GITHUB_WORKSPACE/lens-results"
           printf '%s\n' "$BASE_SHA" "$HEAD_SHA" > "$GITHUB_WORKSPACE/lens-results/tested-commits.txt"
       - name: Before — evaluate the PR base commit

@@ -92,7 +92,7 @@ The optional eval group is needed for the Lens SDK. Normal tests under `tests/` 
 
 ## 3. Compare the base and head revisions on a PR
 
-[The Lens workflow](../.github/workflows/lens-evals.yml) runs the same saved dataset and the same evaluation driver against separate base and head checkouts. Both use the same model and harness. Each execution records its actual source revision; the Python wrapper rejects an incorrect `LENS_VERSION` rather than attributing old code to a new commit.
+[The Lens workflow](../.github/workflows/lens-evals.yml) runs the same saved dataset and the same evaluation driver against separate base and head checkouts. Both use the same model and harness. Each checkout keeps its own execution worker so changes to the agent entrypoint can be compared with older revisions. Each execution records its actual source revision; the Python wrapper rejects an incorrect `LENS_VERSION` or uncommitted changes in `agent/`, `app/`, or `sandbox/` rather than attributing different code to a commit.
 
 Lens receives real outputs and linked agent/model/tool spans for every completed case. The driver waits for trace-delivery receipts before recording a successful result. Incomplete turns, pending tools, missing model/tool execution, and rejected trace delivery are errors, not passing cases. Independent case errors are recorded and the remaining cases still run.
 
@@ -100,9 +100,9 @@ The PR report should identify the dataset revision, source SHAs, scorer, case co
 
 ### What this test covers
 
-The test uses Moyai's real `create_agent` / `run_conversation` seam, native Codex or Claude adapter, context journal, broker model handling, tool activity, and OTLP tracing. It is a single-turn coding-harness regression test. Its concise coding-system instructions are fixed by the evaluation driver.
+The worker calls the same [`agent.agent.run`](../agent/agent.py) entrypoint as production, including the [system prompt](../agent/prompts/system.md), goal and continuation handling, native Codex or Claude adapter, context journal, broker model handling, tool activity, and OTLP tracing. The prompt receives the isolated workspace and session paths. There is no separate eval-only coding prompt.
 
-It does **not** start the production Modal/Substrate/Lambda lifecycle, Temporal scheduling, Slack, multi-agent coordination, or the full production session prompt. Those still need their own integration tests. The separate [deployment readiness checker](../evals/preflight.py) remains available for testing a deployed Moyai service; it is not required by the Python-in-CI flow.
+The cases exercise one coding task at a time. They do **not** start the production Modal/Substrate/Lambda lifecycle, Temporal scheduling, Slack, or multi-agent coordination. Those still need their own integration tests. The separate [deployment readiness checker](../evals/preflight.py) remains available for testing a deployed Moyai service; it is not required by the Python-in-CI flow.
 
 ## Require Lens before merging
 

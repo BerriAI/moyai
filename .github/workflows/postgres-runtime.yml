@@ -57,11 +57,11 @@ jobs:
       - name: Verify import, transactions, ownership and restart
         run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py tests/test_postgres_migration.py
       - name: Verify existing chat, queue, attachment and trace behavior on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_workspace.py tests/test_sessions.py tests/test_session_list_performance.py tests/test_pr_delivery.py tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_workspace.py tests/test_sessions.py tests/test_session_list_performance.py tests/test_session_titles.py tests/test_session_metadata.py tests/test_pr_delivery.py tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
       - name: Verify credentials, permissions, automations and settings on Postgres
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_credentials.py tests/test_skills.py tests/test_memory.py tests/test_initial_context.py tests/test_automations.py tests/test_automation_events.py tests/test_environments.py tests/test_infrastructure_costs.py tests/test_session_folders.py tests/test_spend.py tests/test_github_write_access.py tests/test_lens_feedback.py
       - name: Verify durable admission, gateway, identities and Slack recovery on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py tests/test_durable.py tests/test_startup_latency.py tests/test_automation_concurrency.py tests/test_harness_gateway.py tests/test_broker_transport.py tests/test_adoption.py tests/test_identities.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_activity.py
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py tests/test_durable.py tests/test_startup_latency.py tests/test_startup_overlap.py tests/test_automation_concurrency.py tests/test_harness_gateway.py tests/test_broker_transport.py tests/test_adoption.py tests/test_identities.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_activity.py
       - name: Demonstrate real HTTP requests across two server processes
         run: uv run --frozen --python 3.13 python scripts/postgres_runtime_smoke.py
       - name: Verify saved model choices and opt-in tiers on Postgres
@@ -163,7 +163,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Verify broker ownership, recovery, isolation and readiness
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_separate_broker.py
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_separate_broker.py tests/test_api_lifecycle.py tests/test_api_compatibility.py
       - name: Verify explicit migrations and runtime startup without DDL
         run: |
           uv run --frozen --python 3.13 pytest -q --tb=short tests/test_schema_migrations.py
@@ -172,6 +172,10 @@ jobs:
         run: uv run --frozen --python 3.13 python -m scripts.runtime_startup_fence_probe --output /tmp/moyai-startup-fences
       - name: Verify native inference survives a separate API process restart
         run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe
+      - name: Verify two APIs overlap without restarting the coordinator or inference
+        run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --replicated-api
+      - name: Verify compatible API source builds overlap and incompatible contracts fail closed
+        run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --mixed-build-api
       - name: Verify context recovery on both backends
         run: |
           uv run --frozen --python 3.13 pytest -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py

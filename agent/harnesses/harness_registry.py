@@ -5,10 +5,7 @@ capabilities here; implement Moyai's lifecycle contract in that adapter.
 """
 from dataclasses import dataclass
 from importlib import import_module
-try:
-    from .harness_agent import HarnessAgent
-except ImportError:
-    from harness_agent import HarnessAgent
+from agent.harnesses.harness_agent import HarnessAgent
 
 
 @dataclass(frozen=True)
@@ -23,7 +20,7 @@ class HarnessDefinition:
     durable_context: bool = False
 
     def create(self, **context) -> HarnessAgent:
-        module = import_module('.' + self.module, __package__) if __package__ else import_module(self.module)
+        module = import_module('agent.harnesses.' + self.module)
         return getattr(module, self.factory)(definition=self, **context)
 
     def public(self):

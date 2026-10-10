@@ -88,10 +88,7 @@ def tool_summary(name, arguments):
 def tool_details(name, value):
     # Reuse the trace sanitizer, but always omit personal library/credential
     # payloads from the shared conversation, independent of tracing settings.
-    try:
-        from .trace_content import private_tool, trace_content
-    except ImportError:
-        from trace_content import private_tool, trace_content
+    from agent.trace_content import private_tool, trace_content
     if private_tool(name):
         return None
     if name == 'browser_fill' and isinstance(value, dict):
@@ -117,10 +114,7 @@ class ActivityReporter:
         else:
             data['input'] = details
         if data['tool'] == 'view_image':
-            try:
-                from .tool_images import snapshot
-            except ImportError:
-                from tool_images import snapshot
+            from agent.tools.tool_images import snapshot
             data.update(snapshot(args.get('path')))
         with self.lock:
             self.starts[str(call_id)] = (time.monotonic(), data)
@@ -148,10 +142,7 @@ class ActivityReporter:
             # Separate events never enter the public activity stream. Capture
             # only after the tool completed; observation must not break work.
             try:
-                try:
-                    from .trace_content import private_tool, trace_content
-                except ImportError:
-                    from trace_content import private_tool, trace_content
+                from agent.trace_content import private_tool, trace_content
                 with self.lock:
                     start = self.trace_starts.pop(str(call_id), time.time_ns())
                 private = self.omit_private_tool_payloads and private_tool(data['tool'])

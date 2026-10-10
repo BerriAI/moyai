@@ -2,7 +2,7 @@
 import json
 from .database import Connection
 
-from sandbox.activity import focus_text, public_text
+from agent.activity import focus_text, public_text
 
 
 MAX_UPDATES = 2

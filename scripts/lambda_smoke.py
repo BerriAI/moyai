@@ -86,7 +86,7 @@ async def verify(backend):
             'assert subprocess.check_output(["/usr/local/bin/moyai-test-tool"]).strip()==b"executable"; '
             'assert subprocess.run(["tree","--version"],capture_output=True).returncode==0; '
             'assert os.environ["WORKSPACE_RUN_TOKEN"]=="child-only-capability"; '
-            'import sys; sys.path.insert(0,"/opt/workspace-runner"); from durable_process import status; '
+            'import sys; sys.path.insert(0,"/opt/workspace-runner"); from sandbox.durable_process import status; '
             'assert status(Path("/session/executions/uncertain"))["state"]=="uncertain"; print("restored")')
         assert result.strip() == 'restored'
         assert await restored.filesystem.read_bytes.aio('/usr/local/moyai-environment-proof') == b'prepared'

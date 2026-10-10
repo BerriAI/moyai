@@ -24,7 +24,7 @@ import app.harness_gateway as gateway
 from app.main import create_app
 from app.security import digest
 from sandbox.broker_relay import BrokerRelay
-from sandbox.claude_harness import ClaudeAgent
+from agent.harnesses.claude_harness import ClaudeAgent
 
 
 def main():
@@ -82,7 +82,7 @@ def main():
 
         agent = ClaudeAgent(spec={'model': model, 'max_iterations': 5, 'timeout': 90}, relay=relay,
             config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': token}}}},
             activity=SimpleNamespace(start=started, complete=lambda *args: None, commentary=lambda text: None),
             step=lambda: None, cwd=str(root), definition=None)

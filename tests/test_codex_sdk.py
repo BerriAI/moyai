@@ -13,12 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox import codex_harness
-from sandbox.activity import ActivityReporter
+from agent.harnesses import codex_harness
+from agent.activity import ActivityReporter
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore
-from sandbox.harness_agent import TurnJournal
-from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, recovery_marker
+from agent.context_store import ContextStore
+from agent.harnesses.harness_agent import TurnJournal
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, recovery_marker
 
 
 @pytest.fixture
@@ -1534,7 +1534,7 @@ def test_raw_output_before_native_start_preserves_receipt_lifecycle(codex_agent,
 
 
 def test_polling_counts_toward_limit_without_checkpointing_live_tools(codex_agent, monkeypatch):
-    from sandbox.transport_recovery import recovery_marker
+    from agent.transport_recovery import recovery_marker
     agent, _, store = codex_agent
     agent.context.spec['max_iterations'] = 2
     maintenance = []

@@ -37,8 +37,9 @@ model capacity only with upstream RPM/TPM and measured coordinator headroom.
 
 Run one server process per container. A worker can be replicated independently.
 There must still be exactly one coordinator; a second coordinator is refused.
-This is not support for arbitrary API replicas or uninterrupted coordinator
-deployments. The single API/model broker remains a capacity and availability
+This base topology does not support arbitrary API replicas or uninterrupted coordinator
+deployments. The opt-in [API role](api-replicas.md) adds compatible API build overlap
+under an independent singleton coordinator. The single API/model broker remains a capacity and availability
 boundary that must be measured before a 3,000-live-session production commitment.
 
 The opt-in [separate broker topology](separate-broker.md) moves sandbox inference
@@ -49,8 +50,10 @@ updates and does not enable multiple coordinators.
 
 All roles must use the same PostgreSQL schema, encryption/session keys, shared
 object destination, public URL, Temporal target/namespace/task queue, global
-budgets and application build. A stored fingerprint rejects mismatches. Set the
-same full `MOYAI_BUILD_SHA` on every process. Pool sizes and per-worker concurrency
+budgets. Coordinator/broker/worker builds must match; set the same full
+`MOYAI_BUILD_SHA` on those processes. API replicas may use a different build only
+under the [reviewed API compatibility contract](api-replicas.md#compatibility-contract-and-review).
+A stored fingerprint rejects mismatches. Pool sizes and per-worker concurrency
 may differ. Keep other runtime/provider settings aligned too: the fingerprint
 does not validate every application setting or contact the external services.
 

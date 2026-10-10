@@ -6,7 +6,7 @@ import pytest
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.progress import active_input, current_focus
-from sandbox.activity import ActivityReporter, public_text, result_status
+from agent.activity import ActivityReporter, public_text, result_status
 from test_durable import durable, drive  # noqa: F401
 
 
@@ -59,7 +59,7 @@ def test_connector_details_are_bounded_and_private_payloads_stay_omitted():
 
 def test_view_image_keeps_a_snapshot_and_rejects_outside_paths(tmp_path, monkeypatch):
     from PIL import Image
-    from sandbox import tool_images
+    from agent.tools import tool_images
     monkeypatch.setattr(tool_images, 'WORKSPACE', tmp_path)
     source = tmp_path / 'image.png'
     Image.new('RGB', (4, 4), 'red').save(source)
@@ -331,7 +331,7 @@ def test_focus_envelope_is_bounded_and_never_becomes_a_chat_update():
 
 def test_unknown_native_fields_and_messages_do_not_enter_diagnostics():
     from types import SimpleNamespace
-    from sandbox.sdk_failure import exception_details, codex_details, claude_details
+    from agent.harnesses.sdk_failure import exception_details, codex_details, claude_details
     assert codex_details({'codexErrorInfo': {'private-payload': {'httpStatusCode': 'secret'}},
                           'message': 'secret'}) == {'source': 'native_error'}
     assert claude_details(SimpleNamespace(subtype='private-subtype', is_error=True,
@@ -350,8 +350,8 @@ async def test_claude_hooks_hide_intermediate_failures_and_collapse_completed_pr
     import shutil
     import subprocess
     from types import SimpleNamespace
-    from sandbox.claude_harness import ClaudeAgent
-    from sandbox.harness_agent import TurnJournal
+    from agent.harnesses.claude_harness import ClaudeAgent
+    from agent.harnesses.harness_agent import TurnJournal
 
     node = shutil.which('node')
     if not node:

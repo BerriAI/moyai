@@ -8,7 +8,7 @@ from app.attachments import MAX_FILE, attachment_context, inspect_file
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.security import digest
-from sandbox.agent import conversation_prompt
+from agent.agent import conversation_prompt
 from test_attachments import png
 from test_audio import gateway, grant_files, slack_download
 from test_slack import event, signed, slack_app

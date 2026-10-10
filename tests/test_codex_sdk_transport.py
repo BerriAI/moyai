@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from sandbox.codex_harness import CodexAgent
+from agent.harnesses.codex_harness import CodexAgent
 from sandbox.broker_relay import BrokerRelay
-from sandbox.context_store import ContextStore, ContextUnavailable
+from agent.context_store import ContextStore, ContextUnavailable
 from test_workspace import workspace as broker_workspace
 from test_workspace import recovery_catalog  # noqa: F401 -- actual broker declarations
 
@@ -182,7 +182,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
     from dataclasses import replace
     from io import BytesIO
     import httpx
-    from sandbox.claude_harness import ClaudeAgent
+    from agent.harnesses.claude_harness import ClaudeAgent
     from test_claude_native_compaction import send_message
 
     workspace = tmp_path / 'native-tools'
@@ -259,7 +259,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
         agent = cls(spec={'model': state.app.state.settings.agent_model, 'timeout': 60,
             'max_iterations': tool_steps + 10},
             relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)), commentary=progress),
@@ -268,7 +268,7 @@ def native_background_case(tmp_path, monkeypatch, broker_workspace, harness, pro
             options = agent.options
             agent.options = lambda system: replace(options(system), tools=['Read'], allowed_tools=['Read'], mcp_servers={})
         try:
-            from sandbox.context_store import ContextUnavailable
+            from agent.context_store import ContextUnavailable
             try:
                 result = agent.run_conversation('Perform the fixture steps once and preserve the current task.',
                     conversation_history=[], system_message='Keep each tool receipt. Do not repeat completed actions.')
@@ -447,7 +447,7 @@ def test_native_astra_tools_checkpoint_and_fresh_context(tmp_path, monkeypatch, 
         return CodexAgent(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': max_iterations},
             relay=relay, config={'mcp_servers': {'workspace': {
                 'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': 'fixture-capability'}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)),
@@ -735,7 +735,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     agent = None
     native_errors, native_error_payloads, native_plugins, native_clients, native_threads = [], [], [], [], []
     from openai_codex.async_client import AsyncCodexClient
-    from sandbox.sdk_failure import codex_details
+    from agent.harnesses.sdk_failure import codex_details
     class ObservedClient(AsyncCodexClient):
         async def initialize(self):
             native_clients.append(self)
@@ -976,7 +976,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
     agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': max(60, outage_seconds + 45),
         'max_iterations': 2 if outcome == 'settle-limit' else 8},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
             complete=completed, commentary=lambda text: None,
@@ -1046,8 +1046,8 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
     from app.message_queue import MessageQueue
     from sandbox.broker_relay import BrokerRelay
     from sandbox.broker_transport import unseal
-    from sandbox.continuation import ActiveTurnSteering, AgentSteer
-    from sandbox.harness_registry import resolve
+    from agent.continuation import ActiveTurnSteering, AgentSteer
+    from agent.harnesses.harness_registry import resolve
     from openai_codex.async_client import AsyncCodexClient
     from openai_codex.errors import InvalidRequestError
     import asyncio
@@ -1143,7 +1143,7 @@ def native_steering_case(tmp_path, monkeypatch, during, *, progress=lambda text:
     relay.steering = steering
     agent = CodexAgent(spec={'model': 'openai/gpt-6-astra', 'max_iterations': 6, 'timeout': 30},
         relay=relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-            'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+            'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
             'env': {'WORKSPACE_BROKER_URL': relay.url, 'WORKSPACE_RUN_TOKEN': capability}}}},
         activity=SimpleNamespace(start=lambda *a: None, complete=lambda *a: None, commentary=lambda *a: None),
         step=lambda: steering.step(agent), cwd=str(tmp_path), definition=definition)
@@ -1213,7 +1213,7 @@ def native_automation_validation_case(tmp_path, monkeypatch, broker_workspace, h
     attempts, events, validation_seen = [], [], []
     guest = tmp_path / 'automation-native'
     guest.mkdir()
-    mcp_script = str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')
+    mcp_script = str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')
     original_config = entrypoint.hermes_config
 
     def local_config(spec, broker_url, workspace):

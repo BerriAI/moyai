@@ -12,10 +12,7 @@ from cryptography.fernet import Fernet, InvalidToken
 CONTENT_TYPE = 'application/vnd.moyai.broker-v1'
 MAX_BODY = 5 * 1024 * 1024
 MAX_WIRE = 7 * 1024 * 1024
-try:
-    from .github_limits import MAX_PUBLICATION_BODY
-except ImportError:
-    from github_limits import MAX_PUBLICATION_BODY
+from agent.tools.github_limits import MAX_PUBLICATION_BODY
 
 
 def body_limit(path):

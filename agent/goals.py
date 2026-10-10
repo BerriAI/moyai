@@ -10,10 +10,7 @@ import threading
 import time
 import uuid
 
-try:
-    from .activity import result_status, public_text
-except ImportError:
-    from activity import result_status, public_text
+from agent.activity import result_status, public_text
 
 HELP = ('Use /goal <objective> to keep working until verified completion. '
         'Commands: /goal status, /goal pause, /goal resume, /goal clear. '

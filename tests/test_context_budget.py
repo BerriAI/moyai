@@ -137,7 +137,7 @@ def test_all_routes_check_injected_input_before_admission(workspace, monkeypatch
 
 
 def test_compaction_splits_to_fit_and_advances_only_returned_prefix(workspace, monkeypatch, tmp_path):
-    from sandbox.context_store import ContextStore
+    from agent.context_store import ContextStore
     app, client = workspace
     async def small_limits(model): return limits(7000, 1000)
     monkeypatch.setattr(app.state.context_budget, 'limits', small_limits)

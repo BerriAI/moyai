@@ -9,6 +9,7 @@ import argparse
 import ast
 import json
 from pathlib import Path
+from string import Template
 import subprocess
 from tempfile import TemporaryDirectory
 import time
@@ -23,10 +24,20 @@ from app.context_budget import ModelContextLimits, counting_input
 from app.main import create_app
 from app.memory import MAX_CONTEXT
 from app.security import digest
-from sandbox.tool_guidance import tool_guidance
+from agent.prompts import system_prompt
+from agent.tools.tool_guidance import tool_guidance
 
 
-def prompt_size(source):
+def baseline_prompt_size(root, revision):
+    def read(path):
+        return subprocess.check_output(['git', 'show', revision+':'+path], cwd=root, text=True)
+
+    # Support revisions on both sides of the agent-package extraction.
+    if subprocess.check_output(['git', 'ls-tree', '--name-only', revision, 'agent/prompts/system.md'], cwd=root):
+        template = ' '.join(read('agent/prompts/system.md').splitlines())
+        return len(Template(template).substitute(workspace='/workspace', session='/session',
+            tool_guidance=tool_guidance('codex'), delegation='', slack=''))
+    source = read('sandbox/agent.py')
     assignment = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == 'system_message' for target in node.targets))
     prompt = eval(compile(ast.Expression(assignment.value), '<runtime-prompt>', 'eval'),
@@ -149,10 +160,10 @@ def demonstrate(output, delay, baseline):
                 log('5. Private context stays out of public run data and tool results\n'
                     '   Native-state reuse is disabled for this private turn, as required by existing policy.')
                 root = Path(__file__).resolve().parents[1]
-                current = prompt_size((root/'sandbox/agent.py').read_text())
+                current = len(system_prompt({'harness':'codex'}))
                 sizes = {'after':current}
                 if baseline:
-                    before = prompt_size(subprocess.check_output(['git','show',baseline+':sandbox/agent.py'],cwd=root,text=True))
+                    before = baseline_prompt_size(root, baseline)
                     sizes['before'] = before
                     log(f'6. Core Codex prompt: {before:,} -> {current:,} characters ({100*(1-current/before):.1f}% smaller)\n'
                         '   Plain web turn, no child/Slack/project additions. Not a token or latency benchmark.')

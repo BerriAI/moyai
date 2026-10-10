@@ -11,8 +11,8 @@ import pytest
 from app.config import Settings
 from app.db import Store
 from app.tracing import AgentTracing
-from sandbox.activity import ActivityReporter
-from sandbox.trace_content import trace_content
+from agent.activity import ActivityReporter
+from agent.trace_content import trace_content
 from test_spend import active
 from test_workspace import workspace
 

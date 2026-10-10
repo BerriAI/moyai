@@ -424,7 +424,7 @@ def test_inference_rechecks_origin_after_await(workspace, monkeypatch, change, b
 
 @pytest.mark.parametrize('first', ['oversized', 'incomplete', 'empty', 'unavailable'])
 def test_summary_recovers_without_cutting_output_or_replaying_actions(workspace, monkeypatch, tmp_path, first):
-    from sandbox.context_store import ContextStore, SUMMARY_BYTES
+    from agent.context_store import ContextStore, SUMMARY_BYTES
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = app.state.store.create_run('recover summary', '', 'modal', [], model='openai/gpt-6-astra')
@@ -476,7 +476,7 @@ def test_summary_recovers_without_cutting_output_or_replaying_actions(workspace,
 
 
 def test_repeated_rejection_keeps_checkpoint_and_reports_reason(workspace, monkeypatch, tmp_path):
-    from sandbox.context_store import ContextStore, ContextUnavailable
+    from agent.context_store import ContextStore, ContextUnavailable
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = app.state.store.create_run('recover summary', '', 'modal', [])
@@ -576,7 +576,7 @@ def test_recovery_does_not_reopen_expired_transport_envelope(workspace, monkeypa
 def test_background_summary_survives_answer_and_cold_restore_without_losing_tail(workspace, monkeypatch, tmp_path):
     import asyncio
     import threading
-    from sandbox.context_store import ContextStore
+    from agent.context_store import ContextStore
     from test_workspace import wait_for
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
@@ -637,7 +637,7 @@ def test_background_summary_survives_answer_and_cold_restore_without_losing_tail
 def test_foreground_preempts_background_gateway_and_interrupted_job_retries(workspace, monkeypatch, tmp_path):
     import asyncio
     import threading
-    from sandbox.context_store import ContextStore
+    from agent.context_store import ContextStore
     from test_workspace import wait_for
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
@@ -684,7 +684,7 @@ def test_foreground_preempts_background_gateway_and_interrupted_job_retries(work
 
 def test_late_maintenance_admission_cannot_charge_a_new_turn(workspace, monkeypatch, tmp_path):
     from app.context_budget import Budget
-    from sandbox.context_store import ContextStore
+    from agent.context_store import ContextStore
     from test_workspace import wait_for
     app, client = workspace
     db = app.state.store

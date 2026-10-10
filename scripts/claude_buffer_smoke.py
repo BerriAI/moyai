@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tests'))
 
-from sandbox.claude_harness import SDK_MAX_BUFFER_SIZE
+from agent.harnesses.claude_harness import SDK_MAX_BUFFER_SIZE
 from test_claude_message_buffer import large_image_case
 
 

@@ -50,7 +50,8 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
         original = PostgresConnection.execute
 
         def read_only_construction(conn, sql, params=()):
-            if not sql.strip().upper().startswith('SELECT') and 'runtime_policy' not in sql:
+            if not sql.strip().upper().startswith('SELECT') and not any(
+                    table in sql for table in ('runtime_policy', 'runtime_api_policy')):
                 pytest.fail('Unexpected runtime constructor write: ' + sql[:80])
             return original(conn, sql, params)
 
@@ -74,7 +75,7 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
                 conn.create_view('accidental_view', 'SELECT 1')
 
 
-@pytest.mark.parametrize('role', ['standalone', 'coordinator', 'worker', 'broker'])
+@pytest.mark.parametrize('role', ['standalone', 'coordinator', 'worker', 'broker', 'api'])
 def test_migrator_excludes_every_runtime_owner(split_settings, role):
     settings = ready(split_settings)
     api = main.create_app(settings)
@@ -240,3 +241,30 @@ def test_opt_in_preserves_existing_data_keys_and_runtime_policy(split_settings):
         assert store.rows('SELECT status FROM model_requests WHERE id=?', (request,))[0]['status'] == 'pending'
     finally:
         replacement.state.store.close()
+
+
+def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
+    # Reproduce revision 1's receipt and schema: the only new table is the
+    # durable title inbox and deletion scan index. Existing state survives.
+    settings = ready(split_settings)
+    app = main.create_app(settings)
+    run = app.state.store.create_run('Saved before API split', '', 'demo', [], chat_enabled=True)
+    before = {name: app.state.store.rows('SELECT * FROM ' + name)
+              for name in ('runs', 'messages', 'sandbox_settings', 'runtime_policy')}
+    app.state.store.close()
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE session_title_requests')
+        conn.execute('DROP INDEX idx_runs_pending_deletion')
+        conn.execute('UPDATE schema_state SET revision=1')
+    with pytest.raises(DatabaseError, match='incompatible'):
+        main.create_app(settings)
+    ready(settings)
+    app = main.create_app(settings)
+    try:
+        assert {name: app.state.store.rows('SELECT * FROM ' + name) for name in before} == before
+        assert app.state.store.rows('SELECT * FROM session_title_requests') == []
+        assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_runs_pending_deletion'")
+        assert app.state.store.run(run['id'])['prompt'] == 'Saved before API split'
+    finally:
+        app.state.store.close()

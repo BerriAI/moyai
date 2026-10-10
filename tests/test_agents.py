@@ -15,7 +15,7 @@ from app.config import Settings
 from app.db import Store
 from app.spend import Spend
 from app.temporal_runtime import TemporalRunManager
-from sandbox.continuation import AgentWait
+from agent.continuation import AgentWait
 from test_durable import durable, drive, transport_failure_report
 from test_workspace import workspace
 from test_spend import active, sign_in

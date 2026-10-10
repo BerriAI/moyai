@@ -98,8 +98,8 @@ class TemporalRunManager(DurableRunner):
             raise RuntimeError('Configure a stable ENCRYPTION_KEY before enabling Temporal')
         if self.settings.moyai_runtime_role in {'standalone', 'worker'}:
             self.prepared_task = asyncio.create_task(self.prepared.serve())
-        if self.settings.moyai_runtime_role in {'worker', 'broker'}:
-            # Brokers need a client for run-scoped automation tools, but never
+        if self.settings.moyai_runtime_role in {'worker', 'broker', 'api'}:
+            # Brokers and APIs need a client for request-scoped tools, but never
             # consume execution activities, dispatch wakes or recover sessions.
             self.dispatch_task = asyncio.create_task(self.serve())
             self.diagnostics_task = asyncio.create_task(watch_event_loop())
@@ -145,7 +145,7 @@ class TemporalRunManager(DurableRunner):
                     if self.ready.is_set() and not self.closing:
                         return
         except TimeoutError:
-            raise RuntimeError('Temporal did not become ready before the broker startup deadline.') from None
+            raise RuntimeError('Temporal did not become ready before the runtime startup deadline.') from None
 
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
@@ -200,7 +200,7 @@ class TemporalRunManager(DurableRunner):
                     # seconds per 200 wakes adds 28 seconds to a 3,000-row burst.
                     # Empty/partial batches and failures retain bounded polling.
                     if not backlog:
-                        if dispatch_failed or self.settings.moyai_runtime_role in {'worker', 'broker'}:
+                        if dispatch_failed or self.settings.moyai_runtime_role in {'worker', 'broker', 'api'}:
                             await asyncio.sleep(2)
                         else:
                             await self.wait_for_dispatch()

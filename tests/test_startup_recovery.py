@@ -131,7 +131,7 @@ def test_repository_metadata_reconnects_only_during_startup(route, name, startin
 @pytest.mark.parametrize('outcome', ['transient', 'legacy', 'git_failure', 'exhausted',
                                       'slow_success', 'slow_retry', 'slow_exhausted'])
 def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp_path, monkeypatch, outcome):
-    from sandbox import github_tools, harness_registry
+    from agent.tools import github_tools
     from sandbox.startup import _read_with_reconnect
     from sandbox.broker_relay import BrokerRelay
     from sandbox.access_transport import open_broker
@@ -196,7 +196,7 @@ def test_agent_repository_startup_uses_relay_without_replaying_git(checkout, tmp
     monkeypatch.setattr(agent, 'BrokerRelay', relay_factory)
     monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))
     monkeypatch.setattr(agent, 'emit', lambda kind, message, data=None, **extra: events.append((kind, data, extra)))
-    monkeypatch.setattr(harness_registry, 'create_agent', enter_agent)
+    monkeypatch.setattr('agent.agent.create_agent', enter_agent)
     monkeypatch.setattr(github_tools, 'git', checked_git)
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-token')
     if outcome == 'exhausted':
@@ -251,8 +251,8 @@ def test_reconnecting_capability_still_works_and_stop_revokes_it(workspace):
     for outcome in ('transient', 'exhausted')
 ] + [('codex', outcome) for outcome in ('401', '403', 'invalid', 'late', 'followup', 'control', 'timeout')])
 def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, outcome):
-    from sandbox.context_store import ContextStore
-    from sandbox.harness_registry import resolve
+    from agent.context_store import ContextStore
+    from agent.harnesses.harness_registry import resolve
     from importlib import import_module
     events, reads, invocations = [], [], []
     def started():
@@ -283,7 +283,7 @@ def test_context_startup_readiness_and_receipts(tmp_path, monkeypatch, harness, 
         return {'completed': True, 'final_response': 'Done', 'messages': runtime.journal.messages,
                 **({'pending_steer': 'Continue'} if len(invocations) == 1 and outcome in {'late', 'followup'} else {})}
     definition = resolve(harness)
-    runtime_type = getattr(import_module('sandbox.' + definition.module), definition.factory)
+    runtime_type = getattr(import_module('agent.harnesses.' + definition.module), definition.factory)
     monkeypatch.setattr(runtime_type, 'validate', lambda self: None)  # Dependencies are covered by SDK tests.
     monkeypatch.setattr(runtime_type, '_run', invoke)  # Scripted inference, real startup/journal/HTTP.
     if harness == 'opencode':
@@ -363,6 +363,7 @@ def test_agent_startup_marker_precedes_any_inference(tmp_path, monkeypatch):
     relay.start = lambda: relay
     monkeypatch.setattr(agent, 'BrokerRelay', lambda *args, **kwargs: relay)
     monkeypatch.setattr(agent, 'apply_hermes_patches', lambda: None)  # This fixture supplies a fake Hermes runtime.
+    monkeypatch.setattr('agent.harnesses.hermes_harness.prepare_hermes_imports', lambda: None)
     monkeypatch.setattr(agent, 'prepare_attachments', lambda *args, **kwargs: None)
     monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
     monkeypatch.setattr(agent, 'Path', lambda value: tmp_path / str(value).lstrip('/'))

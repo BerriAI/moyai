@@ -5,10 +5,7 @@ import json
 import threading
 from uuid import uuid4
 
-try:
-    from .history_reference import history_prompt
-except ImportError:
-    from history_reference import history_prompt
+from agent.history_reference import history_prompt
 
 
 @dataclass(frozen=True)

@@ -8,10 +8,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.security import digest
-from sandbox.continuation import ActiveTurnSteering
-from sandbox.context_store import ContextStore
-from sandbox.harness_agent import HarnessAgent, HarnessInputs, TurnJournal
-from sandbox.harness_registry import resolve
+from agent.continuation import ActiveTurnSteering
+from agent.context_store import ContextStore
+from agent.harnesses.harness_agent import HarnessAgent, HarnessInputs, TurnJournal
+from agent.harnesses.harness_registry import resolve
 from test_message_queue import queue, change  # noqa: F401
 from test_workspace import workspace  # noqa: F401
 

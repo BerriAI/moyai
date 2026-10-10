@@ -381,3 +381,27 @@ async def test_reclaim_skips_uncertain_pool_entry_before_evicting_user_workspace
     assert await manager.prepared.reclaim()
     assert not cloud.machines[0].alive
     assert manager.store.rows('SELECT name FROM prepared_sandboxes') == [{'name': 'uncertain'}]
+
+
+@pytest.mark.parametrize('relative', ['agent/agent.py', 'agent/prompts/system.md',
+                                      'agent/skills/example/SKILL.md', 'sandbox/hermes-steering.patch'])
+def test_prepared_pool_identity_includes_every_runtime_source(durable, tmp_path, monkeypatch, relative):
+    from app import prepared_sandboxes
+
+    manager, _, _ = durable
+    root = tmp_path / 'source'
+    (root / 'app').mkdir(parents=True)
+    (root / 'app/workspace_image.py').write_text('image recipe')
+    changed = root / relative
+    changed.parent.mkdir(parents=True, exist_ok=True)
+    changed.write_text('original runtime')
+    monkeypatch.setattr(prepared_sandboxes, '__file__', str(root / 'app/prepared_sandboxes.py'))
+    baseline = prepared_sandboxes.PreparedSandboxes(manager).build
+    changed.write_text('updated runtime')
+    assert prepared_sandboxes.PreparedSandboxes(manager).build != baseline
+    changed.write_text('original runtime')
+    assert prepared_sandboxes.PreparedSandboxes(manager).build == baseline
+    changed.with_suffix('.txt').write_text('not a shipped runtime source')
+    assert prepared_sandboxes.PreparedSandboxes(manager).build == baseline
+    changed.rename(changed.with_name('renamed' + changed.suffix))
+    assert prepared_sandboxes.PreparedSandboxes(manager).build != baseline
