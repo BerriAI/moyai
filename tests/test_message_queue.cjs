@@ -164,3 +164,16 @@ test('automatic follow-ups appear in the conversation while ordinary messages re
   c.render({...run,messages:[active,automatic]});assert.equal(b.element.hidden,true);
   assert.deepEqual(queue.presentation({...run,status:'queued',messages:[message,automatic]}),{queued:[message],transcript:[automatic]});
 });
+
+test('a just-sent placeholder shows Sending… without queue controls until the server confirms it',async()=>{
+  const b=controller();
+  const placeholder={...message,id:2**52+1,pending:true,content:'is this done ?'};
+  b.setRun({status:'running',messages:[active,{...message},placeholder]});
+  const card=b.element.html.slice(b.element.html.indexOf(`data-queued-row="${placeholder.id}"`));
+  assert.match(card,/Sending…/);
+  assert.doesNotMatch(card.slice(0,card.indexOf('</article>')),/data-queue-action/);
+  assert.equal(queue.canEdit(placeholder,'alice','admin'),false);
+  await b.ctrl.act(placeholder.id,'steer');
+  assert.deepEqual(b.requests,[]);
+  assert.deepEqual(b.toasts,[]);
+});

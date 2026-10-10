@@ -856,6 +856,18 @@ def _create_app(settings, store):
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):
+        # Validation and the enqueue transaction stay off the event loop so a
+        # slow database cannot stall other conversations' streams and pages.
+        message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+        await checkpoints.flush()
+        # Resume even for a duplicate whose first acknowledgement was lost.
+        if not metadata_request:
+            await session_titles.request(run_id)
+            if await run_in_threadpool(store.has_queued_messages, run_id):
+                manager.submit(await run_in_threadpool(store.run, run_id))
+        return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
+
+    def enqueue_follow_up(run_id: str, body: ChatMessage, request: Request):
         security.require(request, mutation=True)
         run = store.run(run_id)
         if not run:
@@ -884,13 +896,7 @@ def _create_app(settings, store):
                                        **({'metadata_request': True} if metadata_request else {}))
         except ValueError as exc:
             raise HTTPException(409, str(exc))
-        await checkpoints.flush()
-        # Resume even for a duplicate whose first acknowledgement was lost.
-        if not metadata_request:
-            await session_titles.request(run_id)
-            if store.has_queued_messages(run_id):
-                manager.submit(store.run(run_id))
-        return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
+        return message, created, metadata_request
 
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel(run_id: str, request: Request):
