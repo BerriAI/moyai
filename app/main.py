@@ -1567,7 +1567,7 @@ def _create_app(settings, store):
         payload = {key: value for key, value in body.items() if key in allowed}
         native_sessions.observe_scope(run)
         payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
-        skill_context, memory_context = await harness_gateway.library_context(run, selected_model)
+        skill_context, memory_context = await harness_gateway.library_context(run, selected_model, payload=payload)
         if memory_context:
             # Resolve references for the current requester on every inference.
             # No retrieved note body goes into sandbox history or tool output.

@@ -42,8 +42,19 @@ def run_with_context_recovery(agent, prompt, history, invoke):
     directory = ctx.spec.get('history_reference_dir', ctx.cwd)
     native = getattr(agent, 'native', None)
     typed_replay = getattr(agent, 'typed_replay', False)
-    agent.replay_history = history
-    current = prompt if typed_replay or (native is not None and native.resumed) else agent.journal.prompt(prompt, history, cwd=directory)
+    from agent.context_views import current_view, history_view
+    def seed(current_prompt, records, *, resumed=False):
+        window = getattr(agent, 'compaction_window', None)
+        # Conservative UTF-8 allocation leaves room for native instructions,
+        # tool schemas, private context and output. The broker still counts the
+        # complete provider request; this is a view, never a retention cap.
+        allocation = window // 2 if window else None
+        current = current_view(current_prompt, directory=directory,
+                               budget=allocation // 2 if allocation else None)
+        viewed = history_view(records, directory=directory, budget=allocation) if not resumed else []
+        agent.replay_history = viewed
+        return current if typed_replay or resumed else agent.journal.prompt(current, viewed, cwd=directory)
+    current = seed(prompt, history, resumed=native is not None and native.resumed)
     previous = None
     attempts = 0
     timeout = ctx.spec.get('timeout')
@@ -90,10 +101,10 @@ def run_with_context_recovery(agent, prompt, history, invoke):
         ctx.activity.commentary('Compacting saved context before continuing. Completed tool receipts are preserved.')
         store.compact(ctx.relay.compact, force=True, summary_bytes=target)
         history = store.history()
-        agent.replay_history = history
         handoff = (
             'Continue the unfinished task from the saved receipts. This is a context handoff, not a new request. '
             'Do not repeat completed actions.\n\nOriginal current request:\n' + prompt)
-        current = handoff if typed_replay else agent.journal.prompt(handoff, history, cwd=directory)
+        agent.compaction_window = pressure['input_budget']
+        current = seed(handoff, history)
         if native is not None:
             native.begin(resume=False)

@@ -70,6 +70,21 @@ async def test_output_room_is_reserved_without_changing_generation_fields(monkey
 
 
 @pytest.mark.asyncio
+async def test_view_allocation_uses_output_allowance_without_counting_partial_input(monkeypatch):
+    budget = service(monkeypatch, lambda req: pytest.fail('Unexpected remote count'),
+                     {'alias': limits(16000, 8000)})
+    async def count(*args, **kwargs):
+        pytest.fail('Only the final prepared request may be counted')
+    monkeypatch.setattr(budget, 'count', count)
+    default = await budget.allocation({'model': 'alias'})
+    explicit = await budget.allocation({'model': 'alias', 'max_output_tokens': 4000})
+    assert default.output_tokens == 8000 and explicit.output_tokens == 4000
+    assert explicit.input_budget > default.input_budget
+    with pytest.raises(HTTPException):
+        await budget.allocation({'model': 'alias', 'max_output_tokens': 8001})
+
+
+@pytest.mark.asyncio
 async def test_full_serialized_input_and_images_reach_counter(monkeypatch):
     seen = []
     def upstream(request):

@@ -322,3 +322,26 @@ final MCP suite passes all 32 cases. The live Slack-source regression expectatio
 now preserves the current attributed reference. Independent agent runtime and
 lazy computer acquisition are still in progress and are not enabled by this
 prerequisite.
+
+## Model-sized cold replay (WP2)
+
+Cold starts now derive their history and current-request views from the selected
+model's verified input window. Complete scrubbed typed records remain in immutable,
+content-addressed JSONL references outside repositories, in addition to the server
+journal. Earlier references stay valid as later views are created. Fresh child
+or stale-workspace resets remove inherited references. Codex receives typed replay;
+adapters without a public replay API retain a labeled reference seed. A native
+resume does not redundantly inject old history. These conservative UTF-8 allocations
+are views, not retention limits or optimal token packing.
+
+Library allocation now resolves capacity without counting a preliminary empty
+request. It honors the actual request's output allowance; admission still measures
+the complete request after tool schemas, private context and media are present.
+
+Validation: 294 context, gateway, library and real Claude SDK transport cases pass,
+including all 30 SDK/model-routing/recovery fixture combinations. Another 52
+allocation/lifecycle cases pass; the broader run passed 276 cases and its 15 stale
+typed-replay assertions were corrected and covered by that 52-case rerun. The SDK
+tests use simulated inference responses, not live model-quality comparisons.
+Reference availability across future runtime/filesystem changes and typed replay
+qualification beyond Codex remain explicit WP2/WP8 work.
