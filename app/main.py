@@ -27,7 +27,7 @@ from .db import Store, now, database
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
-from .security import Security, digest
+from .security import Security, Throttle, digest
 from .cloudflare_access import CloudflareAccess, CloudflareAccessMiddleware
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
@@ -251,7 +251,7 @@ def _create_app(settings, store):
     model_tools = ModelTools(store, settings)
     manager.automations = automations
     slack.automation_events = automations.events
-    login_attempts = []
+    login_attempts, all_login_failures = Throttle(10), Throttle(300)
     owns_inference = settings.moyai_runtime_role == 'broker' or (
         settings.moyai_runtime_role in {'standalone', 'coordinator'} and not settings.moyai_separate_broker)
 
@@ -530,15 +530,17 @@ def _create_app(settings, store):
         security.check_origin(request)
         if not settings.password_login_enabled:
             raise HTTPException(403, "Use Google to sign in to this workspace.")
-        login_attempts[:] = [stamp for stamp in login_attempts if stamp > time.monotonic() - 60]
-        if len(login_attempts) >= 10:
+        client = security.client_key(request)
+        # Per-client limit, plus a backstop on total guesses from many addresses.
+        if login_attempts.blocked(client) or all_login_failures.blocked("all"):
             raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
-        login_attempts.append(time.monotonic())
         if settings.workspace_password and hmac.compare_digest(body.password, settings.workspace_password):
             role = "admin"
         elif settings.workspace_member_password and hmac.compare_digest(body.password, settings.workspace_member_password):
             role = "member"
         else:
+            login_attempts.record(client)
+            all_login_failures.record("all")
             raise HTTPException(401, "Incorrect workspace password.")
         response = JSONResponse({"authenticated": True, "role": role})
         security.new_session(response, role)

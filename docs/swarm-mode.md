@@ -18,7 +18,7 @@ The duration is a wall-clock deadline from creation, including queuing, sandbox 
 
 The API accepts `swarm: {"budget_seconds": 300}` on `POST /api/runs` (60–86,400 seconds). Run details include `swarm.status`, `budget_seconds`, `ends_at`, `round`, and `reason`. Controls are `POST /api/runs/{id}/swarm/pause`, `POST /api/runs/{id}/swarm/resume`, and the existing `POST /api/runs/{id}/cancel`. They require normal authentication and mutation protection. Creation, mission intent, the initial message, all 10 workers, their group, and all durable dispatch wakes commit atomically; continuation messages, round advancement, and their dispatch wake do likewise.
 
-Schema revision 4 adds `swarm_missions` and pinned per-worker runtime assignments. For deployments using explicit PostgreSQL migrations, stop runtime owners and run the existing offline migration before starting this version. This feature does not deploy or migrate an existing production installation automatically.
+Schema revision 5 adds `swarm_missions` and pinned per-worker runtime assignments. For deployments using explicit PostgreSQL migrations, stop runtime owners and run the existing offline migration before starting this version. This feature does not deploy or migrate an existing production installation automatically.
 
 ## Interface preview
 
