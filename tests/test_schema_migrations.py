@@ -220,3 +220,23 @@ def test_schema_initializers_have_a_versioned_manifest():
     assert list(versions) == [str(i) for i in range(1, migration.SCHEMA_REVISION + 1)]
     assert versions[str(migration.SCHEMA_REVISION)] == signature, (
         'Schema changed. Increment SCHEMA_REVISION and append its source digest to app/schema_versions.json: ' + signature)
+
+
+def test_opt_in_preserves_existing_data_keys_and_runtime_policy(split_settings):
+    api = main.create_app(split_settings)
+    store = api.state.store
+    run = store.create_run('Existing saved session', '', 'modal', [])
+    request = api.state.spend.begin(run, 'synthetic-model')
+    preserved = {
+        name: store.rows('SELECT * FROM ' + name)
+        for name in ('runs', 'model_requests', 'sandbox_settings', 'organization', 'runtime_policy')
+    }
+    store.close()
+    settings = ready(split_settings)
+    replacement = main.create_app(settings)
+    try:
+        store = replacement.state.store
+        assert {name: store.rows('SELECT * FROM ' + name) for name in preserved} == preserved
+        assert store.rows('SELECT status FROM model_requests WHERE id=?', (request,))[0]['status'] == 'pending'
+    finally:
+        replacement.state.store.close()
