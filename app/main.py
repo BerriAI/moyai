@@ -577,7 +577,7 @@ def _create_app(settings, store):
         return JSONResponse({"status": "ok"}, headers=headers)
 
     @app.get("/api/session")
-    async def session(request: Request):
+    def session(request: Request):
         sid = security.session(request)
         response = JSONResponse({})
         if not sid and security.local_preview():
@@ -839,7 +839,9 @@ def _create_app(settings, store):
                 'events': store.events(run_id, limit=10000, connection=connection)}
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        actor = store.identity(security.session_info(request))
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
+        if actor is None:
+            actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
         feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
