@@ -195,7 +195,7 @@ def test_thread_followups_and_both_slack_event_types_share_one_session(slack_app
     assert messages[-1]['status'] == 'queued'
     finish(app, run_id, 'It was blue lantern.')
     app.state.slack.chat.collect()
-    answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer'")
+    answers = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' ORDER BY id")
     assert len(answers) == 2
     assert '*blue lantern*' in answers[0]['text']
     assert '<https://example.com|Docs>' in answers[0]['text']
