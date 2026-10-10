@@ -1309,8 +1309,15 @@ def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
     finish(app, run_id, 'Still answered.')
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
+    # The background watcher may own the send and still be saving its receipt.
+    wait_for(lambda: app.state.store.rows(
+        "SELECT 1 FROM slack_outbox WHERE run_id=? AND kind='answer' AND status='sent'",
+        (run_id,),
+    ))
     assert sent[-1]['text'].startswith('Still answered.')
-    assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'sent'
+    assert app.state.store.rows(
+        "SELECT status FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,),
+    )[0]['status'] == 'sent'
 
 
 @pytest.mark.parametrize('greeting', ['', 'Hey ', 'Hi, ', 'Hello ', 'hey: '])
