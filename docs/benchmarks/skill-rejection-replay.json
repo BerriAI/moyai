@@ -1,0 +1,573 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-09",
+  "benchmark": "Skill rejection recovery",
+  "scope": "Deterministic synthetic cases derived from a production incident; actual FastAPI app, encrypted BrokerRelay, and stdio MCP. No model, production writes, or full agent task replay.",
+  "baseline_commit": "33900218b4d7c7dca6824fbeb55e16779c5137bb",
+  "candidate_app_main_git_blob": "3f10c66536afee06141084d105abaf7323962c75",
+  "fixture_git_blob": "dc50061ddeb46f1625861b0a09ddb2aac9413b91",
+  "fixture_sha256": "e58c655d6966bb9ba8af225cbbc332dae628e83f8e774eafe6ed07872d166c96",
+  "summary": {
+    "recoverable": {
+      "before": {
+        "passed": 0,
+        "cases": 8
+      },
+      "after": {
+        "passed": 8,
+        "cases": 8
+      }
+    },
+    "critical": {
+      "before": {
+        "passed": 5,
+        "cases": 5
+      },
+      "after": {
+        "passed": 5,
+        "cases": 5
+      }
+    },
+    "existing-failure": {
+      "before": {
+        "passed": 8,
+        "cases": 8
+      },
+      "after": {
+        "passed": 8,
+        "cases": 8
+      }
+    }
+  },
+  "before": [
+    {
+      "category": "recoverable",
+      "case": "load-limit",
+      "expected_rejection": 409,
+      "response_status": 409,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 5,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "load-missing",
+      "expected_rejection": 404,
+      "response_status": 404,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "search-turn",
+      "expected_rejection": 409,
+      "response_status": 409,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "search-keywords",
+      "expected_rejection": 422,
+      "response_status": 422,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "save-permission",
+      "expected_rejection": 403,
+      "response_status": 403,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "save-revision",
+      "expected_rejection": 409,
+      "response_status": 409,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "read-missing",
+      "expected_rejection": 404,
+      "response_status": 404,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "recoverable",
+      "case": "read-offset",
+      "expected_rejection": 422,
+      "response_status": 422,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "load-limit",
+      "expected_rejection": 409,
+      "response_status": 409,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 5,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "load-missing",
+      "expected_rejection": 404,
+      "response_status": 404,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "search-turn",
+      "expected_rejection": 409,
+      "response_status": 409,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "search-keywords",
+      "expected_rejection": 422,
+      "response_status": 422,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "save-permission",
+      "expected_rejection": 403,
+      "response_status": 403,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "save-revision",
+      "expected_rejection": 409,
+      "response_status": 409,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "read-missing",
+      "expected_rejection": 404,
+      "response_status": 404,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "existing-failure",
+      "case": "read-offset",
+      "expected_rejection": 422,
+      "response_status": 422,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": false
+    },
+    {
+      "category": "critical",
+      "case": "capability",
+      "expected_status": 401,
+      "response_status": 401,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "skill-auth",
+      "expected_status": 401,
+      "response_status": 401,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "skill-server",
+      "expected_status": 500,
+      "response_status": 500,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "checkpoint",
+      "expected_status": 503,
+      "response_status": 503,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "checkpoint-rejection",
+      "expected_status": 503,
+      "response_status": 503,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    }
+  ],
+  "after": [
+    {
+      "category": "recoverable",
+      "case": "load-limit",
+      "expected_rejection": 409,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 5,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "load-missing",
+      "expected_rejection": 404,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "search-turn",
+      "expected_rejection": 409,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "search-keywords",
+      "expected_rejection": 422,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "save-permission",
+      "expected_rejection": 403,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "save-revision",
+      "expected_rejection": 409,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "read-missing",
+      "expected_rejection": 404,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "recoverable",
+      "case": "read-offset",
+      "expected_rejection": 422,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": false,
+      "uncertain_tool": false,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "load-limit",
+      "expected_rejection": 409,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 5,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "load-missing",
+      "expected_rejection": 404,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "search-turn",
+      "expected_rejection": 409,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "search-keywords",
+      "expected_rejection": 422,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "save-permission",
+      "expected_rejection": 403,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "save-revision",
+      "expected_rejection": 409,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 0,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "read-missing",
+      "expected_rejection": 404,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "existing-failure",
+      "case": "read-offset",
+      "expected_rejection": 422,
+      "response_status": 200,
+      "rejected_is_error": true,
+      "corrected_is_error": false,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "loaded_skills": 1,
+      "upstream_calls": 2,
+      "actionable_error": true
+    },
+    {
+      "category": "critical",
+      "case": "capability",
+      "expected_status": 401,
+      "response_status": 401,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "skill-auth",
+      "expected_status": 401,
+      "response_status": 401,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "skill-server",
+      "expected_status": 500,
+      "response_status": 500,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "checkpoint",
+      "expected_status": 503,
+      "response_status": 503,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    },
+    {
+      "category": "critical",
+      "case": "checkpoint-rejection",
+      "expected_status": 503,
+      "response_status": 503,
+      "rejected_is_error": true,
+      "continuation_blocked": true,
+      "uncertain_tool": true,
+      "upstream_calls": 1
+    }
+  ],
+  "validation": {
+    "passed": 420,
+    "skipped": 1,
+    "after_rebase_passed": 45,
+    "skip_reason": "Linux memfd credential-file check is not supported on macOS"
+  },
+  "limitations": [
+    "Targeted regression cases are not independent production samples.",
+    "No end-to-end model quality, skill-sync completion, latency, token or dollar savings were measured.",
+    "The five-skill cap remains; large imports still need valid batching or a comparison workflow."
+  ]
+}
