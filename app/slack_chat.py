@@ -212,10 +212,6 @@ class SlackChat:
         # standalone question is answered by the control plane.
         if not directive and not harness_directive and not file_ids and not reference and is_session_id_request(prompt):
             command = 'session-id'
-        # A bound shared thread is a destination, not an invitation to answer
-        # every teammate. DMs and existing standalone controls stay conversational.
-        if not mentioned and not direct_message and (not command or len(original_prompt.strip().splitlines()) != 1):
-            return None
         # Only authored text participates in command/model/harness parsing.
         prompt += reference
         with self.store.connect() as conn:
@@ -327,7 +323,7 @@ class SlackChat:
                 model_name = next((item['name'] for item in self.settings.model_choices() if item['id'] == selected_model), selected_model)
                 response = {'sleep': 'Paused this thread and requested a stop. Say `wake` or mention me to resume.',
                             'stop': 'Stopping the current response and clearing queued follow-ups. You can send another message once it has stopped.',
-                            'wake': 'I’m listening again. ' + ('Send your next message here.' if direct_message else 'Mention me with your next request.'),
+                            'wake': 'I’m listening again. Send your next message here.',
                             'status': 'This thread is paused.' if binding['paused'] else self.status_text(status),
                             'session-id': session_id_response(run_id),
                             'model': model_error or f'New messages in this session will use *{model_name}*. Running and already queued replies keep their original model.',

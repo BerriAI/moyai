@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
-from .slack_chat import SlackChat
+from .slack_chat import SlackChat, USER_MENTION
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 from .slack_credentials import SlackCredentials
 from .slack_references import attachment_reference
@@ -126,12 +126,21 @@ class SlackSessions:
             raise HTTPException(400, "Invalid Slack event fields.")
         mention = f"<@{bot.get('user_id')}>"
         visible, prompt = routing_text(text, mention)
-        # A mention can be the subject of a question to somebody else:
-        # "@OtherAgent what is @Moyai?" must not wake both agents.
-        addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)',
-                             visible.translate(str.maketrans('', '', '*_~')))
-        if addressed and mention not in addressed[1]:
-            return {'ok': True}
+        bound_thread = (not channel.startswith('D') and self.settings.slack_thread_chat_enabled
+                        and self.store.rows('SELECT 1 FROM slack_threads WHERE team_id=? AND channel=? AND thread_ts=?',
+                                            (bot['team_id'], channel, thread_ts)))
+        if bound_thread:
+            # Existing conversations accept ordinary replies. Tagging another
+            # person opts out unless Moyai is also mentioned in authored text.
+            if mention not in visible and USER_MENTION.search(visible):
+                return {'ok': True}
+        else:
+            # New conversations still need an invitation, not a mention used
+            # as the subject of a question addressed to somebody else.
+            addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)',
+                                 visible.translate(str.maketrans('', '', '*_~')))
+            if addressed and mention not in addressed[1]:
+                return {'ok': True}
         file_ids = slack_file_ids(event.get('files'))
         reference, _ = attachment_reference(event)
         if not prompt and reference:

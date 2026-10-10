@@ -624,20 +624,15 @@ def test_ignores_unrelated_threads_bots_edits_wrong_team_and_shared_channels(sla
     assert len(app.state.store.rows('SELECT * FROM runs')) == 1
 
 
-@pytest.mark.parametrize('state', ['fresh', 'active', 'idle', 'paused'])
+@pytest.mark.parametrize('state', ['fresh', 'paused'])
 @pytest.mark.parametrize('user', ['U12345678', 'U87654321'])
-def test_shared_thread_chatter_never_becomes_agent_input(slack_app, state, user):
+def test_unmentioned_replies_do_not_start_or_wake_threads(slack_app, state, user):
     app, client, submitted, _ = slack_app
     store = app.state.store
     if state != 'fresh':
         _, _, run_id = start(slack_app)
-        if state == 'active':
-            store.claim_message(run_id)
-            store.update_run(run_id, status='running', token_hash='still-working')
-        else:
-            finish(app, run_id, 'Ready for your next request.')
-            if state == 'paused':
-                send(client, 10, 'sleep')
+        finish(app, run_id, 'Ready for your next request.')
+        send(client, 10, 'sleep')
     messages = store.rows('SELECT id,content,status FROM messages ORDER BY id')
     runs = store.rows('SELECT id,status,active_message_id,token_hash FROM runs')
     receipts = store.rows('SELECT event_id FROM slack_receipts ORDER BY event_id')
@@ -657,12 +652,10 @@ def test_shared_thread_chatter_never_becomes_agent_input(slack_app, state, user)
         assert store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 1
 
 
-def test_shared_thread_clarification_answer_requires_an_explicit_mention(slack_app):
+def test_shared_thread_clarification_answer_does_not_need_another_mention(slack_app):
     app, client, run_id = start(slack_app)
-    finish(app, run_id, 'Should I include the API documentation? Reply with @Moyai.')
+    finish(app, run_id, 'Should I include the API documentation?')
     send(client, 1, 'yes')
-    assert len(app.state.store.messages(run_id)) == 2
-    send(client, 2, '<@U99999999> yes')
     messages = app.state.store.messages(run_id)
     assert len(messages) == 3
     assert messages[-1]['content'] == 'Slack reply from U12345678:\nyes'
@@ -670,23 +663,25 @@ def test_shared_thread_clarification_answer_requires_an_explicit_mention(slack_a
     assert len(app.state.store.rows('SELECT id FROM runs')) == 1
 
 
-@pytest.mark.parametrize(('directive', 'feedback'), [
-    ('model opus', 'New messages in this session'),
-    ('model unavailable', 'Choose an enabled model'),
-    ('harness hermes', 'This session uses'),
-    ('harness unavailable', 'Choose a harness in a new thread'),
+@pytest.mark.parametrize(('directive', 'feedback', 'valid'), [
+    ('model opus', 'New messages in this session', True),
+    ('model unavailable', 'Choose an enabled model', False),
+    ('harness hermes', 'This session uses', True),
+    ('harness unavailable', 'Choose a harness in a new thread', False),
 ])
-def test_unmentioned_directive_tasks_are_ignored_but_standalone_controls_reply(slack_app, directive, feedback):
+def test_unmentioned_directives_accept_tasks_and_reply_to_controls(slack_app, directive, feedback, valid):
     app, client, run_id = start(slack_app)
-    before = app.state.store.messages(run_id)
     send(client, 1, directive + '\nPlease continue the work')
-    assert app.state.store.messages(run_id) == before
-    assert not app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")
-    assert not app.state.store.rows("SELECT 1 FROM slack_outbox WHERE kind='control'")
+    before = app.state.store.messages(run_id)
+    assert len(before) == 1 + int(valid)
+    if valid:
+        assert before[-1]['content'] == 'Slack reply from U12345678:\nPlease continue the work'
+    assert app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")
     send(client, 2, directive)
     assert app.state.store.messages(run_id) == before
     controls = app.state.store.rows("SELECT text FROM slack_outbox WHERE kind='control'")
-    assert len(controls) == 1 and feedback in controls[0]['text']
+    assert len(controls) == (1 if valid else 2)
+    assert all(feedback in control['text'] for control in controls)
 
 
 @pytest.mark.parametrize('direct', [False, True])
@@ -1216,14 +1211,14 @@ def test_status_failure_does_not_prevent_the_answer(slack_app, monkeypatch):
 
 
 @pytest.mark.parametrize('greeting', ['', 'Hey ', 'Hi, ', 'Hello ', 'hey: '])
-def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app, greeting):
+def test_existing_thread_mentions_anywhere_invite_moyai(slack_app, greeting):
     app, client, run_id = start(slack_app)
     for index, text in enumerate(['<@U88888888> what is <@U99999999>?', '<@U88888888> please continue'], 1):
         send(client, index, greeting + text)
-    assert len(app.state.store.messages(run_id)) == 1
+    assert len(app.state.store.messages(run_id)) == 2
     send(client, 3, greeting + '<@U99999999> tell me about <@U88888888>')
     send(client, 4, greeting + '<@U88888888> <@U99999999> please both explain')
-    assert len(app.state.store.messages(run_id)) == 3
+    assert len(app.state.store.messages(run_id)) == 4
     assert '<@U88888888>' in app.state.store.messages(run_id)[-2]['content']
 
 
@@ -1237,16 +1232,17 @@ def test_questions_addressed_to_someone_else_do_not_wake_moyai(slack_app, greeti
     '*<@U88888888>* what is <@U99999999>?',
     '> Earlier evidence\n<@U88888888> what is <@U99999999>?',
 ])
-def test_quoted_mentions_and_other_recipients_do_not_invite_moyai(slack_app, bound, text):
+def test_reference_text_requires_an_existing_thread_or_direct_invitation(slack_app, bound, text):
     app, client, submitted, _ = slack_app
     if bound:
         start(slack_app)
     before = app.state.store.rows('SELECT id,content FROM messages ORDER BY id')
     runs = len(submitted)
     send(client, 1, text)
-    assert app.state.store.rows('SELECT id,content FROM messages ORDER BY id') == before
-    assert len(submitted) == runs
-    assert not app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")
+    messages = app.state.store.rows('SELECT id,content FROM messages ORDER BY id')
+    assert len(messages) == len(before) + int(bound)
+    assert len(submitted) == runs + int(bound)
+    assert bool(app.state.store.rows("SELECT 1 FROM slack_receipts WHERE event_id='EvChat1'")) == bound
 
 
 @pytest.mark.parametrize('quote', [
@@ -1578,7 +1574,7 @@ def test_forwarded_only_messages_and_followups_keep_quoted_body(slack_app, monke
 
 
 @pytest.mark.parametrize('bound', [False, True])
-def test_forwarded_mentions_do_not_invite_moyai_into_unaddressed_messages(slack_app, bound):
+def test_forward_without_authored_mention_requires_an_existing_thread(slack_app, bound):
     from test_slack import forwarded_attachment
     app, client, submitted, _ = slack_app
     if bound:
@@ -1588,8 +1584,12 @@ def test_forwarded_mentions_do_not_invite_moyai_into_unaddressed_messages(slack_
     payload = event('EvQuotedMention', type='message', text='', ts='1790719001.123456', thread_ts=ROOT,
                     attachments=[forwarded_attachment('<@U99999999> help')])
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
-    assert app.state.store.rows('SELECT id,content FROM messages ORDER BY id') == before
-    assert len(submitted) == runs
+    messages = app.state.store.rows('SELECT id,content FROM messages ORDER BY id')
+    assert len(messages) == len(before) + int(bound)
+    assert len(submitted) == runs + int(bound)
+    if bound:
+        assert 'Please respond to the quoted Slack attachment.' in messages[-1]['content']
+        assert '\\u003c@U99999999> help' in messages[-1]['content']
 
 
 def test_authored_control_still_works_with_forward(slack_app):
