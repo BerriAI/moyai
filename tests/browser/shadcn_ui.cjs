@@ -1890,11 +1890,12 @@ for (const width of [1440, 768, 320]) {
     await page.getByRole('button', { name: /Add metadata/ }).click();
     await page.getByLabel('Key', { exact: true }).fill('team');
     const metadata = page.getByLabel('Value', { exact: true });
-    const boundary = String.fromCodePoint(0x1f680).repeat(16384);
-    await metadata.fill(boundary);
+    const longValue = String.fromCodePoint(0x1f680).repeat(20000);
+    await metadata.fill(longValue);
     assert.equal(await metadata.evaluate(el => el.checkValidity()), true);
-    await metadata.fill(boundary + 'x');
-    assert.equal(await metadata.evaluate(el => el.validity.customError), true);
+    assert.equal(await metadata.inputValue(), longValue);
+    assert.equal(await dialog.locator('form').evaluate(form => new FormData(form).get('metadata_value')), longValue,
+      'Complete Unicode metadata remains valid and is serialized beyond the former text cap');
     await metadata.fill('platform\nRelease checks & owners');
     assert.equal(await metadata.evaluate(el => el.checkValidity()), true);
     const values = await dialog.locator('form').evaluate(form => Object.fromEntries(new FormData(form)));
