@@ -19,6 +19,15 @@ An explicit incompatible harness selection is rejected. The configured
 selected model and tool calls through the runtime's native API (Responses for
 Codex, Messages for Claude); selecting it does not establish provider compatibility.
 
+Delegated groups can mix harnesses and models. `agents_fanout` accepts shared
+`harness` and `model` defaults, and each explicit task can override either field.
+Omitted fields retain the parent's harness and active model. Every resolved pair
+is validated before any group or child session is created. The group saves these
+choices before copying its workspace, so a repeated request or explicit worker
+retry keeps the original assignment even if session model preferences change.
+The agent graph and result handoff include each worker's actual harness, model
+preference, and active model; model choice alone does not identify its harness.
+
 ## Codex SDK
 
 `agent/harnesses/codex_harness.py` uses the published Python `openai-codex==0.161.0`

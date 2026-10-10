@@ -243,6 +243,42 @@ def test_postgres_login_state_upgrade_requires_migration_and_preserves_login(spl
         api.state.store.close()
 
 
+def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(split_settings):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        store = api.state.store
+        run = store.create_run('Existing revision-four session', '', 'modal', [])
+        saved_run = store.rows('SELECT * FROM runs WHERE id=?', (run['id'],))
+    finally:
+        api.state.store.close()
+
+    # Upstream revision four already has per-client login limits but predates
+    # swarm persistence. It must not pass the new runtime readiness check.
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE swarm_missions')
+        conn.execute('''INSERT INTO login_states
+            (state_hash,browser_hash,nonce,verifier,return_path,expires,client)
+            VALUES('state','browser','nonce','verifier','/',123,'browser-client')''')
+        conn.execute('UPDATE schema_state SET revision=4')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+
+    ready(split_settings)
+    assert execute(settings, 'SELECT * FROM swarm_missions') == []
+    assert execute(settings, 'SELECT client,nonce,expires FROM login_states') == [
+        ('browser-client', 'nonce', 123)]
+    assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='login_states_client'") == [
+        ('login_states_client',)]
+    api = main.create_app(settings)
+    try:
+        assert api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],)) == saved_run
+        assert api.state.store.run(run['id'])['prompt'] == 'Existing revision-four session'
+    finally:
+        api.state.store.close()
+
+
 def test_schema_initializers_have_a_versioned_manifest():
     # A schema edit without a new revision must fail CI, including optional
     # components and backend-specific functions/triggers used by the migrator.

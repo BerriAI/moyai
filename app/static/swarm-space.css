@@ -1,0 +1,97 @@
+/* Native session space. Shared controls still come from the shadcn renderer. */
+.new-session-mode{display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap;margin:0 auto 16px;max-width:760px;position:relative;z-index:2}
+.swarm-view-switch{display:inline-flex;align-items:center;gap:2px;padding:3px;border:1px solid var(--line);border-radius:9px;background:var(--surface)}
+.swarm-view-switch button{height:30px;min-height:30px;padding:4px 13px;color:var(--muted);font-size:12px;border-radius:6px}
+.swarm-view-switch button[aria-pressed="true"]{background:var(--line);color:var(--text)}
+.swarm-budget{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
+.swarm-budget>span{white-space:nowrap}
+.swarm-budget select{width:112px;font-size:12px;height:32px}
+.swarm-setup-note{color:var(--muted);font-size:12px;max-width:290px}
+.swarm-setup-note:empty{display:none}
+.swarm-space{position:relative;isolation:isolate;flex:1;min-height:0;width:100%;overflow:auto;scrollbar-width:thin}
+.swarm-stage{position:relative;isolation:isolate;height:100%;min-height:800px;width:100%;overflow:hidden}
+.swarm-space[hidden],.swarm-budget[hidden]{display:none!important}
+.swarm-canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:-1;opacity:.85}
+.swarm-mission{position:absolute;top:5%;inset-inline:24px;text-align:center;pointer-events:none}
+.swarm-kicker{font-family:var(--mono);font-size:9px;letter-spacing:.21em;color:var(--muted);margin:0 0 10px}
+.swarm-mission h2{font-size:clamp(20px,2.5vw,32px);font-weight:300;line-height:1.22;letter-spacing:-.035em;margin:0 auto 12px;max-width:720px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.swarm-mission h2:focus{outline:none}
+.swarm-state-line{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:10px;margin:0;color:var(--muted);font-size:11px}
+.swarm-clock{font-variant-numeric:tabular-nums;color:var(--text)}
+.swarm-clock:empty{display:none}
+.swarm-reason{font-size:11px;color:var(--muted);margin:10px auto 0;max-width:540px;line-height:1.5}
+.swarm-space[data-swarm-status="blocked"] .swarm-state-label{color:var(--amber,#f0c681)}
+.swarm-nodes{position:absolute;inset:0;pointer-events:none}
+.swarm-node-position{position:absolute;transform:translate(-50%,-50%);width:136px;pointer-events:auto}
+.swarm-node-position>div{width:100%}
+button.swarm-node{height:auto;min-height:90px;width:100%;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:5px;padding:5px 4px;border:0;background:transparent;color:var(--text);border-radius:10px;white-space:normal}
+button.swarm-node:hover,button.swarm-node[aria-pressed="true"]{background:transparent}
+.swarm-node-mark{position:relative;width:56px;height:56px;display:grid;place-items:center;border:1px solid var(--line);border-radius:18px;background:var(--surface);box-shadow:0 0 26px #b7cdfa10;transition:border-color .2s,box-shadow .2s}
+.swarm-node-mark img{width:38px;height:38px;object-fit:contain}
+button.swarm-node:hover .swarm-node-mark,button.swarm-node[aria-pressed="true"] .swarm-node-mark{border-color:var(--accent);box-shadow:0 0 28px #b7cdfa28}
+.swarm-node-state{position:absolute;bottom:-3px;right:-3px;width:17px;height:17px;display:grid;place-items:center;border-radius:50%;background:var(--surface);border:1px solid var(--line);color:var(--muted)}
+.swarm-node[data-status="running"] .swarm-node-state,.swarm-node[data-status="waiting_children"] .swarm-node-state{color:var(--accent)}
+.swarm-node[data-status="idle"] .swarm-node-state,.swarm-node[data-status="completed"] .swarm-node-state{color:var(--green,#86d9b0)}
+.swarm-node[data-status="failed"] .swarm-node-state,.swarm-node[data-status="interrupted"] .swarm-node-state{color:var(--red,#f59a9a)}
+.swarm-node[data-status="awaiting_approval"] .swarm-node-state,.swarm-node[data-status="waiting_credential"] .swarm-node-state{color:var(--amber,#f0c681)}
+.swarm-node-fallback{font-size:22px;font-weight:300}
+.swarm-node-label{font-size:12px;font-weight:450;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.swarm-node-status{font-size:10px;color:var(--muted)}
+.swarm-node-harness{font-size:10px;color:var(--accent);line-height:1.3;max-width:100%;overflow-wrap:anywhere}
+.swarm-node-position>.swarm-node-response{position:absolute;top:calc(100% + 5px);left:50%;transform:translateX(-50%);width:var(--swarm-reply-width,190px);max-width:240px}
+button.swarm-response{display:flex;flex-direction:column;align-items:stretch;gap:7px;width:100%;height:auto;min-height:0;padding:10px 12px;text-align:left;white-space:normal;background:var(--surface);border:1px solid var(--line);border-radius:12px;color:var(--text);font-size:12px;font-weight:350;line-height:1.45}
+button.swarm-response:hover{background:var(--panel);border-color:var(--border)}
+.swarm-response-text{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;white-space:pre-line}
+.swarm-response-meta{font-size:9px;color:var(--muted);line-height:1.2}
+.swarm-response-empty{font-size:10px;line-height:1.5;text-align:center;color:var(--muted)}
+.swarm-space[data-dense="true"] .swarm-node-response{display:none}
+.swarm-space[data-dense="true"] .swarm-node-position{width:118px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-stage{height:calc(100% - 120px);min-height:360px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-mission{top:10px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-mission h2{font-size:22px;-webkit-line-clamp:1;margin-bottom:8px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-kicker{margin-bottom:6px}
+.swarm-space[data-dense="true"][data-narrow="false"] button.swarm-node{min-height:0;gap:3px;padding:3px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-node-mark{width:34px;height:34px;border-radius:12px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-node-mark img{width:26px;height:26px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-node-status{display:none}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-node-label{font-size:11px}
+.swarm-space[data-dense="true"][data-narrow="false"] .swarm-node-harness{font-size:9px}
+.swarm-space[data-dense="true"] .swarm-evidence{display:none}
+.swarm-bus{position:sticky;bottom:0;width:calc(100% - 32px);max-width:800px;margin:0 auto;padding:10px 14px;border:1px solid var(--line);border-radius:14px;background:var(--surface);z-index:2}
+.swarm-bus h3{margin:0 0 8px;font-size:11px;font-weight:450;color:var(--muted);display:flex;align-items:center;gap:8px}
+.swarm-bus h3:before{content:'';width:5px;height:5px;flex:none;background:var(--accent);border-radius:50%}
+.swarm-bus-messages{max-height:80px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.swarm-bus-messages>div+div{border-top:1px solid var(--line)}
+.swarm-bus-messages button{display:flex;flex-direction:column;align-items:stretch;gap:4px;width:100%;height:auto;min-height:44px;padding:9px 2px;text-align:left;white-space:normal;border:0;border-radius:4px;background:transparent;color:var(--text);font-weight:350;font-size:12px;line-height:1.4}
+.swarm-bus-messages button:hover{background:var(--panel)}
+.swarm-bus-meta{font-size:10px;color:var(--accent);font-weight:450}
+.swarm-bus-identity{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:10px;color:var(--muted)}
+.swarm-bus-identity strong{font-size:11px;font-weight:450;color:var(--text)}
+.swarm-bus-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.swarm-bus-empty{margin:0;padding:8px 0;font-size:12px;color:var(--muted);line-height:1.5}
+.swarm-space-active>.chat-panel{overflow:hidden}
+.swarm-evidence{position:absolute;inset-inline:24px;bottom:8px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:2px}
+.swarm-receipt{font-size:11px;color:var(--muted);margin:0;max-width:620px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;width:100%}
+.swarm-evidence-actions{display:flex;gap:8px}
+.swarm-evidence-actions button{min-height:28px;height:28px;font-size:10px;color:var(--muted);padding:3px 8px}
+.swarm-space-active #jump-latest{display:none}
+.swarm-space-active .chat-bottom{position:relative;z-index:1}
+.swarm-continuation.user{align-self:stretch;border-inline-start:1px solid var(--line);background:transparent!important;opacity:.8}
+.swarm-continuation .message-label{color:var(--muted)}
+@media(max-width:760px){.header-right .swarm-view-switch button{padding-inline:8px}.swarm-node-position{width:108px}.swarm-mission{inset-inline:16px}.swarm-mission h2{font-size:22px}.swarm-evidence{inset-inline:16px}.swarm-stage{min-height:940px}.swarm-reason{max-width:360px}.swarm-bus{inset-inline:16px;padding:10px 12px}}
+@media(max-width:480px){.swarm-node-position{width:100px}.swarm-node-mark{width:44px;height:44px;border-radius:15px}.swarm-node-mark img{width:30px;height:30px}.swarm-node-label{font-size:11px}.swarm-node-status,.swarm-node-harness{font-size:9px}.swarm-mission h2{font-size:19px}.swarm-mission{top:3%}.swarm-stage{min-height:940px}.swarm-budget select{font-size:16px}.new-session-mode{gap:10px}.swarm-view-switch button{min-height:36px}.swarm-reason{font-size:10px}.swarm-evidence{bottom:4px}.swarm-bus{bottom:0}button.swarm-response{padding:8px;font-size:11px}}
+@media(prefers-reduced-motion:reduce){.swarm-node-mark{transition:none}}
+.swarm-space[data-narrow="true"] .swarm-stage{min-height:940px}
+.swarm-space[data-narrow="true"][data-dense="true"] .swarm-stage{min-height:1180px}
+.chat-layout.swarm-space-active.has-session-tools:not(.panel-open){grid-template-columns:minmax(0,1fr)}
+.swarm-space-active>.session-pull-requests{display:none}
+@media(max-width:600px){
+  .chat-view .workspace:has([data-session-view]){grid-template-rows:auto minmax(0,1fr)}
+  .chat-view .topbar:has([data-session-view]){display:grid;grid-template-columns:32px minmax(0,1fr);height:auto;min-height:44px;gap:4px 8px;padding:6px 10px;width:100%;max-width:100%}
+  .chat-view .topbar:has([data-session-view]) #page-title{max-width:100%;width:100%;grid-column:2;grid-row:1}
+  .chat-view .topbar:has([data-session-view]) #open-sidebar{grid-column:1;grid-row:1}
+  .chat-view .topbar:has([data-session-view]) .header-right{grid-column:1/-1;min-width:0;width:100%;max-width:100%;margin:0;flex-shrink:1;flex-wrap:wrap;gap:4px}
+  .chat-view .topbar:has([data-session-view]) .header-right .header-icon{width:32px;min-height:36px}
+  .chat-view .topbar:has([data-session-view]) #run-status{margin-inline:4px}
+  .swarm-space-active>.chat-panel{overflow:hidden}
+}

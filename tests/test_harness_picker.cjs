@@ -46,7 +46,8 @@ test('every harness offers all configured models even with stale provider metada
 test('harness picker shows the selected harness logo and hides it for harnesses without one',()=>{
   const c=setup();
   assert.match(c.harnessPicker('claude-agent-sdk'),/<img class="provider-logo harness-logo"[^>]*src="\/static\/harness-logos\/claude-code.svg"/);
-  assert.match(c.harnessPicker('hermes'),/<img class="provider-logo harness-logo"[^>]*hidden>/);
+  assert.match(c.harnessPicker('hermes'),/src="\/static\/harness-logos\/hermes.png"/);
+  assert.match(c.harnessPicker('unknown-harness'),/<img class="provider-logo harness-logo"[^>]*hidden>/);
 });
 test('new-session submission omits automatic selection and preserves an explicit override',async()=>{
   const submission=source.slice(source.indexOf('async function submitTask('),source.indexOf('\nasync function openRun('));

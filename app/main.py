@@ -66,6 +66,11 @@ Provider = Literal["linear", "slack", "notion", "github"]
 AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 
+class SwarmOptions(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    budget_seconds: int = Field(ge=60, le=86400, strict=True)
+
+
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     harness: str | None = Field(default=None, min_length=1, max_length=80)
@@ -80,6 +85,7 @@ class NewRun(BaseModel):
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
     side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+    swarm: SwarmOptions | None = None
 
     @model_validator(mode='after')
     def require_input(self):
@@ -685,8 +691,10 @@ def _create_app(settings, store):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         await database(security.require, request, mutation=True)
+        if body.swarm and (not settings.temporal_enabled or body.mode != 'modal'):
+            raise HTTPException(422, 'Swarm mode requires the durable cloud runtime.')
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
-                            and not body.attachment_ids and is_session_id_request(body.prompt))
+                            and not body.swarm and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
             parent = await database(store.run, body.side_chat_of)
             if not parent or parent['deleted_at']:
@@ -719,12 +727,17 @@ def _create_app(settings, store):
         user_id = await database(store.identity, session)
         try:
             run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
+                                   swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
+                                   durable_submit=manager.submit_in if body.swarm else None,
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         if not metadata_request:
-            if settings.temporal_enabled:
+            if body.swarm:
+                pass  # Input, mission and outbox wake committed together.
+            elif settings.temporal_enabled:
                 await database(manager.submit, run)
             else:
                 manager.submit(run)
@@ -884,6 +897,20 @@ def _create_app(settings, store):
         if not store.run(run_id):
             raise HTTPException(404, "Task not found")
         await manager.cancel(run_id)
+        return public_run(store.run(run_id))
+
+    @app.post('/api/runs/{run_id}/swarm/{action}')
+    async def swarm_control(run_id: str, action: Literal['pause', 'resume'], request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Task not found')
+        if not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        try:
+            await getattr(manager.swarms, action)(run_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        await checkpoints.flush()
         return public_run(store.run(run_id))
 
     @app.patch('/api/runs/{run_id}/messages/{message_id}')
@@ -1471,6 +1498,7 @@ def _create_app(settings, store):
 
 def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -> list[dict[str, object]]:
     """Show a durable answer receipt while its canonical turn is still saving."""
+    messages = [{**message, 'source': 'swarm'} if str(message.get('client_id', '')).startswith('swarm:') else message for message in messages]
     raw = run.get('pending_result')
     if not isinstance(raw, str) or not raw:
         return messages
