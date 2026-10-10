@@ -9,6 +9,7 @@ on:
       - 'tests/browser/**'
       - 'tests/helpers/**'
       - 'scripts/settings_ui_preview.cjs'
+      - 'scripts/session_ui_demo.py'
       - 'package*.json'
       - 'tsconfig.json'
       - 'vite.config.ts'
@@ -37,3 +38,14 @@ jobs:
       - run: npm test
       - run: npx playwright install --with-deps chromium
       - run: npm run test:ui
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify startup and session behavior against real local APIs
+        run: |
+          uv run --frozen --python 3.13 python scripts/session_ui_demo.py --port 8830 > /tmp/moyai-session-ui.log 2>&1 &
+          demo_pid=$!
+          trap 'kill "$demo_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 120); do
+            if curl --silent --fail http://127.0.0.1:8830/demo/login >/dev/null; then break; fi
+            sleep 1
+          done
+          SESSION_UI_URL=http://127.0.0.1:8830 node --test tests/browser/session_ui.cjs
