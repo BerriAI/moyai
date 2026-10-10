@@ -69,7 +69,7 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     harness: str | None = Field(default=None, min_length=1, max_length=80)
-    prompt: str = Field(default="", max_length=16000)
+    prompt: str = Field(default="")
     repo_url: str = Field(default="", max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
     mode: Literal["demo", "modal"] = "demo"
@@ -124,7 +124,7 @@ class Login(BaseModel):
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    content: str = Field(default="", max_length=16000)
+    content: str = Field(default="")
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
@@ -143,7 +143,7 @@ class QueueChange(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     revision: int = Field(ge=0)
     action: Literal['edit', 'delete', 'steer']
-    content: str | None = Field(default=None, min_length=1, max_length=16000)
+    content: str | None = Field(default=None, min_length=1)
 
 
 class FeedbackBody(BaseModel):
@@ -1089,7 +1089,8 @@ def _create_app(settings, store):
 
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
-        return [DIAGNOSTIC_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        from .session_journal import READ_TOOL
+        return [DIAGNOSTIC_TOOL, READ_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
@@ -1103,6 +1104,13 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'history_read':
+            from .session_journal import ReadHistory
+            try:
+                arguments = ReadHistory.model_validate(body.arguments).model_dump(exclude_none=True)
+            except ValidationError:
+                return {'error': 'Use nonnegative cursors and positive page/range sizes.', 'outcome': 'rejected', 'dispatched': False}
+            return await asyncio.to_thread(session_journal.exchange, run, {'action': 'read', **arguments})
         if body.name == 'workspace_diagnostics':
             try:
                 DiagnosticArgs.model_validate(body.arguments)
@@ -1125,7 +1133,7 @@ def _create_app(settings, store):
             try:
                 return await asyncio.to_thread(read_session, session_lifecycle, run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a limit from 1 to 20.') from None
+                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a positive page size.') from None
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
@@ -1281,6 +1289,16 @@ def _create_app(settings, store):
     harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
         model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
+
+    from .session_journal import SessionJournal
+    session_journal = SessionJournal(store)
+
+    @app.post('/broker/{run_id}/context/journal')
+    async def conversation_journal(run_id: str, request: Request):
+        caller = require_run(run_id, request)
+        result = await asyncio.to_thread(session_journal.exchange, caller, await broker_body(request, '/context/journal'))
+        await checkpoints.flush()
+        return result
 
     from .native_sessions import NativeSessions
     native_sessions = NativeSessions(settings, store, security, checkpoints, require_run, broker_body)

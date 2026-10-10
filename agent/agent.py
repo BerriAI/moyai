@@ -68,7 +68,7 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
     history_path = session / "conversation.json"
     history_path.parent.mkdir(exist_ok=True, mode=0o700)
     with ExitStack() as cleanup:
-        context_store = open_context(history_path.parent, spec) if definition.durable_context else None
+        context_store = open_context(history_path.parent, spec, relay=relay) if definition.durable_context else None
         if context_store is not None:
             cleanup.callback(context_store.close)
         if spec.get('transport_recovery'):

@@ -687,9 +687,6 @@ class Store:
             return dict(existing), False
         if metadata_request:
             from .session_metadata import complete_in
-            count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-            if count >= 100:
-                raise ValueError('This session allows 100 turns. Start a new session.')
             stamp = now()
             model = model if model is not None else row['model'] or self.default_model
             message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?) RETURNING id",
@@ -700,10 +697,6 @@ class Store:
             raise ValueError("Wait for the current response to stop before sending another message.")
         if send_now and not send_immediately and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
             raise ValueError('Moyai is already picking up another queued message. Wait or queue this normally.')
-        pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
-        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-        if pending >= 5 or count >= 100:
-            raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
         if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= self.max_pending_runs and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()
@@ -932,17 +925,9 @@ class Store:
             # Bind work to the server's claimed turn, never a sandbox-supplied ID.
             active = self.rows('SELECT active_message_id FROM runs WHERE id=?', (run_id,))
             data['turn_id'] = turn_id if turn_id is not None else active[0]['active_message_id'] if active else 0
-        # Keep bounded event history even if an agent floods stdout.
-        count = self.rows("SELECT COUNT(*) AS n FROM events WHERE run_id=?", (run_id,))[0]["n"]
-        if count >= 2000 and kind not in {"result", "error", "artifact", "approval", "status", "chat"}:
-            if not self.rows("SELECT 1 FROM events WHERE run_id=? AND kind='status' AND message='Detailed activity limit reached' LIMIT 1", (run_id,)):
-                self.event(run_id, 'status', 'Detailed activity limit reached',
-                           {'detail': 'Additional tool details are no longer recorded for this session. Response and workspace saves continue.',
-                            'activity_version': 1, 'phase': 'limited'})
-            return
         self.execute(
             "INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)",
-            (run_id, kind, message[:32000], json.dumps(data or {}), now()),
+            (run_id, kind, message, json.dumps(data or {}), now()),
             write_scope=run_id,
         )
 

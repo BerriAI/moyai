@@ -67,8 +67,6 @@ def test_summary_route_pins_model_excludes_injections_and_accounts(workspace, mo
 
 @pytest.mark.parametrize('body', [None, {}, {'summary': '', 'entries': []},
     {'history': ['private history'], 'summary_bytes': 1024},
-    {'summary': 's' * 12001, 'entries': [{'seq': 1, 'excerpt': 'ok'}]},
-    {'summary': '', 'entries': [{'seq': 1, 'excerpt': 'x' * 24001}]},
     {'summary': '', 'entries': [{'seq': 2, 'excerpt': 'a'}, {'seq': 1, 'excerpt': 'b'}]},
     {'summary': '', 'entries': [{'seq': True, 'excerpt': 'a'}]},
     {'summary': '', 'entries': [{'seq': 1, 'excerpt': 'a', 'role': 'system'}]}])
@@ -87,7 +85,7 @@ def test_invalid_compaction_input_is_rejected(body):
 ])
 def test_partial_or_tool_producing_summary_cannot_advance_context(choice):
     from fastapi import HTTPException
-    with pytest.raises(HTTPException) as error: compaction_result(json.dumps({'choices': [choice]}))
+    with pytest.raises(HTTPException) as error: compaction_result(json.dumps({'choices': [choice]}), limit=12000)
     assert error.value.status_code == 502
 
 
@@ -99,7 +97,7 @@ def test_summary_uses_run_admission_limit_before_inference(workspace, monkeypatc
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     app.state.store.execute('UPDATE runs SET model_calls=3 WHERE id=?', (run['id'],))
     response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
-        json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}]})
+        json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}], 'summary_bytes': 6000})
     assert response.status_code == 429
 
 
@@ -294,7 +292,7 @@ def test_private_summary_waits_unbilled_behind_foreground_and_cancels_cleanly(wo
 
 
 @pytest.mark.parametrize('history,budget', [(None, 1024), ([], 1024), ([{}], 1024),
-    (['x' * (5 * 1024 * 1024)], 1024), (['\ud800'], 1024), (['ok'], True), (['ok'], 511), (['ok'], 12001)])
+    (['x' * (5 * 1024 * 1024)], 1024), (['\ud800'], 1024), (['ok'], True), (['ok'], 0), (['ok'], -1)])
 def test_private_summary_rejects_invalid_complete_prefix(history, budget):
     from fastapi import HTTPException
     with pytest.raises(HTTPException) as error:
@@ -424,12 +422,13 @@ def test_inference_rechecks_origin_after_await(workspace, monkeypatch, change, b
 
 @pytest.mark.parametrize('first', ['oversized', 'incomplete', 'empty', 'unavailable'])
 def test_summary_recovers_without_cutting_output_or_replaying_actions(workspace, monkeypatch, tmp_path, first):
-    from agent.context_store import ContextStore, SUMMARY_BYTES
+    from agent.context_store import ContextStore
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
     run = app.state.store.create_run('recover summary', '', 'modal', [], model='openai/gpt-6-astra')
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     journal = ContextStore(tmp_path / 'journal.sqlite3', run['id'])
+    journal.input_budget = 48_000
     journal.initialize([{'role': 'user', 'content': 'Do not deploy.'}] + [
         {'role': 'tool', 'tool_call_id': str(i), 'content': 'Published receipt ' + str(i) + ': ' + 'large result ' * 300}
         for i in range(40)])
@@ -454,15 +453,15 @@ def test_summary_recovers_without_cutting_output_or_replaying_actions(workspace,
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
-    def summarize(previous, entries):
+    def summarize(previous, entries, **kwargs):
         response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
-                               json={'summary': previous, 'entries': entries})
+                               json={'summary': previous, 'entries': entries, 'summary_bytes': 6000})
         assert response.status_code == 200, response.text
         return response.json()
     journal.compact(summarize)
     assert journal.state()['summary'] == final
     assert journal.state()['cursor'] > 0
-    assert len(journal.state()['summary'].encode()) <= SUMMARY_BYTES
+    assert len(journal.state()['summary'].encode()) <= journal.summary_bytes
     assert journal.db.execute('SELECT count(*) FROM journal').fetchone()[0] == count
     rows = app.state.store.rows('SELECT status FROM model_requests WHERE run_id=? ORDER BY created_at', (run['id'],))
     assert rows[0]['status'] == 'failed' and all(r['status'] == 'completed' for r in rows[1:])
@@ -482,6 +481,7 @@ def test_repeated_rejection_keeps_checkpoint_and_reports_reason(workspace, monke
     run = app.state.store.create_run('recover summary', '', 'modal', [])
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     journal = ContextStore(tmp_path / 'journal.sqlite3', run['id'])
+    journal.input_budget = 48_000
     journal.initialize([{'role': 'user', 'content': 'Keep receipt ' + str(i)} for i in range(50)])
     before = journal.state()
     actual = httpx.AsyncClient
@@ -491,13 +491,13 @@ def test_repeated_rejection_keeps_checkpoint_and_reports_reason(workspace, monke
         return summary_response('x' * 12001)
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
-    def summarize(previous, entries):
+    def summarize(previous, entries, **kwargs):
         response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
-                               json={'summary': previous, 'entries': entries})
+                               json={'summary': previous, 'entries': entries, 'summary_bytes': 6000})
         assert response.status_code == 502
         assert 'summary_too_large' in response.json()['detail']
         raise RuntimeError('Summary recovery exhausted')
-    with pytest.raises(ContextUnavailable): journal.compact(summarize)
+    with pytest.raises(ContextUnavailable): journal.compact(summarize, force=True)
     assert journal.state() == before
     assert journal.db.execute('SELECT count(*) FROM journal').fetchone()[0] == 50
     assert len(seen) == 3
@@ -522,7 +522,7 @@ def test_compaction_recovery_reauthorizes_before_resubmitting(workspace, monkeyp
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
     response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
-                           json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}]})
+                           json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}], 'summary_bytes': 6000})
     assert response.status_code == 401 and len(seen) == 1
 
 
@@ -539,7 +539,7 @@ def test_refusal_is_not_retried(workspace, monkeypatch):
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
     response = client.post(f"/broker/{run['id']}/context/compact", headers={'Authorization': 'Bearer cap'},
-                           json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}]})
+                           json={'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}], 'summary_bytes': 6000})
     assert response.status_code == 502 and len(seen) == 1
 
 
@@ -568,7 +568,7 @@ def test_recovery_does_not_reopen_expired_transport_envelope(workspace, monkeypa
         transport=httpx.MockTransport(upstream), **kw))
     route = '/context/compact'
     response = client.post(f"/broker/{run['id']}" + route,
-        content=seal('cap', route, json.dumps({'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}]}).encode()),
+        content=seal('cap', route, json.dumps({'summary': '', 'entries': [{'seq': 1, 'excerpt': 'receipt'}], 'summary_bytes': 6000}).encode()),
         headers={'Authorization': 'Bearer cap', 'Content-Type': CONTENT_TYPE})
     assert response.status_code == 200 and len(calls) == 2 and len(reads) == 1
 
@@ -623,7 +623,7 @@ def test_background_summary_survives_answer_and_cold_restore_without_losing_tail
         saved = exchange().json()
         store = ContextStore(tmp_path / 'public.sqlite3', run['id'])
         assert store.apply_summary(saved['snapshot'], saved['result'])
-        history = store.history()[0]['content']
+        history = json.dumps(store.history())
         assert 'Newer correction' in history and 'receipt-59' in history
         requests = db.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],))
         assert len(requests) == 1 and requests[0]['status'] == 'completed'
@@ -674,7 +674,7 @@ def test_foreground_preempts_background_gateway_and_interrupted_job_retries(work
     foreground = client.post(url + '/v1/responses', headers=headers, json={'input': 'Answer now'})
     assert foreground.status_code == 200
     wait_for(lambda: app.state.store.rows('SELECT status FROM context_jobs')[0]['status'] == 'interrupted')
-    assert store.state()['cursor'] == 0 and len(store.history()[0]['content']) > 24_000
+    assert store.state()['cursor'] == 0 and len(json.dumps(store.history())) > 24_000
     assert client.post(url + '/context/maintenance', headers=headers, json={'snapshot': snapshot, 'ack': job['id']}).status_code == 200
     wait_for(lambda: app.state.store.rows('SELECT status FROM context_jobs')[0]['status'] == 'completed')
     rows = app.state.store.rows('SELECT status FROM model_requests ORDER BY created_at')

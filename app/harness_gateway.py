@@ -264,6 +264,14 @@ class HarnessGateway:
                 expected_run, expected_model = dict(run), model
             body = compaction_body if compact else await self.read_body(request, route)
             if compact:
+                limits = await self.context_budget.limits(model)
+                allocation = max(1, min(limits.max_input_tokens, limits.context_window -
+                    (limits.default_output_tokens or limits.max_output_tokens)) // 8)
+                requested = body.get('summary_bytes')
+                if requested is None:
+                    body = {**body, 'summary_bytes': allocation}
+                elif type(requested) is not int or not 0 < requested <= allocation:
+                    raise HTTPException(422, 'Summary allocation exceeds the selected model context budget.')
                 # Both summary paths omit injections and content tracing. Only
                 # the public journal protocol can return a durable partial cursor.
                 payload = (private_compaction_payload(body['history'], model, body['summary_bytes'], attempt)
@@ -373,7 +381,7 @@ class HarnessGateway:
                         raise HTTPException(502, 'Model response exceeded the size limit.')
                 capture.feed(bytes(raw))
                 capture.finish()
-                result = (JSONResponse({**compaction_result(raw, body.get('summary_bytes', 12_000)),
+                result = (JSONResponse({**compaction_result(raw, body['summary_bytes']),
                                        **({} if private else {'through_seq': body['entries'][-1]['seq']})})
                           if compact else Response(bytes(raw), media_type='application/json',
                                                    headers=upstream_headers(request_id, upstream)))

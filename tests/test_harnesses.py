@@ -368,7 +368,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
         saved = ContextStore(tmp_path / 'session/context.sqlite3', 'harness-test')
         if transport_failure == 502:
             assert saved.checkpoint() == final['transport_retry']['checkpoint']
-        assert 'Saved receipt' in saved.history()[0]['content'] and not saved.pending
+        assert 'Saved receipt' in json.dumps(saved.history()) and not saved.pending
         saved.close()
         return
     assert next(e for e in events if e[0] == 'final')[1:] == ('SDK result', {
@@ -387,6 +387,14 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
     from test_broker_transport import diagnostic_relay
     events, reads = [], []
     handle = 'a' * 32
+    from app.db import Store
+    from app.session_journal import SessionJournal
+    durable = Store(tmp_path / 'journal-server')
+    record = durable.create_run('Inspect repositories', '', 'demo', [], chat_enabled=True, user_id='owner')
+    durable.claim_message(record['id'])
+    durable.update_run(record['id'], status='running', token_hash='fixture')
+    journal_run = durable.run(record['id'])
+    journal = SessionJournal(durable)
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def reply(self, body, status=200):
@@ -401,6 +409,8 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
         def do_POST(self):
             body = json.loads(unseal('private-capability', self.path,
                 self.rfile.read(int(self.headers['Content-Length']))))
+            if self.path == '/context/journal':
+                return self.reply(journal.exchange(journal_run, body))
             if self.path != '/tools/call':
                 return self.reply({})
             if body['name'] == 'github_repositories':

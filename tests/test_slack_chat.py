@@ -903,15 +903,14 @@ def test_no_historical_answer_backfill_and_legacy_requires_a_new_mention(slack_a
     assert 'Continue the previous conversation' in app.state.store.messages(old['id'])[-1]['content']
 
 
-def test_queue_limit_has_one_visible_reply_and_no_dropped_duplicate_execution(slack_app):
+def test_slack_burst_retains_every_message_and_deduplicates_retry(slack_app):
     app, client, run_id = start(slack_app)
-    for index in range(1, 6):
+    for index in range(1, 26):
         send(client, index, f'<@U99999999> Followup {index}')
-    assert len(app.state.store.messages(run_id)) == 5
-    rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")
-    assert len(rows) == 1 and '5 queued messages' in rows[0]['text']
-    send(client, 5, '<@U99999999> Followup 5')
-    assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='rejected:EvChat5'")) == 1
+    assert len(app.state.store.messages(run_id)) == 26
+    assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE dedupe_key LIKE 'rejected:%'")
+    send(client, 25, '<@U99999999> Followup 25')
+    assert len(app.state.store.messages(run_id)) == 26
 
 
 def test_results_are_only_sent_to_original_thread_and_never_ping_users(slack_app):

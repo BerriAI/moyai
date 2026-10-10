@@ -11,7 +11,7 @@ import json
 from .database import RUNTIME_SETTINGS
 from .schema_migrations import SCHEMA_REVISION
 
-API_PROTOCOL_REVISION = 1
+API_PROTOCOL_REVISION = 2
 
 
 def api_fingerprint(settings):

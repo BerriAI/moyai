@@ -27,8 +27,8 @@ def test_owned_inputs_persist_once_preserve_order_and_close(tmp_path):
         assert inputs.accept({'id': 2, 'content': 'Duplicate'})
         assert inputs.accept({'id': 1, 'content': 'Second'})
         assert inputs.pending and not inputs.close_if_empty()
-        expected = ['[User correction to the current task]\nFirst',
-                    '[User correction to the current task]\nSecond']
+        expected = ['[New authenticated user message; interpret its intent in context]\nFirst',
+                    '[New authenticated user message; interpret its intent in context]\nSecond']
         assert inputs.take() == expected
         assert not inputs.pending and inputs.take() == []
         assert inputs.close_if_empty()
@@ -70,7 +70,7 @@ def test_input_acceptance_and_completion_are_one_atomic_decision(monkeypatch):
         assert not completed.result(timeout=1)
     inputs.close()
     assert not inputs.accept({'id': 2, 'content': 'Too late'})
-    assert inputs.take() == ['[User correction to the current task]\nCorrection']
+    assert inputs.take() == ['[New authenticated user message; interpret its intent in context]\nCorrection']
     assert inputs.close_if_empty()
 
 
@@ -275,7 +275,7 @@ def test_native_monitor_delivers_and_clears_actual_queue_promptly(queue, owned_i
         elapsed = time.monotonic() - started
         assert app.state.store.messages(run_id)[1]['status'] == 'injected'
         if owned_inbox:
-            assert agent.inputs.take() == ['[User correction to the current task]\nQueued request']
+            assert agent.inputs.take() == ['[New authenticated user message; interpret its intent in context]\nQueued request']
         else:
             assert len(delivered) == 1
         print(f'Send now through runtime callback and durable receipt: {elapsed:.3f}s')

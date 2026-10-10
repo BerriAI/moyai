@@ -679,9 +679,7 @@ class Credentials:
                     self.enqueue_resolution_in(conn, run, row)
                 except ValueError as exc:
                     conn.execute('ROLLBACK TO credential_delivery')
-                    count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-                    detail = ('This session reached its 100-turn limit. Start a new session to continue.'
-                              if count >= 100 else str(exc))
+                    detail = str(exc)
                     if detail != row['resolution_error']:
                         conn.execute('UPDATE credential_requests SET resolution_error=? WHERE id=?', (detail, row['id']))
                         conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'credential',?,?,?)",

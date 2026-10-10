@@ -213,7 +213,7 @@ class ActiveTurnSteering(AgentSteer):
             accepted = accept_input(item) if accept_input is not None else None
             native_redirect = accepted is None
             if native_redirect:
-                text = '[User correction to the current task]\n' + item['content']
+                text = '[New authenticated user message; interpret its intent in context]\n' + item['content']
                 accepted = agent.steer(text) if boundary else agent.redirect(text)
             if accepted:
                 self.on_input(item)

@@ -31,6 +31,7 @@ def toml_value(value):
 
 
 class CodexAgent(HarnessAgent):
+    typed_replay = True
     def __init__(self, *, spec, relay, config, activity, step, cwd, definition, context_store=None):
         self.context = HarnessContext(spec, relay, config, activity, step, cwd)
         self.context_store = context_store
@@ -494,6 +495,19 @@ class CodexAgent(HarnessAgent):
                             'experimentalRawEvents': True,
                             **({'config': self.runtime_config} if self.runtime_config else {})})
                         self.runtime_thread = thread.thread.id
+                        if getattr(self, 'replay_history', None):
+                            from openai_codex.generated.v2_all import ThreadInjectItemsResponse
+                            from agent.harnesses.replay import codex_items
+                            items = codex_items(self.replay_history)
+                            await client.request('thread/inject_items', {
+                                'threadId': thread.thread.id, 'items': items},
+                                response_model=ThreadInjectItemsResponse)
+                            # These receipts were committed before this native
+                            # invocation. They need no new SDK notification and
+                            # must never be mistaken for unsettled live writes.
+                            with self.receipts:
+                                self.completed.update(item['call_id'] for item in items
+                                    if item['type'] == 'function_call_output')
                         turn = await client.turn_start(thread.thread.id, prompt)
                         while True:
                             notification = asyncio.create_task(client.next_turn_notification(turn.turn.id))
@@ -538,7 +552,7 @@ class CodexAgent(HarnessAgent):
                                     if text:
                                         publish_pending()
                                     if text and item.get('phase') != 'final_answer':
-                                        self.journal.finish(text)
+                                        self.journal.finish(text, phase=item.get('phase'))
                                         if item.get('phase') == 'commentary':
                                             self.context.activity.commentary(text)
                                         else:

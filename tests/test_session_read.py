@@ -70,12 +70,13 @@ def test_private_payloads_reasoning_and_credentials_are_omitted(users_app):
     assert 'private library body' not in result.text
     assert 'hidden thinking' not in result.text
     assert 'sensitivevalue' not in result.text
-    assert result.json()['messages'][-1]['truncated']
+    assert not result.json()['messages'][-1]['truncated']
+    assert 'a' * 9000 in result.json()['messages'][-1]['content']
     assert all('input' not in event['data'] for event in result.json()['events'][:3])
 
 
 @pytest.mark.parametrize('args', [{}, {'session': 'x'}, {'session': 'http://['},
-    {'session': 'https://wrong.example/#run=' + 'a' * 32}, {'session': 'a'*32, 'limit': 21},
+    {'session': 'https://wrong.example/#run=' + 'a' * 32}, {'session': 'a'*32, 'limit': 0},
     {'session': 'a'*32, 'after_event': -1}, {'session': 'a'*32, 'owner_id': 'other'}])
 def test_invalid_input(users_app, args):
     app, client, actor, caller, target = setup(users_app)
