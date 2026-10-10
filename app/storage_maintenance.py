@@ -12,6 +12,7 @@ import sqlite3
 import tempfile
 
 from . import captures
+from .database import PostgresConnection, SQLiteConnection, identifier, row_factory
 
 
 ARCHIVE_LIMIT = 20 * 1024 * 1024
@@ -22,23 +23,68 @@ class MaintenanceError(ValueError):
 
 
 @contextmanager
-def source_database(directory: Path):
+def source_database(directory: Path, *, database_url: str = '', database_schema: str = 'moyai',
+                    writable: bool = False):
+    """Open existing state only: no app recovery, schema upgrades or owner takeover."""
     from .db import require_database_owner
+    if directory.is_symlink() or not directory.is_dir():
+        raise MaintenanceError('Choose the existing application data directory, without a symlink.')
+    if database_url:
+        import psycopg
+        schema = identifier(database_schema)
+        require_database_owner(directory)
+        with psycopg.connect(database_url, connect_timeout=10, cursor_factory=psycopg.ClientCursor,
+                             row_factory=row_factory) as raw:
+            if not writable:
+                raw.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+            raw.execute("SET LOCAL lock_timeout = '10s'")
+            raw.execute("SET LOCAL statement_timeout = '30s'")
+            raw.execute(f'SET LOCAL search_path TO {schema}, pg_catalog')
+            conn = PostgresConnection(raw, database_schema, None)
+            if 'runs' not in conn.table_names():
+                raise MaintenanceError('Choose an existing Moyai Postgres schema. Maintenance never initializes a database.')
+            yield conn
+        return
     path = directory / 'workspace.db'
     if path.is_symlink() or not path.is_file():
         raise MaintenanceError('Choose an existing database, without a symlink.')
     require_database_owner(path)
-    with closing(sqlite3.connect(path.absolute().as_uri() + '?mode=ro', uri=True)) as conn:
+    mode = 'rw' if writable else 'ro'
+    with closing(sqlite3.connect(path.absolute().as_uri() + '?mode=' + mode, uri=True,
+                                 timeout=10, factory=SQLiteConnection)) as conn, conn:
         conn.row_factory = sqlite3.Row
+        conn.execute('PRAGMA foreign_keys=ON')
+        if not writable:
+            conn.begin_read()
         yield conn
 
 
 def table_exists(conn, name):
-    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+    return name in conn.table_names()
 
 
 def attachment_columns(conn):
-    return {row['name'] for row in conn.execute('PRAGMA table_info(attachments)')}
+    return conn.column_names('attachments')
+
+
+class MaintenanceStore:
+    """Only payload access; deliberately does not construct the application Store."""
+
+    def __init__(self, directory: Path, objects, *, database_url: str = '', database_schema: str = 'moyai',
+                 writable: bool = True):
+        from .blob_storage import ArtifactStore
+        self.path = directory / 'workspace.db'
+        self.objects = objects
+        self.connection_options = {'database_url': database_url, 'database_schema': database_schema,
+                                   'writable': writable}
+        self.artifacts = ArtifactStore(self, directory, initialize=False)
+
+    def connect(self):
+        return source_database(self.path.parent, **self.connection_options)
+
+    def rows(self, sql, params=()):
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute(sql, params)]
 
 
 def acknowledged_files(directory: Path, conn):
@@ -48,7 +94,7 @@ def acknowledged_files(directory: Path, conn):
         return
     run_ids = {row['id'] for row in conn.execute('SELECT id FROM runs')}
     frozen = set()
-    if 'result_snapshot' in {row['name'] for row in conn.execute('PRAGMA table_info(agent_groups)')}:
+    if 'result_snapshot' in conn.column_names('agent_groups'):
         for row in conn.execute("SELECT result_snapshot FROM agent_groups WHERE result_snapshot!=''"):
             try:
                 snapshot = json.loads(row['result_snapshot'])
@@ -70,30 +116,44 @@ def acknowledged_files(directory: Path, conn):
                     yield name + '/' + capture.name, captures.MAX_FILE
 
 
-def plan(directory: Path) -> dict:
+def plan(directory: Path, *, database_url: str = '', database_schema: str = 'moyai') -> dict:
     """Inspect without starting the app, changing schema or contacting object storage."""
-    with source_database(directory) as conn:
-        columns = attachment_columns(conn)
-        upgraded = {'data_ref', 'preview_ref', 'preview_size'} <= columns
-        pending = "(data_ref='' AND length(data)>0) OR (preview_ref='' AND length(preview)>0)" if upgraded else '1'
-        attachments = dict(conn.execute(f'''SELECT count(*) AS count,
-            coalesce(sum(length(data)+length(preview)),0) AS retained_bytes,
-            coalesce(sum(CASE WHEN {pending} THEN 1 ELSE 0 END),0) AS pending
-            FROM attachments''').fetchone())
-        manifested = ({row['name'] for row in conn.execute('SELECT name FROM artifact_objects')}
-                      if table_exists(conn, 'artifact_objects') else set())
-        artifacts = {'count': 0, 'retained_bytes': 0, 'pending': 0}
-        for name, _ in acknowledged_files(directory, conn):
-            try:
-                size = (directory / 'artifacts' / name).stat(follow_symlinks=False).st_size
-            except FileNotFoundError:
-                continue
-            artifacts['count'] += 1
-            artifacts['retained_bytes'] += size
-            artifacts['pending'] += name not in manifested
-        return {'operation': 'plan', 'schema_ready': upgraded and table_exists(conn, 'artifact_objects'),
-                'attachments': attachments, 'legacy_artifacts': artifacts,
-                'remote_artifacts': len(manifested), 'source_files_preserved': True}
+    with source_database(directory, database_url=database_url, database_schema=database_schema) as conn:
+        return plan_connection(directory, conn)
+
+
+def plan_connection(directory: Path, conn) -> dict:
+    upgraded = {'data_ref', 'preview_ref', 'preview_size'} <= attachment_columns(conn)
+    pending = "data_ref='' OR ((preview_size>0 OR length(preview)>0) AND preview_ref='')" if upgraded else '1=1'
+    attachments = dict(conn.execute(f'''SELECT count(*) AS count,
+        coalesce(sum(length(data)+length(preview)),0) AS retained_bytes,
+        coalesce(sum(CASE WHEN {pending} THEN 1 ELSE 0 END),0) AS pending
+        FROM attachments''').fetchone())
+    manifested = ({row['name'] for row in conn.execute("SELECT name FROM artifact_objects WHERE reference!=''")}
+                  if table_exists(conn, 'artifact_objects') else set())
+    artifacts = {'count': 0, 'retained_bytes': 0, 'pending': 0}
+    for name, _ in acknowledged_files(directory, conn):
+        try:
+            size = (directory / 'artifacts' / name).stat(follow_symlinks=False).st_size
+        except FileNotFoundError:
+            continue
+        artifacts['count'] += 1
+        artifacts['retained_bytes'] += size
+        artifacts['pending'] += name not in manifested
+    # The worker startup guard also rejects unacknowledged files and symlinks.
+    # Surface those leftovers; zero migratable records is not a cutover receipt.
+    root = directory / 'artifacts'
+    inventory = {'files': 0, 'unmanifested': 0, 'symlinks': int(root.is_symlink())}
+    if not root.is_symlink():
+        for path in root.rglob('*'):
+            if path.is_symlink():
+                inventory['symlinks'] += 1
+            elif path.is_file() and not path.name.startswith('.upload-'):
+                inventory['files'] += 1
+                inventory['unmanifested'] += path.relative_to(root).as_posix() not in manifested
+    return {'operation': 'plan', 'schema_ready': upgraded and table_exists(conn, 'artifact_objects'),
+            'attachments': attachments, 'legacy_artifacts': artifacts, 'local_inventory': inventory,
+            'remote_artifacts': len(manifested), 'source_files_preserved': True}
 
 
 def verified_payload(objects, raw: bytes, reference: str = '') -> str:
@@ -106,7 +166,7 @@ def verified_payload(objects, raw: bytes, reference: str = '') -> str:
 def migrate_attachment(store, row, clear: bool) -> tuple[bool, int]:
     data, preview = row['data'], row['preview']
     data_ref, preview_ref = row['data_ref'], row['preview_ref']
-    if data:
+    if data or (not data_ref and row['size'] == 0):
         if len(data) != row['size'] or hashlib.sha256(data).hexdigest() != row['sha256']:
             raise MaintenanceError('Legacy attachment does not match its metadata. Original bytes were preserved.')
         data_ref = verified_payload(store.objects, data, data_ref)
@@ -114,10 +174,12 @@ def migrate_attachment(store, row, clear: bool) -> tuple[bool, int]:
         raise MaintenanceError('Legacy attachment bytes are missing. Restore the original file before migration.')
     if preview:
         preview_ref = verified_payload(store.objects, preview, preview_ref)
+    elif row['preview_size'] and not preview_ref:
+        raise MaintenanceError('Legacy preview bytes are missing. Restore the original file before migration.')
     cleared = len(data) + len(preview) if clear else 0
     # The remote work is finished before acquiring the database's writer lock.
     with store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         current = conn.execute('SELECT * FROM attachments WHERE id=?', (row['id'],)).fetchone()
         if current is None or dict(current) != row:
             return False, 0
@@ -136,7 +198,7 @@ def migrate_artifact(store, name: str, limit: int) -> bool:
         captures.media_type(name.rsplit('/', 1)[-1], raw)
     reference = verified_payload(store.objects, raw)
     with store.connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
+        conn.begin_write()
         current = store.artifacts.info(name, conn)
         if current != before:
             return False
@@ -152,7 +214,7 @@ def migrate(store, *, limit: int = 100, clear_attachment_blobs: bool = False) ->
     if not 1 <= limit <= 10000:
         raise MaintenanceError('Use a migration batch size between 1 and 10000.')
     directory = store.path.parent
-    pending = "(data_ref='' AND length(data)>0) OR (preview_ref='' AND length(preview)>0)"
+    pending = "data_ref='' OR ((preview_size>0 OR length(preview)>0) AND preview_ref='')"
     if clear_attachment_blobs:
         pending += ' OR length(data)>0 OR length(preview)>0'
     # Enumerate IDs only; at most one attachment's bytes are held at a time.
@@ -168,7 +230,7 @@ def migrate(store, *, limit: int = 100, clear_attachment_blobs: bool = False) ->
         result['attachments_published' if published else 'superseded'] += 1
         result['attachment_bytes_cleared'] += cleared
     remaining = limit - len(ids)
-    with source_database(directory) as conn:
+    with store.connect() as conn:
         names = list(acknowledged_files(directory, conn))
     for name, bound in names:
         if remaining == 0:
@@ -179,8 +241,42 @@ def migrate(store, *, limit: int = 100, clear_attachment_blobs: bool = False) ->
         published = migrate_artifact(store, name, bound)
         result['artifacts_published' if published else 'superseded'] += 1
         remaining -= 1
-    result['remaining'] = plan(directory)
+    with store.connect() as conn:
+        result['remaining'] = plan_connection(directory, conn)
     return result
+
+
+def verify(store) -> dict:
+    """Read every published object back without changing references or sources."""
+    if not store.objects.enabled:
+        raise MaintenanceError('Configure private object storage before verification.')
+    with store.connect() as conn:
+        before = plan_connection(store.path.parent, conn)
+    if (before['attachments']['pending'] or before['legacy_artifacts']['pending']
+            or before['local_inventory']['unmanifested'] or before['local_inventory']['symlinks']):
+        raise MaintenanceError('Shared file verification requires no pending payloads, unmanifested local files or symlinks. Inspect the plan on the original disk.')
+    checked = 0
+    # Metadata only; no database transaction is held during object downloads.
+    attachments = store.rows('SELECT id,data_ref,preview_ref,size,sha256,preview_size FROM attachments ORDER BY id')
+    artifacts = store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')
+    for row in attachments + artifacts:
+        reference = row.get('data_ref', row.get('reference'))
+        if not reference or reference.rsplit(':', 1)[-1] != row['sha256']:
+            raise MaintenanceError('Published file metadata does not match its object checksum.')
+        store.objects.verify(reference, row['size'])
+        checked += 1
+        if row.get('preview_ref'):
+            store.objects.verify(row['preview_ref'], row['preview_size'])
+            checked += 1
+    # A migration receipt is only meaningful for unchanged references/inventory.
+    if (attachments != store.rows('SELECT id,data_ref,preview_ref,size,sha256,preview_size FROM attachments ORDER BY id')
+            or artifacts != store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')):
+        raise MaintenanceError('File inventory changed during verification. Retry after draining file writers.')
+    with store.connect() as conn:
+        if before != plan_connection(store.path.parent, conn):
+            raise MaintenanceError('Local file inventory changed during verification. Retry on the original disk.')
+    return {'operation': 'verify', 'verified_objects': checked, 'source_files_preserved': True,
+            'inventory': before, 'scope': 'Current database references and this data directory; run on the original disk after draining file writers.'}
 
 
 def backup(directory: Path, objects) -> dict:
@@ -212,11 +308,11 @@ def backup(directory: Path, objects) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', nargs='?', choices=('plan', 'migrate', 'backup'), default='plan')
+    parser.add_argument('operation', nargs='?', choices=('plan', 'migrate', 'verify', 'backup'), default='plan')
     parser.add_argument('--data-dir', type=Path, help='Existing Moyai DATA_DIR; defaults to deployment settings.')
     parser.add_argument('--limit', type=int, default=100, help='Maximum payload records migrated per invocation (default 100).')
     parser.add_argument('--clear-attachment-blobs', action='store_true',
-                        help='Clear retained SQLite BLOBs only after remote verification; does not compact SQLite.')
+                        help='Clear retained database payloads only after remote verification; does not compact the database.')
     args = parser.parse_args(argv)
     if args.clear_attachment_blobs and args.operation != 'migrate':
         parser.error('--clear-attachment-blobs applies only to migrate.')
@@ -225,21 +321,23 @@ def main(argv=None) -> int:
         from .config import Settings
         from .blob_storage import ObjectStorage
         settings = Settings()
-        if settings.moyai_database_url:
-            raise MaintenanceError('This maintenance command is SQLite-only. Use Postgres backups for the configured runtime database.')
         directory = args.data_dir if args.data_dir is not None else settings.data_dir
+        connection_options = {'database_url': settings.moyai_database_url,
+                              'database_schema': settings.moyai_database_schema}
+        if args.operation == 'backup' and settings.moyai_database_url:
+            raise MaintenanceError('Use managed Postgres backups or pg_dump for the configured runtime database. This backup command is SQLite-only.')
         if args.operation == 'plan':
-            result = plan(directory)
+            result = plan(directory, **connection_options)
         else:
             objects = ObjectStorage(settings)
             if args.operation == 'backup':
                 result = backup(directory, objects)
             else:
-                if not plan(directory)['schema_ready']:
+                if not plan(directory, **connection_options)['schema_ready']:
                     raise MaintenanceError('Upgrade all app writers before migrating payloads.')
-                from .db import Store
-                store = Store(directory, object_storage=objects)
-                result = migrate(store, limit=args.limit, clear_attachment_blobs=args.clear_attachment_blobs)
+                store = MaintenanceStore(directory, objects, writable=args.operation == 'migrate', **connection_options)
+                result = (verify(store) if args.operation == 'verify' else
+                          migrate(store, limit=args.limit, clear_attachment_blobs=args.clear_attachment_blobs))
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as exc:

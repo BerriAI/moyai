@@ -116,10 +116,13 @@ class GitHubRepositories:
             raise ConnectorError('The GitHub installation belongs to a different organization.')
         return data
 
-    async def metadata_token(self, installation_id):
+    async def metadata_token(self, installation_id, repository_ids=None):
         # Broad discovery is metadata-only. Code/PR tokens always select exact IDs.
+        scope = {'permissions': {'metadata': 'read'}}
+        if repository_ids is not None:
+            scope['repository_ids'] = repository_ids
         data = await self.request('POST', f'/app/installations/{installation_id}/access_tokens',
-                                  token=self.app_jwt(), json={'permissions': {'metadata': 'read'}})
+                                  token=self.app_jwt(), json=scope)
         return data['token']
 
     async def discover_repositories(self, installation_id):
@@ -298,9 +301,27 @@ class GitHubRepositories:
     async def refresh_connection(self):
         credentials = await self.ensure_connection()
         expected = self.connection_version()
-        label = await self.verify(credentials)
+        await self.installation(credentials)
+        selected = self.connected_ids(credentials)
+        repositories = []
+        # Listing needs only metadata. GitHub accepts at most 500 IDs per token;
+        # fetch pages of 100 instead of minting a code token for every repository.
+        for offset in range(0, len(selected), 500):
+            batch = selected[offset:offset + 500]
+            token = await self.metadata_token(credentials['installation_id'], batch)
+            items = []
+            for page in range(1, (len(batch) + 99) // 100 + 1):
+                data = await self.request('GET', '/installation/repositories', token=token,
+                                          params={'per_page': 100, 'page': page})
+                items.extend(data.get('repositories', []))
+            if len(items) != len(batch) or {r.get('id') for r in items} != set(batch):
+                raise ConnectorError('A selected repository ID is not accessible to this installation.')
+            repositories.extend(items)
         if self.connection_version() != expected:
             raise ConnectorError('The GitHub connection changed during verification. Retry the connection check.')
+        for repo in repositories:
+            self.remember_repository(repo, credentials)
+        label = ', '.join(self.repository_name(i, credentials) for i in selected)
         self.migrate_references(credentials)
         # Metadata refresh does not revoke in-flight writes or workspace-published PRs.
         self.store.execute("UPDATE connections SET label=? WHERE provider='github'", (label,))

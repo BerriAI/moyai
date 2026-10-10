@@ -23,6 +23,19 @@ class Search(Args):
     query: str = Field(min_length=1, max_length=500)
 
 
+def slack_search_query(query: str) -> str:
+    """Use Slack's channel mention syntax for bare channel-ID filters.
+
+    Preserve quoted search text, including an unfinished quote, and leave all
+    other filters intact. No channel lookup or broader retry is needed.
+    """
+    return re.sub(
+        r'"(?:\\.|[^"\\])*(?:"|$)|(?<!\S)(-?in:)#?([CG][A-Z0-9]{7,30})(?=\s|$)',
+        lambda match: f'{match[1]}<#{match[2]}>' if match[1] else match[0],
+        query,
+    )
+
+
 LinearIssueId = Annotated[str, Field(pattern=r"^(?:[A-Za-z][A-Za-z0-9]*-\d+|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})$")]
 
 
@@ -73,7 +86,7 @@ TOOLS = {
     "linear_comment": ("linear", True, LinearComment, "Add a comment to a Linear issue directly. No administrator approval step is required."),
     "linear_create_issue": ("linear", True, LinearCreateIssue, "Create a Linear ticket with title and Markdown description directly when the user requests it. Optionally set parent_id to create a sub-issue. To reparent an existing ticket, use linear_update_issue instead; do not create a replacement or substitute cross-links. Include relevant source links. No administrator approval step is required; do not retry an uncertain creation automatically. The connected Linear credential needs Create issues permission."),
     "linear_update_issue": ("linear", True, LinearUpdateIssue, "Update an existing Linear ticket's parent using parent_id; explicit null removes its parent. Accepts issue identifiers or UUIDs. Use for sub-issue reparenting without creating new tickets or substituting cross-links. No administrator approval step is required. The connected credential needs issue-update permission. Verify with linear_issue before retrying an uncertain update."),
-    "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Returns at most 20 matches."),
+    "slack_search": ("slack", False, Search, "Search Slack messages visible to the connected account. Use in:channel-name or in:<#CHANNEL_ID> to scope a search; bare in:CHANNEL_ID is normalized automatically. Returns at most 20 matches."),
     "slack_thread": ("slack", False, SlackThread, "Read up to 50 messages in a Slack thread; has_more indicates truncation. To verify a bot DM sent with slack_send, use as_bot=true and the returned channel and ts as thread_ts."),
     "slack_me": ("slack", False, Args, "Resolve the authenticated requester's verified Slack user ID, workspace, work email and name. Use when asked who the current user is or for their Slack recipient ID, including the owner of an automation run. No email or user ID argument is needed. Never infer the requester from the shared connection owner or a triggering message."),
     "slack_send": ("slack", True, SlackSend, "Send a Slack message as the Moyai app, prefixed with the current requester's name. For 'DM me' use channel='me'; the server resolves the requester's verified account and opens the bot's DM. Save channel='me' in automations that notify their owner. For an explicitly named other recipient, pass their Slack user ID. Requires the installed bot; never falls back to a user token. No administrator approval step is required."),
@@ -329,7 +342,7 @@ class Connectors:
             return data
         if provider == "slack":
             endpoint, method, payload = {
-                "slack_search": ("search.messages", "GET", {"query": args.get("query"), "count": 20, "highlight": False}),
+                "slack_search": ("search.messages", "GET", {"query": slack_search_query(args.get("query", "")), "count": 20, "highlight": False}),
                 "slack_thread": ("conversations.replies", "GET", {"channel": args.get("channel"), "ts": args.get("thread_ts"), "limit": 50}),
             }[name]
             return await self.request(method, f"https://slack.com/api/{endpoint}", headers=headers, **({"params": payload} if method == "GET" else {"json": payload}))

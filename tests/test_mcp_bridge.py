@@ -45,11 +45,12 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
                             'value':json.dumps({'TEST_KEY':'synthetic-stdio-secret'})}]})
                 return
             assert self.path == "/tools/call"
-            calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-            if calls[-1]['name'] == 'skills_save':
+            call = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append(call)
+            if call['name'] == 'skills_save':
                 self.reply({'detail':'Skill revision changed. Use expected_revision=2 after reviewing the current skill.'},409)
                 return
-            if calls[-1]['name'] == 'skills_search':
+            if call['name'] == 'skills_search':
                 self.reply({'detail':'The active turn changed. Use the current turn_id.'},409)
                 return
             self.reply({"issues": [{"identifier": "LIT-123", "title": "Fixture issue"}]})
@@ -78,7 +79,7 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
         server.server_close()
         thread.join(timeout=2)
     assert result.returncode == 0, result.stderr
-    output = [json.loads(line) for line in result.stdout.splitlines()]
+    output = sorted((json.loads(line) for line in result.stdout.splitlines()), key=lambda reply: reply['id'])
     assert len(output) == 7  # notifications never receive responses
     assert output[0]["result"]["protocolVersion"] == "2025-03-26"
     names = {tool["name"] for tool in output[1]["result"]["tools"]}
@@ -92,7 +93,7 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
     assert output[6]['result']['isError']
     assert 'Use the current turn_id' in output[6]['result']['content'][0]['text']
     assert 'synthetic-stdio-secret' not in result.stdout and 'synthetic-stdio-secret' not in result.stderr
-    assert calls == [{"name": "linear_search", "arguments": {"query": "fixture"}}, {'name':'skills_save','arguments':{}},
+    assert sorted(calls, key=lambda call: call['name']) == [{"name": "linear_search", "arguments": {"query": "fixture"}}, {'name':'skills_save','arguments':{}},
                      {'name':'skills_search','arguments':{'query':'benchmark','turn_id':1}}]
 
 

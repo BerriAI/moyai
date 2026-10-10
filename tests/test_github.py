@@ -74,7 +74,13 @@ class GitHubAPI:
         prefix = '/repositories/' + str(self.repository_id)
         if path == '/app/installations/10':
             return {'account': {'id': OWNER_ID, 'type': 'Organization'}, 'permissions': PERMISSIONS}
+        if path == '/app/installations/10/access_tokens':
+            assert kwargs['json']['permissions'] == {'metadata': 'read'}
+            self.metadata_ids = kwargs['json']['repository_ids']
+            return {'token': 'metadata-fixture'}
         if path == '/installation/repositories':
+            if kwargs['token'] == 'metadata-fixture':
+                return {'repositories': [repository_data(n) for n, i in REPO_IDS.items() if i in self.metadata_ids]}
             name = next(n for n, i in REPO_IDS.items() if i == self.token_repository)
             return {'repositories': [repository_data(name)]}
         if path == prefix:

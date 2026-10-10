@@ -75,9 +75,11 @@ CI suite, including upgrades from an imported database.
    work, and a new real agent turn before reopening traffic.
 
 `CHECKPOINT_DIR` is incompatible with Postgres. Enable the database provider's
-backups/PITR and retain backups of files and encryption/session keys. The SQLite
-storage-maintenance CLI refuses to operate when Postgres is configured so it cannot
-silently back up or migrate a stale local database. Render skips the old Modal
+backups/PITR and retain backups of files and encryption/session keys. The
+[storage-maintenance CLI](object-storage.md) uses the configured Postgres database
+for payload planning, migration and verification, without opening the stale SQLite
+copy. Its database `backup` operation remains SQLite-only and refuses Postgres;
+use managed backups or `pg_dump`. Render skips the old Modal
 SQLite bootstrap when a Postgres URL is explicitly configured; the runtime still
 validates the target. The existing Modal checkpoint deployment recipe is not a
 Postgres deployment recipe.

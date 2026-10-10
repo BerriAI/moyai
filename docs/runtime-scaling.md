@@ -70,9 +70,10 @@ loops; use scheduling diagnostics to find remaining stalls.
    database migration with a capacity increase or role change.
 2. Migrate and verify legacy archives, captures and frozen handoffs to private
    shared object storage. New shared uploads alone are insufficient. The
-   [existing storage-maintenance CLI](object-storage.md) operates on SQLite and
-   refuses PostgreSQL: migrate before cutover, or prepare a separate verified
-   PostgreSQL-compatible payload migration. Distributed startup rejects local
+   [storage-maintenance CLI](object-storage.md) uses the configured PostgreSQL
+   database for `plan`, `migrate` and `verify`; it never reads the retained SQLite
+   copy. Run it on the original disk, retain a managed Postgres backup, and keep
+   the source files until verification and restored downloads pass. Distributed startup rejects local
    artifact files without a remote manifest, but an empty/wrong data directory
    cannot reveal files left on another disk. Verify inventory from the original
    disk and restored downloads before removing it.
@@ -218,7 +219,7 @@ uv run --frozen --python 3.13 pytest -q tests/test_runtime_performance.py tests/
    that deploy with the production-cutover owner. This PR does not change any
    deployment setting. The pending-wake index is created at startup; include its
    creation in the normal coordinated startup window.
-2. Finish and verify the PostgreSQL-compatible shared-file migration in
+2. Run and verify the PostgreSQL-compatible shared-file migration added by
    [#330](https://github.com/BerriAI/moyai/pull/330) before
    starting distributed workers. Verify archives, browser captures and frozen
    handoffs from an empty replacement disk, with identical keys and object
