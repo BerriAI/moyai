@@ -203,6 +203,19 @@ def test_api_can_already_be_a_different_compatible_build_than_background_roles(s
     assert all(render.env[sid]['MOYAI_BUILD_SHA'] == OLD for sid in (COORDINATOR, BROKER, WORKER))
 
 
+def test_api_mode_rejects_shared_broker_overlap_without_writes(setup):
+    release, render, _ = setup
+    probe = render.probe
+    def overlap(service):
+        state = probe(service)
+        return {**state, 'brokers': [*state['brokers'], '88@second-broker'],
+                'owners': [*state['owners'], '88@second-broker']}
+    release.probe = overlap
+    with pytest.raises(ReleaseError, match='one API, coordinator, broker and worker'):
+        release.run()
+    assert render.calls == []
+
+
 @pytest.mark.parametrize('outcome', ['canceled', 'queued', 'unrecognized'])
 def test_cancelled_pending_or_unknown_deploy_never_causes_rollback(setup, outcome):
     release, render, _ = setup

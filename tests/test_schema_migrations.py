@@ -51,7 +51,8 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
 
         def read_only_construction(conn, sql, params=()):
             if not sql.strip().upper().startswith('SELECT') and not any(
-                    table in sql for table in ('runtime_policy', 'runtime_api_policy')):
+                    table in sql for table in ('runtime_policy', 'runtime_api_policy', 'runtime_worker_policy',
+                                              'runtime_broker_policy', 'runtime_coordinator_policy')):
                 pytest.fail('Unexpected runtime constructor write: ' + sql[:80])
             return original(conn, sql, params)
 
@@ -304,13 +305,13 @@ def test_revision_five_adds_shared_boards_without_changing_saved_work(split_sett
         api.state.store.close()
 
 
-def test_revision_six_adds_skill_learning_without_changing_saved_work(split_settings):
+def test_revision_seven_adds_skill_learning_without_changing_saved_work(split_settings):
     settings = ready(split_settings)
     api = main.create_app(settings)
-    tables = ('runs', 'messages', 'login_states', 'swarm_missions', 'swarm_teams', 'swarm_posts')
+    tables = ('runs', 'messages', 'login_states', 'swarm_missions', 'swarm_teams', 'swarm_posts', 'coordinator_hooks', 'broker_work_owners')
     try:
         store = api.state.store
-        store.create_run('Existing revision-six session', '', 'modal', [], chat_enabled=True)
+        store.create_run('Existing revision-seven session', '', 'modal', [], chat_enabled=True)
         store.execute('''INSERT INTO login_states
             (state_hash,browser_hash,nonce,verifier,return_path,expires,client)
             VALUES('state','browser','nonce','verifier','/',123,'browser-client')''')
@@ -321,7 +322,7 @@ def test_revision_six_adds_skill_learning_without_changing_saved_work(split_sett
         conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
         for name in ('skill_suggestions', 'skill_learning_jobs', 'skill_learning_preferences'):
             conn.execute('DROP TABLE ' + name)
-        conn.execute('UPDATE schema_state SET revision=6')
+        conn.execute('UPDATE schema_state SET revision=7')
     with pytest.raises(DatabaseError, match='offline migration'):
         main.create_app(settings)
     ready(split_settings)

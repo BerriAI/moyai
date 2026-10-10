@@ -1,9 +1,11 @@
 # Explicit PostgreSQL schema migrations
 
-This is the database prerequisite for overlapping app replacements. It does not
-allow overlapping coordinators or mixed builds yet. The exact-build fingerprint,
-coordinator/broker ownership, and existing coordinated release drain remain in
-force. Production is not opted in by merging this change.
+Explicit schema verification is the database prerequisite for
+[compatible rolling releases](rolling-deploy.md). The selected release currently
+requires revision 8, including API/background compatibility records, durable
+coordinator hooks, broker work ownership and skill-learning drafts. Verified roles can overlap only
+under their reviewed protocols and shared settings; schema changes themselves
+remain offline. Production is not opted in by merging code.
 
 `MOYAI_SCHEMA_MODE=auto` remains the default for existing installations and SQLite.
 For an explicitly migrated PostgreSQL schema, use `MOYAI_SCHEMA_MODE=verify` on
@@ -27,17 +29,21 @@ rejects accidental DDL through the application database adapter.
    python -m app.schema_migrations --apply
    ```
 
-   It prints `{"schema_revision": 7, "status": "ready"}` on success. An empty
+   It prints `{"schema_revision": 8, "status": "ready"}` on success. An empty
    schema must already exist, and requires `MOYAI_DATABASE_INITIALIZE=true`.
    Existing schemas do not need that flag. No credentials are printed.
-4. Set `MOYAI_SCHEMA_MODE=verify` on the coordinator, broker and workers. Start
-   the coordinator first, then the matching broker and workers. Verify their
-   health and an ordinary saved session before reopening ingress.
+4. Set `MOYAI_SCHEMA_MODE=verify` on every role, including the dedicated API.
+   Use the same reviewed release and shared settings for this first activation.
+   Start the coordinator to publish the contracts, then broker, workers and API.
+   Activate role routing and coordinator handoff following the rolling runbook;
+   verify health and an ordinary saved session before reopening ingress.
 
-The current GitHub production release workflow does **not** run this command or
-activate verify mode. Keep production in auto mode until its maintenance release
-is wired to invoke the migrator with all runtime owners stopped. In particular,
-a normal pre-deploy hook that runs while the old app is live will be rejected.
+The API-only and rolling release modes do **not** perform this first migration
+or topology activation. Complete the separately coordinated maintenance
+transition before enabling them. A normal pre-deploy hook that runs while the old
+app is live will be rejected. Future compatible application releases keep the
+verified schema and shared contracts unchanged; a schema bump requires a new
+maintenance transition.
 
 ## Failure and rollback
 

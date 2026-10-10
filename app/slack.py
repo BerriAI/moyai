@@ -92,6 +92,10 @@ class SlackSessions:
             raise HTTPException(400, "Invalid Slack event.")
         if not isinstance(payload, dict):
             raise HTTPException(400, "Invalid Slack event.")
+        return await self.receive_payload(payload, missing_cloud)
+
+    async def receive_payload(self, payload, missing_cloud):
+        """Process a signature-verified event (direct request or durable inbox)."""
         if payload.get("type") == "url_verification":
             return {"challenge": payload.get("challenge", "")}
         if payload.get("type") != "event_callback" or not self.status()["enabled"]:
@@ -363,10 +367,11 @@ class SlackSessions:
             self.submit_reply(row["run_id"])
         self.chat.recover()
 
-    async def shutdown(self):
-        await self.chat.shutdown()
+    async def shutdown(self, *, graceful=False):
+        await self.chat.shutdown(graceful=graceful)
         jobs = list(self.jobs)
-        for job in jobs:
-            job.cancel()
+        if not graceful:
+            for job in jobs:
+                job.cancel()
         await asyncio.gather(*jobs, return_exceptions=True)
         await self.agentchat.close()

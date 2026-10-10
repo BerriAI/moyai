@@ -45,8 +45,13 @@ async def database[**P, T](operation: Callable[P, T], *args: P.args, **kwargs: P
     task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
     try:
         return await asyncio.shield(task)
-    except asyncio.CancelledError:
-        await task
+    except asyncio.CancelledError as cancelled:
+        try:
+            await task
+        except Exception as exc:
+            # A failed, drained operation must not turn shutdown into an
+            # ordinary retry. Preserve both the cancellation and its cause.
+            raise cancelled from exc
         raise
 
 

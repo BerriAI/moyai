@@ -573,8 +573,14 @@ function renderChat(run){
     state.sending.add(id);syncChatComposer(state.chatRun);
     const model=$('#chat-model')?.value||run.model||state.config.model;
     let pending=state.pendingMessages[id];if(!pending||pending.content!==content||pending.model!==model||pending.send_now!==send_now||JSON.stringify(pending.attachment_ids)!==JSON.stringify(attachment_ids))pending=state.pendingMessages[id]={content,model,attachment_ids,send_now,client_id:crypto.randomUUID()};
+    // Show the input immediately; the next server snapshot that contains it replaces this placeholder.
+    const placeholder={id:2**52+(state.pendingSeq=(state.pendingSeq||0)+1),pending:true,known:new Set((state.chatRun?.messages||[]).map(m=>m.id)),role:'user',status:'queued',content,model,user_id:state.userId,user_name:state.chatRun?.messages?.findLast(m=>m.user_id===state.userId)?.user_name||'You',revision:0,queue_locked:0,send_immediately:send_now||state.preferences?.send_immediately===true?1:0,attachments:[]};
+    ((state.pendingQueued??={})[id]??=[]).push(placeholder);
+    input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);
+    if(state.chatRun?.id===id){updateChat(state.chatRun);bottom();}
     try{await api(`/api/runs/${id}/messages`,{method:'POST',body:JSON.stringify(pending)});state.sessionEdits=(state.sessionEdits||0)+1;files.clear(attachment_ids);delete state.pendingMessages[id];if(current()){if(state.modelDrafts[id]===model)delete state.modelDrafts[id];if(state.drafts[id]?.trim()===original)state.drafts[id]='';if(input.value.trim()===original){input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);}}await Promise.all([refreshChat(id),refreshRuns()]);if(current())bottom();}
-    catch(error){toast(error.message);}finally{state.sending.delete(id);if(state.selected===id)syncChatComposer(state.chatRun);}
+    catch(error){toast(error.message);if(current()&&!input.value.trim()){input.value=original;input.dispatchEvent(new Event('input',{bubbles:true}));autoSize(input);}}
+    finally{const queued=state.pendingQueued[id]||[];queued.splice(queued.indexOf(placeholder)>>>0,1);if(state.chatRun?.id===id)updateChat(state.chatRun);state.sending.delete(id);if(state.selected===id)syncChatComposer(state.chatRun);}
   };
   updateChat(run,true);
   connectChatStream(run);
@@ -719,6 +725,13 @@ function showReplyFeedback(run,message){
   dialog.querySelector('input[name="score"]:checked')?.focus();
 }
 function updateChat(run,initial=false){
+  // Just-sent placeholders stay until a snapshot contains the saved message.
+  const placeholders=state.pendingQueued?.[run.id]||[];
+  if(placeholders.length||run.messages?.some(m=>m.pending)){
+    const saved=(run.messages||[]).filter(m=>!m.pending);
+    const sent=placeholder=>saved.some(m=>m.role==='user'&&!placeholder.known.has(m.id)&&m.user_id===placeholder.user_id&&m.content===placeholder.content);
+    run.messages=[...saved,...placeholders.filter(placeholder=>!sent(placeholder))];
+  }
   syncChatComposer(run);
   const previous=state.chatRun?.id===run.id?state.chatRun:null;
   run.loaded_activity=[...new Set([...(run.loaded_activity||[]),...(previous?.loaded_activity||[])])];
@@ -740,7 +753,7 @@ function updateChat(run,initial=false){
       const signature=JSON.stringify([m,m.feedback,failure,run.mode,run.feedback_enabled,diagnostics[index]]),previous=previousTemplates.get(m.id);
       const feedback=m.role==='assistant'&&run.feedback_enabled&&!['running','streaming','queued','injected'].includes(m.status)?`<div class="message-actions"><button class="feedback-message primary" type="button" data-feedback-message="${esc(m.id)}" aria-label="${m.feedback?`Update feedback, score ${m.feedback.score} out of 10`:'Give feedback'}" title="${m.feedback?`Feedback ${esc(m.feedback.status||'pending')}`:'Give feedback on this reply'}">${globalThis.MoyaiIcon?.('chat',14)||''}<span>${m.feedback?`Feedback ${esc(m.feedback.score)}/10`:'Feedback'}</span></button></div>`:'';
       const swarmMessage=m.source==='swarm'||String(m.client_id||'').startsWith('swarm:');
-      const html=previous?.signature===signature?previous.html:`<article data-region-key="message:${esc(m.id)}" data-region-leaf class="chat-message ${m.role==='user'?'user':'assistant'} ${swarmMessage?'swarm-continuation':''} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(swarmMessage?'Swarm continuation':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):renderMarkdown(m.content)}</div>${diagnostics[index]}${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>${feedback}`:''}</article>`;
+      const html=previous?.signature===signature?previous.html:`<article data-region-key="message:${esc(m.id)}" data-region-leaf class="chat-message ${m.role==='user'?'user':'assistant'} ${swarmMessage?'swarm-continuation':''} ${failure?'response-error':''}"><div class="message-label">${m.role==='user'?(swarmMessage?'Swarm continuation':esc(m.user_name||'Earlier message')):'<img src="/static/favicon.svg?v=moyai-train-1" alt="">Moyai'}<small>${m.role==='user'?(m.pending||m.status==='queued'&&m.send_immediately?'Sending…':m.steering_parent_id?'Steering':!['completed','queued'].includes(m.status)?esc(m.status):''):m.status==='save_failed'?'Answer saved · workspace save failed':failure?'Response '+esc(failure):run.mode==='demo'?'Demo':m.model?esc(modelName(m.model)):''}</small></div><div class="message-content ${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):renderMarkdown(m.content)}</div>${diagnostics[index]}${messageAttachments(m.attachments)}${m.role==='assistant'?`<button class="copy-message quiet" data-message="${m.id}" aria-label="Copy response" title="Copy response">${globalThis.MoyaiIcon?.('copy',16)||'Copy'}</button>${feedback}`:''}</article>`;
       templates.set(m.id,{signature,html});
       return html+`${m.role==='user'?`<div data-region-key="activity:${esc(m.id)}" data-region-preserve data-activity-slot="${m.id}"></div>`:''}`;
     }).join('');

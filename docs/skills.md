@@ -148,9 +148,11 @@ retired during listing and review claiming, so it cannot hold a slot indefinitel
   the original requester and turn. Reviews add background model cost.
 - The inference owner alone recovers/runs reviews: the separate broker, or the
   standalone/coordinator process when no separate broker is configured. API
-  replicas and execution workers never start this worker.
-- Schema revision **7** adds the preferences, queue and draft tables after the
-  released sign-in and swarm migrations. This release
+  replicas and execution workers never start this worker. With verified broker
+  overlap, only the broker holding maintenance ownership runs learning; handoff
+  waits for its reviews to drain before a replacement starts.
+- Schema revision **8** adds the preferences, queue and draft tables after the
+  released sign-in, swarm and rolling-release migrations. This release
   needs the normal coordinated schema migration with runtime owners stopped;
   it is not an API-only compatible release. See [schema migrations](schema-migrations.md).
 

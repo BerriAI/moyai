@@ -184,8 +184,11 @@ class Spend:
         request_id = str(uuid4())
         user_id = run['active_user_id'] if run['chat_enabled'] else run['owner_id']
         retry_at = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
-        self.store.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at,gateway_scope,cost_next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)',
-                           (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, now(), self.gateway_scope, retry_at))
+        with self.store.connect() as conn:
+            conn.execute('INSERT INTO model_requests(id,key_hash,run_id,message_id,user_id,model,created_at,gateway_scope,cost_next_attempt_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                         (request_id, self.key_hash, run['id'], run['active_message_id'], user_id, model, now(), self.gateway_scope, retry_at))
+            if owner := getattr(self.store, 'broker_work', None):
+                owner.claim_in(conn, 'model', request_id)
         return request_id
 
     def headers(self, request_id, upstream, streaming) -> str:
@@ -203,9 +206,12 @@ class Spend:
             value = usage.get(field)
             return value if type(value) is int and value >= 0 else None
         cost = capture.cost if capture else None
-        self.store.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
-                           (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
-                            tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
+        with self.store.connect() as conn:
+            conn.execute('UPDATE model_requests SET status=?,finished_at=?,cost_source=CASE WHEN cost IS NULL AND ? IS NOT NULL THEN ? ELSE cost_source END,cost=COALESCE(cost,?),prompt_tokens=?,completion_tokens=?,total_tokens=?,cache_read_input_tokens=?,cache_creation_input_tokens=? WHERE id=?',
+                         (status, now(), cost, 'response_usage', cost, tokens('prompt_tokens'), tokens('completion_tokens'), tokens('total_tokens'),
+                          tokens('cache_read_input_tokens'), tokens('cache_creation_input_tokens'), request_id))
+            if owner := getattr(self.store, 'broker_work', None):
+                owner.release_in(conn, 'model', request_id)
 
     def settle_receipt(self, request_id: str, key_hash: str, gateway_scope: str,
                        receipt_id: str, cost: str) -> bool:

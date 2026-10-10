@@ -1,12 +1,12 @@
 # Separate inference from app restarts
 
 This opt-in topology isolates sandbox model/tool traffic from the coordinator's
-UI/API lifecycle. It does **not** enable mixed-build rollouts, API replicas or
-zero-downtime API updates. All processes still require the same full build SHA
-and runtime fingerprint. The opt-in [API replica extension](api-replicas.md) adds
-same-build API overlap with an independent coordinator; mixed-build releases
-still require coordination. Keep the default topology until the coordinated cutover
-and edge routing below are ready.
+UI/API lifecycle. The base auto-schema topology requires matching builds and
+an exclusive broker. The [API replica extension](api-replicas.md),
+[verified broker overlap](broker-overlap.md), [compatible workers](worker-releases.md)
+and [coordinator handoff](coordinator-handoff.md) provide the mechanisms used by
+the full [rolling deployment procedure](rolling-deploy.md). Keep the default
+topology until the one-time migration, role routing and activation are ready.
 
 ## Ownership
 
@@ -14,29 +14,34 @@ Set `MOYAI_SEPARATE_BROKER=true` on **every** process:
 
 | Role | Traffic and work |
 | --- | --- |
-| `coordinator` | UI, API, uploads, webhooks, Temporal wake dispatch, Slack delivery, identity/environment/automation jobs, trace export, session titles and infrastructure accounting. Rejects `/broker/*` with 503 instead of forwarding. |
+| `coordinator` | Webhooks, Temporal wake dispatch, Slack delivery, identity/environment/automation jobs, trace export, session titles and infrastructure accounting. Also UI/API/uploads in the base topology; hooks only after handoff is enabled. Rejects `/broker/*` with 503 instead of forwarding. |
 | `broker` | `/broker/*` and `/health` only. Owns the model gate, run-scoped tools/credentials/Git/attachments, live context, compaction recovery, memory review and model-cost receipt recovery. Connects to Temporal for automation tools, but never dispatches wakes or consumes activities. |
 | `worker` | Temporal execution activities and `/health` only, as before. |
 
-The broker has an exclusive PostgreSQL ownership lock, separate from the
-coordinator lock. A second broker is refused before schema setup or inference
-recovery runs.
+With `MOYAI_SCHEMA_MODE=auto`, the broker has an exclusive PostgreSQL lock and
+a second broker is refused before recovery. In verified-schema mode, compatible
+brokers share broker membership, use globally coordinated model slots, and elect
+one maintenance owner. See [broker overlap](broker-overlap.md).
 The shared policy includes the split setting; a process configured for the wrong
 topology, keys, storage, limits, prepared-pool settings or build is refused. Only
 execution workers maintain prepared sandboxes; the broker never starts the pool
 or subscribes to execution wake notifications. An API restart no longer
 interrupts pending model requests, running compaction or executing tool receipts.
-Restarting the broker still performs that recovery, because its old connections
-have ended. Do not overlap broker instances or turn off the ownership checks.
+An auto-schema broker restart performs global recovery after its exclusive
+predecessor exits. A verified broker recovers only requests belonging to proven
+dead owners and leaves another live broker's requests untouched. Never disable
+ownership checks to force a rollout.
 
-A build or shared-policy change requires all old workers and the broker to stop
-before the new coordinator starts. The coordinator checks this before schema
+A shared-policy, protocol or schema change requires all runtime owners to stop
+before the new coordinator publishes a different contract. The coordinator checks this before schema
 writes, keeps joining instances out until component setup finishes, and only
-then publishes the new policy. Matching same-build restarts remain supported;
-this startup fence does not make mixed-build rollouts compatible.
+then publishes the new policy. A reviewed compatible build replacement instead
+joins the existing contracts without replacing the baseline policy. This needs
+verified schema and, for coordinator overlap, `MOYAI_COORDINATOR_HANDOFF=true`.
 
 Chat inference, context maintenance, credential inference and memory review keep
-one shared `MAX_CONCURRENT_MODEL_REQUESTS` gate on the broker. Session titles and
+one shared `MAX_CONCURRENT_MODEL_REQUESTS` budget across verified brokers; an
+auto-schema broker retains its local gate. Session titles and
 audio transcription retain their existing separate limits on the coordinator;
 this change does not claim those requests survive an API restart. The API's
 `/api/admin/capacity` identifies model counters as `source=separate_broker` and
@@ -100,8 +105,9 @@ the connector alongside the API could still break those connections.
    then restart **only the coordinator at the same build** during a live model
    request. Check its stream, request accounting, saved result and latency.
 
-The [production deployment button](production-deploy.md) supports subsequent
-coordinated releases of all three activated roles. It verifies and stages the
+For the base three-service topology, the
+[production deployment button](production-deploy.md) supports subsequent
+coordinated releases. It verifies and stages the
 broker before updating the coordinator, then verifies the new broker before
 resuming the worker. It does not change the split flag or edge route and does
 not perform this first topology switch. Clear the broker's `MAINTENANCE_DRAIN`
@@ -109,8 +115,10 @@ flag during activation so all three services form a clean release baseline.
 
 With database pool size 8, three processes plus the coordinator's wake listener
 require up to 28 database connections, plus administrative reserve. One
-overlapping worker adds 9. This does not authorize
-overlapping coordinator or broker instances. Render [private services use TCP
+overlapping worker adds 9. In verified broker mode, add one dedicated slot-lock
+connection per broker (not per model call), plus 9 for each API at pool size 8.
+A verified broker replacement therefore adds up to 10 connections. Use the
+rolling runbook before enabling coordinator/broker overlap. Render [private services use TCP
 health checks](https://render.com/docs/health-checks), not an HTTP health-check
 path. The broker therefore waits for Temporal and valid database ownership before
 ASGI startup completes and Uvicorn opens its port. After
@@ -143,7 +151,12 @@ one provider call and one completed accounting row. The JSON report and cast are
 actual execution output. The model fixture incurs no provider spend; this is not
 a live Render/Cloudflare or paid-model rollout test.
 
-Remaining work: define and test a code-owned compatibility contract for different
-API builds, move schema changes out of ordinary replica startup, coordinate
-singleton app jobs, remove API disk dependence, and implement readiness/traffic
-handoff plus graceful draining for overlapping API instances.
+For the complete rolling topology, migrate offline to the selected schema
+(currently revision 8), activate the dedicated API and its edge route, and enable
+coordinator handoff. All participating services need diskless verified shared
+files and the configured shutdown allowance. The rolling controller verifies
+replacement readiness and old-owner retirement. Broker HTTP draining is bounded
+to 270 seconds inside Render's required 300-second allowance; requests exceeding
+that deadline may be interrupted, and ambiguous external actions are not replayed.
+A successful local rehearsal is evidence of the mechanism, not proof that the
+production routing and activation have already been completed.
