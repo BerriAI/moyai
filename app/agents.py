@@ -393,7 +393,7 @@ class AgentCoordinator:
             SELECT id FROM runs WHERE id=? UNION
             SELECT r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
         ) SELECT r.id,r.parent_run_id,r.agent_group_id,r.agent_label,r.mode,r.status,
-            r.created_at,r.updated_at,r.error,r.checkpoint_error,r.pending_result,
+            r.created_at,r.updated_at,r.error,r.checkpoint_error,r.pending_result,r.harness,r.model,r.active_model,
             r.active_message_id,r.deletion_requested_at,r.deleted_at,
             EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id
                 AND m.status IN ('queued','running','injected')) AS pending_messages

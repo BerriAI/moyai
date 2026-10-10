@@ -73,7 +73,7 @@ class SwarmCollaboration:
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
                 or not run['active_message_id']):
             raise ValueError('Swarm collaboration requires an active member turn.')
-        team = conn.execute('''SELECT t.*,g.parent_id,g.status FROM swarm_teams t
+        team = conn.execute('''SELECT t.*,g.parent_id,g.status,g.message_id AS owner_message_id FROM swarm_teams t
             JOIN agent_groups g ON g.id=t.group_id
             WHERE t.group_id=? AND g.parent_id=?''',
                             (run['agent_group_id'], run['parent_run_id'])).fetchone()
@@ -127,7 +127,7 @@ class SwarmCollaboration:
         if count < 2000:
             data = {'group_id': team['group_id'], 'child_id': run['id'], 'target_id': target_id,
                     'swarm_event': kind, 'post_id': post_id, 'content': content,
-                    'turn_id': run['active_message_id']}
+                    'turn_id': team['owner_message_id'], 'member_turn_id': run['active_message_id']}
             conn.execute('INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)',
                          (team['parent_id'], 'agents', run['agent_label'] + ': ' + kind,
                           json.dumps(data), stamp))

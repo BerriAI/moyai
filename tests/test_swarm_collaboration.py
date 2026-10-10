@@ -49,6 +49,10 @@ async def test_board_persists_goal_roster_posts_and_assignments(durable):
     assert 'Find a useful proposal.' in messages[-1]['content']
     event = collaboration.store.events(lead['parent_run_id'])[-1]
     assert event['data']['post_id'] == board['posts'][-1]['id']
+    parent = collaboration.store.run(lead['parent_run_id'])
+    assert worker['active_message_id'] != parent['active_message_id']
+    assert event['data']['turn_id'] == parent['active_message_id']
+    assert event['data']['member_turn_id'] == worker['active_message_id']
 
 
 async def test_first_willing_lead_wins_concurrent_claims_and_retries(durable):

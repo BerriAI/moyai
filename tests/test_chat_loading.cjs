@@ -339,10 +339,11 @@ test('detail updates render activity once with the complete latest transcript an
     assert.match(box.innerHTML,new RegExp(run.messages.at(-1).content));
   };
   f.context.$=selector=>Object.assign(f.node(selector),{setAttribute(){}});
-  load(f.context,'function updateChatStatus(','function renderChatWorking(');
+  load(f.context,'function syncSwarmControls(','function renderChatWorking(');
   const run={id:runId,mode:'demo',status:'running',events:[],messages:[{id:1,role:'user',status:'running',content:'Question'}]};
   f.context.updateChat(structuredClone(run),true);
   assert.deepEqual(activity,[{status:'running',messages:['Question']}]);
+  assert.equal(f.node('#swarm-pause').hidden,true,'ordinary conversations keep swarm controls hidden');
   run.status='completed';run.messages[0].status='completed';
   run.messages.push({id:2,role:'assistant',status:'completed',content:'Answer'});
   f.context.updateChat(structuredClone(run));
