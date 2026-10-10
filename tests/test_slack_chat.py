@@ -947,20 +947,25 @@ def test_answers_render_mentions_only_for_users_already_mentioned_in_the_thread(
 def test_uncertain_outbox_delivery_survives_restart_without_resending(slack_app, monkeypatch):
     app, client, run_id = start(slack_app)
     wait_for(lambda: bool(app.state.store.rows("SELECT 1 FROM slack_activity WHERE refreshed_at>0")))
-    finish(app, run_id, 'An important answer')
+    request = app.state.connectors.request
     attempts = []
-    async def fail(*args, **kwargs):
-        attempts.append(1)
-        raise TimeoutError('The provider response was lost')
+    async def fail(method, url, **kwargs):
+        if url.endswith('chat.postMessage'):
+            attempts.append(1)
+            raise TimeoutError('The provider response was lost')
+        return await request(method, url, **kwargs)
     monkeypatch.setattr(app.state.connectors, 'request', fail)
+    # The live watcher can send as soon as collection publishes the answer.
+    # Install the failed transport first, and let either delivery task finish.
+    finish(app, run_id, 'An important answer')
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
-    assert app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'uncertain'
+    wait_for(lambda: app.state.store.rows("SELECT status FROM slack_outbox WHERE kind='answer'")[0]['status'] == 'uncertain')
     # A fresh database handle observes the same durable cursor and outbox.
     reopened = Store(app.state.settings.data_dir)
     assert len(reopened.rows("SELECT * FROM slack_outbox WHERE kind='answer'")) == 1
     app.state.slack.chat.collect()
-    app.state.slack.recover()
+    client.portal.call(app.state.slack.recover)
     app.state.slack.chat.last_post.clear()
     client.portal.call(app.state.slack.chat.deliver_one)
     assert attempts == [1]
