@@ -7,6 +7,25 @@
 
 ## Skills
 
+Moyai ships three organization skills: `moyai-dev-and-test`, `pr-feedback-loop`,
+and `pr-delivery`. They cover this repository's setup/checks, repairing existing PR
+feedback, and evidence-backed PR handoff. The Moyai runbook applies only to
+`BerriAI/moyai`; other repositories should have their own verified runbooks.
+
+The release installs these templates at application startup using the existing
+encrypted, versioned library. No model call, sandbox startup or network lookup is
+needed. They use the same bounded initial directory and on-demand instructions
+and reference files described below. Simply having a skill does not invoke it.
+
+Admins can edit or archive them in Settings. Template upgrades preserve edits,
+renames, archives, existing names and library limits. Only unmodified, active
+templates receive a higher bundled source version; restarting an older release
+does not downgrade them. Set `BUNDLED_SKILLS_ENABLED=false` to stop future
+installation/upgrades; archive installed entries to remove them from discovery.
+These defaults require no schema migration and are independent of skill learning.
+See the [initial coding-pack evaluation](coding-skills-evaluation.md) for observed
+selection, overhead, limitations, and reproduction commands.
+
 The **Skills** library stores reusable Markdown instructions. Add a name, a
 description of when to use the skill, and Markdown text, or import a `SKILL.md`.
 You can also ask Moyai in chat to “save this as a personal skill” or, as an admin,
