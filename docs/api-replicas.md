@@ -19,9 +19,9 @@ that mode. Coordinated mode refuses the activated four-service topology.
 
 - PostgreSQL, Temporal, verified shared object storage and explicit stable keys.
 - `MOYAI_SEPARATE_BROKER=true` and `MOYAI_SCHEMA_MODE=verify` on all roles.
-- Offline schema migration to revision 3. Revision 2 adds the durable session-title
+- Offline schema migration to revision 4. Revision 2 adds the durable session-title
   inbox and a partial index for pending deletion scans; revision 3 adds the API
-  compatibility policy. These preserve saved
+  compatibility policy; revision 4 adds opt-in skill-learning jobs and private drafts. These preserve saved
   sessions, keys and runtime policy. Follow
   [schema migrations](schema-migrations.md), including stopping **all** runtime
   owners before `python -m app.schema_migrations --apply`.

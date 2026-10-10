@@ -161,6 +161,10 @@ class Settings(BaseSettings):
     memory_review_idle_seconds: float = Field(default=60, ge=0, le=3600)
     memory_review_timeout_seconds: float = Field(default=60, ge=1, le=180)
     memory_review_backfill_limit: int = Field(default=50, ge=0, le=200)
+    skill_learning_enabled: bool = True
+    skill_learning_model: str = Field(default='', max_length=200)
+    skill_learning_idle_seconds: float = Field(default=60, ge=0, le=3600)
+    skill_learning_timeout_seconds: float = Field(default=60, ge=1, le=180)
     audio_transcription_model: str = "gpt-transcribe"
     audio_transcription_prompt: str = Field(default="", max_length=800)
     # Separate destination/key; enabling traces never reroutes inference.

@@ -580,3 +580,40 @@ test('signed-out boot sends the complete credential target through Google sign-i
   await f.element('google-signin').onclick();
   assert.deepEqual(f.posts,[{return_to:'/'+accessLink()}]);assert.deepEqual(f.redirects,['https://accounts.google.com/fixture']);
 });
+
+const workflowSuggestion={id:'draft-one',name:'fixture-review',description:'Review benchmark fixtures.',instructions:'Check offline fixtures before reporting results.',reason:'The completed workflow is reusable.',target_id:'',target_revision:0,evidence:[],sources:[]};
+test('a learned draft requires scope and saves edits through the atomic acceptance API',async()=>{
+  const f=fixture({kind:'skill'});
+  await f.ctx.openSkillEditor('',workflowSuggestion);
+  assert.equal(f.element('skill-scope').value,'');
+  await f.element('skill-form').onsubmit({preventDefault(){},currentTarget:f.element('skill-form')});
+  assert.equal(f.posts.length,0);
+  f.element('skill-scope').value='personal';
+  f.element('skill-instructions').value='My corrected workflow instructions.';
+  await f.element('skill-form').onsubmit({preventDefault(){},currentTarget:f.element('skill-form')});
+  assert.equal(f.posts[0].path,'/api/skill-learning/suggestions/draft-one/accept');
+  assert.equal(f.posts[0].body.instructions,'My corrected workflow instructions.');
+  assert.equal(f.posts[0].body.scope,'personal');
+});
+test('a failed suggested-skill save preserves edits and a stale update cannot open',async()=>{
+  const f=fixture({kind:'skill',submitError:'Skill changed'});
+  await f.ctx.openSkillEditor('',workflowSuggestion);
+  f.element('skill-scope').value='personal';f.element('skill-instructions').value='Corrected draft';
+  await f.element('skill-form').onsubmit({preventDefault(){},currentTarget:f.element('skill-form')});
+  assert.equal(f.element('skill-instructions').value,'Corrected draft');
+  assert.equal(f.element('skill-form-error').textContent,'Skill changed');
+  assert.equal(f.element('skill-dialog').open,true);
+  const stale=fixture({skill:{...workflowSuggestion,id:'saved-skill',scope:'personal',revision:3,can_manage:true,files:[]}});
+  await assert.rejects(()=>stale.ctx.openSkillEditor('saved-skill',{...workflowSuggestion,target_id:'saved-skill',target_revision:2}),/skill changed/);
+  assert.equal(stale.element('skill-dialog').open,undefined);
+});
+test('a delayed skill editor cannot open after navigation or an account change',async()=>{
+  for(const change of ['pageVersion','userId']){
+    const f=fixture();let resolve;
+    f.ctx.api=()=>new Promise(done=>resolve=done);
+    const opened=f.ctx.openSkillEditor('skill-id');
+    f.ctx.state[change]=change==='pageVersion'?2:'google:another';
+    resolve({...workflowSuggestion,can_manage:true,scope:'personal',revision:1,files:[]});
+    await opened;assert.equal(f.element('skill-dialog').open,undefined);
+  }
+});

@@ -114,7 +114,7 @@ def test_api_starts_no_singleton_jobs_and_does_not_own_hooks(cluster, monkeypatc
                (app.state.session_lifecycle, 'start'), (app.state.environments, 'start'),
                (app.state.identities, 'start'), (app.state.automations, 'start'),
                (app.state.tracing, 'start'), (app.state.lens_feedback, 'start'),
-               (app.state.memory_review, 'start'), (app.state.spend.recovery, 'start')]
+               (app.state.memory_review, 'start'), (app.state.skill_learning, 'start'), (app.state.spend.recovery, 'start')]
     for service, method in guarded:
         monkeypatch.setattr(service, method, Mock(side_effect=AssertionError('API started singleton work')))
     manager = app.state.manager

@@ -119,8 +119,8 @@ jobs:
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py tests/test_runtime_startup_fences.py tests/test_runtime_performance.py tests/test_admission_cleanup.py tests/test_startup_postgres.py
       - name: Verify authenticated capacity observations on both backends
         run: |
-          uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py
-          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py
+          uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py tests/test_skill_learning.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py tests/test_skill_learning.py
       - name: Verify Slack finish transactions and tracing on both backends
         run: |
           uv run --frozen --python 3.13 pytest -q tests/test_finish_tracing.py

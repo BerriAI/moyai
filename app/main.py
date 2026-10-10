@@ -221,6 +221,9 @@ def _create_app(settings, store):
     from .memory_review import MemoryReview
     memory_review = MemoryReview(memory, settings, spend, model_slots)
     memory.reviewer = store.memory_review = memory_review
+    from .skill_learning import SkillLearning
+    skill_learning = SkillLearning(skills, memory, settings, spend, model_slots)
+    store.skill_learning = skill_learning
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     lens_feedback = LensFeedback(store, settings)
@@ -263,6 +266,7 @@ def _create_app(settings, store):
                     await session_lifecycle.close()
                     await session_titles.close()
                     await memory_review.close()
+                    await skill_learning.close()
                     await spend.recovery.close()
                     await infrastructure.close()
                     await automations.close()
@@ -303,9 +307,11 @@ def _create_app(settings, store):
                     await manager.wait_ready()
                     spend.recovery.start()
                     memory_review.start()
+                    skill_learning.start()
                     yield
                 finally:
                     await memory_review.close()
+                    await skill_learning.close()
                     await spend.recovery.close()
                     await harness_gateway.maintenance.close()
                     await harness_gateway.live_context.close()
@@ -327,6 +333,7 @@ def _create_app(settings, store):
             if owns_inference:
                 spend.recovery.start()
                 memory_review.start()
+                skill_learning.start()
             watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
             tracing.start()
             lens_feedback.start()
@@ -337,6 +344,7 @@ def _create_app(settings, store):
             finally:
                 await session_lifecycle.close()
                 await memory_review.close()
+                await skill_learning.close()
                 await spend.recovery.close()
                 await harness_gateway.maintenance.close()
                 await harness_gateway.live_context.close()
@@ -395,6 +403,8 @@ def _create_app(settings, store):
     app.include_router(credentials.routes())
     app.state.credentials = credentials
     app.include_router(skills.routes())
+    app.include_router(skill_learning.routes())
+    app.state.skill_learning = skill_learning
     app.include_router(memory.routes())
     app.state.memory = memory
     app.state.memory_review = memory_review
@@ -476,7 +486,7 @@ def _create_app(settings, store):
             return JSONResponse({'detail': 'Invalid sandbox connection form.'}, status_code=422)
         if request.url.path.startswith('/api/credentials'):
             return JSONResponse({'detail':'Invalid credential form. Choose who can use it and when it can be reused, then check the required fields.'},status_code=422)
-        if request.url.path.startswith('/api/skills'):
+        if request.url.path.startswith(('/api/skills', '/api/skill-learning')):
             return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
         return await request_validation_exception_handler(request,exc)
 
