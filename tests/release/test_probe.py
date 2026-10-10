@@ -93,12 +93,23 @@ def test_release_fingerprint_matches_actual_runtime_policy(production_shape):
     assert policy_fingerprint(settings.model_copy(update={'encryption_key': 'different'})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_pool_size': 1})) != state['policy']
     assert policy_fingerprint(settings.model_copy(update={'sandbox_prepared_idle_seconds': 600})) != state['policy']
+    assert policy_fingerprint(settings.model_copy(update={'independent_agent_runtime': True})) != state['policy']
+
+
+@pytest.mark.parametrize('independent', [False, True])
+def test_release_policy_matches_current_runtime_without_database(independent):
+    from app.database import runtime_fingerprint
+    settings = Settings(_env_file=None, independent_agent_runtime=independent)
+    assert policy_fingerprint(settings) == runtime_fingerprint(settings)
 
 
 @pytest.mark.parametrize('extra', [
     {}, {'moyai_separate_broker': False},
     {'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300},
-    {'moyai_separate_broker': False, 'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300}])
+    {'moyai_separate_broker': False, 'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300},
+    {'moyai_separate_broker': True, 'moyai_coordinator_handoff': True,
+     'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300,
+     'independent_agent_runtime': False}])
 def test_first_upgrade_verifies_each_running_build_fingerprint_without_schema_fallback(extra):
     values = {key: getattr(Settings(_env_file=None), key) for key in POLICY_FIELDS}
     expected = hashlib.sha256(json.dumps(values | extra, sort_keys=True).encode()).hexdigest()

@@ -283,18 +283,26 @@ start fresh; child changes are not automatically merged. Workers can delegate th
 queue and concurrency bounds. Each level keeps its direct parent and original workflow ancestry;
 credentials still require the current requester and original session scope. Child agents follow the same policy: all enabled connected-app tools execute directly under the organization connection policies.
 
-After the delegation tool completes, the coordinator checkpoints between tool
-rounds, terminates its sandbox and waits durably. Its original user message stays
+Delegation returns handles after admission and the workspace snapshot. The parent
+can continue useful work, start another group, or read partial results.
+`agents_wait(after=cursor)` waits for changes without setting a child deadline.
+When dependencies are all that remain, `agents_wait(release=true)` or an initial
+`wait=true` checkpoints between tool rounds, releases the computer and waits durably. Its original user message stays
 open. Once every child and its descendants have settled (including failures), it reacquires capacity,
 restores its checkpoint and continues the same request with the worker reports.
 This works even with only one available sandbox slot. Each child is an ordinary
 Temporal `SessionWorkflow`; parent/group relationships and result data are stored
-in SQLite rather than as large Temporal history payloads. A waiting parent uses
+in the application database rather than as large Temporal history payloads. A waiting parent uses
 no Modal sandbox. It currently checks completion using a five-second Temporal
 timer; this is a workflow-history cost, not sandbox idle time.
 
-`agents_results` retrieves answers/statuses, and `agents_read_artifact` lists or
-reads a bounded UTF-8 file from a child's recovery archive (128 KiB per read).
+`agents_results` retrieves complete answers/statuses and freezes settled handoffs.
+`agents_read_artifact` lists files and published revisions, or reads complete byte
+ranges as text/base64. `agents_send` steers an active child or wakes an idle child
+with explicitly attributed agent guidance. Stable request keys prevent duplicate
+delivery; a parent follow-up reopens the group's result obligation.
+`agents_cancel(child_ids=[...])` stops selected children; omitting the list stops
+the entire group.
 Workers should save structured case results under `/workspace`; the parent can
 read and merge them into its own final result. Failure is not success or a zero
 cost. `agents_retry` accepts explicit recovery instructions for failed workers;
@@ -348,8 +356,8 @@ Authenticated web follow-ups can be sent directly to a child. They queue behind
 its current turn and are charged to the signed-in sender. While the parent is
 waiting, it waits for accepted follow-ups too, including messages arriving during
 capacity admission. A parent stop blocks new child messages until cleanup finishes.
-Workers still cannot create further agents, and organization connection policies
-apply to their tool calls.
+Workers can delegate within inherited scope, capacity and deadlines. Organization
+connection policies apply to their tool calls.
 
 At handoff, the parent receives saved answers and immutable archive versions.
 Later child chats can change their own workspace without silently changing those

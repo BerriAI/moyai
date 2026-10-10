@@ -121,9 +121,9 @@ class HarnessGateway:
         from .live_context import LiveContext
         self.live_context = LiveContext(self)
 
-    async def library_context(self, run, model, budget=None):
+    async def library_context(self, run, model, budget=None, *, payload=None):
         from .library_views import fit_context
-        budget = budget or await self.context_budget.measure({'model': model, 'messages': []})
+        budget = budget or await self.context_budget.allocation({**(payload or {}), 'model': model})
         # This is a view allocation, derived from the actual input window. A
         # byte per token is conservative; final admission still counts the wire.
         allocation = max(1, budget.input_budget // 8)
@@ -137,8 +137,8 @@ class HarnessGateway:
             model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
-        budget = await self.context_budget.measure({'model': model, 'messages': []})
-        context = '\n\n'.join(x for x in await self.library_context(run, model) if x)
+        budget = await self.context_budget.allocation({'model': model})
+        context = '\n\n'.join(x for x in await self.library_context(run, model, budget) if x)
         # The SDK cannot see broker-injected context. Reserve its byte bound as
         # well as room for a new tool result before the next native compact.
         window = max(1, budget.input_budget - len(context.encode()) - 4096)
@@ -308,7 +308,7 @@ class HarnessGateway:
             else:
                 if self.native_sessions is not None:
                     self.native_sessions.observe_scope(run)
-                context = '\n\n'.join(x for x in await self.library_context(run, model) if x)
+                context = '\n\n'.join(x for x in await self.library_context(run, model, payload=body) if x)
                 payload = authorized_payload(body, route, model, context)
                 field = 'messages' if route == '/v1/messages' else 'input'
                 items = payload[field]

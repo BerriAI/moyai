@@ -2,8 +2,8 @@
 
 Explicit schema verification is the database prerequisite for
 [compatible rolling releases](rolling-deploy.md). The selected release currently
-requires revision 7, including API/background compatibility records, durable
-coordinator hooks and broker work ownership. Verified roles can overlap only
+requires revision 9, including the conversation journal, goal/source records,
+computer operations and complete broker payloads. Verified roles can overlap only
 under their reviewed protocols and shared settings; schema changes themselves
 remain offline. Production is not opted in by merging code.
 
@@ -29,7 +29,7 @@ rejects accidental DDL through the application database adapter.
    python -m app.schema_migrations --apply
    ```
 
-   It prints `{"schema_revision": 8, "status": "ready"}` on success. An empty
+   It prints `{"schema_revision": 9, "status": "ready"}` on success. An empty
    schema must already exist, and requires `MOYAI_DATABASE_INITIALIZE=true`.
    Existing schemas do not need that flag. No credentials are printed.
 4. Set `MOYAI_SCHEMA_MODE=verify` on every role, including the dedicated API.

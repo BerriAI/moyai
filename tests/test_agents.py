@@ -704,8 +704,8 @@ async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, 
     await drive(manager, child)
     admission = manager.admission
     @asynccontextmanager
-    async def admit(run_id):
-        async with admission(run_id) as available:
+    async def admit(run_id, **options):
+        async with admission(run_id, **options) as available:
             coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
             yield available
     monkeypatch.setattr(manager, 'admission', admit)

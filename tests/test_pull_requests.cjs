@@ -497,10 +497,11 @@ function agentToolbox(){
   const card=host(),pullsSection=host(),agentsSection=host(),agentTab=host(),classes=new Set(),toggle={hidden:true};
   const ctx={disposed:false,run:{id:'parent'},agents:[],agentSignature:'',pullRequests:[],card,pullsSection,agentsSection,
     tabs:new Map([['agents',{kind:'agents',element:agentTab}]]),
-    document:{activeElement:null,querySelector:()=>toggle},ico:()=>'',
+    document:{activeElement:null,querySelector:()=>toggle,querySelectorAll:()=>[]},ico:()=>'',
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
     layout:{classList:{toggle:(key,value)=>value?classes.add(key):classes.delete(key)}}};
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('app/static/icons.js','utf8'),ctx);
   const app=fs.readFileSync('app/static/app.js','utf8');
   vm.runInContext(app.slice(app.indexOf('function sessionStatus('),app.indexOf('function sessionRepository(')),ctx);
   ctx.statusFor=ctx.sessionStatus;

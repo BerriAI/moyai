@@ -155,3 +155,12 @@ test('source links retain their requested line when saved files arrive or disapp
   assert.equal(view.link.classList.contains('saved-file-link'),false);
   assert.equal(view.link['aria-disabled'],'true');
 });
+
+test('a parent file catalog cannot decorate another agent’s message references',()=>{
+  const view=linkFixture('design.md',false);
+  view.link.closest=selector=>selector==='[data-message-run]'?{dataset:{messageRun:'child'}}:null;
+  decorate(view.container,[file('design.md')],{runId:'parent'});
+  assert.equal(view.link.href,undefined);
+  decorate(view.container,[file('design.md')],{runId:'child'});
+  assert.equal(view.link.href,'/download/design.md');
+});

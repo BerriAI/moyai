@@ -126,11 +126,14 @@ class Cloud:
                            'final': machine.operations[directory]})
 
     def attach(self, manager):
-        async def client():
+        async def client(*args):
             return 'client'
         async def archive(*args):
             pass
         manager.client = client
+        # Independent runtimes construct their own provider around this shared
+        # connection pool. Keep both runtime paths on the same fake cloud.
+        manager.modal_clients.get = client
         manager.image = lambda: 'image'
         manager.command = self.command
         manager.save_artifact = archive

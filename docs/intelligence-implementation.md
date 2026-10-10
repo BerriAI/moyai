@@ -1,6 +1,6 @@
 # Intelligence implementation ledger
 
-Status: in progress on `codex/moyai-intelligence`, integrated with `bb9eba8` from `main`.
+Status: in progress; validated increments are pushed directly to `main`.
 Nothing in this document is a deployment or model-quality claim.
 
 The approved proposal is the scope. This ledger records implementation and
@@ -302,5 +302,128 @@ typecheck pass. The 225-case focused backend run initially found two obsolete
 limit/ranking expectations; the affected initial-context and swarm suites pass
 all 56 cases after correcting those expectations. PostgreSQL passes 96
 migration/rolling-owner checks and 74 goal/journal/source/library/artifact
-contracts. The full repository regression is still running; provider and
+contracts. The broad repository regression completed with 4,970 passes, 94 failures and
+five setup errors. Follow-up contract repairs passed 226 cases, startup/image
+checks passed 75, and the remaining selected contracts passed 334; the final
+evaluation fix passed 36. A fresh full run is still required. Provider and
 production rehearsals remain separate release gates.
+
+## Shared computer primitives (WP6/WP8 prerequisite)
+
+The MCP catalog and in-process harness bindings share complete byte/range file
+reads, atomic text/binary writes and persistent command handles. Removed the
+100 KB output/read cutoffs and 120-second command lifetime. Launch identities
+prevent duplicate execution after a lost acknowledgment; unavailable supervisors
+report unknown outcomes. Explicit stop kills the process group, including a
+command ignoring TERM. Input backpressure returns an acknowledged byte prefix
+and exact remaining suffix. Appending logs remain readable without pretending
+that the file is immutable. Logs/arguments live outside Git working trees.
+
+Validation: 183 computer/MCP/harness cases passed with 15 optional runtime skips;
+all eight new computer contracts passed after the log-location follow-up; the
+final MCP suite passes all 32 cases. The live Slack-source regression expectation
+now preserves the current attributed reference. Independent agent runtime and
+lazy computer acquisition are still in progress and are not enabled by this
+prerequisite.
+
+## Model-sized cold replay (WP2)
+
+Cold starts now derive their history and current-request views from the selected
+model's verified input window. Complete scrubbed typed records remain in immutable,
+content-addressed JSONL references outside repositories, in addition to the server
+journal. Earlier references stay valid as later views are created. Fresh child
+or stale-workspace resets remove inherited references. Codex receives typed replay;
+adapters without a public replay API retain a labeled reference seed. A native
+resume does not redundantly inject old history. These conservative UTF-8 allocations
+are views, not retention limits or optimal token packing.
+
+Library allocation now resolves capacity without counting a preliminary empty
+request. It honors the actual request's output allowance; admission still measures
+the complete request after tool schemas, private context and media are present.
+
+Validation: 294 context, gateway, library and real Claude SDK transport cases pass,
+including all 30 SDK/model-routing/recovery fixture combinations. Another 52
+allocation/lifecycle cases pass; the broader run passed 276 cases and its 15 stale
+typed-replay assertions were corrected and covered by that 52-case rerun. The SDK
+tests use simulated inference responses, not live model-quality comparisons.
+Reference availability across future runtime/filesystem changes and typed replay
+qualification beyond Codex remain explicit WP2/WP8 work.
+
+
+## Independent runtime and complete native state (WP2/WP8; opt-in)
+
+Codex on Modal can enter the same shared conversation lifecycle in a separate
+control guest, without repository checkout, desktop preparation or attachment
+download. Broker tools remain available before a full computer is acquired.
+Computer tools use stable operation identities and the existing durable controller;
+UI wake can request the same computer. The model, turn, goal and capability are
+preserved. App-only answers settle without a filesystem snapshot. The feature
+is disabled by default pending staging/provider qualification; see
+[independent runtime](independent-runtime.md).
+
+Preparation, tools and finalization use the existing launch-once supervisor.
+Launch specifications are immutable; segment/generation identities distinguish
+new computer preparation and saves from earlier snapshots. Project interpreters
+and the credential proxy are activated for each tool without restarting project
+services. Worker retry, owner changes and machine loss preserve completed receipts
+and distinguish rejected actions from unknown dispatched effects. Cleanup closes
+pending receipts without claiming that an uncertain write failed or succeeded.
+
+Removed the native-state 2 MB/256-file cutoffs and Claude transcript abandonment
+at that boundary. Large native state and computer requests use one encrypted,
+owner-bound multipart transport. Integrity, destination and execution ownership
+are checked before the original endpoint validates the assembled body. Native
+checkpoint, taint and revocation checks remain. Complete broker read/control
+responses no longer fail at an unrelated 5 MB response cutoff. Stored payload
+parts currently share session retention; storage governance remains operational work.
+
+Validation so far: 314 runtime/context/environment cases and all 24 PostgreSQL
+migration cases pass. The real pinned Codex SDK with synthetic inference reads a
+broker result before computer admission, then writes through the computer bridge
+in the same native thread/model. That test found and corrected a real MCP approval
+configuration mismatch in the read-only control guest. Another 109 transport/
+recovery cases, 330 adapter/configuration cases (11 optional skips), 23
+PostgreSQL operation/payload cases and 11 image checks pass. A Python 3.14
+isolated environment with exactly the declared lightweight image packages imports
+the guest and verifies its pinned Codex dependencies. The operator guide was
+rendered at desktop/mobile widths and local links checked. This is protocol evidence,
+not measured deployed latency or model quality. Broader recovery, other harnesses
+and providers, and live S26 qualification remain open.
+
+Current source requires schema revision 9 and all four role protocol revisions 4.
+The previously pushed foundation remains revision 8; this increment adds computer
+operations and encrypted payload parts. It requires a coordinated migration.
+
+
+## Asynchronous delegation and attributed follow-ups (WP7; not deployed)
+
+`swarm_start`, `agents_fanout` and retries now return child handles after admission
+and snapshot creation. Parents can work independently and launch multiple groups.
+`agents_wait` reads changes with a cursor or explicitly checkpoints/releases the
+parent until settlement. Reading settled results freezes the handoff; uncollected
+groups still prevent premature parent completion. Direct child guidance is
+idempotent, steers active work, wakes idle work, and reopens collected groups when
+the parent requests refinement. Selected children can be cancelled independently.
+All of this uses Ishaan's existing AgentSwarm interface, database and workflows.
+
+New child assignments, retries and board messages retain explicit agent provenance
+in storage, live steering, native inputs and cold fallback. They cannot become
+new human goal commands. Dispatch after an awaited snapshot, long waits, shared
+board writes and Python handles retain the original actor/turn/capability fence.
+No arbitrary prompt, roster, item-list, board-message or child-answer clipping
+remains in these delegation contracts. Configured workspace capacity still applies;
+`MAX_PARALLEL_AGENTS` accepts any positive operator value. Large tool arguments
+use the same authenticated multipart transport as native state and computer calls.
+
+Validation: 389 broader delegation, swarm, steering, goal, MCP and broker checks
+pass; all 68 database-dependent role checks also pass in a separate PostgreSQL
+invocation. Another 76 new-contract cases and 96 source/fallback cases
+pass. Forty-two delegation/board/transport cases pass against PostgreSQL. The
+AgentSwarm guide was rendered at desktop/mobile widths and inspected. This is
+local protocol and behavioral evidence with simulated workers, not a live
+model-quality benchmark or a deployment. Full-repository regression, independent
+prerequisite readiness and owner-granted automation self-management remain open.
+
+The schema remains revision 9. All four role protocols are now revision 4 because
+older workers interpret agent-generated inputs as human messages. Drain old roles
+and use a coordinated release; rebuilding only the broker is not sufficient.

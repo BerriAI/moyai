@@ -4,6 +4,7 @@ No provider calls or generated shell commands. Tools read and echo synthetic dat
 """
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -376,8 +377,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     assert 'sdk-transport-ok' in text
             inspect_file = resumed is True or (resumed == 'pending' and not done)
             if inspect_file and receipt is None:
+                reference = re.search(r'(/[^\s"\\]+/\.moyai-history-[0-9a-f]{64}\.jsonl)', json.dumps(data['messages']))
                 block = {'type': 'tool_use', 'id': 'history_read', 'name': 'Read', 'input': {
-                    'file_path': str(workspace / 'note.txt' if resumed == 'pending' else session / '.moyai-history.jsonl'),
+                    'file_path': str(workspace / 'note.txt') if resumed == 'pending' else reference[1],
                     'offset': 1, 'limit': 1}}
             else:
                 if inspect_file:
@@ -415,7 +417,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
     url = f'http://127.0.0.1:{server.server_port}'
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-capability')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
-    relay = SimpleNamespace(url=url)
+    # Production obtains this through the authenticated gateway. The fixture
+    # provider rejects 100 KB prompts, so give the adapter its actual window.
+    relay = SimpleNamespace(url=url, context_window=lambda: {'input_budget': 20000})
     native_sessions, native_prompts = [], []
     if native_case:
         from app.security import digest
@@ -524,7 +528,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             if resumed == 'pending':
                 assert store.pending == {'history_read'}
                 assert (workspace / 'note.txt').read_text() == 'already edited\n'
-            store.compact(relay.compact)
+            # Exercise a compacted cold restore even when this fixture's
+            # current history already fits its advertised model window.
+            store.compact(relay.compact, force=True)
             cursor = store.state()['cursor']
             assert cursor > 0
             agent.close()
@@ -593,9 +599,10 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         else:
             assert result['messages'][:len(history)] == history
         if resumed is True:
-            saved = [json.loads(line) for line in (session / '.moyai-history.jsonl').read_text().splitlines()]
+            reference = re.search(r'(/[^\s"\\]+/\.moyai-history-[0-9a-f]{64}\.jsonl)', json.dumps(requests[0]['messages']))
+            saved = [json.loads(line) for line in Path(reference[1]).read_text().splitlines()]
             assert saved == history
-            assert not (workspace / '.moyai-history.jsonl').exists()
+            assert not list(workspace.glob('.moyai-history-*.jsonl'))
     finally:
         agent.close()
         if store is not None:

@@ -107,6 +107,8 @@ class Store:
             self._initialize_schema(default_model)
             from .swarms import initialize_schema
             initialize_schema(self)
+            from .swarm_chat import initialize_schema as initialize_swarm_chat
+            initialize_swarm_chat(self)
         if not self.database:
             self.path.chmod(0o600)
         self.objects = object_storage if object_storage is not None else ObjectStorage()
@@ -560,7 +562,11 @@ class Store:
                     if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
                     mission = conn.execute('SELECT budget_seconds FROM swarm_missions WHERE run_id=?', (previous['run_id'],)).fetchone()
-                    if (mission['budget_seconds'] if mission else None) != swarm_budget_seconds:
+                    original_time = conn.execute("SELECT data FROM events WHERE run_id=? AND json_text(data,'phase')='swarm_initial_time' ORDER BY id LIMIT 1",
+                                                 (previous['run_id'],)).fetchone() if mission else None
+                    initial_budget = (json.loads(original_time['data'])['budget_seconds'] if original_time
+                                      else mission['budget_seconds'] if mission else None)
+                    if initial_budget != swarm_budget_seconds:
                         raise ValueError('That submission ID was already used for different content.')
                     if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
@@ -658,7 +664,7 @@ class Store:
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
             m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
-            CASE WHEN m.input_kind='observation' THEN 'Slack observation' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
+            CASE WHEN m.input_kind='observation' THEN 'Slack observation' WHEN m.input_kind='delegation' THEN 'Agent guidance' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
@@ -707,7 +713,7 @@ class Store:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, restore_archived):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, human_control=False, restore_archived):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row and (row['deleted_at'] or row['deletion_requested_at']):
@@ -720,7 +726,13 @@ class Store:
                     or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
-        from .swarms import execution_policy, remaining_seconds
+        from .swarms import execution_policy, prepare_human_message_in, remaining_seconds
+        # Only authenticated human transports opt into changing a swarm's
+        # lifetime. Tool/peer/automatic messages cannot renew their own budget.
+        # This follows the receipt check so retried extensions apply once.
+        if human_control and not metadata_request and not row['parent_run_id']:
+            prepare_human_message_in(conn, run_id, content)
+            row = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
         mission = execution_policy(self, run_id, connection=conn)
         if mission and (mission['status'] != 'active' or remaining_seconds(mission) <= 0):
             if mission['status'] in {'paused', 'blocked'} and remaining_seconds(mission) > 0:
@@ -872,6 +884,20 @@ class Store:
                 for value in {email, old['email'] if old else email}:
                     self.reconcile_email_in(conn, value)
         return user_id
+
+    def access_actor(self, identity):
+        """Read a pinned account from this request's verified Access claims."""
+        rows = self.rows('''SELECT binding.user_id,binding.email AS access_email,
+            users.kind,users.email AS user_email FROM access_identities binding
+            LEFT JOIN users ON users.id=binding.user_id
+            WHERE binding.issuer=? AND binding.subject=?''', (identity['issuer'], identity['sub']))
+        if not rows:
+            return None
+        binding = rows[0]
+        if (binding['kind'] not in {'google', 'cloudflare'}
+                or binding['access_email'] != identity['email'] or binding['user_email'] != identity['email']):
+            raise ValueError('Access account mapping requires administrator review.')
+        return binding['user_id']
 
     def access_identity(self, identity):
         """Pin a verified Access subject to a person without changing ownership.

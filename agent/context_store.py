@@ -384,6 +384,8 @@ def open_context(directory, spec, relay=None):
         raise ContextUnavailable('The checkpoint is missing its saved conversation. Restore it before resuming work.')
     if reset:
         # Inherited child/stale snapshot state must not enter this run's context.
+        from agent.context_views import clear_views
+        clear_views(directory)
         for suffix in ('', '-journal', '-wal', '-shm'):
             Path(str(path) + suffix).unlink(missing_ok=True)
     context = ContextStore(path, spec['run_id'])

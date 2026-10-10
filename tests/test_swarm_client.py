@@ -51,7 +51,7 @@ async def test_shared_goal_and_typed_agents_start_without_caller_retry_keys():
     group = await AgentSwarm(backend).start(task='Find promising product ideas.', agents=agents)
     assert group.checkpoint_required and len(backend.calls) == 1
     assert backend.calls == [('swarm_start', {
-        'task': 'Find promising product ideas.',
+        'task': 'Find promising product ideas.', 'wait': False,
         'agents': [
             {'name': None, 'harness': None, 'model': None},
             {'name': 'Athena', 'harness': Harness.CLAUDE_AGENT_SDK, 'model': 'anthropic/example'},
@@ -67,7 +67,6 @@ async def test_shared_roster_and_goal_validation_precede_backend_io():
     for arguments in [
         {'task': 'ab', 'agents': [Agent()]},
         {'task': 'Review the case.', 'agents': []},
-        {'task': 'Review the case.', 'agents': [Agent()] * 101},
         {'task': 'Review the case.', 'agents': [{'harness': 'codxe'}]},
         {'task': 'Review the case.', 'agents': [{'task': 'Do my predefined task.'}]},
         {'task': 'Review the case.', 'agents': [Agent(name='Athena'), Agent(name='athena')]},
@@ -115,7 +114,6 @@ async def test_partition_request_and_invalid_input_never_reach_backend():
         {'request_key': 'bad key', 'items': ['a'], 'instructions': 'Review.'},
         {'request_key': 'empty'},
         {'request_key': 'mixed', 'items': ['a'], 'tasks': [Task(label='One', prompt='Review it.')]},
-        {'request_key': 'too-many', 'items': ['a'], 'instructions': 'Review.', 'workers': 101},
     ]:
         with pytest.raises(ValidationError):
             await swarm.delegate(**arguments)
@@ -140,12 +138,11 @@ async def test_planner_output_submits_through_shared_contract_with_exact_allowed
     assert [task.label for task in validated.tasks] == ['Research', 'Critic']
 
 
-async def test_planned_tasks_retain_wire_input_caps_before_backend_submission():
-    backend = Backend()
+async def test_planned_tasks_preserve_complete_prompt_before_backend_submission():
+    backend = Backend(receipt())
     planned = plan_team('x' * 12000, runtimes=[Runtime('codex', 'openai/example')])
-    with pytest.raises(ValidationError):
-        await AgentSwarm(backend).delegate(request_key='oversized-plan', tasks=planned)
-    assert not backend.calls
+    await AgentSwarm(backend).delegate(request_key='large-plan', tasks=planned)
+    assert backend.calls[0][1]['tasks'][0]['prompt'] == planned[0].prompt
 
 
 async def test_restore_reads_frozen_handoff_by_default_and_preserves_unknown_metadata():
@@ -197,9 +194,9 @@ async def test_cancel_and_explicit_retry_use_same_owner_backend_and_persisted_gr
     assert resumed.id == GROUP and resumed.checkpoint_required
     assert not group.checkpoint_required
     assert backend.calls == [
-        ('agents_cancel', {'group_id': GROUP}),
+        ('agents_cancel', {'group_id': GROUP, 'child_ids': []}),
         ('agents_retry', {'group_id': GROUP, 'request_key': 'recover-1', 'child_ids': [CHILD],
-                          'instructions': 'Verify the previous outcome before continuing.'}),
+                          'instructions': 'Verify the previous outcome before continuing.', 'wait': False}),
     ]
 
 

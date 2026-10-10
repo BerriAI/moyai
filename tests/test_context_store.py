@@ -76,10 +76,9 @@ def test_native_commit_requires_the_exact_completed_public_checkpoint(native_che
     assert 'PRIVATE NATIVE MARKER' not in json.dumps(read_records(store.path))
 
 
-@pytest.mark.parametrize('failure', ['missing', 'corrupt', 'oversize', 'wrong_lease', 'unavailable',
+@pytest.mark.parametrize('failure', ['missing', 'corrupt', 'wrong_lease', 'unavailable',
                                      'restart_unavailable', 'restart_wrong_lease'])
 def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_checkpoint, failure):
-    from agent.harnesses.native_session import MAX_BYTES
     native, store, requests = native_checkpoint
     private = native.root / 'claude/previous.jsonl'
     private.write_text('OLD PRIVATE STATE')
@@ -89,7 +88,6 @@ def test_missing_or_corrupt_native_load_preserves_the_public_fallback(native_che
         state = {'private': 'OLD PRIVATE STATE'}
         if failure == 'missing': state = None
         if failure == 'corrupt' or failure.startswith('restart_'): state = ['bad state']
-        if failure == 'oversize': state = {'large': 'x' * (MAX_BYTES + 1)}
         wrong_lease = failure == 'wrong_lease' or (failure == 'restart_wrong_lease' and body['action'] == 'restart')
         return {'lease': 'different-lease' if wrong_lease else body['lease'], 'state': state}
     native.context.relay.native = load
@@ -130,25 +128,24 @@ def test_native_file_restore_rejects_bad_names_before_writing(native_checkpoint,
     assert not (native.cache / 'valid.json').exists()
 
 
-def test_native_file_roundtrip_is_private_and_size_count_bounded(native_checkpoint, monkeypatch):
-    from agent.harnesses import native_session
+def test_native_file_roundtrip_preserves_large_complete_snapshots(native_checkpoint):
     native, _, _ = native_checkpoint
     data = base64.b64encode(b'private').decode()
     native.restore_files(native.cache, {'nested/session.json': data})
     target = native.cache / 'nested/session.json'
     assert target.read_bytes() == b'private' and target.stat().st_mode & 0o777 == 0o600
     assert native.files(native.cache) == {'nested/session.json': data}
-    for snapshot in ({'valid': data, 'bad': 'not base64!'}, {'valid': data, 'large': base64.b64encode(b'x' * 33).decode()}):
-        monkeypatch.setattr(native_session, 'MAX_BYTES', 32)
-        with pytest.raises(ValueError):
-            native.restore_files(native.root / 'restore', snapshot)
-        assert not (native.root / 'restore/valid').exists()
-    monkeypatch.setattr(native_session, 'MAX_FILES', 1)
     with pytest.raises(ValueError):
-        native.restore_files(native.root / 'restore', {'one': data, 'two': data})
-    (target.parent / 'second').write_text('second')
-    with pytest.raises(ValueError):
-        native.files(native.cache)
+        native.restore_files(native.root / 'restore', {'valid': data, 'bad': 'not base64!'})
+    assert not (native.root / 'restore/valid').exists()
+    snapshot = {f'file-{i}': data for i in range(300)}
+    snapshot['large'] = base64.b64encode(b'x' * 3_000_000).decode()
+    native.restore_files(native.root / 'restore', snapshot)
+    assert native.files(native.root / 'restore') == snapshot
+    native.context.relay.native = lambda body: {'lease': body['lease'], 'state': snapshot}
+    assert native.begin() == snapshot
+    native.finish(snapshot)
+    assert native.staged[0] == snapshot
 
 
 @pytest.mark.parametrize('destination', ['outside', 'inside'])

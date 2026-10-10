@@ -15,15 +15,13 @@ public updates are clickable, including existing messages such as
 `Created **design.md**` and links to `/workspace/design.md`. Exact workspace paths
 take precedence; a bare filename only resolves to a nested file when unambiguous.
 
-This browses the latest result ZIP already stored on Render, without starting a
-sandbox. It does not expose the server filesystem or require an archive migration.
-New/loose files are available individually; tracked repository edits still appear
-as patches. Existing collection limits and omissions are unchanged. Text previews
-are capped at 128 KiB; original file downloads are capped at the collector's 2 MiB
-file limit. Binary files download without an inline preview. All routes require
-the same organization sign-in as the session. HTML/scripts stay inert, and a newer
-archive causes an older preview/download URL to return a refresh notice rather
-than silently serving different bytes.
+Explicitly published files have immutable, verified revisions and complete
+downloads, without starting a sandbox. Text previews load further ranges on
+request. The recovery ZIP also preserves full collected files and tracked edits;
+files omitted by an older collector cannot be reconstructed from its archive.
+All routes require the session's organization sign-in. HTML/scripts stay inert.
+A replaced recovery archive requests a refresh rather than silently serving
+different bytes; explicit artifact revisions remain independently readable.
 
 ### Files uploaded by users
 
@@ -110,6 +108,10 @@ The input design follows the documented dictation pattern used by [Claude Code](
 
 ## Computer desktop and captures
 
+The opt-in [independent runtime](independent-runtime.md) can answer connected-app
+questions before starting the computer. Computer tools and **Wake up to see
+live** acquire the workspace under the same turn.
+
 The agent's `browser_read` exposes the full text and control directory of one
 observed frame, including open shadow roots. It also lists frames for explicit
 reads. Optional text and element ranges refer to a saved `snapshot`, so later
@@ -155,3 +157,23 @@ Open a session pull request from the conversation, the PR list, or a saved PR ta
 The panel includes the session’s confirmed PRs and those of its direct child agents. Disabled GitHub access or removed repository selection makes the details unavailable. Large changes show explicit truncation notices; GitHub remains available for complete diffs. Computer and Saved captures retain their separate controls.
 
 For a local demo, run `uv run python scripts/pull_request_panel_demo.py --port 8987` and open `http://localhost:8987/demo/login`. The session and GitHub data are fixtures. Add `--live-github` to read real PR details using your existing local `gh` login; no model, cloud workspace, or GitHub write is used.
+
+## File and terminal tools
+
+The shared computer tools read complete files in byte pages and return exact
+base64 bytes, including binary files and UTF-8 characters split across pages.
+`computer_write_file` publishes a complete replacement atomically; replacing an
+existing file requires `overwrite=true` and preserves its executable mode.
+
+`computer_terminal` returns a process handle. Commands continue after the tool
+returns; use `computer_terminal_read` to inspect status and page through the full
+saved output. A stable `request_key` identifies one launch across acknowledgment
+retries. An unavailable supervisor has an unknown outcome and does not authorize
+relaunching the command.
+
+Use `computer_terminal_input` to send text, exact base64 bytes, EOF, or an explicit
+force stop. When the process cannot accept all input immediately, the receipt
+identifies the accepted prefix and returns the exact remaining base64 suffix.
+Only send that remaining suffix again. Run services as foreground commands with
+handles; descendants stop when their owning command exits. Logs and command
+arguments stay outside repository trees, under the saved session directory.

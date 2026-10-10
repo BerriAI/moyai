@@ -95,6 +95,13 @@ def counting_input(payload):
 
 
 @dataclass(frozen=True)
+class InputAllocation:
+    input_budget: int
+    output_tokens: int
+    context_window: int
+
+
+@dataclass(frozen=True)
 class Budget:
     input_tokens: int
     input_budget: int
@@ -239,7 +246,8 @@ class ContextBudget:
                 raise HTTPException(503, 'Image token counting is unavailable. The request was not sent to the model.') from None
         return tokens, method
 
-    async def measure(self, payload, *, scope=''):
+    async def allocation(self, payload):
+        """Resolve available input room without counting an incomplete request."""
         limits = await self.limits(payload['model'])
         supplied = [payload[key] for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens') if key in payload]
         if any(positive(value) is None for value in supplied):
@@ -257,8 +265,12 @@ class ContextBudget:
         if available <= 0:
             raise HTTPException(422, 'The selected model has no input room with this output allowance. '
                 'Choose compatible model limits or an explicit output allowance.')
-        tokens, method = await self.count(payload, input_budget=available, scope=scope)
-        return Budget(tokens, available, output, limits.context_window, method)
+        return InputAllocation(available, output, limits.context_window)
+
+    async def measure(self, payload, *, scope=''):
+        allocation = await self.allocation(payload)
+        tokens, method = await self.count(payload, input_budget=allocation.input_budget, scope=scope)
+        return Budget(tokens, allocation.input_budget, allocation.output_tokens, allocation.context_window, method)
 
     async def check(self, payload, *, scope=''):
         budget = await self.measure(payload, scope=scope)

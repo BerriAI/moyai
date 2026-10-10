@@ -48,6 +48,16 @@
     return `<svg class="ui-icon icon-${name}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${body}</svg>`;
   }
   root.MoyaiIcon=icon;
+  // Identity depends only on the saved run ID, never list order or live status.
+  root.MoyaiAgentIcon=function(id){
+    let hash=2166136261;
+    for(const char of String(id||''))hash=Math.imul(hash^char.charCodeAt(0),16777619)>>>0;
+    hash=Math.imul(hash^(hash>>>16),2246822507)>>>0;
+    hash=(hash^(hash>>>13))>>>0;
+    const symbols=['cube','target','bolt','grid','code','design'];
+    const colors=['blue','mint','gold','rose'];
+    return `<span class="agent-identity agent-identity-${colors[hash%colors.length]}" aria-hidden="true">${icon(symbols[Math.floor(hash/colors.length)%symbols.length],18)}</span>`;
+  };
   if(typeof document!=='undefined'){
     // Static shell controls declare data-icon so their markup stays readable.
     const apply=()=>document.querySelectorAll('[data-icon]').forEach(node=>{if(!node.querySelector('.ui-icon'))MoyaiUI.insert(node, 'afterbegin', icon(node.dataset.icon,Number(node.dataset.iconSize)||16));});

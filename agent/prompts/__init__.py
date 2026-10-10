@@ -22,9 +22,16 @@ def system_prompt(spec, *, workspace=Path('/workspace'), session=Path('/session'
         slack=_read('slack') + ' ' if spec.get('slack_thread_chat') else '',
     )
     message += '\nBundled skill catalog (read through bundled_skill_read):\n' + json.dumps(catalog(), ensure_ascii=False)
-    guidance = repository_guidance([str(workspace)], workspace=workspace)
-    if any(item['guidance'] for item in guidance['paths']):
-        message += '\nApplicable root repository guidance (directory scoped):\n' + json.dumps(guidance, ensure_ascii=False)
+    if spec.get('independent_runtime'):
+        message += ('\nRuntime: inference and connected-app tools are ready independently of the computer. '
+                    'Computer file, terminal, repository and browser tools acquire the saved workspace when needed. '
+                    'Use those tools for all workspace operations. Read repository_guidance before repository work. '
+                    'The local control directory is not the workspace. Public saved-history file references can be '
+                    'read with computer_read_file without acquiring the workspace computer.')
+    else:
+        guidance = repository_guidance([str(workspace)], workspace=workspace)
+        if any(item['guidance'] for item in guidance['paths']):
+            message += '\nApplicable root repository guidance (directory scoped):\n' + json.dumps(guidance, ensure_ascii=False)
     if spec.get('side_chat_context'):
         message += (
             '\nThis is a separate side conversation. The main task continues independently. '

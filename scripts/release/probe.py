@@ -63,6 +63,8 @@ def policy_fingerprint(settings):
         fields += ('moyai_separate_broker',)
     if hasattr(settings, 'moyai_coordinator_handoff'):
         fields += ('moyai_coordinator_handoff',)
+    if hasattr(settings, 'independent_agent_runtime'):
+        fields += ('independent_agent_runtime',)
     return hashlib.sha256(json.dumps({key: getattr(settings, key) for key in fields}, sort_keys=True).encode()).hexdigest()
 
 

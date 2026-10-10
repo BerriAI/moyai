@@ -228,7 +228,7 @@ class Settings(BaseSettings):
     # Zero means unlimited. A positive value caps active and warm sandboxes.
     max_concurrent_runs: int = Field(default=0, ge=0)
     max_pending_runs: int = Field(default=1000, ge=100)
-    max_parallel_agents: int = Field(default=100, ge=1, le=100)
+    max_parallel_agents: int = Field(default=100, ge=1)
     swarm_models: str = ''
     # Zero means unlimited. A positive value bounds broker response buffers.
     max_concurrent_model_requests: int = Field(default=0, ge=0)
@@ -239,6 +239,7 @@ class Settings(BaseSettings):
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
     codex_runtime_reuse: bool = True
+    independent_agent_runtime: bool = False
     temporal_enabled: bool = False
     maintenance_drain: bool = False
     temporal_address: str = "localhost:7233"

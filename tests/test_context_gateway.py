@@ -903,12 +903,12 @@ def test_native_private_taint_is_sticky_across_repeated_begin(workspace, timing,
     assert not app.state.store.rows('SELECT encrypted FROM native_sessions')[0]['encrypted']
 
 
-def test_native_metadata_during_invocation_and_oversized_state_cannot_commit(workspace):
+def test_native_metadata_during_invocation_still_fences_large_state(workspace):
     from test_spend import active
     app, client = workspace
     run = active(app)
     native_exchange(client, run['id'], 'begin')
-    assert native_exchange(client, run['id'], 'commit', state={'data': 'x' * (2 * 1024 * 1024)}).status_code == 413
+    assert native_exchange(client, run['id'], 'commit', state={'data': 'x' * (2 * 1024 * 1024)}).json()['saved']
     assert client.post('/api/runs/' + run['id'] + '/messages',
         json={'content': '/session-id', 'client_id': 'native-metadata'}).status_code == 202
     assert native_exchange(client, run['id'], 'commit').json()['reason'] == 'turn_mismatch'

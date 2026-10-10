@@ -20,9 +20,11 @@ if __package__ in {None, ''}:
 
 from agent.tools import github_tools
 from agent.tools import artifact_tools
+from agent.tools import computer_tools
 from sandbox import computer
 from agent.tools import credential_tools
 from agent.repository_guidance import TOOL as GUIDANCE_TOOL, resolve as repository_guidance
+from sandbox.broker_transport import send_payload
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -30,6 +32,12 @@ GIT_BROKER = os.environ.get('WORKSPACE_GIT_BROKER_URL', BROKER)
 
 
 def broker(path, body=None):
+    if path == '/tools/call' and body is not None:
+        return send_payload(path, body, _broker)
+    return _broker(path, body)
+
+
+def _broker(path, body=None):
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     req = urllib.request.Request(BROKER + path, data=data, headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=920) as response:
@@ -100,7 +108,13 @@ MAX_PENDING_PER_LANE = 32
 def call_tool(params, tools):
     name, args = params['name'], params.get('arguments', {})
     try:
-        if name == 'repository_guidance':
+        if os.environ.get('MOYAI_REMOTE_COMPUTER') == '1':
+            from agent.tools import remote_computer
+            if remote_computer.requires_computer(name):
+                return remote_computer.call(name, args, broker)
+        if name in {tool['name'] for tool in computer_tools.TOOLS}:
+            data = computer_tools.call(name, args, os.environ.get('MOYAI_WORKSPACE', '/workspace'))
+        elif name == 'repository_guidance':
             data = repository_guidance(workspace=os.environ.get('MOYAI_WORKSPACE', '/workspace'), **{'paths': [], **args})
         elif name in {'artifact_publish', 'artifact_fetch'}:
             available = broker('/tools')
@@ -129,8 +143,17 @@ def call_tool(params, tools):
             if path.is_relative_to(computer.CAPTURES.resolve()) and path.suffix == '.png':
                 content.append({'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(path.read_bytes()).decode()})
         return {"content": content, "isError": bool(isinstance(data, dict) and data.get("error"))}
-    except (github_tools.GitHubToolError, artifact_tools.ArtifactError) as exc:
+    except (github_tools.GitHubToolError, artifact_tools.ArtifactError, computer_tools.ComputerToolError) as exc:
         return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+    except (FileExistsError, FileNotFoundError, IsADirectoryError, PermissionError) as exc:
+        # These local failures have useful repair instructions and contain no
+        # upstream response body. Do not turn a known filesystem rejection into
+        # an unexplained, potentially executed external write.
+        detail = {FileExistsError: 'The destination exists. Read it first and choose overwrite=true only when replacement is intended.',
+                  FileNotFoundError: 'The path does not exist. Check its workspace-relative path.',
+                  IsADirectoryError: 'The path identifies a directory; choose a regular file.',
+                  PermissionError: 'The computer denied access to this path.'}[type(exc)]
+        return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
     except HTTPError as exc:
         message = f'Tool failed (HTTP {exc.code}). The action was not confirmed.'
         if name in {'skills_search', 'skills_load', 'skills_save', 'skills_read_file'} or name.startswith(('credentials_', 'memory_')):
@@ -174,8 +197,6 @@ def serve():
         for line in sys.stdin:
             request = None
             try:
-                if len(line) > 2_000_000:
-                    raise ValueError('Message too large')
                 request = json.loads(line)
                 if 'id' not in request:
                     continue
@@ -186,7 +207,7 @@ def serve():
                 elif method == 'ping':
                     result = {}
                 elif method == 'tools/list':
-                    tools = github_tools.advertised_tools(broker('/tools')) + BROWSER_TOOLS + [GUIDANCE_TOOL]
+                    tools = github_tools.advertised_tools(broker('/tools')) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
                     result = {'tools': tools}
                 elif method == 'tools/call':
                     executor, slots = (reads, read_slots) if params['name'] in CONCURRENT_READS else (ordered, ordered_slots)

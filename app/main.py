@@ -68,7 +68,17 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 class SwarmOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    budget_seconds: int = Field(ge=60, le=86400, strict=True)
+    budget_seconds: int = Field(default=0, strict=True)
+
+    @field_validator('budget_seconds')
+    @classmethod
+    def valid_budget(cls, value):
+        from agent.swarm.timing import validate_swarm_budget
+        return validate_swarm_budget(value)
+
+
+class SwarmTimeChange(SwarmOptions):
+    budget_seconds: int = Field(strict=True)
 
 
 class NewRun(BaseModel):
@@ -584,7 +594,7 @@ def _create_app(settings, store):
         return JSONResponse({"status": "ok"}, headers=headers)
 
     @app.get("/api/session")
-    async def session(request: Request):
+    def session(request: Request):
         sid = security.session(request)
         response = JSONResponse({})
         if not sid and security.local_preview():
@@ -662,6 +672,7 @@ def _create_app(settings, store):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
+        from agent.swarm.planning import INITIAL_TEAM_SIZE
         return {"harnesses": choices(), "harness": settings.default_harness(), "cloud_ready": not missing, "missing": missing,
                 "evaluation": {"environment": settings.trace_environment, "agent_version": settings.moyai_build_sha,
                                "tracing_enabled": bool(settings.litellm_trace_endpoint and settings.litellm_trace_api_key)},
@@ -669,6 +680,7 @@ def _create_app(settings, store):
                 "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
+                "swarm_initial_team_size": INITIAL_TEAM_SIZE,
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
                 "sandbox_rotation_seconds": settings.sandbox_rotation_seconds,
@@ -820,6 +832,17 @@ def _create_app(settings, store):
             await session_titles.request(run['id'])
         return public_run(run)
 
+    @app.get('/api/runs/{run_id}/swarm/chat')
+    async def swarm_chat(run_id: str, request: Request, limit: int = Query(default=50, ge=1, le=100),
+                         after: str | None = Query(default=None, max_length=1024),
+                         before: str | None = Query(default=None, max_length=1024),
+                         watch: str | None = Query(default=None, max_length=8192)):
+        from .swarm_chat import read_page
+        def load():
+            security.require(request)
+            return read_page(store, run_id, public_messages, limit=limit, after=after, before=before, watch=watch)
+        return await run_in_threadpool(load)
+
     @app.get('/api/runs/{run_id}/side-chats')
     async def side_chats(run_id: str, request: Request):
         security.require(request)
@@ -846,7 +869,9 @@ def _create_app(settings, store):
                 'events': store.events(run_id, limit=10000, connection=connection)}
         owners = store.rows('SELECT id,email,name FROM users WHERE id=?', (run['owner_id'],))
         project = environments.context(run)
-        actor = store.identity(security.session_info(request))
+        actor = getattr(request.state, 'access_actor', None) if settings.cloudflare_access_login else None
+        if actor is None:
+            actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
         feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
@@ -934,7 +959,17 @@ def _create_app(settings, store):
     async def send_message(run_id: str, body: ChatMessage, request: Request):
         # Validation and the enqueue transaction stay off the event loop so a
         # slow database cannot stall other conversations' streams and pages.
-        message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+        security.require(request, mutation=True)
+        run = await run_in_threadpool(store.run, run_id)
+        if run and run.get('swarm') and not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        if settings.temporal_enabled and run and run.get('swarm'):
+            # Time edits and expiry share the root execution lease. A deadline
+            # observer cannot cancel a swarm after a human has extended it.
+            async with manager.session_guard(run_id):
+                message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+        else:
+            message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
         if not metadata_request:
@@ -977,9 +1012,14 @@ def _create_app(settings, store):
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel(run_id: str, request: Request):
         security.require(request, mutation=True)
-        if not store.run(run_id):
+        run = await run_in_threadpool(store.run, run_id)
+        if not run:
             raise HTTPException(404, "Task not found")
-        await manager.cancel(run_id)
+        if settings.temporal_enabled and run.get('swarm'):
+            async with manager.session_guard(run_id):
+                await manager.cancel(run_id)
+        else:
+            await manager.cancel(run_id)
         return public_run(store.run(run_id))
 
     @app.post('/api/runs/{run_id}/swarm/{action}')
@@ -991,6 +1031,20 @@ def _create_app(settings, store):
             raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
         try:
             await getattr(manager.swarms, action)(run_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        await checkpoints.flush()
+        return public_run(store.run(run_id))
+
+    @app.patch('/api/runs/{run_id}/swarm/time')
+    async def swarm_time(run_id: str, body: SwarmTimeChange, request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Task not found')
+        if not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        try:
+            await manager.swarms.set_time(run_id, body.budget_seconds)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
@@ -1159,16 +1213,35 @@ def _create_app(settings, store):
         store.event(row["run_id"], "approval", f"{row['tool']}: {status}")
         return {"status": status}
 
-    def require_run(run_id, request):
+    def require_run(run_id, request, *, enforce_swarm_time=True):
         run = store.run(run_id)
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
+        if enforce_swarm_time and (run.get('swarm') or run['parent_run_id']):
+            # Admission reads current root policy even if its execution worker
+            # is offline. An extension keeps the same authenticated capability;
+            # no cached native deadline decides whether new work is allowed.
+            from .swarms import execution_policy, remaining_seconds
+            mission = (execution_policy(store, run_id) if run['parent_run_id'] else run['swarm'])
+            if mission and mission['status'] != 'active':
+                raise HTTPException(401, 'Swarm is on hold. Resume it before requesting more work.')
+            if mission and remaining_seconds(mission) <= 0:
+                raise HTTPException(401, 'Swarm time window ended. Add more time or resume it to continue.')
         observation = request.scope.get('moyai_model_diagnostic')
         if observation is not None:
             observation.setdefault('run', dict(run))
         return run
+
+    from .broker_payloads import BrokerPayloads
+    broker_payloads = BrokerPayloads(store, security)
+
+    def require_run_state(run_id, request):
+        # Already-admitted results and SDK checkpoints must survive the end of
+        # a work window. Keep capability, turn and stop fences; this callback
+        # never authorizes inference, tool execution or new steering delivery.
+        return require_run(run_id, request, enforce_swarm_time=False)
 
     async def broker_body(request, route):
         # Called only after require_run. The edge carries opaque authenticated
@@ -1182,9 +1255,26 @@ def _create_app(settings, store):
         if len(raw) > body_limit(route):
             raise HTTPException(413, 'Broker request too large.')
         try:
-            return json.loads(raw)
+            body = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, 'Invalid broker request JSON.')
+        if isinstance(body, dict) and 'moyai_payload' in body:
+            admission = require_run_state if route == '/context/native' else require_run
+            caller = await asyncio.to_thread(admission, request.path_params['run_id'], request)
+            return await asyncio.to_thread(broker_payloads.resolve, caller, route, body)
+        return body
+
+    @app.post('/broker/{run_id}/payloads')
+    async def upload_broker_payload(run_id: str, request: Request):
+        caller = await asyncio.to_thread(require_run_state, run_id, request)
+        body = await broker_body(request, '/payloads')
+        # Native checkpoint parts only save already-admitted state. Computer
+        # action payloads still require a current work window before upload.
+        if not isinstance(body, dict) or body.get('route') != '/context/native':
+            caller = await asyncio.to_thread(require_run, run_id, request)
+        result = await asyncio.to_thread(broker_payloads.upload, caller, body)
+        await checkpoints.flush()
+        return result
 
     from .github_git import routes as git_routes
     app.include_router(git_routes(connectors.github, require_run))
@@ -1192,7 +1282,7 @@ def _create_app(settings, store):
     @app.post('/broker/{run_id}/control')
     async def session_control(run_id: str, request: Request):
         from .db import database
-        await database(require_run, run_id, request)
+        await database(require_run_state, run_id, request)
         body = await broker_body(request, '/control')
         result = await database(apply_session_control, run_id, request, body)
         await checkpoints.flush()
@@ -1202,9 +1292,10 @@ def _create_app(settings, store):
         # Revalidate after reading the body: a stop or capability rotation can
         # race a slow upload. Connections stay inside this worker thread, and
         # cancellation waits for any outstanding receipt write.
-        run = require_run(run_id, request)
+        receipt_only = isinstance(body, dict) and body.get('version') == 2 and body.get('receipt_only') is True
+        run = (require_run_state if receipt_only else require_run)(run_id, request)
         if isinstance(body, dict) and body.get('version') == 2:
-            if body.get('receipt_only') is True:
+            if receipt_only:
                 message_queue.acknowledge(run_id, run['active_message_id'], body.get('applied', []))
                 result = {'steer_message_id': None}
             else:
@@ -1213,15 +1304,28 @@ def _create_app(settings, store):
         target = message_queue.accept_steer(run_id, run['active_message_id'])
         return {'steer_message_id': target}
 
+    from .computer_operations import READ_TOOL as COMPUTER_OPERATION_READ
+    computer_operations = manager.agent_runtime.operations if hasattr(manager, 'agent_runtime') else None
+
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
     def tool_list(run_id: str, request: Request):
         return workspace_catalog(require_run(run_id, request))
+
+    @app.post('/broker/{run_id}/agent-runtime')
+    async def computer_operation(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        if computer_operations is None:
+            raise HTTPException(409, 'An independent runtime requires durable execution.')
+        body = await broker_body(request, '/agent-runtime')
+        result = await asyncio.to_thread(computer_operations.exchange, run, body)
+        await checkpoints.flush()
+        return result
 
     @app.post('/broker/{run_id}/artifacts/transfer')
     async def artifact_transfer(run_id: str, request: Request):
@@ -1240,6 +1344,10 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'computer_operation_read':
+            if computer_operations is None:
+                raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
+            return await asyncio.to_thread(computer_operations.read, run, body.arguments)
         if body.name in ARTIFACT_SPECS:
             try:
                 return await asyncio.to_thread(published_artifacts.call, run, body.name, body.arguments)
@@ -1369,7 +1477,7 @@ def _create_app(settings, store):
             if not coordinator.available(run):
                 raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
             try:
-                result = await coordinator.call(run_id, body.name, body.arguments)
+                result = await coordinator.call(run_id, body.name, body.arguments, caller=run)
                 await checkpoints.flush()
                 return result
             except (ValueError, ValidationError) as exc:
@@ -1503,13 +1611,13 @@ def _create_app(settings, store):
 
     @app.post('/broker/{run_id}/context/journal')
     async def conversation_journal(run_id: str, request: Request):
-        caller = require_run(run_id, request)
+        caller = require_run_state(run_id, request)
         result = await asyncio.to_thread(session_journal.exchange, caller, await broker_body(request, '/context/journal'))
         await checkpoints.flush()
         return result
 
     from .native_sessions import NativeSessions
-    native_sessions = NativeSessions(settings, store, security, checkpoints, require_run, broker_body)
+    native_sessions = NativeSessions(settings, store, security, checkpoints, require_run_state, broker_body)
     harness_gateway.native_sessions = native_sessions
 
     @app.post('/broker/{run_id}/context/native')
@@ -1568,7 +1676,7 @@ def _create_app(settings, store):
         payload = {key: value for key, value in body.items() if key in allowed}
         native_sessions.observe_scope(run)
         payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
-        skill_context, memory_context = await harness_gateway.library_context(run, selected_model)
+        skill_context, memory_context = await harness_gateway.library_context(run, selected_model, payload=payload)
         if memory_context:
             # Resolve references for the current requester on every inference.
             # No retrieved note body goes into sandbox history or tool output.
