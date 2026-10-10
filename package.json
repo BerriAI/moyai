@@ -4,9 +4,9 @@
   "scripts": {
     "prebuild": "npm run generate",
     "build": "npm run build:assets",
-    "build:assets": "vite build && vite build --config vite.app.config.ts",
+    "build:assets": "vite build",
     "predev": "npm run generate",
-    "dev": "vite build --config vite.app.config.ts --watch",
+    "dev": "vite build --watch",
     "preview": "node scripts/settings_ui_preview.cjs",
     "test": "node --test tests/*.cjs",
     "test:ui": "node --test tests/browser/shadcn_ui.cjs tests/browser/navigation_loading.cjs tests/browser/message_history.cjs",
@@ -27,6 +27,7 @@
     "radix-ui": "^1.4.3",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "sonner": "^2.0.8",
     "tailwind-merge": "^3.3.1",
     "zod": "^4.6.5"
   },

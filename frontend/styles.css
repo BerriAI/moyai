@@ -1,0 +1,15 @@
+/* Legacy styles keep their original cascade order around the theme. */
+@import "../app/static/style.css";
+@import "../app/static/computer.css";
+@import "../app/static/workspace-panel.css";
+@import "../app/static/automations.css";
+@import "../app/static/settings.css";
+@import "../app/static/adoption.css";
+@import "../app/static/memory.css";
+@import "../app/static/session-folders.css";
+@import "../app/static/session-actions.css";
+@import "../app/static/polish.css";
+@import "../app/static/branding.css";
+@import "../app/static/settings-system.css";
+@import "./theme.css";
+@import "../app/static/command-palette.css";

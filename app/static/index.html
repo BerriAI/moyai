@@ -6,38 +6,26 @@
   <title>Moyai</title><link rel="icon" href="/static/favicon.svg?v=moyai-train-1"><link rel="stylesheet" href="/static/style.css?v=deep-space-1">
   <link rel="preload" href="/static/fonts/geist-variable.woff2" as="font" type="font/woff2" crossorigin>
   <meta name="theme-color" content="#03070c">
-
-
-
-
   <link rel="stylesheet" href="/static/computer.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/workspace-panel.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/automations.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/settings.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/adoption.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/memory.css?v=deep-space-1">
-
-
-
-
-
-
   <link rel="stylesheet" href="/static/session-folders.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/session-actions.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/polish.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/branding.css?v=deep-space-1">
   <link rel="stylesheet" href="/static/settings-system.css?v=deep-space-1">
-  <link rel="stylesheet" href="/static/generated/ui/moyai-ui.css?v=deep-space-1">
+  <link rel="stylesheet" href="/static/spa/main.css">
   <link rel="stylesheet" href="/static/command-palette.css?v=deep-space-1">
   <script type="module" src="/static/spa/app.js"></script>
-  <link rel="stylesheet" href="/static/spa/main.css">
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app" class="contents"></div>
   <dialog id="connection-dialog" data-dialog-scope="settings" aria-labelledby="connection-title"><form id="connection-form"><button class="dialog-close" type="button" aria-label="Close">×</button><h2 id="connection-title">Connect an app</h2><div id="connection-body"></div></form></dialog>
   <dialog id="credential-dialog" aria-labelledby="credential-dialog-title"><form id="credential-form" autocomplete="off"></form></dialog>
   <dialog id="skill-dialog" aria-label="Skill editor"></dialog>
-  <dialog id="memory-dialog" data-dialog-scope="settings" aria-label="Memory editor"></dialog>
   <dialog id="user-role-dialog" data-dialog-scope="settings" aria-label="Workspace role"></dialog>
   <dialog id="automation-dialog" data-dialog-scope="settings" aria-label="Automation editor"></dialog>
   <dialog id="session-delete-dialog" aria-labelledby="session-delete-title"></dialog>

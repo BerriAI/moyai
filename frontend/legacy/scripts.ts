@@ -1,45 +1,17 @@
+/// <reference types="vite/client" />
+// Classic scripts share globals, so Vite only fingerprints them; they still load in order.
+const urls: Record<string, string> = import.meta.glob(["../../app/static/*.js", "../../app/static/vendor/*.js"], { query: "?url", import: "default", eager: true })
+
 // Ordered compatibility controllers; removed as each feature moves to React.
 export const controllerScripts = [
-  "/static/space-field.js?v=1",
-  "/static/icons.js?v=shadcn-1",
-  "/static/vendor/marked.js",
-  "/static/vendor/purify.js",
-  "/static/goal-status.js?v=shadcn-1",
-  "/static/provider-logos.js?v=2",
-  "/static/computer.js?v=shadcn-1",
-  "/static/pull-request.js?v=recent-navigation-1",
-  "/static/workspace-panel.js?v=safe-error-diagnostics-1",
-  "/static/automation-triggers.js?v=shadcn-1",
-  "/static/automations.js?v=recent-navigation-1",
-  "/static/automation-builder.js?v=dialog-scope-1",
-  "/static/settings.js?v=recent-navigation-1",
-  "/static/analytics.js?v=analytics-1",
-  "/static/adoption.js?v=unified-users-1",
-  "/static/memory.js?v=recent-navigation-1",
-  "/static/environments.js?v=recent-navigation-1",
-  "/static/users.js?v=recent-navigation-1",
-  "/static/skill-icons.js?v=1",
-  "/static/skill-editor.js?v=skill-history-2",
-  "/static/saved-files.js?v=shadcn-tools-1",
-  "/static/markdown.js?v=source-links-1",
-  "/static/infrastructure.js?v=settings-system-1",
-  "/static/spend-prs.js?v=recent-navigation-1",
-  "/static/spend-analytics.js?v=recent-navigation-3",
-  "/static/spend.js?v=recent-navigation-2",
-  "/static/credentials.js?v=dialog-scope-1",
-  "/static/skills.js?v=recent-navigation-1",
-  "/static/message-history.js?v=1",
-  "/static/skill-composer.js?v=skill-history-2",
-  "/static/attachment-transport.js?v=attachments-2",
-  "/static/audio-recorder.js?v=shadcn-lifecycle-1",
-  "/static/attachments.js?v=shadcn-deletion-1",
-  "/static/activity.js?v=safe-error-diagnostics-3",
-  "/static/message-queue.js?v=skill-history-2",
-  "/static/session-folders.js?v=session-alignment-1",
-  "/static/sandbox-settings.js?v=shadcn-lambda-1",
-  "/static/session-actions.js?v=shadcn-deletion-1",
-  "/static/regions.js?v=incremental-1",
-  "/static/command-palette.js?v=1",
-  "/static/navigation-cache.js?v=1",
-  "/static/app.js?v=deep-space-1"
-] as const
+  "space-field", "icons", "vendor/marked", "vendor/purify", "goal-status", "provider-logos", "computer", "pull-request",
+  "workspace-panel", "automation-triggers", "automations", "automation-builder", "settings", "analytics", "adoption",
+  "environments", "users", "skill-icons", "skill-editor", "saved-files", "markdown", "infrastructure", "spend-prs",
+  "spend-analytics", "spend", "credentials", "skills", "message-history", "skill-composer", "attachment-transport",
+  "audio-recorder", "attachments", "activity", "message-queue", "session-folders", "sandbox-settings", "session-actions",
+  "regions", "command-palette", "navigation-cache", "app",
+].map(name => {
+  const url = urls[`../../app/static/${name}.js`]
+  if (!url) throw new Error(`Missing workspace controller: ${name}`)
+  return url
+})

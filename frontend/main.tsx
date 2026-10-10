@@ -1,42 +1,27 @@
 import { createRoot } from "react-dom/client"
+import { flushSync } from "react-dom"
+import { QueryClientProvider } from "@tanstack/react-query"
 import { createRouter, RouterProvider } from "@tanstack/react-router"
 import { routeTree } from "./routeTree.gen"
-import { installRuntime } from "./legacy/runtime"
-import { isView } from "./legacy/bridge"
 import { queryClient } from "./api/client"
+import { initializeShell } from "./overlays"
+import { observeRemovals } from "./render"
+import { isView, loadScripts } from "./legacy/bridge"
+import { installRuntime, viewPath } from "./legacy/runtime"
+import { controllerScripts } from "./legacy/scripts"
+import "./styles.css"
 
-const legacyLocation = (hash: string) => {
+const router = createRouter({ routeTree, defaultPreload: false })
+declare module "@tanstack/react-router" { interface Register { router: typeof router } }
+
+// Old #view and #run= links are translated once; TanStack owns history.
+function legacyLocation(hash: string) {
   const session = hash.match(/^#run=([0-9a-f]{32})(.*)$/)
   if (session) return `/sessions/${session[1]}${location.search}${session[2] ? "#" + session[2].replace(/^&/, "") : ""}`
   const view = hash.slice(1)
-  if (isView(view)) return `${view === "tasks" ? "/sessions/new" : view === "settings" ? "/settings" : `/settings/${view}`}${location.search}`
-  return null
+  return isView(view) ? `${viewPath(view)}${location.search}` : null
 }
-const initial = legacyLocation(location.hash)
-if (initial) history.replaceState(null, "", initial)
 
-const router = createRouter({ routeTree, context: { queryClient }, defaultPreload: false, defaultStaleTime: 0 })
-declare module "@tanstack/react-router" { interface Register { router: typeof router } }
-
-installRuntime({
-  async view(view) {
-    const previous = location.pathname
-    if (view === "tasks") await router.navigate({ to: "/sessions/new" })
-    else if (view === "settings") await router.navigate({ to: "/settings" })
-    else await router.navigate({ to: "/settings/$page", params: { page: view } })
-    // Re-selecting the current page is an explicit refresh in the old UI.
-    if (previous === location.pathname) await router.invalidate()
-  },
-  async session(id, hash) {
-    const previous = location.pathname
-    const fragment = hash?.match(/^#run=[^&]+&(.*)$/)?.[1] ?? ""
-    await router.navigate({ to: "/sessions/$sessionId", params: { sessionId: id }, hash: fragment })
-    if (previous === location.pathname) await router.invalidate()
-  },
-  async reload() { await router.invalidate() },
-})
-
-// Compatibility bookmarks are translated once; TanStack owns browser history.
 document.addEventListener("click", event => {
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
   const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>("a[href^='#']") : null
@@ -51,7 +36,19 @@ window.addEventListener("hashchange", () => {
   if (destination) void router.navigate({ href: destination, replace: true })
 })
 
-const host = document.createElement("div")
-host.id = "application-routes"
-document.body.append(host)
-createRoot(host).render(<RouterProvider router={router} />)
+async function start() {
+  const initial = legacyLocation(location.hash)
+  if (initial) history.replaceState(null, "", initial)
+  installRuntime(router)
+  await router.load()
+  const host = document.querySelector<HTMLElement>("#app")
+  if (!host) throw new Error("Missing application root")
+  // Controllers bind to the shell when they load, so it must be committed first.
+  flushSync(() => createRoot(host).render(<QueryClientProvider client={queryClient}><RouterProvider router={router} /></QueryClientProvider>))
+  if (!document.querySelector("#sidebar")) throw new Error("The workspace shell did not render")
+  initializeShell({ renderShell: false })
+  observeRemovals()
+  await loadScripts(controllerScripts)
+}
+
+void start()

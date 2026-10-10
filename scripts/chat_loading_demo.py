@@ -99,7 +99,7 @@ def build(directory):
 
     @app.get('/demo/workspace')
     async def workspace():
-        html = (args.root / 'app/static/index.html').read_text()
+        html = (args.root / 'app/static/spa/index.html').read_text()
         return HTMLResponse(html.replace('<head>', '<head><script src="/demo/probe.js"></script>'))
 
     @app.get('/demo/probe.js')

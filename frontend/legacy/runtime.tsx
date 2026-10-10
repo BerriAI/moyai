@@ -1,79 +1,113 @@
-import { QueryClientProvider } from "@tanstack/react-query"
-import { createRoot } from "react-dom/client"
+import { useSyncExternalStore } from "react"
 import { flushSync } from "react-dom"
-import { AppShell } from "../app-shell"
+import { toast } from "sonner"
+import type { AnyRouter } from "@tanstack/react-router"
 import { queryClient } from "../api/client"
+import { queries } from "../api/queries"
+import type { WorkspaceSession } from "../api/generated/types.gen"
 import * as ui from "../render"
-import { createDialog, initializeShell } from "../overlays"
-import { SettingsPage } from "../pages/settings"
-import { MemoryPage } from "../pages/memory"
-import { controllerScripts } from "./scripts"
-import { isView, loadScript, type View } from "./bridge"
-import "../theme.css"
+import { createDialog } from "../overlays"
+import { settingsGroups } from "../config/settings-navigation"
+import { isView, type Role, type View } from "./bridge"
+import { controllers } from "./controllers"
 
-let resolveReady: () => void
-let rejectReady: (error: Error) => void
-const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
-let booted = false
+// Controllers own authentication. Routes render only after the controllers
+// report a signed-in workspace; until then #content belongs to boot().
+type Runtime = { ready: boolean; authenticated: boolean; userId: string | null; role: Role; generation: number }
+let runtime: Runtime = { ready: false, authenticated: false, userId: null, role: "member", generation: 0 }
+const listeners = new Set<() => void>()
 
-export type Navigation = {
-  view(view: View): Promise<void>
-  session(id: string, hash?: string): Promise<void>
-  reload(): Promise<void>
+function publish(next: Runtime) {
+  runtime = next
+  // Commit before the caller writes into the host this state selects.
+  flushSync(() => { for (const listener of listeners) listener() })
 }
-const submissions = new Map<string, unknown>()
 
-export function installRuntime(navigation: Navigation) {
-  window.MoyaiUI = { ...ui, createDialog, isOpen: host => host.dataset.open === "true" }
+export function useRuntime() {
+  return useSyncExternalStore(listener => { listeners.add(listener); return () => listeners.delete(listener) }, () => runtime)
+}
+
+export function useIdentity() {
+  const { userId, role } = useRuntime()
+  return { userId, role }
+}
+
+// For callbacks that finish after the identity may have changed.
+export function currentUserId() {
+  return runtime.userId
+}
+
+// Remounts the current route, e.g. re-selecting the page you are on.
+export function remountRoute() {
+  publish({ ...runtime, generation: runtime.generation + 1 })
+}
+
+export const nativeViews = new Set<View>(["settings", "memory"])
+
+export function viewPath(view: View) {
+  return view === "tasks" ? "/sessions/new" : view === "settings" ? "/settings" : `/settings/${view}`
+}
+
+export function legacyHash() {
+  const session = location.pathname.match(/^\/sessions\/([0-9a-f]{32})$/)
+  if (session) return `#run=${session[1]}${location.hash.replace(/^#/, "&")}`
+  const view = location.pathname === "/settings" ? "settings" : location.pathname.startsWith("/settings/") ? location.pathname.slice(10) : "tasks"
+  return `#${view}`
+}
+
+// A submission is handed from the new-session composer to the session route.
+const submissions = new Map<string, unknown>()
+export function takeSubmission(id: string) {
+  const submission = submissions.get(id)
+  submissions.delete(id)
+  return submission
+}
+
+export function showError(error: unknown) {
+  toast(error instanceof Error ? error.message : String(error))
+}
+
+// The session query is the source of truth; the controllers mirror it.
+function syncSession() {
+  return queryClient.getQueryCache().subscribe(event => {
+    // Fetches and setQueryData both settle as "success".
+    if (event.type !== "updated" || event.action.type !== "success" || event.query.queryKey[0] !== queries.session._def[0]) return
+    const session = event.query.state.data as WorkspaceSession | undefined
+    if (!session) return
+    controllers.applySession(session)
+    const userId = controllers.userId(), role = controllers.role()
+    if (userId !== runtime.userId || role !== runtime.role) publish({ ...runtime, userId, role })
+    // A signed-out session belongs to the controllers' sign-in flow.
+    if (!session.authenticated) void controllers.boot()
+  })
+}
+
+export function installRuntime(router: AnyRouter) {
+  syncSession()
+  window.MoyaiUI = { ...ui, createDialog, isOpen: host => host.dataset.open === "true", toast: message => { toast(message) } }
+  window.MoyaiConfig = { settingsGroups }
   window.MoyaiApp = {
     ready() {
       queryClient.clear()
-      if (booted) void navigation.reload()
-      else { booted = true; resolveReady() }
+      publish({ ready: true, authenticated: controllers.authenticated(), userId: controllers.userId(), role: controllers.role(), generation: runtime.generation + 1 })
     },
-    navigate(view) {
-      if (!isView(view)) return Promise.reject(new Error(`Unknown workspace page: ${view}`))
-      return navigation.view(view)
+    async navigate(view) {
+      if (!isView(view)) throw new Error(`Unknown workspace page: ${view}`)
+      const path = viewPath(view)
+      if (location.pathname !== path && !(view === "tasks" && location.pathname === "/")) return void await router.navigate({ href: path })
+      // Re-selecting the current page refreshes it, as the sidebar always has.
+      if (nativeViews.has(view)) remountRoute()
+      else await controllers.page(view)
     },
-    openRun(id, hash, submission) {
+    async openRun(id, hash = `#run=${id}`, submission) {
+      const fragment = hash.match(/^#run=[^&]+&(.*)$/)?.[1] ?? ""
+      if (location.pathname === `/sessions/${id}` && location.hash.slice(1) === fragment) {
+        return controllers.session(id, hash, submission)
+      }
       if (submission) submissions.set(id, submission)
-      return navigation.session(id, hash)
+      await router.navigate({ href: `/sessions/${id}${location.search}${fragment ? `#${fragment}` : ""}` })
     },
-    renderPage(view) {
-      if (view !== "settings" && view !== "memory") return false
-      const content = document.querySelector<HTMLElement>("#content")
-      if (!content) throw new Error("Missing workspace content host")
-      ui.renderComponent(content, <QueryClientProvider client={queryClient}>{view === "settings" ? <SettingsPage /> : <MemoryPage />}</QueryClientProvider>)
-      return true
-    },
-    legacyHash() {
-      const session = location.pathname.match(/^\/sessions\/([^/]+)$/)
-      if (session && session[1] !== "new") return `#run=${session[1]}${location.hash.replace(/^#/, "&")}`
-      const view = location.pathname.startsWith("/settings/") ? location.pathname.slice(10) : location.pathname === "/settings" ? "settings" : "tasks"
-      return `#${view}`
-    },
+    legacyHash,
+    replaceUrl(href) { router.history.replace(href) },
   }
-  const shell = document.querySelector<HTMLElement>("#app")
-  if (!shell) throw new Error("Missing application root")
-  shell.style.display = "contents"
-  flushSync(() => createRoot(shell).render(<AppShell />))
-  initializeShell({ renderShell: false })
-  ui.observeRemovals()
-  void (async () => {
-    try { for (const source of controllerScripts) await loadScript(source) }
-    catch (error) { rejectReady(error instanceof Error ? error : new Error(String(error))) }
-  })()
-}
-
-export async function showView(view: View, signal: AbortSignal) {
-  await ready
-  if (!signal.aborted && window.MoyaiControllers.authenticated()) await window.MoyaiControllers.page(view)
-}
-
-export async function showSession(id: string, signal: AbortSignal) {
-  await ready
-  if (signal.aborted || !window.MoyaiControllers.authenticated()) return
-  const submission = submissions.get(id)
-  submissions.delete(id)
-  await window.MoyaiControllers.session(id, window.MoyaiApp.legacyHash(), submission)
 }

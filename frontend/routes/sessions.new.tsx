@@ -1,7 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router"
-import { showView } from "../legacy/runtime"
+import { ControllerView } from "../legacy/views"
 
-export const Route = createFileRoute("/sessions/new")({
-  loader: ({ abortController }) => showView("tasks", abortController.signal),
-  component: () => null,
-})
+export const Route = createFileRoute("/sessions/new")({ component: () => <ControllerView view="tasks" /> })

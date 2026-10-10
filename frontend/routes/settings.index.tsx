@@ -1,7 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router"
-import { showView } from "../legacy/runtime"
+import { ReactView } from "../legacy/views"
+import { SettingsPage } from "../pages/settings"
 
-export const Route = createFileRoute("/settings/")({
-  loader: ({ abortController }) => showView("settings", abortController.signal),
-  component: () => null,
-})
+export const Route = createFileRoute("/settings/")({ component: () => <ReactView view="settings"><SettingsPage /></ReactView> })

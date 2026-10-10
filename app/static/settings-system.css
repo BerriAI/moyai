@@ -2,15 +2,15 @@
    .settings-view belongs to the page/rail and explicitly owned dialog mounts,
    never body: workspace overlays and the composer have their own density. */
 .settings-view {
-  --settings-text: var(--ui-foreground);
-  --settings-muted: var(--ui-muted);
-  --settings-surface: var(--ui-background);
+  --settings-text: var(--foreground);
+  --settings-muted: var(--muted-foreground);
+  --settings-surface: var(--background);
   --settings-subtle: var(--ui-subtle);
-  --settings-line: var(--ui-border);
+  --settings-line: var(--border);
   --settings-control-border: var(--ui-control-border);
-  --settings-accent: var(--ui-primary);
-  --settings-accent-foreground: var(--ui-primary-foreground);
-  --settings-selected: var(--ui-secondary);
+  --settings-accent: var(--primary);
+  --settings-accent-foreground: var(--primary-foreground);
+  --settings-selected: var(--secondary);
   --settings-danger: var(--ui-danger);
   --settings-danger-bg: var(--ui-danger-bg);
   --settings-success: var(--ui-success);
@@ -23,9 +23,9 @@
   --settings-body: .933333rem;
   --settings-heading: 1.066667rem;
   --settings-title: 1.866667rem;
-  --muted: var(--settings-muted);
+  --text-muted: var(--settings-muted);
 }
-.skip-link { position: fixed; inset-inline-start: 16px; inset-block-start: -100px; z-index: 100; padding: 12px 18px; background: var(--ui-background); color: var(--ui-primary); border: 2px solid var(--ui-primary); border-radius: 8px; }
+.skip-link { position: fixed; inset-inline-start: 16px; inset-block-start: -100px; z-index: 100; padding: 12px 18px; background: var(--background); color: var(--primary); border: 2px solid var(--primary); border-radius: 8px; }
 .skip-link:focus { inset-block-start: 12px; }
 /* Inherit the chat rail width, brand inset, and responsive shell spacing. */
 .settings-view :is(.rail-links,.sessions-label,#session-search-field,#session-list,#new-task,#search-sessions) { display: none !important; }

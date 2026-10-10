@@ -129,7 +129,7 @@ def checks():
 
         page.route("**/api/logout", lambda route: route.fulfill(status=503, json={"detail": "Sign-out test failure"}))
         page.get_by_role("button", name="Sign out", exact=True).click()
-        expect(page.locator("#toast")).to_have_text("Sign-out test failure")
+        expect(page.locator("[data-sonner-toast]")).to_have_text("Sign-out test failure")
         expect(page.get_by_role("button", name="Sign out", exact=True)).to_be_enabled()
         assert page.request.get(BASE + "/api/session").json()["authenticated"]
         page.unroute("**/api/logout")

@@ -111,7 +111,7 @@ def build(directory):
 
     @app.get('/demo/panel-workspace')
     async def workspace():
-        html = (args.source_root / 'app/static/index.html').read_text()
+        html = (args.source_root / 'app/static/spa/index.html').read_text()
         return HTMLResponse(html.replace('<head>', '<head><script src="/demo/panel-probe.js"></script>'))
 
     @app.get('/demo/panel-probe.js')

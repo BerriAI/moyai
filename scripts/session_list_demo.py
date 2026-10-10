@@ -101,7 +101,7 @@ def build(root, directory, port):
 
     @app.get('/demo/session-list')
     async def workspace():
-        return HTMLResponse((root / 'app/static/index.html').read_text().replace(
+        return HTMLResponse((root / 'app/static/spa/index.html').read_text().replace(
             '<head>', '<head><script src="/demo/session-list-probe.js"></script>'))
 
     @app.get('/demo/session-list-probe.js')

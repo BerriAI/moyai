@@ -156,7 +156,7 @@ test('accepted creation clears text even if subsequent sidebar refresh fails',as
   const page=await setup(t);
   await page.route('**/api/runs?*',route=>route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({detail:'Test sidebar unavailable'})}));
   await page.locator('#prompt').fill('Accepted despite sidebar outage');await page.locator('#prompt').press('Enter');
-  await page.locator('#toast').filter({hasText:'Test sidebar unavailable'}).waitFor();
+  await page.locator('[data-sonner-toast]').filter({hasText:'Test sidebar unavailable'}).waitFor();
   await page.locator('#followup').waitFor();
   assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Accepted despite sidebar outage');
   await page.unroute('**/api/runs?*');
@@ -233,7 +233,7 @@ test('rename persists after reload, preserves messages and drafts, and rejects s
   const dialog=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Navigation follow-up');
   await dialog.getByRole('button',{name:'Save',exact:true}).click();
-  await page.locator('#toast').filter({hasText:'Session renamed.'}).waitFor();
+  await page.locator('[data-sonner-toast]').filter({hasText:'Session renamed.'}).waitFor();
   release();await refreshed;
   assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
   assert.equal(await page.title(),'Navigation follow-up · Moyai');
@@ -279,7 +279,7 @@ test('rename supports cancel, Escape, blank validation, failure retry and litera
   assert.equal(await page.locator('#page-title').textContent(),'Rename error recovery');
   await page.unroute('**/api/runs/*/title');
   await dialog.getByRole('button',{name:'Save',exact:true}).click();
-  await page.locator('#toast').filter({hasText:'Session renamed.'}).waitFor();
+  await page.locator('[data-sonner-toast]').filter({hasText:'Session renamed.'}).waitFor();
   assert.equal(await page.locator('#page-title').textContent(),'<b>Literal name</b>');
   assert.equal(await page.locator('#page-title b').count(),0);
   dialog=await renameDialog(page);

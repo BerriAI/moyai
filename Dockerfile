@@ -18,14 +18,14 @@ WORKDIR /frontend
 COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend ./frontend
+COPY app/static ./app/static
 COPY --from=contracts /app/frontend/api/openapi.json ./frontend/api/openapi.json
 COPY scripts/generate_routes.mjs ./scripts/generate_routes.mjs
-COPY vite.config.ts vite.app.config.ts tsconfig.json openapi-ts.config.ts ./
+COPY vite.config.ts tsconfig.json openapi-ts.config.ts ./
 RUN npm run api:client && npm run routes:generate && npm exec tsc -- --noEmit && npm run build:assets
 
 FROM python-base
 COPY app ./app
-COPY --from=frontend /frontend/app/static/generated/ui ./app/static/generated/ui
 COPY --from=frontend /frontend/app/static/spa ./app/static/spa
 COPY sandbox ./sandbox
 COPY agent ./agent

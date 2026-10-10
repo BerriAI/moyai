@@ -80,10 +80,10 @@ with httpx.Client(base_url='http://127.0.0.1:8787', headers={'Host': 'vm.example
     for path in ('/', '/sessions/new', '/settings', '/settings/memory'):
         response = client.get(path)
         assert response.status_code == 200, (path, response.status_code)
-        assert '/static/spa/app.js' in response.text
+        assert 'src="/static/spa/' in response.text
     html = client.get('/').text
     assets = re.findall(r'(?:src|href)="(/static/[^"?]+)', html)
-    assert '/static/spa/app.js' in assets
+    assert any(asset.endswith('.js') for asset in assets)
     for asset in assets:
         response = client.get(asset)
         assert response.status_code == 200, (asset, response.status_code)

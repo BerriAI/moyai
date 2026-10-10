@@ -1,4 +1,7 @@
 const vm = require('node:vm');
+const {readFileSync} = require('node:fs');
+const path = require('node:path');
+const settingsGroups = JSON.parse(readFileSync(path.join(__dirname, '../../frontend/config/settings-navigation.json'), 'utf8'));
 
 // Controller tests use lightweight DOM doubles. Actual React/Radix behavior is
 // covered by tests/browser/shadcn_ui.cjs against the production bundle.
@@ -11,7 +14,9 @@ function install(context) {
     createElement: (tag, doc = context.document) => doc.createElement(tag),
     createDialog: () => context.document.createElement('dialog'),
     isOpen: host => host.matches(':popover-open'),
+    toast: () => {},
   };
+  context.MoyaiConfig ||= {settingsGroups};
   return context;
 }
 module.exports = {

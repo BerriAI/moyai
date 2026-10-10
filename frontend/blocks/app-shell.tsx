@@ -1,10 +1,10 @@
-import { memo } from "react"
-import { Button } from "./components/ui/button"
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/ui/tooltip"
-import { FormSelect } from "./form-select"
+import { Button } from "../components/ui/button"
+import { Toaster } from "../components/ui/sonner"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip"
+import { FormSelect } from "../form-select"
+import { optionFragment } from "../lib/options"
 
-const scopeOptions = document.createDocumentFragment()
-scopeOptions.append(new Option("My sessions", "mine"))
+const scopeOptions = optionFragment([["mine", "My sessions"]])
 const buttonClass = "h-auto whitespace-normal shrink"
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
@@ -15,9 +15,15 @@ function ShellButton({ title, children, ...props }: React.ComponentProps<typeof 
   return <Tooltip><TooltipTrigger asChild><Button {...props} className={`${buttonClass} ${props.className ?? ""}`} variant="ghost">{children}</Button></TooltipTrigger><TooltipContent sideOffset={6}>{title}</TooltipContent></Tooltip>
 }
 
-// These empty hosts are owned by the transition controllers. React owns their
-// shell, never their mutable children. Feature roots dispose themselves on exit.
-export const AppShell = memo(function AppShell() {
+// The route-owned page host. Empty hosts belong to a controller; React pages
+// pass children. A route change replaces the host, never shares it.
+export function ContentHost({ children }: { children?: React.ReactNode }) {
+  return <main id="content" tabIndex={0}>{children}</main>
+}
+
+// Rail and header hosts are filled by the controllers. React owns their shell,
+// never their mutable children. Feature roots dispose themselves on exit.
+export function AppShell({ children }: { children: React.ReactNode }) {
   return <TooltipProvider delayDuration={500}>
     <a className="skip-link" href="#content">Skip to content</a>
     <Button id="sidebar-scrim" className={`sidebar-scrim ${buttonClass}`} aria-label="Close sidebar" hidden />
@@ -37,7 +43,7 @@ export const AppShell = memo(function AppShell() {
       <nav id="settings-navigation" aria-label="Settings" hidden />
       <div className="rail-foot"><small className="rail-identity">Private workspace</small><div className="rail-account-actions"><ShellButton title="Settings" className="nav-button rail-settings" data-view="settings" aria-label="Settings"><span className="nav-icon"><Icon name="gear" size={16} /></span></ShellButton><ShellButton title="Sign out" id="logout" className="quiet rail-logout" type="button" aria-label="Sign out" hidden><Icon name="logout" size={16} /></ShellButton></div></div>
     </aside>
-    <div className="workspace"><header className="topbar"><ShellButton title="Show sidebar" id="open-sidebar" className="icon-button" aria-label="Open sidebar" aria-expanded={false} aria-controls="sidebar"><Icon name="sidebar" /></ShellButton><span id="page-title">New session</span><div id="header-actions" className="header-right"><span className="environment">Your team's agent</span></div></header><main id="content" tabIndex={0} /></div>
-    <div id="toast" role="status" hidden />
+    <div className="workspace"><header className="topbar"><ShellButton title="Show sidebar" id="open-sidebar" className="icon-button" aria-label="Open sidebar" aria-expanded={false} aria-controls="sidebar"><Icon name="sidebar" /></ShellButton><span id="page-title">New session</span><div id="header-actions" className="header-right"><span className="environment">Your team's agent</span></div></header>{children}</div>
+    <Toaster position="bottom-center" duration={5500} visibleToasts={1} />
   </TooltipProvider>
-})
+}

@@ -772,7 +772,7 @@ test('identity linking disables its submit action, not the new dropdown trigger'
   assert.equal(await save.isDisabled(), true);
   assert.equal(await form.getByRole('combobox').isDisabled(), false);
   release();
-  await page.locator('#toast').filter({ hasText: 'Link not saved. Try again.' }).waitFor();
+  await page.locator('[data-sonner-toast]').filter({ hasText: 'Link not saved. Try again.' }).waitFor();
   assert.equal(await save.isDisabled(), false);
 });
 

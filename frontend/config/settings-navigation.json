@@ -1,0 +1,20 @@
+[
+  { "id": "workflows", "title": "Workflows", "items": [
+    { "view": "automations", "title": "Automations", "description": "Schedule recurring work and review past runs." },
+    { "view": "skills", "title": "Skills", "description": "Save instructions for yourself or your team." },
+    { "view": "memory", "title": "Memory", "description": "Review what Moyai remembers for your future sessions." }
+  ] },
+  { "id": "integrations", "title": "Integrations", "items": [
+    { "view": "connections", "title": "Connections", "description": "Connect GitHub, Slack, Linear, and Notion." },
+    { "view": "secrets", "title": "Secrets", "description": "Manage personal and shared service access." }
+  ] },
+  { "id": "workspace", "title": "Workspace", "items": [
+    { "view": "spend", "title": "Spend", "description": "See your own LLM usage and costs.", "memberOnly": true },
+    { "view": "runtime", "title": "Runtime", "description": "Check cloud setup and session limits." },
+    { "view": "environments", "title": "Environments", "description": "Prepare repositories and workspace tools.", "admin": true }
+  ] },
+  { "id": "administration", "title": "Administration", "admin": true, "items": [
+    { "view": "users", "title": "Users", "description": "Manage workspace members and roles.", "admin": true },
+    { "view": "spend", "title": "Spend & usage", "description": "Review team costs, model usage, and human activity.", "admin": true }
+  ] }
+]

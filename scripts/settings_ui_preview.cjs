@@ -108,7 +108,7 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/'||/^\/sessions\/[^/]+$/.test(p)||/^\/settings(?:\/[^/]+)?$/.test(p)){
   fixture=url.searchParams.get('fixture')||'populated';
   accountLinkPolls=0;
-  let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
+  let html=fs.readFileSync(path.join(root,'spa','index.html'),'utf8');
   res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
  }
  if(p.startsWith('/static/')){

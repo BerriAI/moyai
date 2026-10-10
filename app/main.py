@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
@@ -62,6 +62,10 @@ from .media_shares import MediaShares, TOOLS as MEDIA_TOOLS
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, wire_limit, unseal
 
 STATIC = Path(__file__).parent / "static"
+# Vite writes the entry document with fingerprinted asset URLs.
+FRONTEND_INDEX = STATIC / "spa" / "index.html"
+
+
 Provider = Literal["linear", "slack", "notion", "github"]
 AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
@@ -504,9 +508,8 @@ def _create_app(settings, store):
     from .frontend_contracts import WorkspaceSession
 
     @app.get("/api/session", response_model=WorkspaceSession, operation_id='get_workspace_session')
-    async def session(request: Request):
+    async def session(request: Request, response: Response):
         sid = security.session(request)
-        response = JSONResponse({})
         if not sid and security.local_preview():
             sid = security.new_session(response, local=True)
         role = security.role(request) or ("admin" if sid else None)
@@ -514,12 +517,10 @@ def _create_app(settings, store):
         user_id = None
         if info:
             user_id = store.identity(info)
-        response.body = json.dumps({"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
-                                   "identity": info.get("identity"), "user_id": user_id, "preferences": user_preferences.get(user_id), "google_enabled": settings.google_enabled(),
-                                   "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
-                                   "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}).encode()
-        response.headers["content-length"] = str(len(response.body))
-        return response
+        return {"authenticated": bool(sid), "csrf": security.csrf(sid) if sid else "", "local": security.local, "role": role,
+                "identity": info.get("identity"), "user_id": user_id, "preferences": user_preferences.get(user_id), "google_enabled": settings.google_enabled(),
+                "google_domains": sorted(settings.google_domains()) if settings.google_enabled() else [],
+                "password_enabled": settings.password_login_enabled and bool(settings.workspace_password or settings.workspace_member_password)}
 
     @app.post("/api/login")
     async def login(body: Login, request: Request):
@@ -1465,7 +1466,7 @@ def _create_app(settings, store):
 
     @app.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html")
+        return FileResponse(FRONTEND_INDEX, headers={'Cache-Control': 'no-cache'})
 
     # Explicit SPA routes: missing APIs/assets must still return their own 404.
     @app.get('/sessions/new', include_in_schema=False)
@@ -1473,7 +1474,7 @@ def _create_app(settings, store):
     @app.get('/settings', include_in_schema=False)
     @app.get('/settings/{page}', include_in_schema=False)
     async def frontend_route():
-        return FileResponse(STATIC / 'index.html')
+        return FileResponse(FRONTEND_INDEX, headers={'Cache-Control': 'no-cache'})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

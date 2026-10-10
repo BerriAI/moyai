@@ -34,7 +34,7 @@ async function api(path, options = {}) {
   state.navigationCache?.clear();
   try{return await load();}finally{state.navigationCache?.clear();}
 }
-function toast(message) { $('#toast').textContent = message; $('#toast').hidden = false; clearTimeout(state.toast); state.toast = setTimeout(() => $('#toast').hidden = true, 5500); }
+function toast(message) { MoyaiUI.toast(message); }
 function statusLabel(status) { return `<span class="status ${esc(status)}">${esc(status==='idle'?'Ready':status.replaceAll('_',' '))}</span>`; }
 function relative(date) { const min = Math.max(0, Math.floor((Date.now() - new Date(date)) / 60000)), hours=Math.floor(min/60), days=Math.floor(min/1440), months=Math.floor(days/30); return min < 1 ? 'Just now' : min < 60 ? `${min}m ago` : hours < 24 ? `${hours} hour${hours===1?'':'s'} ago` : days < 30 ? `${days} day${days===1?'':'s'} ago` : months < 2 ? 'last month' : months < 12 ? `${months} months ago` : new Date(date).toLocaleDateString(); }
 function stopStream(){ resetCredentialNavigation();if(typeof workspacePanel!=='undefined'){workspacePanel?.dispose();workspacePanel=null;} computer.close(); clearTimeout(state.streamRetry); state.streamRetry=null; state.source?.close(); state.source = null; state.chatRun = null; state.revealSessionAncestors=null; state.sessionHeaderRun = null; savedFiles.reset(); }
@@ -261,18 +261,15 @@ function bindComposer(input,form){
 }
 async function navigate(view,initialConfig,fromRouter=false) {
   if(globalThis.MoyaiApp&&!fromRouter)return globalThis.MoyaiApp.navigate(view);
-  if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
-  stopStream();state.pageVersion++;state.view=view;state.selected=null;
+  view=enterView(view);
   const version=state.pageVersion;
-  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
   if(!globalThis.MoyaiApp)history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(settingsViews.has(view)) {
     MoyaiUI.render($('#content'), '<p class="settings-loading" role="status">Loading…</p>');
     $('#content').scrollTop=0;
   }
   try {
-  if(globalThis.MoyaiApp?.renderPage(view))return;
-  if(view==='settings')await renderSettings(true);else if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else if(view==='memory')await renderMemory(true);else await renderRuntime(true);
+  if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else await renderRuntime(true);
   } catch(error) {
     if(version!==state.pageVersion)return;
     if(!settingsViews.has(view))throw error;
@@ -283,6 +280,13 @@ async function navigate(view,initialConfig,fromRouter=false) {
     const heading=$('#content h1');
     if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}
   }
+}
+// Page chrome shared by controller pages and React pages.
+function enterView(view){
+  if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
+  stopStream();state.pageVersion++;state.view=view;state.selected=null;
+  setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
+  return view;
 }
 async function refreshRuns(){
   const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(globalThis.MoyaiApp?.legacyHash()||location.hash)?.runId||'';
@@ -958,11 +962,6 @@ window.addEventListener('keydown',e=>{
   if(e.key==='Escape'){setSidebar(false);if(state.selected&&$('.chat-layout'))toggleDetails(false);}
 });
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();
-window.addEventListener('hashchange',()=>{
-  if(globalThis.MoyaiApp||!state.csrf)return;
-  const linkedRun=parseSessionLink(globalThis.MoyaiApp?.legacyHash()||location.hash);
-  (linkedRun?openRun(linkedRun.runId,linkedRun.hash):navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks')).catch(showError);
-});
 document.querySelector('.skip-link')?.addEventListener('click',event=>{event.preventDefault();$('#content').focus();});
 async function boot(){
   let page=state.pageVersion,loadingChat=false;
@@ -970,14 +969,15 @@ async function boot(){
     const session=await api('/api/session');applyUserSession(session);restoreSessionFolderView();
     $('.rail-foot small').textContent=session.local?'Private · local preview':'Shared internal workspace';
     if(!session.authenticated){
+      // The router hands #content back to sign-in before it is rendered.
+      globalThis.MoyaiApp?.ready();
       const passwordForm='<form id="login-form"><div class="field"><label for="password">Workspace password</label><input id="password" type="password" autocomplete="current-password" required></div><button class="primary full">Sign in</button></form>';
       MoyaiUI.render($('#content'), `<div class="login"><div class="card"><div class="login-mark" aria-hidden="true">M</div><h1>Welcome to Moyai</h1><p class="subtext">${session.google_enabled?'Your team’s agent, one conversation away.':'Sign in to Moyai.'}</p>${session.google_enabled?`<button id="google-signin" class="google-signin full" type="button"><span class="google-letter" aria-hidden="true">G</span> Continue with Google</button><p class="login-domain">Use your ${session.google_domains.map(d=>'@'+esc(d)).join(' or ')} work account.</p>`:''}${session.password_enabled?(session.google_enabled?'<details class="password-fallback"><summary>Use workspace password</summary>'+passwordForm+'</details>':passwordForm):''}<p id="signin-error" class="signin-error" role="alert"></p></div></div>`);
       if($('#login-form'))$('#login-form').onsubmit=async(e)=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({password:$('#password').value})});await boot();}catch(error){toast(error.message);}};
-      if($('#google-signin'))$('#google-signin').onclick=async()=>{const button=$('#google-signin');button.disabled=true;try{const result=await api('/api/auth/google/start',{method:'POST',body:JSON.stringify({return_to:'/'+location.hash})});location.assign(result.url);}catch(error){button.disabled=false;$('#signin-error').textContent=error.message;}};
+      if($('#google-signin'))$('#google-signin').onclick=async()=>{const button=$('#google-signin');button.disabled=true;try{const result=await api('/api/auth/google/start',{method:'POST',body:JSON.stringify({return_to:'/'+(globalThis.MoyaiApp?.legacyHash()??location.hash)})});location.assign(result.url);}catch(error){button.disabled=false;$('#signin-error').textContent=error.message;}};
       const signInError=new URLSearchParams(location.search).get('signin');
-      if(signInError){$('#signin-error').textContent=signInError==='cancelled'?'Sign-in was cancelled. You can try again.':'We couldn’t sign you in. Use your BerriAI Google Workspace account and try again.';history.replaceState(null,'','/'+location.hash);}
+      if(signInError){$('#signin-error').textContent=signInError==='cancelled'?'Sign-in was cancelled. You can try again.':'We couldn’t sign you in. Use your BerriAI Google Workspace account and try again.';if(globalThis.MoyaiApp)MoyaiApp.replaceUrl(location.pathname+location.hash);else history.replaceState(null,'','/'+location.hash);}
       document.querySelectorAll('.rail button').forEach(b=>b.disabled=true);
-      globalThis.MoyaiApp?.ready();
       return;
     }
     registerWebMCP();
@@ -994,7 +994,11 @@ async function boot(){
     // Navigation can supersede this route while authentication is pending,
     // but identity, configuration and the sidebar still belong to the app.
     if(page!==state.pageVersion){await state.configReady;return;}
-    if(globalThis.MoyaiApp){await state.configReady;globalThis.MoyaiApp.ready();return;}
+    if(globalThis.MoyaiApp){
+      await state.configReady;MoyaiApp.ready();
+      if(new URLSearchParams(location.search).get('connection')){toast(location.search.includes('success')?'App connected.':'Connection cancelled.');MoyaiApp.replaceUrl(location.pathname);}
+      return;
+    }
     const linkedRun=parseSessionLink(location.hash);
     if(linkedRun){loadingChat=true;const opening=openRun(linkedRun.runId,linkedRun.hash);page=state.pageVersion;await opening;}
     else {await state.configReady;if(page!==state.pageVersion)return;const navigation=navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks',state.config);page=state.pageVersion;await navigation;}
@@ -1024,10 +1028,11 @@ globalThis.MoyaiControllers={
   csrf:()=>state.csrf,
   userId:()=>state.userId||null,
   role:()=>state.role,
+  boot:()=>boot(),
+  enter:view=>{enterView(view);},
   page:view=>navigate(view,undefined,true),
   session:(id,hash,submission)=>openRun(id,hash,submission,true),
   applySession:session=>applyUserSession(session),
-  updatePreferences:preferences=>Object.assign(state.preferences,preferences),
   invalidate:()=>state.navigationCache?.clear(),
 };
 boot();

@@ -546,13 +546,13 @@ test('async session opening retains a target across metadata retry and ignores a
 });
 
 function routeFixture(authenticated){
-  const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),opened=[],handlers={},redirects=[];
+  const f=linkedFixture(),app=readFileSync('app/static/app.js','utf8'),opened=[],redirects=[];
   f.ctx.state.runs=[];
   for(const id of ['google-signin','signin-error','logout'])f.element(id);
   Object.assign(f.ctx,{location:{hash:accessLink(),search:'',assign:url=>redirects.push(url)},URLSearchParams,
     renderSidebar(){},showError:error=>{throw error;},applyUserSession:session=>f.ctx.state.csrf=session.authenticated?'csrf':'',restoreSessionFolderView(){},refreshRuns:async()=>{},
     registerWebMCP(){},navigate:async view=>opened.push({view}),openRun:async(id,hash)=>opened.push({id,hash}),
-    settingsViews:new Set(['secrets','users']),window:{addEventListener:(event,handler)=>handlers[event]=handler},
+    settingsViews:new Set(['secrets','users']),
     api:async(path,options)=>{
       if(path==='/api/session')return {authenticated,google_enabled:true,google_domains:['example.com'],local:true};
       if(path==='/api/auth/google/start'){f.posts.push(JSON.parse(options.body));return {url:'https://accounts.google.com/fixture'};}
@@ -560,18 +560,13 @@ function routeFixture(authenticated){
     }});
   const query=f.ctx.$;f.ctx.$=selector=>selector==='.rail-foot small'?f.element('rail-label'):query(selector);
   f.ctx.document.querySelectorAll=()=>[];
-  vm.runInContext(app.slice(app.indexOf("window.addEventListener('hashchange'"),app.indexOf("document.querySelector('.skip-link')"))+
-    app.slice(app.indexOf('async function boot('),app.indexOf('function registerWebMCP(')),f.ctx);
-  return {...f,opened,handlers,redirects};
+  vm.runInContext(app.slice(app.indexOf('async function boot('),app.indexOf('function registerWebMCP(')),f.ctx);
+  return {...f,opened,redirects};
 }
 
-test('boot and hash changes share the complete session link parser while plain app routes remain intact',async()=>{
+test('boot opens the complete session link',async()=>{
   const f=routeFixture(true);await f.ctx.boot();
   assert.deepEqual(f.opened,[{id:linkRun,hash:accessLink()}]);
-  f.ctx.location.hash='#run='+linkRun;f.handlers.hashchange();await flush();
-  assert.deepEqual(f.opened.at(-1),{id:linkRun,hash:'#run='+linkRun});
-  f.ctx.location.hash='#secrets';f.handlers.hashchange();await flush();assert.deepEqual(f.opened.at(-1),{view:'secrets'});
-  f.ctx.location.hash=accessLink()+'&key=must-not-parse';f.handlers.hashchange();await flush();assert.deepEqual(f.opened.at(-1),{view:'tasks'});
 });
 
 test('signed-out boot sends the complete credential target through Google sign-in',async()=>{
