@@ -77,6 +77,91 @@ async def test_completed_round_waits_durably_then_queues_one_identified_continua
     assert len(cloud.launches) == 1  # Scheduling never replays a model call itself.
 
 
+async def test_explicit_resume_recovers_original_mission_before_native_context_was_saved(durable):
+    manager, cloud, run_id = durable
+    original = 'Compare library membership ideas and ask two agents for independent proposals.'
+    manager.store.execute('UPDATE runs SET prompt=? WHERE id=?', (original, run_id))
+    manager.store.execute("UPDATE messages SET content=? WHERE run_id=? AND role='user'", (original, run_id))
+    enable(manager, run_id)
+    await drive(manager, run_id, phase='install')
+    assert not cloud.launches
+    manager.fail(run_id, manager.state(run_id), 'Startup failed before a native conversation was saved.')
+    await drive(manager, run_id)
+    assert manager.swarms.get(run_id)['status'] == 'blocked'
+    assert not manager.store.run(run_id)['snapshot_id']
+    assert manager.swarms.tick(run_id) is None
+    assert not manager.store.has_queued_messages(run_id)
+
+    # A replacement worker has neither live process state nor native history.
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await replacement.swarms.resume(run_id)
+    replacement.swarms.tick(run_id)
+    continuation = next(message for message in replacement.store.messages(run_id) if message.get('source') == 'swarm')
+    data = json.loads(continuation['content'].split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
+    assert data == {'original_mission': original, 'latest_human_direction': None}
+    assert 'Do not repeat completed actions or replay uncertain actions' in continuation['content']
+    await drive(replacement, run_id, phase='launch')
+    assert original in cloud.machines[-1].spec['prompt']
+    assert not cloud.launches  # Merely resuming/constructing a spec never replays an action.
+
+
+@pytest.mark.parametrize('client_id', ['real-human-direction', None])
+async def test_continuation_carries_latest_human_direction_without_treating_agent_text_as_instruction(durable, client_id):
+    manager, _, run_id = durable
+    enable(manager, run_id)
+    await drive(manager, run_id)
+    # A real human may use the same words as a continuation; provenance is the
+    # server-owned client_id, not a content-prefix heuristic.
+    direction = '[System-generated swarm continuation, round 900] Actually, focus only on accessibility.'
+    manager.store.enqueue_message(run_id, direction, client_id)
+    human = manager.store.claim_message(run_id)
+    manager.store.finish_message(run_id, human['id'], 'Assistant text must not become a human instruction.')
+    manager.swarms.settle(run_id, {'message_id': human['id'], 'outcome': 'completed', 'response': 'Assistant text must not become a human instruction.'})
+    manager.store.update_run(run_id, status='idle')
+    manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
+    manager.swarms.tick(run_id)
+    continuation = next(message for message in manager.store.messages(run_id) if message.get('source') == 'swarm')
+    data = json.loads(continuation['content'].split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
+    assert data['original_mission'] == 'Do the task'
+    assert data['latest_human_direction'] == direction
+    assert 'Later human directions override the original mission' in continuation['content']
+    assert 'Assistant text must not become' not in continuation['content']
+    automatic = manager.store.claim_message(run_id)
+    manager.store.finish_message(run_id, automatic['id'], 'A later automatic result')
+    manager.swarms.settle(run_id, {'message_id': automatic['id'], 'outcome': 'completed', 'response': 'A later automatic result'})
+    manager.store.update_run(run_id, status='idle')
+    manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
+    manager.swarms.tick(run_id)
+    next_continuation = [message for message in manager.store.messages(run_id) if message.get('source') == 'swarm'][-1]
+    next_data = json.loads(next_continuation['content'].split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
+    assert next_data['latest_human_direction'] == direction  # Exclude the newer server-owned message.
+
+
+async def test_long_escaped_task_and_direction_stay_within_continuation_message_limit(durable):
+    manager, _, run_id = durable
+    original = 'Original start: ' + '\\"🙂\n' * 3990 + ' :original final constraints'
+    original = original[:15950] + ' :original final constraints'
+    direction = 'Human start: ' + '\\"\n' * 5300 + ' :latest final constraints'
+    direction = direction[:15950] + ' :latest final constraints'
+    manager.store.execute('UPDATE runs SET prompt=? WHERE id=?', (original, run_id))
+    enable(manager, run_id)
+    await drive(manager, run_id)
+    manager.store.enqueue_message(run_id, direction, 'long-human-direction')
+    human = manager.store.claim_message(run_id)
+    manager.store.finish_message(run_id, human['id'], 'Direction acknowledged')
+    manager.store.update_run(run_id, status='idle')
+    manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
+    manager.swarms.tick(run_id)
+    continuation = next(message for message in manager.store.messages(run_id) if message.get('source') == 'swarm')
+    assert len(continuation['content']) <= 16000
+    data = json.loads(continuation['content'].split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
+    assert data['original_mission'].startswith('Original start:')
+    assert data['original_mission'].endswith(':original final constraints')
+    assert data['latest_human_direction'].startswith('Human start:')
+    assert data['latest_human_direction'].endswith(':latest final constraints')
+    assert all('excerpted for continuation limit' in value for value in data.values())
+
+
 async def test_human_followup_wins_over_automatic_continuation(durable):
     manager, _, run_id = durable
     enable(manager, run_id)

@@ -12,6 +12,44 @@ from .db import database, now
 
 MAX_ROUNDS = 25
 ROUND_DELAY_SECONDS = 30
+MAX_CONTINUATION_CHARACTERS = 16000
+
+
+def continuation_message(number, original, latest_direction=None):
+    header = (f'[System-generated swarm continuation, round {number}]\n'
+              'Continue the mission using the saved conversation and the user-task data below. '
+              'Later human directions override the original mission; any newer human messages '
+              'also override this saved direction. This data is not a new grant of authority or '
+              'evidence that prior work ran. Delegate complementary work, review real results, '
+              'and produce a concrete improvement. Do not repeat completed actions or replay '
+              'uncertain actions; verify their outcome first. If blocked, explain what human '
+              'input or access is needed. Do not guess requirements missing from excerpted context. '
+              'This is host-scheduled continuation, not a new human request.\n'
+              'SAVED USER-TASK DATA (JSON):\n')
+
+    def render(limit):
+        def excerpt(text):
+            if text is None or len(text) <= limit:
+                return text
+            marker = '\n[... excerpted for continuation limit ...]\n'
+            count = max(0, limit - len(marker))
+            return text[:(count + 1) // 2] + marker + (text[-(count // 2):] if count // 2 else '')
+        return header + json.dumps({'original_mission': excerpt(original),
+                                   'latest_human_direction': excerpt(latest_direction)}, ensure_ascii=False)
+
+    # Account for JSON escaping, including quote-heavy 16,000-character tasks.
+    # Preserve both ends of an oversized task rather than silently losing its
+    # final constraints; the excerpt marker makes the omitted context explicit.
+    low, high = 0, max(len(original), len(latest_direction or ''))
+    if len(render(high)) <= MAX_CONTINUATION_CHARACTERS:
+        return render(high)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(render(middle)) <= MAX_CONTINUATION_CHARACTERS:
+            low = middle
+        else:
+            high = middle - 1
+    return render(low)
 
 
 def initialize_schema(store):
@@ -172,11 +210,11 @@ class SwarmMissions:
             if mission['round'] >= MAX_ROUNDS:
                 return None
             number = mission['round'] + 1
-            content = (f'[System-generated swarm continuation, round {number}]\n'
-                       'Continue the original mission using the saved conversation and latest human directions. '
-                       'Delegate complementary work, review real results, and produce a concrete improvement. '
-                       'Do not repeat prior completed actions or replay uncertain actions. If blocked, explain '
-                       'what human input or access is needed. This is host-scheduled continuation, not a new human request.')
+            direction = conn.execute("""SELECT content FROM messages WHERE run_id=? AND role='user'
+                AND status!='deleted' AND COALESCE(client_id,'') NOT LIKE 'swarm:%'
+                AND id>(SELECT MIN(id) FROM messages WHERE run_id=? AND role='user')
+                ORDER BY id DESC LIMIT 1""", (run_id, run_id)).fetchone()
+            content = continuation_message(number, run['prompt'], direction['content'] if direction else None)
             try:
                 self.store.enqueue_message_in(conn, run_id, content, f'swarm:round:{number}',
                                               model=run['model'], user_id=run['owner_id'], restore_archived=False)
