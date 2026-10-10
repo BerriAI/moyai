@@ -6,18 +6,11 @@ import re
 import threading
 import time
 
-try:
-    from .broker_relay import InputPending
-    from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
-    from .harness_bindings import RUNTIME_BINDINGS
-    from .harness_dependencies import prepare_runtime, prepare_binary, runtime_version, LITELLM_REVISION
-    from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
-except ImportError:
-    from broker_relay import InputPending
-    from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
-    from harness_bindings import RUNTIME_BINDINGS
-    from harness_dependencies import prepare_runtime, prepare_binary, runtime_version, LITELLM_REVISION
-    from context_recovery import run_with_context_recovery, prepare_context, maintain_context
+from sandbox.broker_relay import InputPending
+from agent.harnesses.harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
+from agent.harnesses.harness_bindings import RUNTIME_BINDINGS
+from sandbox.harness_dependencies import prepare_runtime, prepare_binary, runtime_version, LITELLM_REVISION
+from agent.context_recovery import run_with_context_recovery, prepare_context, maintain_context
 
 
 class LiteLLMAgent(HarnessAgent):
@@ -51,10 +44,7 @@ class LiteLLMAgent(HarnessAgent):
     def prepare_native(self, system_message):
         if self.definition.runtime_binding not in ('opencode', 'pi'):
             return
-        try:
-            from .native_session import NativeSession
-        except ImportError:
-            from native_session import NativeSession
+        from agent.harnesses.native_session import NativeSession
         # Goal continuations are new invocations. Drop an intermediate stage
         # and obtain a new lease/fingerprint before appending their user input.
         self.native = NativeSession(self.context, self.context_store, self.definition.id,

@@ -11,7 +11,7 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
-from sandbox.trace_content import private_tool, trace_content
+from agent.trace_content import private_tool, trace_content
 from sandbox.broker_failure import safe_error, error_summary
 from .native_trace import MODEL_TEXT_LIMIT
 from .slack_mentions import MENTION

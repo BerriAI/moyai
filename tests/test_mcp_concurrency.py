@@ -8,7 +8,7 @@ import sys
 from threading import Event, Lock, Thread
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from sandbox import mcp_bridge
+from agent.tools import mcp_bridge
 
 
 def message(identity, name):
@@ -35,7 +35,7 @@ def test_slow_github_http_does_not_block_skills_memory_or_ping_and_eof_drains():
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    script = Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py'
+    script = Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py'
     process = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, env={'PATH': os.environ['PATH'],
         'WORKSPACE_BROKER_URL': f'http://127.0.0.1:{server.server_port}', 'WORKSPACE_RUN_TOKEN': 'fixture-capability'})

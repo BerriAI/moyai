@@ -1,13 +1,8 @@
 """Restart a native session only after a confirmed context rejection and receipts."""
 import time
-try:
-    from .context_store import ContextUnavailable
-    from .sdk_failure import report_failure
-    from .startup import StartupUnavailable
-except ImportError:
-    from context_store import ContextUnavailable
-    from sdk_failure import report_failure
-    from startup import StartupUnavailable
+from agent.context_store import ContextUnavailable
+from agent.harnesses.sdk_failure import report_failure
+from sandbox.startup import StartupUnavailable
 
 
 def maintain_context(agent, *, refresh=False):

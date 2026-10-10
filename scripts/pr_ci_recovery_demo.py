@@ -23,9 +23,9 @@ from app.config import Settings
 from app.github import Publish, RulesetReviewers
 from app.main import create_app
 from app.security import digest
-from sandbox.activity import ActivityReporter
-from sandbox.codex_harness import CodexAgent
-from sandbox.harness_agent import TurnJournal
+from agent.activity import ActivityReporter
+from agent.harnesses.codex_harness import CodexAgent
+from agent.harnesses.harness_agent import TurnJournal
 from test_github import GitHubAPI, PAYLOAD, connected
 from test_github_ci import CIProvider, SHA
 
@@ -62,7 +62,7 @@ def demo(directory, port):
                               'arguments': {'query': 'github checks workflow status'}}, completed=False)
             # Inject an additional formatter defect to verify the fallback,
             # independent of the fixed schema-type regression.
-            with patch('sandbox.activity.tool_details', side_effect=TypeError('demo formatter failure')):
+            with patch('agent.activity.tool_details', side_effect=TypeError('demo formatter failure')):
                 agent.record_item({'type': 'tool_search_output', 'execution': 'client', 'call_id': 'search-demo',
                     'status': 'completed', 'tools': [{'type': 'function', 'name': 'github_update_ruleset_reviewers',
                                                      'parameters': RulesetReviewers.model_json_schema()}]}, completed=True)

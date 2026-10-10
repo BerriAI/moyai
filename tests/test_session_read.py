@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi import Request
 
@@ -122,3 +124,118 @@ def test_requester_rechecked_after_body_read(users_app, monkeypatch, field, valu
 
     monkeypatch.setattr(Request, 'body', changed_body)
     assert read(client, caller, session=target['id']).status_code == 409
+
+
+def add_group(store, target, group, status='running', created_at=None):
+    store.execute('''INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at)
+        VALUES(?,?,1,?,'{}',?,?)''', (group, target['id'], group, status, created_at or now()))
+
+
+def set_waiting(store, target, group):
+    store.execute('CREATE TABLE IF NOT EXISTS durable_sessions(run_id TEXT PRIMARY KEY,state TEXT)')
+    store.execute('INSERT INTO durable_sessions(run_id,state) VALUES(?,?)',
+                  (target['id'], json.dumps({'phase': 'waiting_children', 'wait_group': group, 'private': 'state-canary'})))
+    store.update_run(target['id'], status='waiting_children')
+
+
+def test_waiting_diagnostics_are_sanitized_current_observations(users_app):
+    app, client, actor, caller, target = setup(users_app)
+    store = app.state.store
+    group = 'read-test-group'
+    add_group(store, target, group)
+    child = store.create_run('Worker', '', 'demo', [], chat_enabled=True)
+    store.execute('UPDATE runs SET parent_run_id=?,agent_group_id=?,agent_label=? WHERE id=?',
+                  (target['id'], group, 'Scout password=label-canary', child['id']))
+    store.update_run(child['id'], status='idle')
+    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (child['id'],))
+    set_waiting(store, target, group)
+    store.event(target['id'], 'error', 'Broker failed', {'phase': 'broker_failure', 'http_status': 502,
+                'request_id': 'req-reader', 'raw_body': 'failure-canary'})
+    before = store.run(target['id'])
+    response = read(client, caller, session=target['id'])
+    assert response.status_code == 200, response.text
+    for value in ('state-canary', 'label-canary', 'failure-canary'):
+        assert value not in response.text
+    data = response.json()
+    assert data['untrusted_reference']
+    assert data['session']['status'] == 'waiting_children'
+    assert data['agents']['waiting_group_id'] == group
+    assert data['agents']['groups'][0]['current_settled']
+    assert data['agents']['groups'][0]['children_scope'] == 'current'
+    assert data['recent_failures'][0]['request_id'] == 'req-reader'
+    assert data['recent_failures'][0]['http_status'] == 502
+    store.execute("UPDATE messages SET status='queued' WHERE run_id=?", (child['id'],))
+    assert not read(client, caller, session=target['id']).json()['agents']['groups'][0]['current_settled']
+    assert store.run(target['id']) == before
+
+
+def test_diagnostics_bound_groups_children_and_failures(users_app):
+    app, client, actor, caller, target = setup(users_app)
+    store = app.state.store
+    group = 'old-waiting-group'
+    add_group(store, target, group, status='preparing', created_at='2020-01-01T00:00:00')
+    for i in range(4):
+        add_group(store, target, f'new-group-{i}')
+    set_waiting(store, target, group)
+    hidden = []
+    for i in range(23):
+        child = store.create_run('Worker', '', 'demo', [])
+        store.execute('UPDATE runs SET parent_run_id=?,agent_group_id=? WHERE id=?', (target['id'], group, child['id']))
+        if i < 2:
+            field = 'deleted_at' if i == 0 else 'deletion_requested_at'
+            store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (now(), child['id']))
+            hidden.append(child['id'])
+    for i in range(7):
+        store.event(target['id'], 'error', 'Failure', {'phase': 'broker_failure' if i % 2 else 'sdk_failure',
+                    'request_id': f'req-{i}', 'raw_body': 'failure-canary'})
+    store.event(target['id'], 'error', 'Other event', {'phase': 'unrelated'})
+    response = read(client, caller, session=target['id'], limit=1)
+    assert response.status_code == 200, response.text
+    assert all(child_id not in response.text for child_id in hidden)
+    data = response.json()
+    assert data['agents']['groups_truncated']
+    assert len(data['agents']['groups']) == 3
+    first = data['agents']['groups'][0]
+    assert first['id'] == group and not first['current_settled']
+    assert first['children_truncated'] and len(first['children']) == 20
+    assert [f['request_id'] for f in data['recent_failures']] == [f'req-{i}' for i in range(6, 1, -1)]
+    assert 'failure-canary' not in response.text
+
+
+def test_empty_diagnostics_and_last_activity_excludes_deleted_messages(users_app):
+    app, client, actor, caller, target = setup(users_app)
+    store = app.state.store
+    store.execute("UPDATE messages SET created_at='2099-01-01T00:00:00' WHERE run_id=?", (target['id'],))
+    store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'user','deleted','deleted','2099-03-01T00:00:00')", (target['id'],))
+    data = read(client, caller, session=target['id']).json()
+    assert data['session']['last_activity_at'] == '2099-01-01T00:00:00'
+    assert data['agents'] == {'waiting_group_id': None, 'groups': [], 'groups_truncated': False}
+    assert data['recent_failures'] == []
+    store.event(target['id'], 'status', 'More activity')
+    store.execute("UPDATE events SET created_at='2099-02-01T00:00:00' WHERE run_id=?", (target['id'],))
+    assert read(client, caller, session=target['id']).json()['session']['last_activity_at'] == '2099-02-01T00:00:00'
+
+
+@pytest.mark.parametrize('change', ['actor', 'turn', 'target_deleted', 'target_deleting', 'root_deleting'])
+def test_access_rechecked_after_diagnostics(users_app, monkeypatch, change):
+    import app.session_read as module
+    app, client, actor, caller, target = setup(users_app)
+    store = app.state.store
+    root = store.create_run('Parent', '', 'demo', [])
+    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (root['id'], target['id']))
+    original = module.read_diagnostics
+
+    def changed(*args):
+        result = original(*args)
+        field, value, run_id = {
+            'actor': ('active_user_id', 'google:other', caller['id']),
+            'turn': ('active_message_id', 999999, caller['id']),
+            'target_deleted': ('deleted_at', now(), target['id']),
+            'target_deleting': ('deletion_requested_at', now(), target['id']),
+            'root_deleting': ('deletion_requested_at', now(), root['id']),
+        }[change]
+        store.execute(f'UPDATE runs SET {field}=? WHERE id=?', (value, run_id))
+        return result
+
+    monkeypatch.setattr(module, 'read_diagnostics', changed)
+    assert read(client, caller, session=target['id']).status_code == (409 if change in {'actor', 'turn'} else 404)

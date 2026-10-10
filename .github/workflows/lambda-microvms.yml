@@ -4,6 +4,7 @@ on:
     paths:
       - 'app/**'
       - 'sandbox/**'
+      - 'agent/**'
       - 'tests/test_lambda*'
       - 'tests/test_claude_sdk_transport.py'
       - 'tests/fixtures/lambda/**'

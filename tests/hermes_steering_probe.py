@@ -13,11 +13,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from openai.types.chat import ChatCompletion
-from run_agent import AIAgent
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from sandbox.continuation import ActiveTurnSteering
-from sandbox.goals import GoalLoop, run_goal_conversation
+from sandbox.hermes_compat import prepare_hermes_imports
+prepare_hermes_imports()
+from run_agent import AIAgent
+from agent.continuation import ActiveTurnSteering
+from agent.goals import GoalLoop, run_goal_conversation
 
 
 def reply(content='', write=None):
@@ -195,7 +197,7 @@ def conversation(scenario, *, unpatched=False):
 
 
 def background_compaction(url, model, enabled):
-    from sandbox.hermes_harness import HermesAgent
+    from agent.harnesses.hermes_harness import HermesAgent
     events = []
     activity = SimpleNamespace(start=lambda call, *args: events.append(('start', call)),
         complete=lambda call, *args: events.append(('complete', call)), commentary=lambda text: None)
@@ -218,7 +220,7 @@ def background_compaction(url, model, enabled):
 
 
 def read_recovery(url, model):
-    from sandbox.hermes_harness import HermesAgent
+    from agent.harnesses.hermes_harness import HermesAgent
     from tools.mcp_tool_lifecycle import shutdown_mcp_servers
 
     completed_tools = []

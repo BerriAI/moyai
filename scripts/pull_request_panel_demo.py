@@ -167,7 +167,7 @@ def demo(directory, port=8976, static_root=None, computer_container=None, live_g
         store.execute("UPDATE runs SET mode='modal',sandbox_id='local-browser-fixture' WHERE id=?", (root['id'],))
         async def execute(container, *args, timeout=45):
             process = await asyncio.create_subprocess_exec(
-                'docker', 'exec', computer_container, 'python', '/opt/workspace-runner/computer.py', *args,
+                'docker', 'exec', computer_container, 'python', '/opt/workspace-runner/sandbox/computer.py', *args,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
             if process.returncode:

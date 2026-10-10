@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.db import Store
 from app.message_queue import MessageQueue
 from app.security import digest
-from sandbox.continuation import AgentSteer
+from agent.continuation import AgentSteer
 from test_attachments import upload
 from test_durable import durable, drive  # noqa: F401
 from test_slack import slack_app  # noqa: F401

@@ -45,8 +45,11 @@ def test_api_requires_verified_schema_and_broker(split_settings, changes):
         create_app(split_settings.model_copy(update=values))
 
 
-def test_two_apis_share_auth_requests_and_shutdown_leaves_owner_work_intact(cluster):
+@pytest.mark.parametrize('build', ['a' * 40, 'b' * 40])
+def test_two_apis_share_auth_requests_and_shutdown_leaves_owner_work_intact(cluster, build):
     coordinator, settings = cluster
+    settings = settings.model_copy(update={'google_client_id': 'google-client',
+        'google_client_secret': 'google-secret', 'google_admin_emails': 'alice@berri.ai'})
     store = coordinator.state.store
     run = store.create_run('Existing session', '', 'demo', [], chat_enabled=True)
     request = coordinator.state.spend.begin(run, 'fixture-model')
@@ -58,16 +61,21 @@ def test_two_apis_share_auth_requests_and_shutdown_leaves_owner_work_intact(clus
     preserved = {name: store.rows('SELECT * FROM ' + name) for name in ('model_requests', 'context_jobs', 'approvals', 'slack_events', 'slack_outbox')}
     broker = create_app(settings.model_copy(update={'moyai_runtime_role': 'broker'}))
     try:
-        with client_for(create_app(settings)) as first, client_for(create_app(settings)) as second:
+        with client_for(create_app(settings)) as first, client_for(create_app(settings.model_copy(update={'moyai_build_sha': build}))) as second:
             assert first.get('/health').status_code == second.get('/health').status_code == 200
             sign_in(first.app, first)
             second.cookies.update(first.cookies)
             second.headers.update({'Origin': settings.public_url, 'X-CSRF-Token': first.headers['X-CSRF-Token']})
             assert second.get('/api/session').json()['authenticated']
+            assert second.get('/api/session').json()['csrf'] == first.headers['X-CSRF-Token']
             created = first.post('/api/runs', json={'prompt': 'Synthetic API request', 'mode': 'demo'})
             assert created.status_code == 201, created.text
             run_id = created.json()['id']
             assert second.get('/api/runs/' + run_id).json()['id'] == run_id
+            # Candidate writes must remain readable by the old API for rollback.
+            candidate_run = second.post('/api/runs', json={'prompt': 'Candidate API write', 'mode': 'demo'})
+            assert candidate_run.status_code == 201, candidate_run.text
+            assert first.get('/api/runs/' + candidate_run.json()['id']).json()['prompt'] == 'Candidate API write'
             # The API persisted a wake, but neither API has dispatched a workflow.
             assert store.rows('SELECT run_id FROM durable_sessions WHERE run_id=? AND revision>delivered', (run_id,))
             first.app.state.manager.temporal.start_workflow.assert_not_awaited()
@@ -81,7 +89,7 @@ def test_two_apis_share_auth_requests_and_shutdown_leaves_owner_work_intact(clus
         broker.state.store.close()
 
 
-@pytest.mark.parametrize('change', [{'moyai_build_sha': 'b' * 40}, {'session_secret': 'different'},
+@pytest.mark.parametrize('change', [{'session_secret': 'different'},
                                    {'sandbox_prepared_pool_size': 1}])
 def test_api_rejects_incompatible_owner_without_writes(cluster, monkeypatch, change):
     _, settings = cluster
@@ -98,9 +106,10 @@ def test_api_rejects_incompatible_owner_without_writes(cluster, monkeypatch, cha
     app.state.store.close()
 
 
-def test_api_starts_no_singleton_jobs_and_does_not_own_hooks(cluster, monkeypatch):
+@pytest.mark.parametrize('build', ['a' * 40, 'b' * 40])
+def test_api_starts_no_singleton_jobs_and_does_not_own_hooks(cluster, monkeypatch, build):
     coordinator, settings = cluster
-    app = create_app(settings)
+    app = create_app(settings.model_copy(update={'moyai_build_sha': build}))
     guarded = [(app.state.slack, 'recover'), (app.state.session_titles, 'start'),
                (app.state.session_lifecycle, 'start'), (app.state.environments, 'start'),
                (app.state.identities, 'start'), (app.state.automations, 'start'),

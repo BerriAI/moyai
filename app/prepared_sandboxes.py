@@ -17,6 +17,7 @@ import modal
 from .db import database
 from .runner import refresh_sandbox_files
 from .runtime_coordination import lease
+from .runtime_files import runtime_sources
 from .scheduling_diagnostics import record
 
 log = logging.getLogger(__name__)
@@ -30,8 +31,9 @@ class PreparedSandboxes:
             initialize_schema(self.store)
         root = Path(__file__).resolve().parents[1]
         revision = hashlib.sha256()
-        for path in sorted([*(root / 'sandbox').glob('*.py'), *(root / 'sandbox').glob('hermes-*.patch')]):
-            revision.update(path.name.encode()); revision.update(path.read_bytes())
+        for path in runtime_sources(root):
+            revision.update(path.relative_to(root).as_posix().encode())
+            revision.update(path.read_bytes())
         revision.update((root / 'app/workspace_image.py').read_bytes())
         self.build = hashlib.sha256(str((self.settings.moyai_build_sha,
             self.settings.hermes_revision, self.settings.modal_app_name,

@@ -411,7 +411,7 @@ async def test_real_temporal_model_recovery_timer_survives_worker_replacement(
         durable, tmp_path, monkeypatch, recovery_catalog, read_name, read_status):
     from http.server import BaseHTTPRequestHandler
     from sandbox.startup import _read_with_reconnect
-    from sandbox.transport_recovery import recovery_marker
+    from agent.transport_recovery import recovery_marker
     from test_broker_transport import diagnostic_relay
     from test_context_recovery import runtime
     from test_durable import transport_failure_report

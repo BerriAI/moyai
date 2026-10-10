@@ -19,8 +19,8 @@ from app.config import Settings
 from app.main import create_app
 from app.security import digest
 from sandbox.broker_transport import CONTENT_TYPE, seal
-from sandbox.context_store import ContextStore, read_records
-from sandbox.harness_agent import TurnJournal
+from agent.context_store import ContextStore, read_records
+from agent.harnesses.harness_agent import TurnJournal
 
 
 def demonstrate(checkpoints, delay=0):

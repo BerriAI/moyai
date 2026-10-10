@@ -11,10 +11,7 @@ from contextlib import ExitStack
 from typing import Callable
 from urllib.parse import quote
 
-try:
-    from .install_access_tools import ensure_tools
-except ImportError:
-    from install_access_tools import ensure_tools
+from sandbox.install_access_tools import ensure_tools
 
 MAX_OUTPUT = 128 * 1024
 

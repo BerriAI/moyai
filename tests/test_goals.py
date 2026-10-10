@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.skills import requested_skills
-from sandbox.continuation import ActiveTurnSteering
-from sandbox.goals import GoalLoop, command, run_goal_conversation
+from agent.continuation import ActiveTurnSteering
+from agent.goals import GoalLoop, command, run_goal_conversation
 
 
 @pytest.fixture
@@ -234,7 +234,7 @@ def test_midturn_status_does_not_auto_continue(goal):
 
 def test_timeout_is_not_reset_between_goal_rounds(goal, monkeypatch):
     clock = iter([0, 1, 4])
-    monkeypatch.setattr('sandbox.goals.time.monotonic', lambda: next(clock))
+    monkeypatch.setattr('agent.goals.time.monotonic', lambda: next(clock))
     budgets = []
     def run(*a, **k):
         budgets.append(agent.run_budget_seconds)

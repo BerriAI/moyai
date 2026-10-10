@@ -3,10 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 
-try:
-    from .memory_history import scrub_memory_history
-except ImportError:
-    from memory_history import scrub_memory_history
+from agent.memory_history import scrub_memory_history
 
 
 # This is an input byte budget, not a model-specific token estimate. It leaves

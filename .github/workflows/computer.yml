@@ -11,7 +11,7 @@ on:
       - 'app/static/workspace-panel.js'
       - 'app/workspace_image.py'
       - 'sandbox/computer.py'
-      - 'sandbox/mcp_bridge.py'
+      - 'agent/tools/**'
       - 'Dockerfile.sandbox'
       - 'tests/test_computer*'
       - 'tests/test_pull_requests.cjs'

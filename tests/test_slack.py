@@ -130,7 +130,7 @@ def test_user_and_bot_token_refresh_preserve_the_other_identity(slack_app, monke
 
 
 def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypatch):
-    from sandbox.agent import conversation_prompt
+    from agent.agent import conversation_prompt
     app, client, runs, _ = slack_app
     root, mention = '1790718000.654321', '1790719000.123456'
     client.post('/hooks/slack/events', **signed(event(thread_ts=root)))
@@ -194,7 +194,7 @@ def test_thread_context_bounds_and_reports_truncation(slack_app, monkeypatch):
 
 
 def test_new_channel_threads_never_share_context_or_agentchat_history(slack_app, monkeypatch):
-    from sandbox.agent import conversation_prompt
+    from agent.agent import conversation_prompt
     app, client, runs, _ = slack_app
     ryan, mateo = '1790718000.123456', '1790719000.123456'
     old_task = 'Update the TypeSafe /v1/decisions playground.'
@@ -232,7 +232,7 @@ def test_new_channel_threads_never_share_context_or_agentchat_history(slack_app,
 
 
 def test_old_channel_context_is_scoped_before_display_or_prompt(slack_app):
-    from sandbox.agent import conversation_prompt
+    from agent.agent import conversation_prompt
     app, client, runs, _ = slack_app
     client.post('/hooks/slack/events', **signed(event()))
     run_id = runs[0]['id']
@@ -345,7 +345,7 @@ def forwarded_attachment(body):
 
 @pytest.mark.parametrize('shape', ['text', 'blocks', 'fallback'])
 def test_forwarded_body_reaches_context_and_model_prompt(slack_app, monkeypatch, shape):
-    from sandbox.agent import conversation_prompt
+    from agent.agent import conversation_prompt
     app, client, runs, _ = slack_app
     body = 'Is `/get/ui_settings` listing settings without auth intentional?'
     attachment = forwarded_attachment(body)

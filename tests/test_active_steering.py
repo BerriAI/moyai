@@ -16,7 +16,7 @@ from sandbox.broker_transport import unseal
 from test_durable import durable, drive  # noqa: F401
 from app.message_queue import MessageQueue
 from app.security import digest
-from sandbox.continuation import ActiveTurnSteering
+from agent.continuation import ActiveTurnSteering
 from test_message_queue import queue, change  # noqa: F401
 from test_workspace import workspace  # noqa: F401
 from test_attachments import upload
@@ -333,7 +333,7 @@ def test_superseded_relay_reply_cannot_erase_or_replace_current_generation_error
 
 
 def test_background_handoff_is_not_reported_as_command_completion():
-    from sandbox.activity import ActivityReporter
+    from agent.activity import ActivityReporter
     events = []
     activity = ActivityReporter(lambda kind, message, data: events.append(data))
     activity.start('one', 'terminal', {'command':'test-command'})

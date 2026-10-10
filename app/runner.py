@@ -20,7 +20,7 @@ from .model_selection import gateway_model
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 CAPTURE_RELEASE_TIMEOUT = 35
 RETAINED_RELEASES = 128
-SANDBOX_FILES = Path(__file__).parent.parent / "sandbox"
+RUNTIME_FILES = Path(__file__).parent.parent
 SAVE_WARNING = ("Your answer is saved, but the latest workspace files could not be saved. "
                 "The previous workspace checkpoint is unchanged. Download the recovered files before continuing; "
                 "they may be incomplete. Queued follow-ups were stopped, and no actions were replayed.")
@@ -58,7 +58,7 @@ def response_status(run: dict[str, object]) -> str:
 
 async def refresh_sandbox_files(sandbox):
     """Refresh our adapter and runtime patches, preserving workspace/history."""
-    await sync_runtime(sandbox, SANDBOX_FILES)
+    await sync_runtime(sandbox, RUNTIME_FILES)
 
 
 def safe_error_detail(exc, secrets_to_hide=()):
@@ -426,7 +426,7 @@ class RunManager:
 
     def spec(self, run):
         from .attachments import attachment_context
-        from sandbox.harness_registry import resolve
+        from agent.harnesses.harness_registry import resolve
         run_id = run["id"]
         fresh_child = bool(run.get('parent_run_id')) and not run.get('continuation') and not self.store.rows(
             "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
@@ -513,10 +513,9 @@ class RunManager:
         spec = self.spec(run)
         if backend.name == 'lambda':
             spec["rotation_at"] = sandbox.started_at + self.settings.sandbox_rotation_for('lambda')
-        # Restored snapshots can contain an older adapter; refresh only our own
-        # runner files, preserving all user workspace files and agent history.
-        if snapshot_id:
-            await refresh_sandbox_files(sandbox)
+        # Both restored checkpoints and pinned provider images may predate the
+        # controller. Refresh only our own runtime before launching the agent.
+        await refresh_sandbox_files(sandbox)
         if getattr(self, 'computer', None):
             await self.computer.restore(sandbox, run_id, required=False)
         await sandbox.filesystem.write_text.aio(json.dumps(spec), "/tmp/task.json")
@@ -525,7 +524,7 @@ class RunManager:
         self.store.event(run_id, "status", f"Sandbox ready. Starting {resolve(run['harness']).name}.")
         # Modal streams arbitrary chunks by default. Protocol events are JSON
         # lines and must be framed before decoding, including parallel tools.
-        process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/agent.py", "/tmp/task.json",
+        process = await sandbox.exec.aio("/opt/hermes-env/bin/python", "/opt/workspace-runner/sandbox/agent.py", "/tmp/task.json",
                                          timeout=self.settings.run_timeout_seconds or None, bufsize=1,
                                          env=self.settings.broker_environment(token))
         result = None

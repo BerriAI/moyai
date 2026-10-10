@@ -11,20 +11,12 @@ import sys
 import tomllib
 from uuid import uuid4
 
-try:
-    from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
-    from .harness_dependencies import prepare_codex
-    from .codex_catalog import search_catalog
-    from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
-    from .sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
-    from .transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
-except ImportError:
-    from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
-    from harness_dependencies import prepare_codex
-    from codex_catalog import search_catalog
-    from context_recovery import run_with_context_recovery, prepare_context, maintain_context
-    from sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
-    from transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
+from agent.harnesses.harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
+from sandbox.harness_dependencies import prepare_codex
+from agent.harnesses.codex_catalog import search_catalog
+from agent.context_recovery import run_with_context_recovery, prepare_context, maintain_context
+from agent.harnesses.sdk_failure import codex_details, exception_details, failure_diagnostic, failure_summary
+from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
 
 
 RECEIPT_TIMEOUT_SECONDS = 10
@@ -179,7 +171,7 @@ class CodexAgent(HarnessAgent):
             # ephemeral thread receives this invocation's relay and token only.
             provider.pop('env_key', None)
             provider['http_headers'] = {'Authorization': 'Bearer ' + os.environ['WORKSPACE_RUN_TOKEN']}
-            proxy = Path(__file__).with_name('codex_runtime.py')
+            proxy = Path(__file__).resolve().parents[2] / 'sandbox/codex_runtime.py'
             config = replace(config, launch_args_override=(sys.executable, str(proxy),
                              'proxy', self.runtime_info['socket']))
             lease.clean = False

@@ -27,7 +27,8 @@ async def verify_agent_image(sandbox):
     tests = Path(__file__).resolve().parents[1] / 'tests/test_claude_sdk_transport.py'
     await sandbox.filesystem.write_text.aio(tests.read_text(), '/opt/validation/tests/test_claude_sdk_transport.py')
     process = await sandbox.exec.aio('sh', '-ec',
-        'ln -s /opt/workspace-runner /opt/validation/sandbox; '
+        'ln -s /opt/workspace-runner/sandbox /opt/validation/sandbox; '
+        'ln -s /opt/workspace-runner/agent /opt/validation/agent; '
         '/opt/hermes-env/bin/python -m pip install pytest; '
         # First use of the large SDK executable can fault cold AWS image pages.
         'MOYAI_SDK_TEST_TIMEOUT=120 PYTHONPATH=/opt/validation:/opt/hermes /opt/hermes-env/bin/python -m pytest -q '
@@ -43,11 +44,11 @@ async def verify_environment_build(sandbox):
               'setup': 'printf prepared > /usr/local/moyai-environment-proof',
               'startup': '', 'verify': 'test -f README', 'shutdown': ''}
     await sandbox.filesystem.write_text.aio(json.dumps(recipe), '/tmp/moyai-environment.json')
-    await execute(sandbox, 'import sys; sys.path.insert(0,"/opt/workspace-runner"); import environment_build; environment_build.main("start")')
+    await execute(sandbox, 'import sys; sys.path.insert(0,"/opt/workspace-runner"); from sandbox import environment_build; environment_build.main("start")')
     async with asyncio.timeout(240):
         while True:
             result = json.loads(await execute(sandbox,
-                'import sys,json; sys.path.insert(0,"/opt/workspace-runner"); import environment_build; print(json.dumps(environment_build.main("status")))'))
+                'import sys,json; sys.path.insert(0,"/opt/workspace-runner"); from sandbox import environment_build; print(json.dumps(environment_build.main("status")))'))
             if result.get('done'):
                 assert result.get('success'), result
                 break
@@ -61,7 +62,7 @@ async def verify_computer(sandbox):
 import asyncio, sys, threading, json, traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, '/opt/workspace-runner')
-import computer
+from sandbox import computer
 class Page(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self):

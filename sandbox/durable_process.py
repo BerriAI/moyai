@@ -92,7 +92,7 @@ def start(directory, spec_path):
 if __name__ == '__main__':
     operation, directory = sys.argv[1], Path(sys.argv[2])
     if operation == 'run':
-        supervise(directory, ['/opt/hermes-env/bin/python', '/opt/workspace-runner/agent.py', sys.argv[3]])
+        supervise(directory, ['/opt/hermes-env/bin/python', '/opt/workspace-runner/sandbox/agent.py', sys.argv[3]])
     elif operation == 'start':
         start(directory, sys.argv[3])
     elif operation == 'read':
