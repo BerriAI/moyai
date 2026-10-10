@@ -27,7 +27,8 @@ def send_payload(path, body, send):
         send('/payloads', {'route': path, 'digest': digest, 'part': parts,
                           'data': base64.b64encode(raw[offset:offset + MAX_BODY // 2]).decode()})
         parts += 1
-    return send(path, {'moyai_payload': {'digest': digest, 'parts': parts}})
+    return send(path, {'moyai_payload': {'digest': digest, 'parts': parts},
+                       **({'name': body['name']} if path == '/tools/call' else {})})
 
 
 def body_limit(path):

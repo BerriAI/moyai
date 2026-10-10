@@ -47,6 +47,8 @@ async def test_board_persists_goal_roster_posts_and_assignments(durable):
     messages = collaboration.store.messages(worker['id'])
     assert 'untrusted teammate' in messages[-1]['content']
     assert 'Find a useful proposal.' in messages[-1]['content']
+    assert messages[-1]['input_kind'] == 'delegation'
+    assert messages[-1]['user_name'] == 'Agent guidance'
     event = collaboration.store.events(lead['parent_run_id'])[-1]
     assert event['data']['post_id'] == board['posts'][-1]['id']
     parent = collaboration.store.run(lead['parent_run_id'])

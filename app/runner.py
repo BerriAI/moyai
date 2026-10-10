@@ -427,6 +427,14 @@ class RunManager:
     def spec(self, run):
         from .attachments import attachment_context
         from agent.harnesses.harness_registry import resolve
+        from agent.inputs import attributed_input
+        def history_content(message):
+            content = message['content'] + attachment_context(by_message.get(message['id'], []))
+            if message['role'] == 'user' and message['input_kind'] != 'user':
+                content = attributed_input(content, message['input_kind'], json.loads(message['source_json']))
+            if message['role'] == 'user' and message['status'] != 'completed':
+                content = f"[Prior {message['status']} message; context only, do not replay] " + content
+            return content
         run_id = run["id"]
         fresh_child = bool(run.get('parent_run_id')) and not run.get('continuation') and not self.store.rows(
             "SELECT 1 FROM messages WHERE run_id=? AND role='assistant' LIMIT 1", (run_id,))
@@ -464,7 +472,7 @@ class RunManager:
                 "side_chat_context": run.get('side_chat_context', ''),
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
-                "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
+                "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": history_content(m)} for m in self.store.messages(run_id)
                                      if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "saving", "deleted"}]}
         if self.environments:
             spec["project_environment"] = self.environments.context(run)

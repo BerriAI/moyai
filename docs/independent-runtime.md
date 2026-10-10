@@ -14,7 +14,7 @@ the existing path. No harness or model is silently substituted.
 
 Use a staging deployment with the existing Modal connection, model gateway,
 durable runtime and connected apps. This change requires schema revision **9**
-and API, worker, broker and coordinator protocol revision **3**. Follow the
+and API, worker, broker and coordinator protocol revision **4**. Follow the
 [coordinated migration procedure](schema-migrations.md); it is not an API-only
 or compatible rolling update from revision 8.
 

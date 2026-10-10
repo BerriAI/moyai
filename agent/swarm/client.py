@@ -1,8 +1,8 @@
 """Agent-owned access to durable delegation, independent of a host runtime.
 
-Starting or retrying work returns a receipt immediately. The host checkpoints
-the owner at a complete tool boundary and resumes it when workers settle. This
-client never waits locally, owns timers, or extends the owner's time budget.
+Starting or retrying work returns child handles immediately. Explicit release
+waits checkpoint the owner at a complete tool boundary. The durable host owns
+child lifetimes and inherited deadlines; the client never extends them.
 """
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .contracts import Assignment, Fanout, Group, Results, Retry
+from .contracts import Assignment, Fanout, Group, Results, Retry, Wait, Send, Cancel
 from .mission import SharedMission, internal_request_key
 from .planning import PlannedTask
 from .types import Agent, Harness
@@ -77,6 +77,8 @@ class GroupResult(_Response):
     total: int = Field(ge=0)
     children: list[WorkerResult]
     result_scope: str | None = None
+    cursor: str = ''
+    timed_out: bool = False
 
     @property
     def failed(self) -> bool:
@@ -140,15 +142,30 @@ class SwarmRun:
         value = await _call(self._backend, 'agents_results', Results(group_id=self.id, latest=latest))
         return self._result(value)
 
-    async def cancel(self) -> GroupResult:
-        value = await _call(self._backend, 'agents_cancel', Group(group_id=self.id))
+    async def wait(self, *, after: str = '', seconds: float = 60, latest: bool = False, release: bool = False) -> "GroupResult | SwarmRun":
+        value = await _call(self._backend, 'agents_wait', Wait(group_id=self.id, after=after, seconds=seconds, latest=latest, release=release))
+        return _handle(self._backend, value, expected_id=self.id) if value.get('moyai_wait_group') else self._result(value)
+
+    async def send(self, child_id: str, message: str, *, request_key: str | None = None) -> Mapping[str, Any]:
+        if self.children and child_id not in {child.id for child in self.children}:
+            raise ValueError('Worker is not in this group.')
+        request = Send(group_id=self.id, child_id=child_id, message=message, request_key=request_key or 'auto')
+        if request_key is None:
+            request.request_key = internal_request_key({'operation': 'send', **request.model_dump(exclude={'request_key'})})
+        value = await _call(self._backend, 'agents_send', request)
+        if value.get('child_id') != child_id:
+            raise ValueError('Swarm backend returned a different child.')
+        return value
+
+    async def cancel(self, *, child_ids: Sequence[str] = ()) -> GroupResult:
+        value = await _call(self._backend, 'agents_cancel', Cancel(group_id=self.id, child_ids=list(child_ids)))
         return self._result(value)
 
     async def retry(self, *, child_ids: Sequence[str], instructions: str,
-                    request_key: str | None = None) -> 'SwarmRun':
+                    request_key: str | None = None, wait: bool = False) -> 'SwarmRun':
         """Request explicit recovery of failed workers; never replay work automatically."""
         request = Retry(group_id=self.id, request_key=request_key if request_key is not None else 'auto', child_ids=list(child_ids),
-                        instructions=instructions)
+                        instructions=instructions, wait=wait)
         if request_key is None:
             request.request_key = internal_request_key({
                 'operation': 'retry', **request.model_dump(exclude={'request_key'}),
@@ -174,21 +191,21 @@ class AgentSwarm:
     def __init__(self, backend: SwarmBackend):
         self._backend = backend
 
-    async def start(self, *, task: str, agents: Sequence[Agent]) -> SwarmRun:
+    async def start(self, *, task: str, agents: Sequence[Agent], wait: bool = False) -> SwarmRun:
         """Start one shared goal; members choose a leader and divide the work.
 
         The host persists the roster and shared board, deduplicates equal starts
-        within this owner's active turn, and checkpoints the owner while members
-        collaborate. Runtime defaults, permissions and deadlines remain host-owned.
+        within this owner's active turn. The owner can continue independent work
+        or explicitly wait while members collaborate. Runtime defaults, permissions and deadlines remain host-owned.
         """
-        request = SharedMission(task=task, agents=list(agents))
+        request = SharedMission(task=task, agents=list(agents), wait=wait)
         value = await _call(self._backend, 'swarm_start', request)
         return _handle(self._backend, value)
 
     async def delegate(self, *, tasks: Sequence[Assignment | PlannedTask] = (),
                        instructions: str = '', items: Sequence[str] = (), workers: int = 10,
                        harness: Harness | None = None, model: str | None = None,
-                       request_key: str | None = None) -> SwarmRun:
+                       request_key: str | None = None, wait: bool = False) -> SwarmRun:
         """Advanced explicit assignments or item partitioning without a shared board.
 
         Prefer start(task=..., agents=...) for a self-organizing swarm. Equal
@@ -198,7 +215,7 @@ class AgentSwarm:
         assignments = [asdict(task) if isinstance(task, PlannedTask) else task for task in tasks]
         selected_harness = Harness(harness).value if harness is not None else None
         request = Fanout(request_key=request_key if request_key is not None else 'auto', instructions=instructions, items=list(items),
-                         workers=workers, tasks=assignments, harness=selected_harness, model=model)
+                         workers=workers, tasks=assignments, harness=selected_harness, model=model, wait=wait)
         if request_key is None:
             request.request_key = internal_request_key({
                 'operation': 'delegate', **request.model_dump(exclude={'request_key'}),

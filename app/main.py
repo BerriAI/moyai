@@ -1189,7 +1189,7 @@ def _create_app(settings, store):
             body = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, 'Invalid broker request JSON.')
-        if isinstance(body, dict) and set(body) == {'moyai_payload'}:
+        if isinstance(body, dict) and 'moyai_payload' in body:
             caller = await asyncio.to_thread(require_run, request.path_params['run_id'], request)
             return await asyncio.to_thread(broker_payloads.resolve, caller, route, body)
         return body
@@ -1402,7 +1402,7 @@ def _create_app(settings, store):
             if not coordinator.available(run):
                 raise HTTPException(403, 'Only a Temporal chat session can coordinate agents.')
             try:
-                result = await coordinator.call(run_id, body.name, body.arguments)
+                result = await coordinator.call(run_id, body.name, body.arguments, caller=run)
                 await checkpoints.flush()
                 return result
             except (ValueError, ValidationError) as exc:

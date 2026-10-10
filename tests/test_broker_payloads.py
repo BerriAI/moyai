@@ -69,3 +69,46 @@ def test_payload_integrity_completeness_and_deduplication(workspace):
     service.upload(run, {**first, 'digest': bad, 'data': base64.b64encode(raw).decode()})
     with pytest.raises(HTTPException, match='integrity'):
         service.resolve(run, '/agent-runtime', {'moyai_payload': {'digest': bad, 'parts': 1}})
+
+
+def test_large_tool_arguments_roundtrip_with_authenticated_tool_identity(workspace, monkeypatch):
+    from sandbox import broker_transport
+    app, client = workspace
+    run = active(app)
+    service = BrokerPayloads(app.state.store, app.state.security)
+    body = {'name': 'agents_send', 'arguments': {'child_id': 'a'*32, 'request_key': 'complete',
+        'message': 'complete Unicode 漢🙂 ' * 5000}}
+    monkeypatch.setattr(broker_transport, 'body_limit', lambda path: 1024)
+    calls = []
+    def send(route, value):
+        calls.append((route, value))
+        if route == '/payloads':
+            return service.upload(run, value)
+        return service.resolve(run, route, value)
+    assert send_payload('/tools/call', body, send) == body
+    manifest = calls[-1][1]
+    assert manifest['name'] == 'agents_send'
+    with pytest.raises(HTTPException, match='identity does not match'):
+        service.resolve(run, '/tools/call', {**manifest, 'name': 'agents_fanout'})
+    assert 'complete Unicode' not in json.dumps(app.state.store.rows('SELECT * FROM broker_payload_parts'))
+
+
+def test_tools_endpoint_resolves_parts_before_tool_validation(workspace, monkeypatch):
+    from sandbox import broker_transport
+    app, client = workspace
+    run = active(app)
+    monkeypatch.setattr(broker_transport, 'body_limit', lambda path: 1024)
+    calls = []
+    # A read with a deliberately invalid field still needs complete transport.
+    # The endpoint returns the tool's structured validation error, not a 413 or
+    # validation of the small manifest in place of the original tool arguments.
+    body = {'name': 'artifact_read', 'arguments': {'unknown': 'large ' * 1000}}
+    def send(route, value):
+        calls.append(route)
+        response = client.post('/broker/' + run['id'] + route, json=value,
+                               headers={'Authorization': 'Bearer capability'})
+        assert response.status_code == 200, response.text
+        return response.json()
+    result = send_payload('/tools/call', body, send)
+    assert result['outcome'] == 'rejected' and result['dispatched'] is False
+    assert calls[0] == '/payloads' and calls[-1] == '/tools/call'

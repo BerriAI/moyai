@@ -24,6 +24,7 @@ from agent.tools import computer_tools
 from sandbox import computer
 from agent.tools import credential_tools
 from agent.repository_guidance import TOOL as GUIDANCE_TOOL, resolve as repository_guidance
+from sandbox.broker_transport import send_payload
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -31,6 +32,12 @@ GIT_BROKER = os.environ.get('WORKSPACE_GIT_BROKER_URL', BROKER)
 
 
 def broker(path, body=None):
+    if path == '/tools/call' and body is not None:
+        return send_payload(path, body, _broker)
+    return _broker(path, body)
+
+
+def _broker(path, body=None):
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     req = urllib.request.Request(BROKER + path, data=data, headers={"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=920) as response:

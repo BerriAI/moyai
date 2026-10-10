@@ -19,7 +19,7 @@ async def explore(backend):
 
 `Agent()` is valid. Optional `name`, `harness: Harness`, and `model` configure a participant. Missing names become unique neutral names; missing runtimes inherit the owning agent's runtime, subject to host compatibility checks. Harness IDs are a typed enum: `HERMES`, `CLAUDE_AGENT_SDK`, `CODEX`, `OPENCODE`, `DEEPAGENTS`, `TOOL_LOOP`, and `PI`. Names and the shared task remain text. Definitions are immutable and reject unknown fields, unknown harnesses, blank explicit names, and duplicate names.
 
-`agent.swarm` is an internal extraction boundary for a future SDK. It depends only on the standard library and Pydantic, not Moyai, Temporal, cloud providers or the UI. It is not a separately published package. The host injects an authenticated `SwarmBackend`; Moyai obtains it with `coordinator.swarm(agent_run_id)` during an active turn. The capability is bound to that agent, so callers cannot choose another owner or extend its budget.
+`agent.swarm` is an internal extraction boundary for a future SDK. It depends only on the standard library and Pydantic, not Moyai, Temporal, cloud providers or the UI. It is not a separately published package. The host injects an authenticated `SwarmBackend`; Moyai obtains it with `coordinator.swarm(agent_run_id)` during an active turn. The capability is bound to that agent, requester, active turn and execution token, so callers cannot choose another owner or extend its budget.
 
 ## Collaboration
 
@@ -34,9 +34,9 @@ The host persists the board, assignments and workflow wakes together. Members fi
 
 ## Durable results
 
-`start` returns a `SwarmRun` receipt with `id`, `children`, and `checkpoint_required` after durable acceptance, without waiting for models. Identical validated starts in the same owning turn recover the same group; internal keys are scoped to that owner and turn. Save the group ID across turns.
+`start` returns a `SwarmRun` receipt with `id`, `children`, and `checkpoint_required` after durable acceptance, without waiting for models. Identical validated starts in the same owning turn recover the same group; internal keys are scoped to that owner and turn. Save the group ID across turns. The default returns immediately with `checkpoint_required=False`, so the parent can continue independent work or launch another group. Starts still wait for the workspace snapshot and admission; they do not wait for child models.
 
-When `checkpoint_required` is true, return control to the host. Moyai preserves the `moyai_wait_group` marker, checkpoints the owner, releases its sandbox, and resumes it with saved results. Direct Python hosts must implement that checkpoint boundary; the client does not suspend a harness by itself.
+Use `start(..., wait=True)`, `delegate(..., wait=True)`, or `await group.wait(release=True)` when there is no useful independent work. When the returned `checkpoint_required` is true, return control to the host. Moyai preserves the `moyai_wait_group` marker, checkpoints the owner, releases its sandbox, and resumes it with saved results. Direct Python hosts must implement that checkpoint boundary; the client does not suspend a harness by itself.
 
 ```python
 async def read_saved_team(backend, group_id):
@@ -46,9 +46,13 @@ async def read_saved_team(backend, group_id):
     return result
 ```
 
+`result()` returns partial answers while workers run. `await group.wait(after=result.cursor, seconds=60)` returns when a worker changes, the group settles, or the interval ends. `timed_out` means that read interval ended; it never stops children. The complete child transcript is available through Moyai's `sessions_read` tool. Read completed results before finishing the parent task; Moyai also catches uncollected groups at the parent's final boundary and durably resumes it to gather their results.
+
 `settled` includes failed and cancelled workers; `successful` checks actual outcomes. Default results preserve the handoff even if a user later chats with a worker. Use `result(latest=True)` explicitly for newer work. `group()` only restores a handle; every backend operation rechecks ownership.
 
-`await group.cancel()` cascades cancellation and retains saved work. `await group.retry(child_ids=[...], instructions="...")` explicitly recovers failed workers; verify ambiguous external actions before retrying. Transport errors propagate and writes are never automatically replayed.
+`await group.send(child_id, "Check this counterexample.", request_key="counterexample-1")` steers an active child or wakes an idle one. The message is attributed to the parent agent and cannot create new human permissions or goal commands. Repeating the same request key and text reconciles the existing input; use a new key for an intentionally new delivery. A parent follow-up reopens a collected group's result obligation. Human chats alone keep the old handoff frozen.
+
+`await group.cancel(child_ids=[...])` stops selected children; omit `child_ids` to cascade through the whole group. Both retain saved work. `await group.retry(child_ids=[...], instructions="...")` explicitly recovers failed workers; verify ambiguous external actions before retrying. Retries also return immediately unless `wait=True`. Transport errors propagate and uncertain external actions are never automatically replayed.
 
 ## Explicit delegation
 
@@ -76,6 +80,10 @@ async def delegate_known_jobs(agentswarm):
 
 Product Swarm mode uses `plan_swarm()` to choose ten neutral members across approved harness/model pairs, without preset roles. It commits the pinned roster, shared goal, scoped uploads and dispatch wakes atomically. `plan_team()` remains an explicit role-based planner for advanced callers.
 
-A new host implements `SwarmBackend.call(name, arguments)` for `swarm_start`, result, cancellation and recovery contracts, plus the collaboration tools exposed to members. It must authenticate ownership, enforce budgets, persist deduplication and implement checkpoint/resume. The client interface alone does not provide durability.
+A new host implements `SwarmBackend.call(name, arguments)` for `swarm_start`, `agents_fanout`, `agents_results`, `agents_wait`, `agents_send`, `agents_cancel` and `agents_retry`, plus the collaboration tools exposed to members. It must authenticate ownership, enforce budgets, persist deduplication and implement checkpoint/resume. The client interface alone does not provide durability.
 
 The space UI displays public worker replies and harnesses; board posts also appear in the persisted activity trace. No hidden reasoning is exposed. Tests cover restart recovery, atomic leader claims, peer delivery, coalescing, scope, deadlines and saved result handoffs using the real persistence/workflow code with test sandboxes.
+
+The source defaults to 100 workers per group through `MAX_PARALLEL_AGENTS`; operators can choose any positive value. Admission still enforces configured runtime capacity and inherited time budgets. Prompts, mission text, board posts, item lists and returned child answers have no fixed character or list-length ceilings. Large tool arguments use authenticated multipart transport across the HTTP envelope boundary.
+
+This behavior is in source and has not been deployed. It requires schema revision 9 and role protocol revision 4. Older workers treat agent messages as human input, so use the coordinated release path in [rolling deployments](../../docs/rolling-deploy.md); do not mix these protocols.

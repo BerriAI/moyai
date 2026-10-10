@@ -11,7 +11,7 @@ import re
 from fastapi import HTTPException
 
 
-ROUTES = frozenset({'/agent-runtime', '/context/native'})
+ROUTES = frozenset({'/agent-runtime', '/context/native', '/tools/call'})
 
 
 def initialize_schema(store):
@@ -63,8 +63,10 @@ class BrokerPayloads:
             return {'uploaded': part}
 
     def resolve(self, caller, route, body):
-        if not isinstance(body, dict) or set(body) != {'moyai_payload'}:
+        if not isinstance(body, dict) or 'moyai_payload' not in body:
             return body
+        if set(body) != ({'moyai_payload', 'name'} if route == '/tools/call' else {'moyai_payload'}):
+            raise HTTPException(422, 'Invalid broker payload envelope.')
         manifest = body['moyai_payload']
         if (route not in ROUTES or not isinstance(manifest, dict)
                 or set(manifest) != {'digest', 'parts'} or type(manifest['parts']) is not int
@@ -83,6 +85,9 @@ class BrokerPayloads:
         if hashlib.sha256(raw).hexdigest() != manifest['digest']:
             raise HTTPException(409, 'Payload integrity verification failed.')
         try:
-            return json.loads(raw)
+            value = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, 'The payload is not valid JSON.') from None
+        if route == '/tools/call' and (not isinstance(value, dict) or value.get('name') != body['name']):
+            raise HTTPException(422, 'The payload tool identity does not match.')
+        return value

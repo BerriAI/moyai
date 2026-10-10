@@ -144,9 +144,10 @@ class SwarmMissions:
                  run['environment_id'], run['environment_build_id'], runtime['harness'], run['github_repository_id'], run['sandbox_provider']))
             if run['side_chat_context']:
                 conn.execute('UPDATE runs SET side_chat_context=? WHERE id=?', (run['side_chat_context'], child_id))
-            child_message = conn.execute("""INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id)
-                VALUES(?,'user',?,'queued','initial',?,?,?) RETURNING id""",
-                (child_id, prompt, stamp, runtime['model'], run['owner_id'])).fetchone()[0]
+            child_message = conn.execute("""INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,input_kind,source_json)
+                VALUES(?,'user',?,'queued','initial',?,?,?,'delegation',?) RETURNING id""",
+                (child_id, prompt, stamp, runtime['model'], run['owner_id'],
+                 json.dumps({'type': 'agent', 'run_id': run_id, 'message_id': message_id, 'operation': 'shared_assignment'}))).fetchone()[0]
             # Independent rows keep the existing run-scoped attachment broker
             # authorization. Object-store references are shared immutably; no
             # parent attachment access is granted to an arbitrary child.

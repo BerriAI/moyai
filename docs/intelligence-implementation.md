@@ -1,6 +1,6 @@
 # Intelligence implementation ledger
 
-Status: in progress on `codex/moyai-intelligence`, validated increments are pushed directly to `main`.
+Status: in progress; validated increments are pushed directly to `main`.
 Nothing in this document is a deployment or model-quality claim.
 
 The approved proposal is the scope. This ledger records implementation and
@@ -390,6 +390,40 @@ rendered at desktop/mobile widths and local links checked. This is protocol evid
 not measured deployed latency or model quality. Broader recovery, other harnesses
 and providers, and live S26 qualification remain open.
 
-Current source requires schema revision 9 and all four role protocol revisions 3.
+Current source requires schema revision 9 and all four role protocol revisions 4.
 The previously pushed foundation remains revision 8; this increment adds computer
 operations and encrypted payload parts. It requires a coordinated migration.
+
+
+## Asynchronous delegation and attributed follow-ups (WP7; not deployed)
+
+`swarm_start`, `agents_fanout` and retries now return child handles after admission
+and snapshot creation. Parents can work independently and launch multiple groups.
+`agents_wait` reads changes with a cursor or explicitly checkpoints/releases the
+parent until settlement. Reading settled results freezes the handoff; uncollected
+groups still prevent premature parent completion. Direct child guidance is
+idempotent, steers active work, wakes idle work, and reopens collected groups when
+the parent requests refinement. Selected children can be cancelled independently.
+All of this uses Ishaan's existing AgentSwarm interface, database and workflows.
+
+New child assignments, retries and board messages retain explicit agent provenance
+in storage, live steering, native inputs and cold fallback. They cannot become
+new human goal commands. Dispatch after an awaited snapshot, long waits, shared
+board writes and Python handles retain the original actor/turn/capability fence.
+No arbitrary prompt, roster, item-list, board-message or child-answer clipping
+remains in these delegation contracts. Configured workspace capacity still applies;
+`MAX_PARALLEL_AGENTS` accepts any positive operator value. Large tool arguments
+use the same authenticated multipart transport as native state and computer calls.
+
+Validation: 389 broader delegation, swarm, steering, goal, MCP and broker checks
+pass; 68 database-dependent role checks were skipped in that invocation and are
+being run separately. Another 76 new-contract cases and 96 source/fallback cases
+pass. Forty-two delegation/board/transport cases pass against PostgreSQL. The
+AgentSwarm guide was rendered at desktop/mobile widths and inspected. This is
+local protocol and behavioral evidence with simulated workers, not a live
+model-quality benchmark or a deployment. Full-repository regression, independent
+prerequisite readiness and owner-granted automation self-management remain open.
+
+The schema remains revision 9. All four role protocols are now revision 4 because
+older workers interpret agent-generated inputs as human messages. Drain old roles
+and use a coordinated release; rebuilding only the broker is not sufficient.

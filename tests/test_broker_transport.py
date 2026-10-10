@@ -725,7 +725,9 @@ def test_failed_turn_is_not_saved_as_a_completed_assistant_answer(workspace):
     assert [m['status'] for m in app.state.store.messages(run['id'])]==['failed','failed']
 
 
-def test_relay_only_pauses_for_an_authenticated_delegation_response():
+@pytest.mark.parametrize('name', ['agents_fanout', 'swarm_start', 'agents_retry', 'agents_wait'])
+@pytest.mark.parametrize('multipart', [False, True])
+def test_relay_only_pauses_for_an_authenticated_delegation_response(name, multipart):
     group = 'f' * 32
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -744,7 +746,7 @@ def test_relay_only_pauses_for_an_authenticated_delegation_response():
         headers = {'Authorization': 'Bearer token'}
         httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'slack_search'})
         assert relay.wait_group == ''
-        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': 'agents_fanout'})
+        response = httpx.post(relay.url + '/tools/call', headers=headers, json={'name': name, **({'moyai_payload': {'digest': 'a'*64, 'parts': 1}} if multipart else {})})
         assert response.json()['moyai_wait_group'] == relay.wait_group == group
     finally:
         relay.close()
