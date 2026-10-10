@@ -225,7 +225,9 @@ uv run --frozen --python 3.13 pytest -q tests/test_runtime_performance.py tests/
    handoffs from an empty replacement disk, with identical keys and object
    destination. All user/sandbox traffic still requires one coordinator.
 3. Start staging at 100 occupied sandboxes, two workers, 120 activity slots per
-   worker, pools of 8, and the existing model budget of 8. Keep dispatch batch
+   worker, pools of 8, and the currently configured production model budget.
+   Preserve explicit overrides (for example, 32 model requests) rather than
+   resetting them to the default of 8. Keep dispatch batch
    200/concurrency 10 initially: the artificial batch pauses are already removed.
    Two workers plus one coordinator use at most 27 DB connections; budget 36
    during one overlapping replacement, plus administration/reserve. Four-slot
