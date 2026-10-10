@@ -174,7 +174,7 @@ def test_broker_buffers_gateway_to_obtain_final_cost_for_streaming_clients(works
     def fail(request):
         return httpx.Response(429)
     monkeypatch.setattr('app.main.httpx.AsyncClient', lambda **kw: real(transport=httpx.MockTransport(fail), **kw))
-    assert client.post(url,headers={'Authorization':'Bearer capability'},json={'messages':[]}).status_code == 502
+    assert client.post(url,headers={'Authorization':'Bearer capability'},json={'messages':[]}).status_code == 429
     assert app.state.store.rows("SELECT * FROM model_requests WHERE status='failed'")
 
 
