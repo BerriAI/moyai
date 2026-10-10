@@ -629,10 +629,11 @@ def _create_app(settings, store):
 
     @app.get("/api/runs")
     async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None, archived: bool = False,
-                   search: str = Query(default='', max_length=200), view: Literal['full', 'sidebar'] = 'full'):
+                   search: str = Query(default='', max_length=200), view: Literal['full', 'sidebar'] = 'full',
+                   include_archived: bool = False):
         # SQLite reads/identity writes can wait on disk or a writer. Keep the
         # bounded worker pool responsible for those waits, not the event loop.
-        rows, receipts = await run_in_threadpool(load_run_list, request, focus, scope, archived, search, view)
+        rows, receipts = await run_in_threadpool(load_run_list, request, focus, scope, None if include_archived else archived, search, view)
         # The PR cache and refresh tasks belong to the event loop. Recheck live
         # GitHub access here; do not pass connection credentials across threads.
         summaries = session_pull_requests.summaries(rows, receipts=receipts)
