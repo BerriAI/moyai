@@ -1,4 +1,3 @@
-import asyncio
 import json
 import time
 
@@ -73,7 +72,7 @@ def test_slack_feedback_button_is_on_the_last_chunk_and_survives_long_replies(sl
     assert json.loads(action['elements'][0]['value']) == {'run_id': run_id, 'message_id': assistant['id']}
     assert all(len(block['text']['text']) <= 3000 for block in rich['blocks'] if block['type'] == 'section')
     assert len(rich['blocks']) <= 49
-    asyncio.run(service.close())
+    client.portal.call(service.close)
 
 
 @pytest.mark.parametrize('saving', [False, True])
@@ -158,4 +157,4 @@ def test_slack_feedback_interactions_open_submit_and_preserve_credentials(slack_
         {'type': 'button', 'action_id': 'credential_open'}]}
     preserved = client.post('/hooks/slack/interactions', **signed(credential_action, form=True))
     assert preserved.status_code == 200 and preserved.json() == {'ok': True}
-    asyncio.run(service.close())
+    client.portal.call(service.close)

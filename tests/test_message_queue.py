@@ -214,9 +214,9 @@ def test_slack_edits_and_deletes_retire_pending_inputs_and_correct_delivered_inp
     target=web(app,client,run_id).json()['id']
     assert change(client,run_id,target,'edit',content='New queued version').status_code==200
     assert app.state.store.rows("SELECT status FROM slack_outbox WHERE dedupe_key=?",(f'input:{target}:0',))[0]['status']=='skipped'
-    drain(app)
+    drain(app, client)
     assert any('New queued version' in post.get('text','') for post in mirror[3])
     assert not any('Continue from web' in post.get('text','') for post in mirror[3])
     assert change(client,run_id,target,'delete',1).status_code==200
-    drain(app)
+    drain(app, client)
     assert any('removed in Moyai' in post.get('text','') for post in mirror[3])
