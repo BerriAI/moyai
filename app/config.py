@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     def database_backend(self):
         if self.moyai_schema_mode == 'verify' and not self.moyai_database_url:
             raise ValueError('MOYAI_SCHEMA_MODE=verify requires PostgreSQL.')
+        if self.temporal_enabled and self.checkpoint_dir and (
+                not self.object_storage_bucket or not self.encryption_key or not self.session_secret):
+            raise ValueError('Temporal with CHECKPOINT_DIR requires shared object storage and explicit '
+                             'ENCRYPTION_KEY and SESSION_SECRET; periodic SQLite backups do not preserve workflow payloads.')
         if self.sandbox_prepared_pool_size:
             if not self.temporal_enabled or self.sandbox_provider != 'modal':
                 raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
@@ -192,7 +196,7 @@ class Settings(BaseSettings):
     braintrust_api_key: str = ""
     braintrust_parent: str = "project_name:moyai"
     agent_model: str = ""
-    agent_harness: str = 'claude-agent-sdk'
+    agent_harness: str = 'pydantic-ai'
     sandbox_provider: Literal['modal', 'substrate', 'lambda'] = 'modal'
     lambda_region: str = 'us-east-1'
     lambda_image: str = ''
@@ -438,19 +442,11 @@ class Settings(BaseSettings):
         return resolve(value).id
 
     def default_harness(self, value: str | None = None) -> str:
-        """Choose once for a new session, honoring processing-mode requirements."""
+        """All new model selections use the durable engine by default."""
         model = self.resolve_model(value)
-        if model == ASTRA_ULTRAFAST:
-            return 'codex'  # Ultrafast requires the native Responses API.
-        if 'agent_harness' in self.model_fields_set:
-            return self.agent_harness
-        # Resolve aliases first, then use the provider namespace so new catalog
-        # models inherit their native SDK without a version-specific pairing.
-        provider = model.split('/', 1)[0] if '/' in model else ''
-        return {
-            'openai': 'codex',
-            'anthropic': 'claude-agent-sdk',
-        }.get(provider, self.agent_harness)
+        if model == ASTRA_ULTRAFAST and self.agent_harness != 'pydantic-ai':
+            return 'codex'  # Compatibility for explicitly configured legacy harnesses.
+        return self.agent_harness
 
     def harness_model(self, harness: str, value: str | None = None) -> str:
         from .harnesses import validate_harness
@@ -551,4 +547,6 @@ class Settings(BaseSettings):
     def missing_cloud(self, provider=None) -> list[str]:
         required = {'LITELLM_API_BASE': self.litellm_api_base, 'LITELLM_API_KEY': self.litellm_api_key,
                     'AGENT_MODEL': self.agent_model}
+        if self.default_harness() == 'pydantic-ai':
+            required['TEMPORAL_ENABLED'] = self.temporal_enabled
         return self.missing_sandbox(provider) + [key for key, value in required.items() if not value]

@@ -320,7 +320,7 @@ class HarnessGateway:
                 model_stage(request, stage)
             while True:
                 try:
-                    if compact:
+                    if compact or run['harness'] == 'pydantic-ai':
                         checked_budget = await self.context_budget.check(payload)
                     else:
                         payload, checked_budget = await self.live_context.prepare(run, request, payload, route)

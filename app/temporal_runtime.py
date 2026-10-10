@@ -9,6 +9,13 @@ from uuid import uuid4
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
+from temporalio.converter import DataConverter, DefaultFailureConverterWithEncodedAttributes
+from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
+from .pydantic_context import RuntimeInterceptor
+from .pydantic_execution import PydanticExecution
+from .pydantic_runtime import PydanticRuntime
+from .pydantic_workflow import PydanticTurnWorkflow
+from .temporal_payloads import PrivatePayloads, PrivatePayloadCodec
 
 from .db import database
 from .durable_runner import DurableRunner
@@ -22,9 +29,14 @@ log = logging.getLogger(__name__)
 class TemporalRunManager(DurableRunner):
     def __init__(self, store, settings):
         super().__init__(store, settings)
+        self.payloads = PrivatePayloads(store, settings)
+        self.pydantic_runtime = PydanticRuntime(self, self.payloads)
+        self.pydantic_execution = PydanticExecution(self, self.payloads)
         self.temporal = None
         self.worker = None
         self.worker_task = None
+        self.agent_worker = None
+        self.agent_worker_task = None
         self.dispatch_task = None
         self.diagnostics_task = None
         self.prepared_task = None
@@ -135,7 +147,9 @@ class TemporalRunManager(DurableRunner):
         return await Client.connect(
             self.settings.temporal_address, namespace=self.settings.temporal_namespace,
             api_key=self.settings.temporal_api_key or None, tls=self.settings.temporal_tls,
-            identity=self.identity,
+            identity=self.identity, plugins=[PydanticAIPlugin()],
+            data_converter=DataConverter(payload_codec=PrivatePayloadCodec(self.payloads),
+                failure_converter_class=DefaultFailureConverterWithEncodedAttributes),
         )
 
     async def wait_ready(self):
@@ -153,7 +167,20 @@ class TemporalRunManager(DurableRunner):
 
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
-                      workflows=[SessionWorkflow, AutomationWorkflow], activities=[self.advance_session, self.launch_automation, self.automation_finished],
+                      workflows=[SessionWorkflow, AutomationWorkflow],
+                      activities=[self.advance_session, self.launch_automation, self.automation_finished],
+                      max_concurrent_activities=self.settings.temporal_worker_activities,
+                      max_cached_workflows=self.settings.temporal_workflow_cache_size,
+                      graceful_shutdown_timeout=timedelta(seconds=1))
+
+    def make_agent_worker(self, client):
+        # Tool activities can wait for computer capacity/receipts. Keep their
+        # slots separate from the controller that must dispatch those actions.
+        plugins = [] if any(isinstance(p, PydanticAIPlugin) for p in client.config().get('plugins', [])) else [PydanticAIPlugin()]
+        return Worker(client, task_queue=self.settings.temporal_task_queue + '-agents-v1',
+                      workflows=[PydanticTurnWorkflow],
+                      activities=[self.pydantic_runtime.prepare, self.pydantic_runtime.boundary, self.pydantic_runtime.publish],
+                      plugins=plugins, interceptors=[RuntimeInterceptor(self.pydantic_runtime)],
                       max_concurrent_activities=self.settings.temporal_worker_activities,
                       max_cached_workflows=self.settings.temporal_workflow_cache_size,
                       graceful_shutdown_timeout=timedelta(seconds=1))
@@ -179,6 +206,8 @@ class TemporalRunManager(DurableRunner):
                 if self.settings.moyai_runtime_role in {'standalone', 'worker'}:
                     self.worker = self.make_worker(self.temporal)
                     self.worker_task = asyncio.create_task(self.worker.run())
+                    self.agent_worker = self.make_agent_worker(self.temporal)
+                    self.agent_worker_task = asyncio.create_task(self.agent_worker.run())
                     # The SDK validates the namespace asynchronously in run().
                     # A scheduled task alone does not prove the poller started.
                     # Its public is_running flag is set after that validation.
@@ -187,7 +216,10 @@ class TemporalRunManager(DurableRunner):
                         if self.worker_task.done():
                             await self.worker_task
                             raise RuntimeError('Temporal worker stopped during startup')
-                        if self.worker.is_running:
+                        if self.agent_worker_task.done():
+                            await self.agent_worker_task
+                            raise RuntimeError('Agent worker stopped during startup')
+                        if self.worker.is_running and self.agent_worker.is_running:
                             break
                 self.ready.set()
                 while not self.closing:
@@ -197,6 +229,9 @@ class TemporalRunManager(DurableRunner):
                     if self.worker_task and self.worker_task.done():
                         await self.worker_task
                         raise RuntimeError('Temporal worker stopped')
+                    if self.agent_worker_task and self.agent_worker_task.done():
+                        await self.agent_worker_task
+                        raise RuntimeError('Agent worker stopped')
                     # A lost database fence must stop activities, including
                     # when the task queue currently has no work to deliver.
                     await database(self.store.rows, 'SELECT 1')
@@ -327,15 +362,15 @@ class TemporalRunManager(DurableRunner):
             raise ApplicationError('Automation status temporarily unavailable', type=type(exc).__name__) from None
 
     async def stop_worker(self):
-        if self.worker and self.worker_task:
-            if not self.worker_task.done():
-                if self.worker.is_running:
-                    await self.worker.shutdown()
-                else:
-                    # shutdown() waits for run() to finish. Before namespace
-                    # validation completes it cannot stop a stalled startup.
-                    self.worker_task.cancel()
-            await asyncio.gather(self.worker_task, return_exceptions=True)
+        async def stop(worker, task):
+            if worker and task:
+                if not task.done():
+                    if worker.is_running:
+                        await worker.shutdown()
+                    else:
+                        task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        await asyncio.gather(stop(self.worker, self.worker_task), stop(self.agent_worker, self.agent_worker_task))
 
     async def shutdown(self):
         self.closing = True

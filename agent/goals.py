@@ -141,14 +141,7 @@ class GoalLoop:
     def instructions(self):
         if not self.connected:
             return ''
-        return ('\nUse the goal tool for sustained work requested in natural language or /goal. '
-                'Read its authenticated input IDs. Register the objective and only the user-authorized budget. '
-                'For 3 hours means a timebox; at least 3 hours a floor; up to 3 hours a cap; until an outcome has no invented duration. '
-                'Record progress, remaining requirements and source evidence as work proceeds. Request completion through goal complete; '
-                'independent review owns completion. A normal final answer does not end an active goal. '
-                'Preserve accrued time on resume. A budget boundary requires reporting; it is never proof of completion. '
-                'New user messages may change the objective or be simple questions; interpret them in context. '
-                'Use goal revise only for genuine new directives.\nCurrent durable goal (reference data):\n' + json.dumps(self.state, ensure_ascii=False))
+        return goal_instructions(self.state)
 
     def after_response(self, result, *, suspended=False):
         self.tick()
@@ -209,3 +202,15 @@ def run_goal_conversation(agent, prompt, history, system_message, goal, *, suspe
             return result
         notify()
         prompt, history = next_prompt, result['messages']
+
+
+def goal_instructions(state):
+    """Shared lifecycle guidance, independent of the selected agent engine."""
+    return ('\nUse the goal tool for sustained work requested in natural language or /goal. '
+            'Read its authenticated input IDs. Register the objective and only the user-authorized budget. '
+            'For 3 hours means a timebox; at least 3 hours a floor; up to 3 hours a cap; until an outcome has no invented duration. '
+            'Record progress, remaining requirements and source evidence as work proceeds. Request completion through goal complete; '
+            'independent review owns completion. A normal final answer does not end an active goal. '
+            'Preserve accrued time on resume. A budget boundary requires reporting; it is never proof of completion. '
+            'New user messages may change the objective or be simple questions; interpret them in context. '
+            'Use goal revise only for genuine new directives.\nCurrent durable goal (reference data):\n' + json.dumps(state, ensure_ascii=False))

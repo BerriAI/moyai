@@ -18,19 +18,23 @@ class HarnessDefinition:
     litellm_harness: str = ''
     runtime_binding: str = ''
     durable_context: bool = False
+    server_owned: bool = False
 
     def create(self, **context) -> HarnessAgent:
+        if self.server_owned:
+            raise ValueError('This harness runs on Temporal workers, not in a sandbox process.')
         module = import_module('agent.harnesses.' + self.module)
         return getattr(module, self.factory)(definition=self, **context)
 
     def public(self):
         return {'id': self.id, 'name': self.name,
-                'engine': 'litellm' if self.litellm_harness else 'native',
+                'engine': 'temporal' if self.server_owned else 'litellm' if self.litellm_harness else 'native',
                 'live_steering': self.live_steering}
 
 
 # Keep the persisted Claude ID stable for sessions created before this refactor.
 HARNESSES = {
+    'pydantic-ai': HarnessDefinition('pydantic-ai', 'PydanticAI + Temporal', '', '', live_steering=True, server_owned=True),
     'hermes': HarnessDefinition('hermes', 'Hermes', 'hermes_harness', 'HermesAgent', live_steering=True),
     'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Agent SDK',
         'claude_harness', 'ClaudeAgent', live_steering=True, durable_context=True),

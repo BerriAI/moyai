@@ -7,8 +7,8 @@ def validate_harness(harness, model):
     # Model authorization belongs to Settings.resolve_model, not the harness.
     # The gateway handles compatibility with each harness's native protocol.
     resolve(harness)
-    if model == ASTRA_ULTRAFAST and harness != 'codex':
-        raise ValueError('GPT-6 Astra Ultrafast requires Codex. Choose Codex for a new session or select regular GPT-6 Astra.')
+    if model == ASTRA_ULTRAFAST and harness not in {'codex', 'pydantic-ai'}:
+        raise ValueError('GPT-6 Astra Ultrafast requires the Responses API. Choose PydanticAI for a new session or select regular GPT-6 Astra.')
     return harness
 
 

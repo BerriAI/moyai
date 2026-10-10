@@ -1,5 +1,9 @@
 # Agent responses before computer startup
 
+The default [PydanticAI + Temporal engine](pydantic-temporal.md) uses this computer
+operation boundary without a separate agent-control VM and without an opt-in flag.
+The Codex-specific setting and control-VM procedure below apply to the legacy path.
+
 The independent runtime lets the selected agent use connected apps and answer
 questions before acquiring its full workspace computer. A shell, repository,
 browser, credential command or file operation acquires that computer under the
