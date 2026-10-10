@@ -29,7 +29,7 @@ def test_slack_search_preserves_scope_and_returns_matches(workspace, monkeypatch
         requests.append(request)
         assert request.method == 'GET' and request.url.path == '/api/search.messages'
         assert request.headers['Authorization'] == 'Bearer provider-test-token'
-        assert dict(request.url.params) == {'query': expected, 'count': '20', 'highlight': 'false'}
+        assert dict(request.url.params) == {'query': expected, 'count': '50', 'page': '1', 'highlight': 'false'}
         return httpx.Response(200, json={'ok': True, 'query': expected, 'messages': {'matches': [match]}})
 
     original = httpx.AsyncClient
@@ -63,7 +63,8 @@ def test_empty_or_failed_search_never_broadens_channel_scope(workspace, monkeypa
                            json={'name': 'slack_search', 'arguments': {'query': 'in:C0123456789 after:2026-10-08'}})
     assert response.status_code == 200
     if reply['ok']:
-        assert response.json() == reply
+        assert response.json()['messages'] == reply['messages']
+        assert response.json()['coverage']['has_more'] is None
     else:
         assert 'error' in response.json()
     assert len(requests) == 1

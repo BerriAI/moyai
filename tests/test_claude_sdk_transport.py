@@ -752,7 +752,7 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
             assert state['late_result'], 'The outage-time rejection must arrive after recovery has finished'
         assert len(diagnostics) == 1 and diagnostics[0]['http_status'] == 502
         assert not agent.journal.pending and not store.pending
-        assert sum(m.get('content') == '[User correction to the current task]\n' + correction for m in agent.journal.messages) == 1
+        assert sum(m.get('content') == '[New authenticated user message; interpret its intent in context]\n' + correction for m in agent.journal.messages) == 1
         assert [e['data']['phase'] for e in events if e['data'].get('stage') == 'model_transport'] == ['reconnecting', 'recovered']
         assert len([m for m in agent.journal.messages if m.get('tool_calls') and m['tool_calls'][0]['id'] == 'original_command']) == 1
         return {'completed': True, 'native_sessions': len(native_sessions), 'original_command_executions': len(pids),

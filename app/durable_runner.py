@@ -628,7 +628,7 @@ class DurableRunner(RunManager):
     def startup_retry_allowed(self, run, state):
         marker = state.get('result', {}).get('startup_retry')
         return (isinstance(marker, dict) and marker.get('version') == 1
-                and marker.get('stage') in {'workspace_tools', 'attachments', 'repository_metadata', 'context_window'}
+                and marker.get('stage') in {'workspace_tools', 'attachments', 'repository_metadata', 'context_window', 'conversation_journal'}
                 and marker.get('reason') in {'network', 'HTTP 408', 'HTTP 425', 'HTTP 429',
                                              'HTTP 500', 'HTTP 502', 'HTTP 503', 'HTTP 504'}
                 and state.get('exit_code') == 75 and not state.get('execution_started')
@@ -1103,7 +1103,7 @@ class DurableRunner(RunManager):
                     state.update(phase='cleanup', keep_warm=False)
                     await database(self.save, run_id, state)
                     return True
-            await database(self.store.finish_message, run_id, state['message_id'], state['response'], state['outcome'])
+            state['response'] = await database(self.store.finish_message, run_id, state['message_id'], state['response'], state['outcome'])
             await database(self.swarms.settle, run_id, state)
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 self.credentials.reconcile_resolutions(run_id)

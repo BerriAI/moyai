@@ -110,6 +110,23 @@ The input design follows the documented dictation pattern used by [Claude Code](
 
 ## Computer desktop and captures
 
+The agent's `browser_read` exposes the full text and control directory of one
+observed frame, including open shadow roots. It also lists frames for explicit
+reads. Optional text and element ranges refer to a saved `snapshot`, so later
+reads cannot silently combine different live page revisions. There is no fixed
+24,000-character or 80-control cutoff. Closed components, canvas and image
+contents still require visual inspection; lazy content may require scrolling.
+
+Observed `target` references bind to exact DOM nodes. A replaced or changed node
+rejects the action and requires a fresh read. Role/name and label selectors remain
+available, as do screenshot coordinates, ordinary navigation, keyboard input,
+horizontal/vertical scrolling, tab listing/selection, form selects, workspace-file
+uploads, and completed downloads. Snapshot/target handles belong to the live
+computer; after recovery, read a fresh observation before acting. Downloads return
+their exact local path and size. Upload paths must remain within the workspace.
+`browser_screenshot` supplies an image content block to the model as well as the
+saved PNG path, allowing visual inspection on runtimes/models that support images.
+
 Open **Computer** in a cloud session to use its Linux desktop and Chromium browser. **Take control** lets the requester or an administrator click and type directly into the desktop, including Chrome’s address bar and sign-in fields. Use Cmd/Ctrl+L for the address bar, paste from your clipboard, drag, scroll, or open tabs normally. Ctrl+Alt+Esc moves keyboard focus back to Moyai’s controls. **Open browser** reopens Chrome if you close its windows. Agent browser actions wait while a person holds control and resume on the selected tab when control is released. Closing the panel releases control, and an abandoned lease expires after 60 seconds. Human interaction refreshes the existing five-minute idle window, without extending the sandbox's absolute lifetime. **Wake up to see live** starts an asleep workspace from its last saved checkpoint without sending a chat message or running the model. It shows progress until the live desktop is ready; **Take control** remains a separate action. Wake uses the durable session runtime (enabled on the hosted deployment), shared sandbox capacity, and normal idle cleanup. If automatic post-response retention is disabled, an explicitly awakened computer still has a five-minute idle window. Legacy deployments must enable durable sessions to use this button. Manual desktop changes are retained while the machine is live; waking after shutdown restores the last saved checkpoint.
 
 Coding tasks that create a PR default to running the changed behavior, recording a short real browser flow, and saving a useful screenshot, unless the user opts out. The final handoff includes the confirmed PR link, exact saved capture links, and what was verified. Documentation/backend changes without a meaningful browser flow use applicable checks; unavailable demos or captures are reported explicitly. This is agent guidance, not a guarantee that every task produces media, and it does not authorize public deployment.
@@ -138,3 +155,23 @@ Open a session pull request from the conversation, the PR list, or a saved PR ta
 The panel includes the session’s confirmed PRs and those of its direct child agents. Disabled GitHub access or removed repository selection makes the details unavailable. Large changes show explicit truncation notices; GitHub remains available for complete diffs. Computer and Saved captures retain their separate controls.
 
 For a local demo, run `uv run python scripts/pull_request_panel_demo.py --port 8987` and open `http://localhost:8987/demo/login`. The session and GitHub data are fixtures. Add `--live-github` to read real PR details using your existing local `gh` login; no model, cloud workspace, or GitHub write is used.
+
+## File and terminal tools
+
+The shared computer tools read complete files in byte pages and return exact
+base64 bytes, including binary files and UTF-8 characters split across pages.
+`computer_write_file` publishes a complete replacement atomically; replacing an
+existing file requires `overwrite=true` and preserves its executable mode.
+
+`computer_terminal` returns a process handle. Commands continue after the tool
+returns; use `computer_terminal_read` to inspect status and page through the full
+saved output. A stable `request_key` identifies one launch across acknowledgment
+retries. An unavailable supervisor has an unknown outcome and does not authorize
+relaunching the command.
+
+Use `computer_terminal_input` to send text, exact base64 bytes, EOF, or an explicit
+force stop. When the process cannot accept all input immediately, the receipt
+identifies the accepted prefix and returns the exact remaining base64 suffix.
+Only send that remaining suffix again. Run services as foreground commands with
+handles; descendants stop when their owning command exits. Logs and command
+arguments stay outside repository trees, under the saved session directory.

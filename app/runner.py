@@ -439,7 +439,9 @@ class RunManager:
         from .progress import active_input
         with self.store.connect() as conn:
             activity_input_id = active_input(conn, run_id, run.get('message_id') or 0)
-        spec = {"run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
+        inputs = self.store.rows('SELECT input_kind,source_json FROM messages WHERE id=? AND run_id=?', (run.get('message_id'), run_id))
+        source_input = inputs[0] if inputs else {'input_kind': 'user', 'source_json': '{}'}
+        spec = {'input_kind': source_input['input_kind'], 'input_source': json.loads(source_input['source_json']), "run_id": run_id, "prompt": run["prompt"], "repo_url": run["repo_url"],
                 "attachments": uploads, "harness": run.get('harness', 'hermes'),
                 "attachment_context": attachment_context(by_message.get(run.get('message_id'), [])),
                 "github_repository_id": run.get("github_repository_id"),
@@ -616,14 +618,12 @@ class RunManager:
         if getattr(self, 'computer', None):
             await self.computer.save_captures(sandbox, run_id, releasing=False)
         try:
-            info = await sandbox.filesystem.stat.aio("/artifacts/result.zip")
-            if info.size > 20 * 1024 * 1024:
-                self.store.event(run_id, "error", "Artifact archive exceeds the 20 MB limit and was not downloaded.")
-                return
-            data = await sandbox.filesystem.read_bytes.aio("/artifacts/result.zip")
-            if len(data) > 20 * 1024 * 1024:
-                return
-            await asyncio.to_thread(self.store.artifacts.save, f"{run_id}.zip", data)
+            import tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory(prefix='moyai-recovery-') as directory:
+                path = Path(directory) / 'result.zip'
+                await sandbox.filesystem.copy_to_local.aio('/artifacts/result.zip', str(path))
+                await asyncio.to_thread(self.store.artifacts.save_file, f"{run_id}.zip", path)
             self.store.event(run_id, "artifact", "Result archive saved", {"download": f"/api/runs/{run_id}/artifact"})
         except Exception:
             self.store.event(run_id, "error", "No result archive was recovered from this run.")

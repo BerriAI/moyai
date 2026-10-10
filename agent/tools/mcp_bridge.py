@@ -5,6 +5,7 @@ Inference provider keys stay server-side. Approved generic access is scoped to
 one subprocess by credential_tools and never returned as raw tool output.
 """
 import json
+import base64
 import os
 from pathlib import Path
 import sys
@@ -18,8 +19,11 @@ if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.tools import github_tools
+from agent.tools import artifact_tools
+from agent.tools import computer_tools
 from sandbox import computer
 from agent.tools import credential_tools
+from agent.repository_guidance import TOOL as GUIDANCE_TOOL, resolve as repository_guidance
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -45,15 +49,38 @@ def schema(properties, required):
 
 
 BROWSER_TOOLS = [
-    {"name": "browser_open", "description": "Open an HTTP(S) page in the sandbox's isolated Chromium browser.", "inputSchema": schema({"url": "URL to open"}, ["url"])},
-    {"name": "browser_read", "description": "Read the current browser page and save its screenshot.", "inputSchema": schema({}, [])},
+    {"name": "browser_open", "description": "Open an HTTP(S) page in the sandbox browser. Set new_tab to preserve the current page.", "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}, "new_tab": {"type": "boolean", "default": False}}, "required": ["url"], "additionalProperties": False}},
+    {"name": "browser_read", "description": "Read a complete observed frame with exact DOM targets and a frame directory. Optional ranges read the same snapshot without mixing revisions; omit snapshot for a fresh observation. Text extraction does not describe canvas or image contents; use browser_screenshot for visual inspection.", "inputSchema": {"type": "object", "properties": {"frame": {"type": "string"}, "snapshot": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}, "characters": {"type": "integer", "minimum": 1}, "element_offset": {"type": "integer", "minimum": 0}, "element_count": {"type": "integer", "minimum": 1}}, "additionalProperties": False}},
     {"name": "browser_click", "description": "Click a visible element by its accessible role and exact name. Can perform website actions.", "inputSchema": schema({"role": "Accessible role, such as button or link", "name": "Exact accessible name"}, ["role", "name"])},
     {"name": "browser_fill", "description": "Fill a form field by its exact accessible label.", "inputSchema": schema({"label": "Field's accessible label", "value": "Text to enter"}, ["label", "value"])},
     {"name": "browser_screenshot", "description": "Save a named PNG screenshot of the current desktop, including browser tabs and address bar. Return its workspace path as a Markdown link so the user can preview/download it.", "inputSchema": schema({"name": "Short descriptive capture name"}, ["name"])},
     {"name": "browser_record_start", "description": "Start recording the sandbox browser flow as WebM. Open the page first, then start recording, perform the flow, and stop recording. No audio. Maximum 10 minutes/25 MB per clip.", "inputSchema": schema({"name": "Short descriptive recording name"}, ["name"])},
     {"name": "browser_record_stop", "description": "Stop and save the browser video. Link the returned workspace path in your answer. Active recordings are also finalized when your response ends.", "inputSchema": schema({}, [])},
-    {"name": "browser_key", "description": "Press a browser key: Enter, Tab, Shift+Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Control+a or Space.", "inputSchema": schema({"key": "Key to press"}, ["key"])},
+    {"name": "browser_key", "description": "Press a key or combination using Playwright keyboard syntax, such as Enter, Control+Home or Shift+Tab.", "inputSchema": schema({"key": "Key to press"}, ["key"])},
     {"name": "browser_scroll", "description": "Scroll the browser viewport vertically.", "inputSchema": {"type":"object", "properties":{"dy":{"type":"integer", "description":"Pixels to scroll, negative for up"}}, "required":["dy"], "additionalProperties":False}},
+]
+
+# Keep the existing role/label selectors and add exact observed-node targets.
+for tool in BROWSER_TOOLS:
+    if tool['name'] in {'browser_click', 'browser_fill'}:
+        properties = tool['inputSchema']['properties']
+        properties.update(target={'type': 'string', 'description': 'Exact target from the latest observed page/frame.'}, frame={'type': 'string'})
+        tool['inputSchema']['required'] = ['value'] if tool['name'] == 'browser_fill' else []
+        tool['inputSchema']['anyOf'] = [{'required': ['target']}, {'required': ['role', 'name'] if tool['name'] == 'browser_click' else ['label']}]
+        if tool['name'] == 'browser_click':
+            properties.update(x={'type': 'number'}, y={'type': 'number'})
+            tool['inputSchema']['anyOf'].append({'required': ['x', 'y']})
+    if tool['name'] == 'browser_scroll':
+        tool['inputSchema']['properties']['dx'] = {'type': 'integer', 'default': 0}
+BROWSER_TOOLS += [
+    {'name': 'browser_tabs', 'description': 'List all tabs in the agent browser, including popups, with stable IDs.', 'inputSchema': schema({}, [])},
+    {'name': 'browser_type', 'description': 'Insert complete text at the currently focused browser control.', 'inputSchema': schema({'text': 'Text to insert'}, ['text'])},
+    {'name': 'browser_select_tab', 'description': 'Select a tab by its observed ID.', 'inputSchema': schema({'page_id': 'ID returned by browser_tabs'}, ['page_id'])},
+    *[{'name': 'browser_'+action, 'description': description, 'inputSchema': schema({}, [])}
+      for action, description in [('back', 'Navigate back.'), ('forward', 'Navigate forward.'), ('reload', 'Reload the current page.')]],
+    {'name': 'browser_select', 'description': 'Select option values on an observed select element.', 'inputSchema': {'type': 'object', 'properties': {'target': {'type': 'string'}, 'values': {'type': 'array', 'items': {'type': 'string'}}}, 'required': ['target', 'values'], 'additionalProperties': False}},
+    {'name': 'browser_upload', 'description': 'Upload existing workspace files to an observed file input. This sends files to the current website; use only for the authorized task.', 'inputSchema': {'type': 'object', 'properties': {'target': {'type': 'string'}, 'paths': {'type': 'array', 'items': {'type': 'string'}, 'minItems': 1}}, 'required': ['target', 'paths'], 'additionalProperties': False}},
+    {'name': 'browser_download', 'description': 'Click an observed download target and save its completed file in the workspace. Returns a path and size; publish an artifact to deliver it.', 'inputSchema': schema({'target': 'Exact download target'}, ['target'])},
 ]
 
 
@@ -61,6 +88,7 @@ BROWSER_TOOLS = [
 # share a page, and skills/memory searches select model context. Those and all
 # unknown/new tools stay on the ordered lane, regardless of readOnlyHint.
 CONCURRENT_READS = frozenset({
+    'artifacts_list', 'artifact_read',
     'github_repositories', 'github_repository', 'github_rulesets', 'github_ruleset',
     'github_pull_request', 'github_pull_request_comments',
     'linear_my_issues', 'linear_teams', 'linear_search', 'linear_issue',
@@ -73,7 +101,16 @@ MAX_PENDING_PER_LANE = 32
 def call_tool(params, tools):
     name, args = params['name'], params.get('arguments', {})
     try:
-        if name == 'credentials_run':
+        if name in {tool['name'] for tool in computer_tools.TOOLS}:
+            data = computer_tools.call(name, args, os.environ.get('MOYAI_WORKSPACE', '/workspace'))
+        elif name == 'repository_guidance':
+            data = repository_guidance(workspace=os.environ.get('MOYAI_WORKSPACE', '/workspace'), **{'paths': [], **args})
+        elif name in {'artifact_publish', 'artifact_fetch'}:
+            available = broker('/tools')
+            if name not in {tool['name'] for tool in available}:
+                raise ValueError('Artifact transfer is unavailable for this execution.')
+            data = artifact_tools.call(name, args, broker, os.environ.get('MOYAI_WORKSPACE', '/workspace'))
+        elif name == 'credentials_run':
             available = broker('/tools')
             if name not in {tool['name'] for tool in available}:
                 raise github_tools.GitHubToolError('Credential commands are not enabled for this session.')
@@ -89,9 +126,23 @@ def call_tool(params, tools):
             names = sorted(tool['name'] for tool in tools) if tools is not None else None
             data['mcp_catalog'] = {'names': names, 'count': len(names) if names is not None else None,
                 'scope': 'Last tools/list response from this MCP process; not the model request catalog.'}
-        return {"content": [{"type": "text", "text": json.dumps(data)}], "isError": bool(isinstance(data, dict) and data.get("error"))}
-    except github_tools.GitHubToolError as exc:
+        content = [{"type": "text", "text": json.dumps(data)}]
+        if name == 'browser_screenshot' and isinstance(data, dict) and not data.get('error'):
+            path = Path(data['path']).resolve()
+            if path.is_relative_to(computer.CAPTURES.resolve()) and path.suffix == '.png':
+                content.append({'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(path.read_bytes()).decode()})
+        return {"content": content, "isError": bool(isinstance(data, dict) and data.get("error"))}
+    except (github_tools.GitHubToolError, artifact_tools.ArtifactError, computer_tools.ComputerToolError) as exc:
         return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
+    except (FileExistsError, FileNotFoundError, IsADirectoryError, PermissionError) as exc:
+        # These local failures have useful repair instructions and contain no
+        # upstream response body. Do not turn a known filesystem rejection into
+        # an unexplained, potentially executed external write.
+        detail = {FileExistsError: 'The destination exists. Read it first and choose overwrite=true only when replacement is intended.',
+                  FileNotFoundError: 'The path does not exist. Check its workspace-relative path.',
+                  IsADirectoryError: 'The path identifies a directory; choose a regular file.',
+                  PermissionError: 'The computer denied access to this path.'}[type(exc)]
+        return {'content': [{'type': 'text', 'text': detail}], 'isError': True}
     except HTTPError as exc:
         message = f'Tool failed (HTTP {exc.code}). The action was not confirmed.'
         if name in {'skills_search', 'skills_load', 'skills_save', 'skills_read_file'} or name.startswith(('credentials_', 'memory_')):
@@ -135,8 +186,6 @@ def serve():
         for line in sys.stdin:
             request = None
             try:
-                if len(line) > 2_000_000:
-                    raise ValueError('Message too large')
                 request = json.loads(line)
                 if 'id' not in request:
                     continue
@@ -147,7 +196,7 @@ def serve():
                 elif method == 'ping':
                     result = {}
                 elif method == 'tools/list':
-                    tools = github_tools.advertised_tools(broker('/tools')) + BROWSER_TOOLS
+                    tools = github_tools.advertised_tools(broker('/tools')) + BROWSER_TOOLS + [GUIDANCE_TOOL] + computer_tools.TOOLS
                     result = {'tools': tools}
                 elif method == 'tools/call':
                     executor, slots = (reads, read_slots) if params['name'] in CONCURRENT_READS else (ordered, ordered_slots)

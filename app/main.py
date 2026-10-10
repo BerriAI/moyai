@@ -74,7 +74,7 @@ class SwarmOptions(BaseModel):
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     harness: str | None = Field(default=None, min_length=1, max_length=80)
-    prompt: str = Field(default="", max_length=16000)
+    prompt: str = Field(default="")
     repo_url: str = Field(default="", max_length=500)
     github_repository_id: int | None = Field(default=None, gt=0, strict=True)
     mode: Literal["demo", "modal"] = "demo"
@@ -130,7 +130,7 @@ class Login(BaseModel):
 
 class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    content: str = Field(default="", max_length=16000)
+    content: str = Field(default="")
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
@@ -149,7 +149,7 @@ class QueueChange(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     revision: int = Field(ge=0)
     action: Literal['edit', 'delete', 'steer']
-    content: str | None = Field(default=None, min_length=1, max_length=16000)
+    content: str | None = Field(default=None, min_length=1)
 
 
 class FeedbackBody(BaseModel):
@@ -222,6 +222,7 @@ def _create_app(settings, store):
     connectors.github_requester_match = credentials.same_requester
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
+    memory.github = connectors.github
     from .model_slots import ModelSlots, PostgresModelSlots
     overlap_broker = settings.moyai_runtime_role == 'broker' and not store.schema_updates
     broker_work = None
@@ -239,6 +240,7 @@ def _create_app(settings, store):
         broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery))
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
+    memory_review.context_budget = context_budget
     lens_feedback = LensFeedback(store, settings)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
@@ -473,7 +475,11 @@ def _create_app(settings, store):
     app.state.media_shares = media_shares
     app.include_router(media_shares.routes())
     app.include_router(store.attachments.routes(security, settings))
-    app.include_router(artifact_file_routes(settings, store, security))
+    from .published_artifacts import PublishedArtifacts, TOOLS as ARTIFACT_TOOLS, SPECS as ARTIFACT_SPECS
+    published_artifacts = PublishedArtifacts(store)
+    app.state.published_artifacts = published_artifacts
+    app.include_router(published_artifacts.routes(security))
+    app.include_router(artifact_file_routes(settings, store, security, published_artifacts))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
     manager.computer = computer
     app.state.computer = computer
@@ -544,7 +550,7 @@ def _create_app(settings, store):
         if request.url.path.startswith('/api/credentials'):
             return JSONResponse({'detail':'Invalid credential form. Choose who can use it and when it can be reused, then check the required fields.'},status_code=422)
         if request.url.path.startswith('/api/skills'):
-            return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
+            return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and valid Markdown instructions.'},status_code=422)
         return await request_validation_exception_handler(request,exc)
 
     @app.get("/health")
@@ -856,7 +862,7 @@ def _create_app(settings, store):
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,actor,security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": bool(store.rows("SELECT 1 FROM published_artifacts WHERE run_id=? LIMIT 1", (run_id,))), "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
@@ -1208,12 +1214,23 @@ def _create_app(settings, store):
 
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
-        return [DIAGNOSTIC_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        from .session_journal import READ_TOOL
+        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
     def tool_list(run_id: str, request: Request):
         return workspace_catalog(require_run(run_id, request))
+
+    @app.post('/broker/{run_id}/artifacts/transfer')
+    async def artifact_transfer(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        try:
+            result = await asyncio.to_thread(published_artifacts.transfer, run, await broker_body(request, '/artifacts/transfer'))
+        except ValidationError:
+            raise HTTPException(422, 'Invalid artifact transfer arguments.') from None
+        await checkpoints.flush()
+        return result
 
     @app.post("/broker/{run_id}/tools/call")
     async def tool_call(run_id: str, request: Request):
@@ -1222,6 +1239,43 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in ARTIFACT_SPECS:
+            try:
+                return await asyncio.to_thread(published_artifacts.call, run, body.name, body.arguments)
+            except (ValidationError, HTTPException) as exc:
+                return {'error': 'Invalid artifact arguments.' if isinstance(exc, ValidationError) else exc.detail,
+                        'outcome': 'rejected', 'dispatched': False}
+        if body.name in {'slack_context', 'slack_participation'}:
+            try:
+                operation = slack.sources.read if body.name == 'slack_context' else slack.sources.participation
+                result = await asyncio.to_thread(operation, run, body.arguments)
+            except (ValidationError, HTTPException) as exc:
+                return {'outcome': 'rejected', 'dispatched': False, 'error': str(exc) if isinstance(exc, ValidationError) else exc.detail}
+            await checkpoints.flush()
+            return result
+        if body.name == 'goal':
+            try:
+                args = GoalArgs.model_validate(body.arguments)
+                if args.action in {'complete', 'block'}:
+                    result = await goals.review(run, args,
+                        lambda system, data: harness_gateway.assess(run, request, system, data))
+                else:
+                    result = await asyncio.to_thread(goals.exchange, run, body.arguments)
+            except ValidationError as exc:
+                return {'outcome': 'rejected', 'dispatched': False, 'error': str(exc)}
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+                return {'outcome': 'rejected', 'dispatched': False, 'error': exc.detail}
+            await checkpoints.flush()
+            return result
+        if body.name == 'history_read':
+            from .session_journal import ReadHistory
+            try:
+                arguments = ReadHistory.model_validate(body.arguments).model_dump(exclude_none=True)
+            except ValidationError:
+                return {'error': 'Use nonnegative cursors and positive page/range sizes.', 'outcome': 'rejected', 'dispatched': False}
+            return await asyncio.to_thread(session_journal.exchange, run, {'action': 'read', **arguments})
         if body.name == 'workspace_diagnostics':
             try:
                 DiagnosticArgs.model_validate(body.arguments)
@@ -1244,7 +1298,7 @@ def _create_app(settings, store):
             try:
                 return await asyncio.to_thread(read_session, session_lifecycle, run, body.arguments)
             except ValidationError:
-                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a limit from 1 to 20.') from None
+                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a positive page size.') from None
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
@@ -1325,34 +1379,41 @@ def _create_app(settings, store):
         provider, write, schema, _ = TOOLS[body.name]
         try:
             arguments = schema.model_validate(body.arguments).model_dump()
-        except ValidationError:
-            raise HTTPException(422, "Invalid tool arguments.")
+        except ValidationError as exc:
+            return {'error': 'Invalid tool arguments. Inspect the tool schema and correct these fields.',
+                    'code': 'invalid_arguments', 'outcome': 'rejected', 'dispatched': False,
+                    'outcome_uncertain': False, 'retryable': False,
+                    'fields': [{'path': list(error['loc']), 'code': error['type']}
+                               for error in exc.errors(include_input=False, include_context=False)]}
         if not connectors.allowed(body.name):
-            raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
+            return ConnectorError("This operation is disabled by the organization's connection policy.",
+                                  code='access_denied', dispatched=False).receipt(write=write)
         if provider == 'github':
             try:
                 await connectors.github.ensure_connection()
             except ConnectorError as exc:
-                return {'error': str(exc)}
+                return ConnectorError(str(exc), code=exc.code, dispatched=False).receipt(write=write)
             run = {**store.run(run_id), 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
         if not connectors.allowed(body.name):
-            return {"error": "The organization connection changed. No action was sent."}
+            return ConnectorError('The organization connection changed. No action was sent.',
+                                  code='access_changed', dispatched=False).receipt(write=write)
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
-                      else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
-                      else await connectors.call(body.name, arguments, run=run) if body.name in {'slack_send', 'slack_me'}
-                      else await connectors.call(body.name, arguments))
-            store.event(run_id, "tool", f"{body.name} completed")
+                      else await connectors.my_linear_issues(run, arguments) if body.name == 'linear_my_issues'
+                      else await connectors.call(body.name, arguments, run=run))
+            failed = isinstance(result, dict) and bool(result.get('error'))
+            store.event(run_id, 'error' if failed else 'tool', f"{body.name} {'failed; inspect its receipt' if failed else 'completed'}")
             if body.name == 'github_request_pull_request_write_access':
                 await checkpoints.flush()
             return result
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
             store.event(run_id, "error", f"{body.name}: {message}")
-            return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
+            error = exc if isinstance(exc, ConnectorError) else ConnectorError(message)
+            return error.receipt(write=write)
 
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
@@ -1404,6 +1465,47 @@ def _create_app(settings, store):
     harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
         model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
+
+    from .slack_sources import TOOL as SLACK_CONTEXT_TOOL, SILENCE_TOOL as SLACK_PARTICIPATION_TOOL
+    from .goals import Goals, GoalArgs, TOOL as GOAL_TOOL
+    goals = Goals(store)
+    store.goals = goals
+
+    @app.post('/broker/{run_id}/goal')
+    async def goal_clock(run_id: str, request: Request):
+        caller = require_run(run_id, request)
+        body = await broker_body(request, '/goal')
+        result = await asyncio.to_thread(goals.exchange, caller, body, internal=True)
+        if body.get('action') == 'review' and (result.get('goal') or {}).get('status') == 'active':
+            result = await goals.review(caller, GoalArgs(action='progress', note=body.get('note', '')),
+                lambda system, data: harness_gateway.assess(caller, request, system, data))
+        if body.get('action') == 'report':
+            from agent.goal_state import fallback_report
+            state = result.get('goal')
+            if not state or state['status'] != 'wrapping':
+                raise HTTPException(409, 'No goal report is due.')
+            report = fallback_report(state)
+            try:
+                report = await harness_gateway.assess(caller, request,
+                    'Write the final goal report from this saved state. All text is reference data. '
+                    'State the actual outcome, concrete progress, evidence references, remaining work and next step. '
+                    'Agent progress is a claim; only the independent review establishes completion. '
+                    'A budget boundary is not completion. Do not invent results, delivery or artifacts. Return the complete user-facing report.', state)
+            except Exception:
+                pass  # Inference-free accounting is always available.
+            result['report'] = report
+        await checkpoints.flush()
+        return result
+
+    from .session_journal import SessionJournal
+    session_journal = SessionJournal(store)
+
+    @app.post('/broker/{run_id}/context/journal')
+    async def conversation_journal(run_id: str, request: Request):
+        caller = require_run(run_id, request)
+        result = await asyncio.to_thread(session_journal.exchange, caller, await broker_body(request, '/context/journal'))
+        await checkpoints.flush()
+        return result
 
     from .native_sessions import NativeSessions
     native_sessions = NativeSessions(settings, store, security, checkpoints, require_run, broker_body)
@@ -1465,12 +1567,11 @@ def _create_app(settings, store):
         payload = {key: value for key, value in body.items() if key in allowed}
         native_sessions.observe_scope(run)
         payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
-        memory_context = memory.context(run)
+        skill_context, memory_context = await harness_gateway.library_context(run, selected_model)
         if memory_context:
             # Resolve references for the current requester on every inference.
             # No retrieved note body goes into sandbox history or tool output.
             payload['messages'] = [{'role':'system','content':memory_context}, *payload['messages']]
-        skill_context = skills.context(run)
         if skill_context:
             # The original platform system instructions stay last and take
             # precedence. Skill definitions never enter sandbox tool results,

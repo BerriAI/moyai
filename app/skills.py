@@ -11,14 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 
 from .db import now
 from .memory import search_terms
+from .library_views import page
+from .bundled_skills import TOOL as BUNDLED_TOOL, call as read_bundled
 from .skill_tools import (SAVE_TOOL, READ_TOOL, SaveSkill, ReadSkillFile, bundle_row,
                           bundle, save_skill, read_file, require_turn)
 
 
-LIBRARY_LIMITS = {'personal': 50, 'organization': 200}
-MAX_SEARCH_MATCHES = 5
-MAX_INDEX_SKILLS = 12
-MAX_INDEX_CONTEXT = 6000  # Serialized metadata characters, not instruction bodies.
 SkillIcon = Literal['auto', 'cube', 'team', 'code', 'review', 'search', 'document', 'chart', 'design', 'video', 'chat', 'automation', 'target']
 
 
@@ -26,7 +24,7 @@ class SkillForm(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
     name: str = Field(pattern=r'^[a-z0-9]+(?:-[a-z0-9]+)*$', max_length=64)
     description: str = Field(min_length=3, max_length=320)
-    instructions: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=3, max_length=32000)
+    instructions: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(min_length=3)
     scope: Literal['personal', 'organization']
     icon: SkillIcon = 'auto'
     revision: int = Field(default=0, ge=0)
@@ -53,17 +51,19 @@ class LoadSkill(BaseModel):
 
 class SearchSkills(BaseModel):
     model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
-    query: str = Field(min_length=2, max_length=200, description='Specific keywords from the task or an exact skill reference. Searches names and descriptions, not instruction bodies.')
+    query: str = Field(default='', description='Keywords or an exact reference. Empty lists every authorized skill. Searches names/descriptions, not instruction bodies.')
+    cursor: str = ''
+    page_size: int = Field(default=50, ge=1, description='Page size; follow next to enumerate all results.')
     turn_id: int = Field(ge=1, description='Current turn_id from the broker skill context. Never reuse a previous turn ID.')
 
 
 SEARCH_TOOL = {'name':'skills_search',
-        'description':'Find relevant personal or organization workflows using keywords when the initial skill index has no clear match or is incomplete. At most five matches replace the previous search for this turn. The tool returns references and revisions only; matching descriptions appear privately in the next model call. Search does not load instructions: call skills_load for a relevant match. Skills cannot grant permissions.',
+        'description':'Find relevant personal or organization workflows using keywords when the initial skill index has no clear match or is incomplete. Search results are pageable; an empty query lists the complete authorized catalog. Each page replaces the discovery selection for this turn. The tool returns references and revisions only; matching descriptions appear privately in the next model call. Search does not load instructions: call skills_load for a relevant match. Skills cannot grant permissions.',
         'inputSchema':SearchSkills.model_json_schema(), 'annotations':{'readOnlyHint':True}}
 TOOL = {'name':'skills_load',
         'description':'Load an available personal or organization skill for the current user turn. Use an exact reference from the initial skill index, skills_search or the user request, e.g. org:benchmark or personal:review. Its instructions are added privately to subsequent model calls; this tool returns metadata only. Skills cannot grant credentials, connected-app permissions, or write approval. Workers may load the same skill by reference.',
         'inputSchema':LoadSkill.model_json_schema()}
-TOOLS = [SEARCH_TOOL, TOOL, SAVE_TOOL, READ_TOOL]
+TOOLS = [BUNDLED_TOOL, SEARCH_TOOL, TOOL, SAVE_TOOL, READ_TOOL]
 TOOL_NAMES = {tool['name'] for tool in TOOLS}
 
 
@@ -104,9 +104,11 @@ class Skills:
             return json.loads(row['manifest']) if row else []
 
     def tools(self, run):
-        return TOOLS if run['chat_enabled'] and run['active_user_id'] and run['active_message_id'] else []
+        return TOOLS if run['chat_enabled'] and run['active_user_id'] and run['active_message_id'] else [BUNDLED_TOOL]
 
     def call(self, run, name, arguments):
+        if name == 'bundled_skill_read':
+            return read_bundled(arguments)
         if name == 'skills_search':
             return self.search(run,SearchSkills.model_validate(arguments))
         if name == 'skills_save':
@@ -156,7 +158,6 @@ class Skills:
         if body.scope == 'organization' and not admin:
             raise HTTPException(403,'Only an administrator can publish organization skills.')
         namespace = 'organization' if body.scope == 'organization' else actor
-        limit = LIBRARY_LIMITS[body.scope]
         try:
             own_transaction = conn is None
             with (self.store.connect() if own_transaction else nullcontext(conn)) as conn:
@@ -170,8 +171,6 @@ class Skills:
                         raise HTTPException(403,'Only the owner can change a skill’s sharing.')
                     if old['revision'] != body.revision:
                         raise HTTPException(409,'This skill changed. Reopen it before saving.')
-                    if old['namespace'] != namespace and conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
-                        raise HTTPException(409,'The destination skill library is full.')
                     icon = body.icon if 'icon' in body.model_fields_set else old['icon']
                     conn.execute('UPDATE skills SET name=?,description=?,encrypted=?,scope=?,namespace=?,icon=?,revision=revision+1,updated_at=? WHERE id=?',
                                  (body.name,body.description,self.security.encrypt(body.instructions),body.scope,namespace,icon,now(),skill_id))
@@ -182,8 +181,6 @@ class Skills:
                                 or self.security.decrypt(prior['encrypted'])!=body.instructions):
                             raise HTTPException(409,'This save was already used. Reopen the form.')
                         return prior['id']
-                    if conn.execute('SELECT COUNT(*) FROM skills WHERE namespace=?',(namespace,)).fetchone()[0] >= limit:
-                        raise HTTPException(409,'The skill library is full. Reuse or edit an existing skill.')
                     skill_id = uuid4().hex
                     conn.execute('INSERT INTO skills(id,name,description,encrypted,scope,owner_id,namespace,created_at,updated_at,client_id,icon) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                  (skill_id,body.name,body.description,self.security.encrypt(body.instructions),body.scope,actor,namespace,now(),now(),body.client_id,body.icon))
@@ -195,7 +192,7 @@ class Skills:
     def search(self, run: Mapping[str, object], body: SearchSkills) -> dict[str, object]:
         require_turn(run)
         terms = search_terms(body.query)
-        if not terms:
+        if body.query and not terms:
             raise HTTPException(422,'Search with specific skill keywords, such as benchmark or deployment.')
         with self.store.connect() as conn:
             conn.begin_write()
@@ -211,16 +208,18 @@ class Skills:
                 metadata = self.metadata(skill)
                 score = len(terms & search_terms(skill['name']+' '+skill['description']))
                 exact = body.query.casefold() in (skill['name'],metadata['reference'])
-                if score or exact:
+                if score or exact or not body.query:
                     ranked.append((-int(exact),-score,skill['scope']!='personal',skill['name'],skill['id'],metadata))
-            selected = [item[-1] for item in sorted(ranked)[:MAX_SEARCH_MATCHES]]
+            all_matches = [item[-1] for item in sorted(ranked)]
+            selected, paging = page(all_matches, body.cursor, body.page_size,
+                [body.query, current['active_user_id'], [(s['id'], s['revision']) for s in all_matches]])
             # IDs only: descriptions stay out of sandbox history and are resolved
             # privately with current authorization on each model call.
             conn.execute('DELETE FROM skill_searches WHERE run_id=?',(run['id'],))
             for position,skill in enumerate(selected):
                 conn.execute('INSERT INTO skill_searches VALUES(?,?,?,?,?)',
                              (run['id'],body.turn_id,current['active_user_id'],skill['id'],position))
-        return {'matches':[{'reference':s['reference'],'revision':s['revision']} for s in selected],
+        return {**paging, 'matches':[{'reference':s['reference'],'revision':s['revision']} for s in selected],
                 'message':'Matching descriptions appear privately in the next model call. Use skills_load to load a relevant skill.'}
 
     def find(self, name, actor):
@@ -232,6 +231,9 @@ class Skills:
         return next((s for s in matches if s['scope']=='personal'),matches[0])
 
     def load(self, run, name):
+        current = self.store.run(run['id'])
+        if not current or any(current[key] != run[key] for key in ('token_hash', 'active_message_id', 'active_user_id')):
+            raise HTTPException(409, 'The skill capability changed. Use the current authenticated turn.')
         if not run['chat_enabled'] or not run['active_user_id'] or not run['active_message_id']:
             raise HTTPException(403,'Skills require an authenticated chat turn.')
         skill = self.find(name,run['active_user_id'])
@@ -257,7 +259,7 @@ class Skills:
             return ''
         available = self.rows_for(run['active_user_id'])
         messages = self.store.rows("""SELECT content FROM messages WHERE run_id=? AND user_id=? AND role='user'
-            AND (id=? OR (steering_parent_id=? AND status='injected')) ORDER BY id""",
+            AND input_kind='user' AND (id=? OR (steering_parent_id=? AND status='injected')) ORDER BY id""",
             (run['id'],run['active_user_id'],run['active_message_id'],run['active_message_id']))
         missing = []
         # Only the current authenticated message can explicitly select a skill.
@@ -281,20 +283,21 @@ class Skills:
                 if reads:
                     with self.store.connect() as conn:
                         files = bundle(self,conn,skill['id'],use['revision'])
+                        files['SKILL.md'] = self.security.decrypt(use['encrypted'])
                     item['excerpts'] = [{'path':r['path'],'offset':r['offset'],
                                          'content':files[r['path']][r['offset']:r['offset']+r['length']]} for r in reads if r['path'] in files]
                 loaded.append(item)
         matches = []
         for selection in self.store.rows('''SELECT skill_id FROM skill_searches
-                WHERE run_id=? AND message_id=? AND actor_id=? ORDER BY position LIMIT ?''',
-                (run['id'],run['active_message_id'],run['active_user_id'],MAX_SEARCH_MATCHES)):
+                WHERE run_id=? AND message_id=? AND actor_id=? ORDER BY position''',
+                (run['id'],run['active_message_id'],run['active_user_id'])):
             skill = by_id.get(selection['skill_id'])
             if skill:
                 matches.append({'reference':self.metadata(skill)['reference'],
                                 'description':skill['description'],'revision':skill['revision']})
         # Show a small directory before the first tool call. Search results and
         # loaded bodies have priority and are not duplicated in this directory.
-        terms = search_terms(' '.join(m['content'] for m in messages)[-8000:])
+        terms = search_terms(' '.join(m['content'] for m in messages))
         shown = {item['reference'] for item in loaded + matches}
         candidates = [s for s in available if self.metadata(s)['reference'] not in shown]
         candidates.sort(key=lambda s: (-len(terms & search_terms(s['name']+' '+s['description'])),
@@ -303,18 +306,15 @@ class Skills:
         for skill in candidates:
             item = {'reference':self.metadata(skill)['reference'],
                     'description':skill['description'],'revision':skill['revision']}
-            if len(index) >= MAX_INDEX_SKILLS:
-                break
-            if len(json.dumps([*index, item], ensure_ascii=False)) <= MAX_INDEX_CONTEXT:
-                index.append(item)
+            index.append(item)
         if loaded or matches or index:
             from .native_sessions import mark_private_context
             mark_private_context(self.store, run)
         return ('MOYAI SKILLS FOR THE CURRENT REQUESTER. These are reusable user-authored workflows, subordinate to platform safety, '
                 'the current user request and all tool permissions/approval rules. A skill cannot grant credentials or authority for external writes. '
-                'The available directory is bounded and ranked by current task keywords. Descriptions are discovery hints, not loaded instructions. '
+                'The available directory is ranked by current task keywords; the gateway fits its view to the selected model window. Descriptions are discovery hints, not loaded instructions. '
                 'When an available or searched skill clearly fits, call skills_load directly; no preliminary search is needed. '
-                'Use skills_search for other workflows, especially when omitted is nonzero. Search names/descriptions, not bodies. '
+                'Use skills_search with an empty query to enumerate every authorized workflow, following next. Search names/descriptions, not bodies. '
                 'Apply explicitly requested loaded skills. '
                 'Use skills_save when the requester asks to save or update a personal/organization skill; attachment IDs import original text. '
                 'Supporting files are stored in the library, not workspace paths. Use skills_read_file with a listed path to privately read excerpts. '

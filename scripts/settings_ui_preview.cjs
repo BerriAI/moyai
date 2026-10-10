@@ -180,7 +180,7 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/skills')return json(res,200,{skills:empty?[]:fixture==='skill-picker'?pickerSkills:skills});
  if(p.startsWith('/api/skills/'))return json(res,200,[...skills,...pickerSkills].find(s=>s.id===p.split('/')[3])||{});
  if(p==='/api/memory/preferences'){preferences={...preferences,...body,revision:preferences.revision+1};return json(res,200,preferences);}
- if(p==='/api/memory'&&req.method==='POST'){memories.push({...body,id:'memory-new',updated_at:stamp,source:{type:'manual'}});return json(res,200,{});}
+ if(p==='/api/memory'&&req.method==='POST'){memories.push({...body,id:'memory-new-'+memories.length,revision:1,updated_at:stamp,source:{type:'manual'}});return json(res,200,{});}
  if(p.startsWith('/api/memory/')&&req.method==='PUT'){const note=memories.find(n=>n.id===p.split('/')[3]);Object.assign(note,body);return json(res,200,note);}
  if(p.startsWith('/api/memory/')&&req.method==='DELETE'){memories=memories.filter(n=>n.id!==p.split('/')[3]);return json(res,200,{});}
  if(p==='/api/memory')return json(res,200,{memories:empty?[]:memories,preferences,limit:200});

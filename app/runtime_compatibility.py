@@ -11,13 +11,13 @@ import json
 from .database import RUNTIME_SETTINGS
 from .schema_migrations import SCHEMA_REVISION
 
-API_PROTOCOL_REVISION = 1
+API_PROTOCOL_REVISION = 2
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 1
-BROKER_PROTOCOL_REVISION = 1
-COORDINATOR_PROTOCOL_REVISION = 1
+WORKER_PROTOCOL_REVISION = 2
+BROKER_PROTOCOL_REVISION = 2
+COORDINATOR_PROTOCOL_REVISION = 2
 
 
 def api_fingerprint(settings):

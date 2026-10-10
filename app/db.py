@@ -88,6 +88,8 @@ class Store:
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
+        self.goals = None
+        self.answer_delivery = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
@@ -308,6 +310,9 @@ class Store:
             if 'model' not in conn.column_names('messages'):
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             columns = conn.column_names('messages')
+            for name, default in (('input_kind', 'user'), ('source_json', '{}'), ('reply_policy', 'respond')):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE messages ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             for name in ('revision', 'queue_locked', 'send_immediately'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
@@ -646,12 +651,14 @@ class Store:
             context.update(kind='thread', messages=messages,
                            truncated=any(item.get('text_truncated') for item in messages),
                            warning='Neighboring channel messages are excluded.')
+        elif getattr(self, 'slack_sources', None):
+            context.update(self.slack_sources.snapshot(run_id))
         return {**context, **row}
 
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
-            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,
-            COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
+            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,m.input_kind,m.source_json,m.reply_policy,
+            CASE WHEN m.input_kind='observation' THEN 'Slack observation' ELSE COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') END AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
                 AND m.user_id='slack:'||r.team_id||':'||r.user_id LIMIT 1),
@@ -721,9 +728,6 @@ class Store:
             raise ValueError('This swarm has ended. Start a new mission to continue.')
         if metadata_request:
             from .session_metadata import complete_in
-            count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-            if count >= 100:
-                raise ValueError('This session allows 100 turns. Start a new session.')
             stamp = now()
             model = model if model is not None else row['model'] or self.default_model
             message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?) RETURNING id",
@@ -734,10 +738,6 @@ class Store:
             raise ValueError("Wait for the current response to stop before sending another message.")
         if send_now and not send_immediately and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='queued' AND queue_locked=1", (run_id,)).fetchone():
             raise ValueError('Moyai is already picking up another queued message. Wait or queue this normally.')
-        pending = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND status='queued'", (run_id,)).fetchone()[0]
-        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
-        if pending >= 5 or count >= 100:
-            raise ValueError("This session allows 5 queued messages and 100 turns. Wait, or start a new session.")
         if conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0] >= self.max_pending_runs and row["status"] in {"idle", "completed", "failed", "cancelled", "interrupted"}:
             raise ValueError("The session queue is full. Wait for a response to finish.")
         stamp = now()
@@ -798,27 +798,39 @@ class Store:
             # Older interruption paths may have settled the input alone. Repair
             # only its still-saving answer, never rewrite a terminal outcome.
             source = conn.execute("SELECT status FROM messages WHERE id=? AND run_id=? AND role='user'", (message_id, run_id)).fetchone()
+            answer = conn.execute('SELECT status FROM messages WHERE run_id=? AND response_to_id=?', (run_id, message_id)).fetchone()
+            goal = self.goals.current(conn, run_id) if self.goals else None
+            missing_goal_report = not answer and goal and goal['status'] in {'active', 'wrapping'}
             if (not source or source['status'] != status or status in {'running', 'queued', 'injected'}
-                    or not conn.execute("SELECT 1 FROM messages WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id)).fetchone()):
+                    or not ((answer and answer['status'] == 'saving') or missing_goal_report)):
                 return
         conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
         conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
+        if self.goals:
+            content = self.goals.settle_in(conn, run_id, message_id, content, status)
         if status != 'steered':
             self.save_answer_in(conn, run_id, message_id, content, status)
         else:
             conn.execute("UPDATE messages SET status='steered' WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id))
+        if self.answer_delivery:
+            self.answer_delivery(conn, run_id)
         if self.tracing:
             # Commit the answer and its pending span together. A crash
             # after saving the answer must not lose its root trace.
             self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
         if status == 'completed' and self.memory_review:
             self.memory_review.enqueue_in(conn, message_id)
+        return content
 
     def finish_message(self, run_id, message_id, content, status="completed"):
         with self.connect(write_scope=run_id) as conn:
             conn.begin_write()
-            self.finish_message_in(conn, run_id, message_id, content, status)
+            saved = self.finish_message_in(conn, run_id, message_id, content, status)
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
+        if saved is not None:
+            return saved
+        answers = self.rows('SELECT content FROM messages WHERE run_id=? AND response_to_id=?', (run_id, message_id))
+        return answers[0]['content'] if answers else content
 
     def interrupt_messages(self, run_id, status='interrupted'):
         """Retire orphaned inputs and published answers together, without replay."""
@@ -830,6 +842,10 @@ class Store:
                 WHERE a.run_id=? AND a.status='saving'""", (run_id,)).fetchall()
             for answer in answers:
                 self.finish_message_in(conn, run_id, answer['response_to_id'], answer['content'], answer['status'])
+            if self.goals:
+                run = conn.execute('SELECT active_message_id FROM runs WHERE id=?', (run_id,)).fetchone()
+                if run and run['active_message_id']:
+                    self.finish_message_in(conn, run_id, run['active_message_id'], '', status)
 
     def has_queued_messages(self, run_id):
         return bool(self.rows("SELECT id FROM messages WHERE run_id=? AND status='queued' LIMIT 1", (run_id,)))
@@ -937,8 +953,15 @@ class Store:
         if not fields.keys() <= allowed:
             raise ValueError("Unsupported run update")
         fields["updated_at"] = now()
-        keys = ",".join(f"{key}=?" for key in fields)
-        self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id), write_scope=run_id)
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            if self.goals and fields.get('status') in {'completed', 'failed', 'cancelled', 'interrupted'}:
+                current = conn.execute('SELECT chat_enabled,summary FROM runs WHERE id=?', (run_id,)).fetchone()
+                if current and not current['chat_enabled']:
+                    fields['summary'] = self.goals.settle_in(conn, run_id, None,
+                        fields.get('summary', current['summary']) or fields.get('error', ''), fields['status'])
+            keys = ",".join(f"{key}=?" for key in fields)
+            conn.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id))
 
     def event(self, run_id: str, kind: str, message: str, data=None, *, turn_id=None):
         data = dict(data) if isinstance(data, dict) else {}
@@ -966,17 +989,9 @@ class Store:
             # Bind work to the server's claimed turn, never a sandbox-supplied ID.
             active = self.rows('SELECT active_message_id FROM runs WHERE id=?', (run_id,))
             data['turn_id'] = turn_id if turn_id is not None else active[0]['active_message_id'] if active else 0
-        # Keep bounded event history even if an agent floods stdout.
-        count = self.rows("SELECT COUNT(*) AS n FROM events WHERE run_id=?", (run_id,))[0]["n"]
-        if count >= 2000 and kind not in {"result", "error", "artifact", "approval", "status", "chat"}:
-            if not self.rows("SELECT 1 FROM events WHERE run_id=? AND kind='status' AND message='Detailed activity limit reached' LIMIT 1", (run_id,)):
-                self.event(run_id, 'status', 'Detailed activity limit reached',
-                           {'detail': 'Additional tool details are no longer recorded for this session. Response and workspace saves continue.',
-                            'activity_version': 1, 'phase': 'limited'})
-            return
         self.execute(
             "INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)",
-            (run_id, kind, message[:32000], json.dumps(data or {}), now()),
+            (run_id, kind, message, json.dumps(data or {}), now()),
             write_scope=run_id,
         )
 
@@ -987,6 +1002,11 @@ class Store:
         return rows
 
     def goal(self, run_id: str):
+        if self.goals:
+            with self.connect() as conn:
+                state = self.goals.current(conn, run_id)
+                if state:
+                    return state
         rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
                          "AND json_number(data,'goal_version')=1 AND json_text(data,'phase')='goal' "
                          "ORDER BY id DESC LIMIT 1", (run_id,))

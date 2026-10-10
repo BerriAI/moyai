@@ -1,5 +1,7 @@
 """Loopback OpenAI/MCP adapter; never forwards a model-chosen destination."""
 import hmac
+import base64
+import hashlib
 import http.client
 import json
 import random
@@ -146,7 +148,7 @@ class BrokerRelay:
                     (r'info/refs\?service=git-upload-pack' if self.command == 'GET' else
                      r'git-upload-pack' if self.command == 'POST' else r'(?!)'), self.path))
                 tool_read = git_route
-                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize'}}
+                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize', '/artifacts/transfer'}}
                 if not git_route and not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:
@@ -458,6 +460,43 @@ class BrokerRelay:
         self.live_compaction = value.get('live_compaction') is True
         return value
 
+    def journal(self, body):
+        raw = json.dumps(body, ensure_ascii=False).encode()
+        if len(raw) > MAX_BODY:
+            # The broker envelope is a transport boundary, not a content limit.
+            # All pieces and the final append can be retried after a lost ACK.
+            digest = hashlib.sha256(raw).hexdigest()
+            size = MAX_BODY // 2
+            parts = 0
+            for offset in range(0, len(raw), size):
+                self.journal({'action': 'upload', 'id': digest, 'part': parts,
+                              'data': base64.b64encode(raw[offset:offset + size]).decode()})
+                parts += 1
+            return self.journal({'action': 'commit_upload', 'id': digest, 'parts': parts, 'sha256': digest})
+        route = '/context/journal'
+        request = urllib.request.Request(self.remote.rstrip('/') + route,
+            data=seal(self.token, route, raw),
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
+        # Stable item IDs make a reconnect safe even after a lost response.
+        # Unlike arbitrary tool POSTs, this endpoint enforces stable item and
+        # upload identities. Retrying cannot append a second item or execute a
+        # task action, including after the response is lost following commit.
+        return _read_with_reconnect(request, lambda response: json.load(response),
+                                    stage='conversation_journal', notify=self.notify, opener=open_broker)
+
+    def goal(self, body):
+        route = '/goal'
+        request = urllib.request.Request(self.remote.rstrip('/') + route,
+            data=seal(self.token, route, json.dumps(body).encode()),
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
+        # Cumulative clock receipts and one-time imports are idempotent. A short
+        # timeout leaves the next heartbeat to retry, without blocking tools.
+        timeout = 330 if body.get('action') in {'review', 'report'} else 5
+        with open_broker(request, timeout=timeout) as response:
+            return json.load(response)
+
     def native(self, body):
         route = '/context/native'
         request = urllib.request.Request(self.remote.rstrip('/') + route,
@@ -478,10 +517,7 @@ class BrokerRelay:
                      'X-Moyai-Request-ID': uuid4().hex}, method='POST')
         # This waits for durable job admission, never for summary inference.
         with open_broker(request, timeout=2) as response:
-            raw = response.read(64_001)
-            if len(raw) > 64_000:
-                raise ValueError('Context maintenance response exceeded its limit.')
-            return json.loads(raw)
+            return json.load(response)
 
     def compact(self, summary, entries, *, summary_bytes=None):
         """Tool-free maintenance outside the runtime's next-model checkpoint hook.
@@ -510,10 +546,7 @@ class BrokerRelay:
                 exc.close()
                 time.sleep(3)
         with response:
-            raw = response.read(64_001)
-            if len(raw) > 64_000:
-                raise ValueError('Context summary response exceeded the limit.')
-            value = json.loads(raw)
+            value = json.load(response)
             return value if 'through_seq' in value else value['summary']
 
     def close(self):

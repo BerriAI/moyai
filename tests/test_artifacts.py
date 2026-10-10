@@ -3,7 +3,10 @@ from pathlib import Path
 import subprocess
 import zipfile
 
-from sandbox.artifacts import FILE_LIMIT, TOTAL_LIMIT, collect_archive
+from sandbox.artifacts import CHUNK_BYTES, collect_archive
+
+FILE_LIMIT = 2 * 1024 * 1024
+TOTAL_LIMIT = 15 * 1024 * 1024
 from app.runner import safe_error_detail
 
 
@@ -73,7 +76,7 @@ def test_committed_download_and_source_citation_survive_followup(tmp_path):
         assert archive.read('new-files/app/static/spend.js') == source.read_bytes()
 
 
-def test_tracked_exports_preserve_exclusions_and_size_limits(tmp_path):
+def test_tracked_exports_preserve_exclusions_and_large_outputs(tmp_path):
     workspace = tmp_path / 'workspace'; workspace.mkdir()
     artifacts = tmp_path / 'artifacts'; artifacts.mkdir()
     command(workspace, 'init')
@@ -91,8 +94,9 @@ def test_tracked_exports_preserve_exclusions_and_size_limits(tmp_path):
         assert archive.read('new-files/readme.txt') == b'[redacted]'
         assert not any(name in archive.namelist() for name in (
             'new-files/.env', 'new-files/node_modules/dependency.js',
-            'new-files/linked.txt', 'new-files/large.zip'))
-        assert 'new-files/large.zip (size limit)' in json.loads(archive.read('recovery-manifest.json'))['omitted']
+            'new-files/linked.txt'))
+        assert archive.read('new-files/large.zip') == b'x'*(2*1024*1024+1)
+        assert not json.loads(archive.read('recovery-manifest.json'))['omitted']
 
 
 def test_tracked_source_cannot_displace_the_saved_screenshot(tmp_path):
@@ -112,5 +116,18 @@ def test_tracked_source_cannot_displace_the_saved_screenshot(tmp_path):
     with zipfile.ZipFile(artifacts / 'result.zip') as archive:
         assert archive.read('result.md') == b''
         assert archive.read('browser.png') == b'image'
-        assert [name for name in archive.namelist() if name.startswith('new-files/')] == sources[:-1]
-        assert json.loads(archive.read('recovery-manifest.json'))['omitted'] == [sources[-1] + ' (size limit)']
+        assert [name for name in archive.namelist() if name.startswith('new-files/')] == sources
+        assert json.loads(archive.read('recovery-manifest.json'))['omitted'] == []
+
+
+def test_archive_retains_all_files_and_redacts_secrets_across_transport_pages(tmp_path):
+    workspace = tmp_path/'workspace'; workspace.mkdir()
+    artifacts = tmp_path/'artifacts'; artifacts.mkdir()
+    for index in range(1001):
+        (workspace/f'file-{index}.txt').write_text(str(index))
+    (workspace/'boundary.txt').write_bytes(b'x'*(CHUNK_BYTES-2)+b'run-secret'+b'end')
+    collect_archive(workspace, artifacts, b'run-secret')
+    with zipfile.ZipFile(artifacts/'result.zip') as archive:
+        assert len(archive.namelist()) == 1003
+        assert archive.read('new-files/boundary.txt') == b'x'*(CHUNK_BYTES-2)+b'[redacted]end'
+        assert archive.read('new-files/file-1000.txt') == b'1000'

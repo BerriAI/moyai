@@ -148,7 +148,7 @@ def conversation(scenario, *, unpatched=False):
             assert result['final_response'].startswith('All six corrections incorporated.')
             assert len(calls) == len(script)
             assert writes == [f'write-{i}' for i in range(7)], writes
-            assert users == ['[User correction to the current task]\n' + text for text in corrections], users
+            assert users == ['[New authenticated user message; interpret its intent in context]\n' + text for text in corrections], users
             assert 'pending_steer' not in result
             report('PASS: six corrections, seven real file writes, no replay, one final answer')
         elif scenario == 'corrections':

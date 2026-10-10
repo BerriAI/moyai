@@ -83,7 +83,9 @@ def test_stdio_bridge_discovers_tools_and_forwards_only_run_token():
     assert len(output) == 7  # notifications never receive responses
     assert output[0]["result"]["protocolVersion"] == "2025-03-26"
     names = {tool["name"] for tool in output[1]["result"]["tools"]}
-    assert names == {"credentials_run", "linear_search", "browser_open", "browser_read", "browser_click", "browser_fill", "browser_screenshot", "browser_record_start", "browser_record_stop", "browser_key", "browser_scroll"}
+    from agent.tools.mcp_bridge import BROWSER_TOOLS
+    from agent.tools.computer_tools import TOOLS as COMPUTER_TOOLS
+    assert names == {"credentials_run", "linear_search", "repository_guidance"} | {tool['name'] for tool in BROWSER_TOOLS + COMPUTER_TOOLS}
     assert "Fixture issue" in output[2]["result"]["content"][0]["text"]
     assert output[3]["error"]["code"] == -32601
     assert output[4]['result']['isError']

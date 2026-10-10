@@ -52,8 +52,8 @@ def test_should_release_session_resources_after_startup_or_cleanup_failure(monke
     def fail():
         raise RuntimeError(f'{failure_stage} failed')
 
-    def open_session(*args):
-        context = captured['context'] = open_context(*args)
+    def open_session(*args, **kwargs):
+        context = captured['context'] = open_context(*args, **kwargs)
         if failure_stage == 'history':
             context.history = fail
         return context

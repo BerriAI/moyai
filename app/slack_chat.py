@@ -28,6 +28,13 @@ logger = logging.getLogger(__name__)
 USER_MENTION = re.compile(r'<@([UW][A-Z0-9]{7,30})(?:\|[^>\n]*)?>')
 
 
+def explicit_control(text):
+    """Syntactic product controls bypass participation judgment."""
+    value = text.strip().lower().lstrip('/')
+    return (value in COMMANDS or value.split(maxsplit=1)[:1] in [['model'], ['harness'], ['goal']] or
+            is_session_id_request(text))
+
+
 def slack_text(text, mentions=frozenset(), *, public_url='', run_id=''):
     """Format replies without letting model text trigger Slack mentions/unfurls.
 
@@ -413,16 +420,26 @@ class SlackChat:
             return None  # A received answer supersedes progress while files save.
         return turn_id
 
+    def settle_answer_in(self, conn, run_id):
+        """Commit the saved answer and its existing delivery intent together."""
+        binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+        if binding:
+            allowed = (self.settings.slack_thread_chat_enabled and self.owner.status()['enabled'] and
+                       binding['team_id'] == self.owner.connectors.slack_installation().get('team_id'))
+            self.collect_answers_in(conn, binding, allowed)
+
     def collect_answers_in(self, conn, binding, allowed):
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
         for message in messages:
-            if allowed and not binding['paused'] and message['status'] != 'steered':
+            policy = conn.execute('SELECT input_kind,reply_policy FROM messages WHERE id=? AND run_id=?',
+                                  (message['response_to_id'], run_id)).fetchone()
+            direct = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND steering_parent_id=? AND input_kind='user' AND status!='deleted'", (run_id, message['response_to_id'])).fetchone()
+            silent = policy and policy['input_kind'] == 'observation' and policy['reply_policy'] == 'silent' and not direct
+            if allowed and not binding['paused'] and message['status'] != 'steered' and not silent:
                 value = self.scrub(message['content'])
                 if message['status'] in {'failed', 'cancelled', 'interrupted'}:
                     value = 'Response ' + message['status'] + ':\n\n' + value
-                if len(value) > 32000:
-                    value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
                 prs = select_prs(conn, run_id, value)
                 for pr in prs:
                     pr.title = self.scrub(pr.title)
@@ -500,10 +517,12 @@ class SlackChat:
             self.queue(conn, run_id, f'answer:{message_id}:{index}', 'answer', chunk + suffix, metadata)
 
     def collect(self):
-        enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
-        team = self.owner.connectors.slack_installation().get('team_id')
         with self.store.connect() as conn:
             conn.begin_write()
+            # Revalidate after acquiring the write lock; a collector may have
+            # waited while an operator disabled Slack or replaced its identity.
+            enabled = self.owner.status()['enabled'] and self.settings.slack_thread_chat_enabled
+            team = self.owner.connectors.slack_installation().get('team_id')
             for binding in conn.execute('SELECT t.*,r.status,r.updated_at,r.deleted_at,r.deletion_requested_at FROM slack_threads t JOIN runs r ON r.id=t.run_id').fetchall():
                 run_id = binding['run_id']
                 allowed = enabled and binding['team_id'] == team and not binding['deleted_at'] and not binding['deletion_requested_at']
