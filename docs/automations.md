@@ -186,9 +186,13 @@ The native source needs no webhook or Slack credentials. Automatic runs still
 require Temporal and retain the existing owner identity, connections, hourly cap,
 workspace capacity and bounded inbox. Under load, capture waits without blocking users.
 A durable indexed message cursor and receipt commit together; restarts cannot
-relaunch the same delivery. Source context includes a session link, at most ten
-prior messages (1000 characters each), the triggering text (4000 characters), and
-an explicit truncation indicator. Context is untrusted evidence, never authority.
+relaunch the same delivery. Source context includes a session link, the complete triggering text, and all
+prior undeleted conversation messages with their identities, roles, timestamps
+and input provenance. Automated continuations, observations and agent messages
+can provide context but cannot trigger this human-message source. Context is
+untrusted evidence, never authority. Large inputs use the shared model-sized
+context view and complete saved references; content is not discarded to fit a
+fixed character or message count.
 
 Example workflow for Moyai complaints:
 
@@ -260,7 +264,9 @@ Retry with the same event ID and a fresh timestamp. Use the unchanged raw body
 when signing. Provider body-only signatures use a canonical payload hash for
 replay protection because their delivery-ID headers are not signed. Intake checks
 authentication before parsing/storing content, accepts at most 256 KiB, and supplies
-bounded event context to the agent as external data, never as authorization.
+complete selected event fields to the agent as external data, never as authorization.
+Filters match the complete body, including text beyond the initial preview.
+Unrelated payload fields do not become runtime settings, credentials or authority.
 
 ### Recovery and concurrency
 

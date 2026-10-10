@@ -78,6 +78,7 @@ class Goals:
 
     def sources(self, conn, caller):
         sources = [dict(r) for r in conn.execute("""SELECT id,content,user_id FROM messages WHERE run_id=? AND role='user' AND input_kind='user'
+            AND COALESCE(client_id,'') NOT LIKE 'swarm:%'
             AND (id=? OR (steering_parent_id=? AND status='injected')) ORDER BY id""",
             (caller['id'], caller['active_message_id'], caller['active_message_id'])).fetchall()]
         for source in sources:

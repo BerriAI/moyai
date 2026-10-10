@@ -554,3 +554,29 @@ inspected. All provider responses in these checks are synthetic.
 
 Current source requires schema 12 (main's startup fix) and role protocols 9.
 No deployment was performed.
+
+## Complete automation sources and attributed continuations (WP2/WP7)
+
+Automation source filters now inspect complete event bodies; selected titles,
+URLs and body fields retain all text. Native session events snapshot all prior
+undeleted messages with identities, authors, roles, timestamps and input
+provenance. Removed the ten-message, 1,000-character history and 4,000-character
+body cuts. Large event prompts use the shared context/reference path. The
+snapshot is currently copied per occurrence; a future storage optimization must
+preserve its event-time contents and permissions.
+
+Swarm continuation retains the complete mission and latest actual human
+direction, removing the 16,000-character excerpt. Host-generated inputs now
+carry continuation provenance and cannot authorize a new goal, grant automation
+management, trigger human-message workflows or replace the saved human direction.
+Legacy continuations remain excluded using their server-owned receipt identity.
+Ishaan's initial twenty-worker team and renewable timing policy are preserved.
+
+Validation: 180 core contracts passed; one Unicode test compared encoded JSON
+with decoded text and its corrected case passed. The final six source/authority
+checks passed, including agent guidance after a real human direction. Fifty-one
+PostgreSQL cases passed before that assertion correction; the corrected case and
+final authority checks also passed on PostgreSQL. Another 103 automation,
+history, time-control, runtime and package regressions passed. The automation
+and swarm guides were rendered at desktop/mobile widths and inspected.
+Schema remains 12; all role protocols are 10. Nothing was deployed.
