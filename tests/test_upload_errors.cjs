@@ -15,7 +15,7 @@ function client(status,detail){
 }
 
 test('HTML edge failures explain the HTTP status without showing untrusted markup',async()=>{
-  await assert.rejects(client(403),/firewall blocked.*HTTP 403/);
+  await assert.rejects(client(403),/upload request was denied.*HTTP 403/);
   await assert.rejects(client(502),/temporarily unavailable.*HTTP 502/);
   await assert.rejects(client(429),/Other files are uploading/);
 });

@@ -16,7 +16,7 @@ async function api(path, options = {}) {
     if (!response.ok) {
       const upload = options.method === 'PUT' && path.startsWith('/api/attachments/');
       const fallback = upload ? (
-        response.status === 403 ? 'The hosting firewall blocked this upload (HTTP 403). Refresh the page and retry the file.' :
+        response.status === 403 ? 'The upload request was denied (HTTP 403). Refresh the page and retry the file.' :
         response.status === 413 ? 'This file is too large. Attach a file under 10 MB.' :
         response.status === 429 ? 'Other files are uploading. Retry this file in a moment.' :
         response.status >= 500 ? `The upload service is temporarily unavailable (HTTP ${response.status}). Retry this file.` :
