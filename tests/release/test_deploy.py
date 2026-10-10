@@ -2,6 +2,7 @@
 from copy import deepcopy
 from pathlib import Path
 import json
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -59,6 +60,47 @@ def test_failed_coordinator_keeps_worker_staged_and_never_activates_it(setup):
     assert render.env[WORKER]['MAINTENANCE_DRAIN'] == 'true'
     assert not render.worker_running
     assert [c[1] for c in render.calls if c[0] == 'POST'] == [WORKER, WORKER, COORDINATOR]
+
+
+def test_stop_requested_after_worker_staging_does_not_block_release(setup):
+    release, render, _ = setup
+    probe = render.probe
+    render.owner_delay = 3
+    staged_snapshots = []
+    def stop_after_staging(service):
+        state = probe(service)
+        if not render.worker_running:
+            # The coordinator accepts Stop while no worker can finish it.
+            render.unsafe = 1
+            if service.id == COORDINATOR:
+                state['unsafe_sessions'] = 1
+                staged_snapshots.append(state)
+        return state
+    release.probe = stop_after_staging
+    release.run()
+    assert release.record['status'] == 'success'
+    assert staged_snapshots and all(s['unsafe_sessions'] == 1 for s in staged_snapshots)
+    assert render.owner_delay == 0  # A late Stop must not bypass old-worker ownership.
+    assert render.env[WORKER]['MAINTENANCE_DRAIN'] == 'false'
+    assert render.env[COORDINATOR]['MOYAI_BUILD_SHA'] == NEW
+
+
+@pytest.mark.parametrize('counter', ['owners', 'model_requests', 'live_leases'])
+def test_staged_wait_still_blocks_active_execution(setup, counter):
+    release, render, _ = setup
+    probe = render.probe
+    def still_active(service):
+        state = probe(service)
+        if not render.worker_running and service.id == COORDINATOR:
+            state[counter] += 1
+            state['unsafe_sessions'] = 1
+        return state
+    release.probe = still_active
+    with pytest.raises(ReleaseError, match='Old worker ownership did not clear'):
+        release.run()
+    assert render.env[COORDINATOR]['MOYAI_BUILD_SHA'] == OLD
+    assert render.env[WORKER]['RENDER_MIGRATION_STAGE'] == 'true'
+    assert all(c[1] == WORKER for c in render.calls)
 
 
 def test_ambiguous_post_is_recorded_and_never_retried(setup):
@@ -205,6 +247,51 @@ class CheckAPI:
         if 'check-runs' in path:
             return {'total_count': len(self.checks), 'check_runs': self.checks}
         return self.status
+
+
+class PaginatedChecks(CheckAPI):
+    def __init__(self, count):
+        super().__init__()
+        self.checks = [{**self.checks[0], 'name': f'check-{i}'} for i in range(count)]
+        self.pages = []
+
+    def call(self, method, path):
+        if 'check-runs' not in path:
+            return super().call(method, path)
+        page = int(parse_qs(urlsplit(path).query)['page'][0])
+        self.pages.append(page)
+        # Old reruns are counted even though filter=latest omits them.
+        return {'total_count': 5000, 'check_runs': self.checks[(page - 1) * 100:page * 100]}
+
+
+@pytest.mark.parametrize('count', [0, 1, 100, 101])
+def test_ci_pagination_finishes_despite_historical_check_count(count):
+    api = PaginatedChecks(count)
+    github = GitHub(api, '123', NEW)
+    assert github.ready(NEW)
+    assert api.pages == list(range(1, count // 100 + 2))
+    api.pages.clear()
+    assert github.ready(NEW)  # Same-SHA retry must work too.
+
+
+@pytest.mark.parametrize('status,conclusion', [('completed', 'failure'), ('in_progress', None)])
+def test_ci_pagination_includes_checks_on_later_pages(status, conclusion):
+    api = PaginatedChecks(101)
+    api.checks[-1].update(status=status, conclusion=conclusion)
+    github = GitHub(api, '123', NEW)
+    if status == 'completed':
+        with pytest.raises(ReleaseError, match='A check failed'):
+            github.ready(NEW)
+    else:
+        assert not github.ready(NEW)
+    assert api.pages == [1, 2]
+
+
+def test_ci_pagination_refuses_inventory_over_its_bound():
+    api = PaginatedChecks(2001)
+    with pytest.raises(ReleaseError, match='inventory was incomplete'):
+        GitHub(api, '123', NEW).ready(NEW)
+    assert len(api.pages) == 20
 
 
 def test_ci_requires_docker_and_every_reported_check():

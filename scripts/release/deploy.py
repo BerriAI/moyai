@@ -113,7 +113,9 @@ class GitHub:
         for page in range(1, 21):
             batch = self.api.call('GET', self.prefix + f'/commits/{sha}/check-runs?per_page=100&page={page}&filter=latest')
             checks.extend(batch['check_runs'])
-            if len(checks) >= batch['total_count']:
+            # total_count can include historical reruns excluded by filter=latest.
+            # Stop at the end of the returned pages, not that unfiltered count.
+            if len(batch['check_runs']) < 100:
                 break
         else:
             raise ReleaseError('GitHub checks inventory was incomplete.')
@@ -318,6 +320,14 @@ class Release:
         return (state['owners'] == owners and state['coordinators'] == 1 and (not drained or
                 all(state[key] == 0 for key in keys[2:])))
 
+    @classmethod
+    def execution_stopped(cls, state):
+        # Drain session state while workers can still complete it. After staging,
+        # a new Stop request needs the replacement worker to finish; it must not
+        # block the ownership handoff. Still fence actual workers and execution.
+        return (cls.settled(state, 1) and state['model_requests'] == 0
+                and state['live_leases'] == 0)
+
     def run(self):
         try:
             sha = self.github.candidate()
@@ -352,7 +362,7 @@ class Release:
                 self.configure(worker, {'RENDER_MIGRATION_STAGE': 'true', 'MOYAI_BUILD_SHA': sha})
                 self.deploy(worker, sha)
                 self.phase('Confirm all old execution workers have exited')
-                self.wait(lambda: self.settled(self.probe(coordinator), 1, drained=True),
+                self.wait(lambda: self.execution_stopped(self.probe(coordinator)),
                           'Old worker ownership did not clear; the coordinator was not changed.', 600)
                 self.phase('Deploy the coordinator at the selected commit')
                 self.configure(coordinator, {'MOYAI_BUILD_SHA': sha})

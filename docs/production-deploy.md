@@ -50,7 +50,10 @@ host key stops the workflow and must be verified against Render before updating.
    and the old worker instance to exit. Queued work stays saved; the workflow does
    not cancel sessions.
 3. Deploy the new worker in maintenance staging. It serves a health response but
-   does not run jobs. Confirm no execution worker still owns the database.
+   does not run jobs. Confirm no execution worker still owns the database and
+   model requests and execution leases have cleared. A Stop request accepted
+   after draining stays saved for the replacement worker; the ownership check
+   does not wait for a paused worker to process it.
 4. Deploy the app/coordinator at the selected commit and verify its runtime.
 5. Activate the worker at the same commit, clear its drain flag, and verify both
    services and database ownership before declaring success.

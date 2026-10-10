@@ -9,6 +9,7 @@ import pytest
 
 from app.config import Settings
 from app.main import create_app
+from scripts.release.deploy import Release
 from scripts.release.probe import snapshot
 
 
@@ -43,6 +44,26 @@ def test_probe_reports_real_ownership_and_enforces_read_only(production_shape):
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             connection.execute('DELETE FROM runs')
     assert all(k not in result for k in ('sessions', 'prompts', 'credentials', 'database_url'))
+
+
+def test_stop_after_worker_exit_can_wait_for_replacement(production_shape):
+    store, url, schema = production_shape
+    run = store.create_run('Synthetic late Stop', '', 'demo', [], chat_enabled=True)
+    store.execute('INSERT INTO durable_sessions(run_id,state,revision,delivered) VALUES(?,?,1,1)',
+                  (run['id'], json.dumps({'phase': 'warm'})))
+    with psycopg.connect(url, autocommit=True) as worker:
+        worker.execute('SELECT pg_advisory_lock_shared(726940, %s::regnamespace::oid::int)', (schema,))
+        with psycopg.connect(url) as connection:
+            drained = {'ok': True, **snapshot(connection, schema)}
+        assert Release.settled(drained, 2, drained=True)
+        assert not Release.execution_stopped(drained)
+    # Stop is accepted by the coordinator after the worker releases ownership.
+    store.update_run(run['id'], status='stopping')
+    with psycopg.connect(url) as connection:
+        stopped = {'ok': True, **snapshot(connection, schema)}
+    assert stopped['unsafe_sessions'] == 1
+    assert not Release.settled(stopped, 1, drained=True)
+    assert Release.execution_stopped(stopped)
 
 
 @pytest.mark.parametrize('phase,unsafe', [('monitor', 1), ('save', 1), ('finish', 1),
