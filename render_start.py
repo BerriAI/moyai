@@ -19,6 +19,7 @@ from fastapi.responses import PlainTextResponse
 
 
 maintenance = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+API_GRACEFUL_SHUTDOWN_SECONDS = 270
 
 
 @maintenance.get("/health")
@@ -117,7 +118,8 @@ def main():
     if stage == "false":
         asyncio.run(bootstrap())
     uvicorn.run(maintenance if stage == "true" else "app.main:app", host="0.0.0.0",
-                port=int(os.environ.get("PORT", "10000")), workers=1, timeout_graceful_shutdown=20)
+                port=int(os.environ.get("PORT", "10000")), workers=1,
+                timeout_graceful_shutdown=API_GRACEFUL_SHUTDOWN_SECONDS if os.environ.get('MOYAI_RUNTIME_ROLE') == 'api' else 20)
 
 
 if __name__ == "__main__":

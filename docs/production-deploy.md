@@ -1,4 +1,8 @@
-# Deploy the production app, worker and broker
+# Deploy production
+
+After dedicated API activation, use `release_type: api` and follow
+[compatible API deployments](api-deploy.md). The rest of this page describes
+`release_type: coordinated` for the original two/three-service topology.
 
 Use **GitHub → Actions → Deploy production → Run workflow → main** after the
 one-time setup below. One button coordinates `moyai-private` and `moyai-worker`,
@@ -29,7 +33,7 @@ Render's separate **Deploy latest commit** buttons while it is running.
 
    Never put either credential in workflow YAML, PR comments, artifacts, or logs.
    No separate GitHub token, database exposure, public management endpoint, or
-   new paid service is needed for the button. Keep Render auto-deploy **off** for every service.
+   new paid service is needed for coordinated mode. Keep Render auto-deploy **off** for every service.
 4. Run the workflow on `main` with **Only check configuration (no deployment)**
    checked. It verifies CI, all active Render services, SSH access, running build IDs,
    local health, database ownership, and matching shared settings without writing
@@ -87,7 +91,8 @@ settings, and concurrency limits. Each mutation and deploy ID goes into the
 nonsecret **production-release** artifact. No-op releases still verify the
 running services.
 
-This is coordinated deployment, not yet seamless deployment. There are four
+This mode is coordinated deployment. Compatible API updates can use the
+[API-only path](api-deploy.md) after its separate topology activation. There are four
 Render deployments in the combined topology and six with a separate broker,
 so builds and safe draining can take several minutes. New
 execution pauses, and the app still restarts. The separate work on broker

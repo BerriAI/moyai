@@ -123,3 +123,16 @@ def test_invalid_custom_origins_never_start(monkeypatch, url):
     monkeypatch.setenv('MOYAI_PUBLIC_URL', url)
     with pytest.raises(RuntimeError):
         configure_environment()
+
+
+@pytest.mark.parametrize('role,seconds', [('api', 270), ('coordinator', 20), ('broker', 20), ('worker', 20)])
+def test_render_api_shutdown_budget_leaves_time_for_cleanup(monkeypatch, role, seconds):
+    import render_start
+    monkeypatch.setenv('MOYAI_PUBLIC_URL', 'https://moyai.example')
+    monkeypatch.setenv('MOYAI_RUNTIME_ROLE', role)
+    monkeypatch.setenv('RENDER_MIGRATION_STAGE', 'true')
+    calls = []
+    monkeypatch.setattr(render_start.uvicorn, 'run', lambda *args, **kwargs: calls.append(kwargs))
+    render_start.main()
+    assert calls[0]['timeout_graceful_shutdown'] == seconds
+    assert calls[0]['workers'] == 1

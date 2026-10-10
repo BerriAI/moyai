@@ -11,9 +11,9 @@ cleanup.
 This is an opt-in prerequisite for seamless API releases. Coordinator/broker/worker
 builds must still match, and coordinator/broker replacements still require their singleton
 owner to exit. No production service, edge route, or deployment workflow is
-changed automatically. The production GitHub Action currently supports the
-three-service coordinator/broker/worker topology only; do not add API services to
-production and then use that action unchanged.
+changed automatically. The production GitHub Action has a separate `api` release mode; follow
+[API deployment activation](api-deploy.md) before adding this service or selecting
+that mode. Coordinated mode refuses the activated four-service topology.
 
 ## Prerequisites
 
@@ -115,17 +115,16 @@ API processes cannot participate in this first transition.
 3. Drain the old API's existing requests before stopping it. Platform termination
    deadlines still matter: browser event streams/computer sockets must reconnect,
    and long uploads or audio transcription may be interrupted if forced past the
-   drain deadline. This PR does not implement an edge traffic switch or a new
-   drain protocol.
+   drain deadline. The [API release workflow](api-deploy.md) uses Render native
+   overlap and verifies process retirement; initial edge routing is a one-time step.
 4. Verify the coordinator, worker executions and broker streams stayed alive;
    confirm queued title/deletion work was handled by the coordinator.
 
 For an incompatible protocol, changed shared config or schema revision, use a
 coordinated maintenance transition that includes every API owner. Do not bypass
 the fingerprint. Remaining release work includes coordinator ownership transfer,
-broker draining, readiness/routing/drain automation, and a production continuity
-rehearsal with real sessions. The current production GitHub Action has not gained
-an API-only release path in this change.
+broker draining and a production continuity rehearsal with real sessions.
+The API-only workflow does not make background-service or schema upgrades seamless.
 
 ## Local verification
 

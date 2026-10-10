@@ -175,7 +175,7 @@ jobs:
       - name: Verify two APIs overlap without restarting the coordinator or inference
         run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --replicated-api
       - name: Verify compatible API source builds overlap and incompatible contracts fail closed
-        run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --mixed-build-api
+        run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe --mixed-build-api --drain-api
       - name: Verify context recovery on both backends
         run: |
           uv run --frozen --python 3.13 pytest -q --tb=short tests/test_context_gateway.py tests/test_context_recovery.py
