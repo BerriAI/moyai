@@ -59,6 +59,21 @@ def test_read_only_snapshot_tracks_shared_brokers_and_singleton_leaders(owners):
             assert overlap['contracts'] == state['contracts']
 
 
+def test_api_probe_preserves_shared_broker_membership_inventory(owners):
+    from scripts.release.api_probe import snapshot as api_snapshot
+    url, schema, _ = owners
+    with psycopg.connect(url) as reader:
+        baseline = api_snapshot(reader, schema)
+        assert len(baseline['owners']) == 4 and len(baseline['brokers']) == 1
+    with psycopg.connect(url, autocommit=True) as replacement:
+        replacement.execute('SELECT pg_advisory_lock_shared(726940,%s::regnamespace::oid::int)', (schema,))
+        replacement.execute('SELECT pg_advisory_lock_shared(726944,%s::regnamespace::oid::int)', (schema,))
+        with psycopg.connect(url) as reader:
+            overlap = api_snapshot(reader, schema)
+            assert len(overlap['owners']) == 5 and len(overlap['brokers']) == 2
+            assert set(baseline['brokers']) < set(overlap['brokers'])
+
+
 @pytest.mark.parametrize('change', ['dirty', 'stale_contract', 'missing_contract', 'exclusive_broker'])
 def test_snapshot_rejects_unactivated_or_ambiguous_baseline(owners, change):
     url, schema, connections = owners

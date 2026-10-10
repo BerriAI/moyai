@@ -29,7 +29,12 @@ def snapshot(connection, schema):
         AND l.objid=%s::regnamespace::oid AND l.objsubid=2 AND l.granted''', (schema,)).fetchall()
     owners = {key: [] for key in ('owners', 'coordinators', 'brokers')}
     for kind, pid, start, mode in rows:
-        if start is None or mode != ('ShareLock' if kind == 726940 else 'ExclusiveLock'):
+        # Verified broker releases retain a shared membership lock; legacy
+        # brokers used exclusive ownership. Preserve every PID in either case:
+        # the API controller still requires one unchanged broker, never overlap.
+        modes = {'ShareLock', 'ExclusiveLock'} if kind == 726944 else {
+            'ShareLock' if kind == 726940 else 'ExclusiveLock'}
+        if start is None or mode not in modes:
             raise ValueError('Unexpected database ownership')
         owners[{726940: 'owners', 726943: 'coordinators', 726944: 'brokers'}[kind]].append(f'{pid}@{start.isoformat()}')
     policy = connection.execute('''SELECT p.fingerprint,a.cluster_fingerprint,a.fingerprint
