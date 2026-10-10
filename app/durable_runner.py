@@ -494,6 +494,8 @@ class DurableRunner(RunManager):
         return False
 
     def has_capacity(self, run_id=None):
+        if not self.settings.max_concurrent_runs:
+            return True
         # We only need to know whether the limit is reached. Ordered, bounded
         # index reads also avoid Postgres overestimating JSON predicate matches
         # and choosing a scan of retained history for an unbounded count.

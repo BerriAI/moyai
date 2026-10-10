@@ -33,6 +33,7 @@ def test_capacity_tracks_persisted_phase_transitions_and_restart(durable, phase,
 @pytest.mark.parametrize('occupied', [99, 100])
 async def test_admission_work_does_not_grow_with_retained_history(durable, occupied):
     manager, _, run_id = durable
+    manager.settings.max_concurrent_runs = 100
     populate(manager.store, history=30000, occupied=occupied)
     connect = manager.store.connect
     steps = 0
@@ -77,6 +78,7 @@ async def test_admission_work_does_not_grow_with_retained_history(durable, occup
 
 async def test_only_reclaimable_sessions_need_cleanup_locks(durable):
     manager, _, run_id = durable
+    manager.settings.max_concurrent_runs = 100
     populate(manager.store, history=200, occupied=100)
     assert await manager.make_capacity(run_id) is False
     assert manager.locks == {}
@@ -107,3 +109,14 @@ async def test_full_capacity_skips_queued_and_locked_warm_sessions(durable):
     async with manager.locks.setdefault('fixture-0', asyncio.Lock()):
         assert await manager.make_capacity('new-session') is False
     manager.release_warm.assert_not_awaited()
+
+
+async def test_zero_sandbox_capacity_admits_past_any_occupied_count(durable):
+    manager, _, run_id = durable
+    manager.settings.max_concurrent_runs = 0
+    populate(manager.store, history=0, occupied=500)
+    assert manager.has_capacity()
+    async with manager.admission(run_id) as available:
+        assert available
+    manager.settings.max_concurrent_runs = 500
+    assert not manager.has_capacity()

@@ -258,11 +258,11 @@ matching the verified production configuration.
 
 The same rollout moved 27 existing sessions, 13 user profiles, all three encrypted organization connections, and 25 result archives into **Organization for Litellm → Litellm** on Render. Google SSO and all three provider health checks passed on the new origin. Slack's verified event endpoint and Slack/Notion OAuth callback configuration use the new origin. The existing gateway key and spend ledger were preserved. A follow-up in the existing #bot-spam thread restored its prior marker and file value `24` and posted one answer with a link to the new origin.
 
-`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on active and warm
-sandboxes, including delegated workers. It does not pre-provision 100 machines.
+`MAX_CONCURRENT_RUNS` is an optional workspace-wide ceiling on active and warm
+sandboxes, including delegated workers. The default `0` means no ceiling. A ceiling never pre-provisions machines.
 Ten executing agents need about ten sandboxes, plus recent chats within their
 five-minute idle window. Each completed response saves its filesystem immediately.
-Idle sandboxes incur compute charges and are reclaimed oldest-first when another
+Idle sandboxes incur compute charges and, with a ceiling, are reclaimed oldest-first when another
 session needs capacity; a sandbox with queued work is protected. Follow-ups reuse
 a warm machine or restore a new sandbox from the snapshot after release. Provisioning/cleanup and Modal quotas
 can temporarily change the observed count; capacity above the ceiling queues.

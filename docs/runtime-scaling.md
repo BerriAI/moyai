@@ -2,14 +2,14 @@
 
 Moyai can use one coordinator and multiple Temporal execution workers with
 PostgreSQL and shared object storage. The default remains `standalone`, with
-100 occupied sandboxes, 1,000 unfinished sessions and no limit on concurrent model requests. Higher
+1,000 unfinished sessions and no limit on occupied sandboxes or concurrent model requests. Higher
 budgets are now configurable; this does not provision provider quota or replicas.
 
 ## What each limit controls
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `MAX_CONCURRENT_RUNS` | 100 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. |
+| `MAX_CONCURRENT_RUNS` | 0 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. 0 means unlimited, so warm machines are only released by their idle timeout. |
 | `MAX_PENDING_RUNS` | 1,000 | Unfinished sessions, including active work and queued work; this is not just the waiting queue. |
 | `MAX_CONCURRENT_MODEL_REQUESTS` | 0 | Concurrent requests through the coordinator's model gate. 0 means unlimited. With a positive value, full foreground requests over the limit receive the existing explicit, unbilled queue response. |
 | `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one separate process-ownership connection. Range 1–256. |

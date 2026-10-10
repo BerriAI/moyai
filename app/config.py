@@ -52,7 +52,7 @@ class Settings(BaseSettings):
         if self.sandbox_prepared_pool_size:
             if not self.temporal_enabled or self.sandbox_provider != 'modal':
                 raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
-            if self.sandbox_prepared_pool_size >= self.max_concurrent_runs:
+            if self.max_concurrent_runs and self.sandbox_prepared_pool_size >= self.max_concurrent_runs:
                 raise ValueError('Prepared workspaces must leave capacity for active sessions.')
         if self.moyai_database_url:
             if urlsplit(self.moyai_database_url).scheme not in {'postgresql', 'postgres'}:
@@ -221,7 +221,8 @@ class Settings(BaseSettings):
 
     auto_prepare_repositories: bool = True
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
-    max_concurrent_runs: int = Field(default=100, ge=1)
+    # Zero means unlimited. A positive value caps active and warm sandboxes.
+    max_concurrent_runs: int = Field(default=0, ge=0)
     max_pending_runs: int = Field(default=1000, ge=100)
     max_parallel_agents: int = Field(default=100, ge=1, le=100)
     swarm_models: str = ''

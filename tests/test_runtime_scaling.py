@@ -59,7 +59,7 @@ def test_capacity_can_exceed_old_ceilings_without_changing_default_budgets():
                         moyai_database_pool_size=32, temporal_worker_activities=256)
     assert (settings.max_concurrent_runs, settings.max_pending_runs, settings.max_concurrent_model_requests) == (3000, 20000, 3000)
     defaults = Settings(_env_file=None)
-    assert (defaults.max_concurrent_runs, defaults.max_pending_runs, defaults.max_concurrent_model_requests) == (100, 1000, 0)
+    assert (defaults.max_concurrent_runs, defaults.max_pending_runs, defaults.max_concurrent_model_requests) == (0, 1000, 0)
     with pytest.raises(ValueError, match='PostgreSQL and Temporal'):
         Settings(_env_file=None, moyai_runtime_role='worker')
     with pytest.raises(ValueError, match='shared object storage'):
