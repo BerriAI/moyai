@@ -1292,3 +1292,20 @@ async def test_deferred_child_delivery_retains_parent_admission_and_snapshot_tra
     assert lifecycle.archives(actor) == {root}
     manager.store.update_run(child, summary='Later worker answer')
     assert coordinator.results(root, result['group_id'])['children'][0]['summary'] == 'Frozen worker answer'
+
+
+@pytest.mark.parametrize('failure', ['invalid', 'expired'])
+def test_unusable_provider_key_reports_precise_failure(workspace, monkeypatch, failure):
+    app, client = workspace
+    sign_in(app, client)
+    secret = save(client).json()['id']
+    run = active(app)
+    request = requested(app, run)
+    app.state.store.execute('UPDATE provider_secrets SET invalid_reason=? WHERE id=?', (failure, secret))
+    monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
+    result = client.post('/broker/' + run['id'] + '/credentials/invoke',
+        headers={'Authorization': 'Bearer capability'},
+        json={'request_id': request['request_id'], 'path': '/models', 'method': 'GET'})
+    assert result.status_code == 401
+    assert result.json()['error']['type'] == 'credential_' + failure
+    assert KEY not in result.text
