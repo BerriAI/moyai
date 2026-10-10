@@ -31,9 +31,177 @@ jobs:
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_storage_maintenance.py tests/test_postgres_storage_maintenance.py tests/test_blob_storage.py tests/test_artifact_files.py
       - name: Migrate through the CLI and restore in a replacement process with no local files
         run: uv run --frozen --python 3.13 python scripts/shared_storage_smoke.py
-  runtime:
+  runtime-tests:
+    name: runtime (${{ matrix.group }})
+    strategy:
+      fail-fast: false
+      max-parallel: 50
+      matrix:
+        include:
+          - group: 01-migration-postgres-migration
+            command: |
+              uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_migration.py
+          - group: 02-migration-postgres-runtime
+            command: |
+              uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py
+          - group: 03-postgres-activity
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_activity.py
+          - group: 04-postgres-admission-scaling
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py
+          - group: 05-postgres-agents
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py
+          - group: 06-postgres-astra-ultrafast
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_astra_ultrafast.py
+          - group: 07-postgres-attachments
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_attachments.py
+          - group: 08-postgres-automation-events
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_automation_events.py
+          - group: 09-postgres-automations
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_automations.py
+          - group: 10-postgres-broker-transport
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_broker_transport.py
+          - group: 11-postgres-cloudflare-login-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_cloudflare_login.py -k 'conversation or keeps_personal_tools'
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_adoption.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_mission.py
+          - group: 12-postgres-credentials
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_credentials.py
+          - group: 13-postgres-durable
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_durable.py
+          - group: 14-postgres-environments
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_environments.py
+          - group: 15-postgres-github-ci
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_github_ci.py
+          - group: 16-postgres-github-write-access
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_github_write_access.py
+          - group: 17-postgres-harness-gateway
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_harness_gateway.py
+          - group: 18-postgres-identities
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_identities.py
+          - group: 19-postgres-infrastructure-costs
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_infrastructure_costs.py
+          - group: 20-postgres-lens-feedback-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_lens_feedback.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_types.py
+          - group: 21-postgres-memory
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_memory.py
+          - group: 22-postgres-message-queue
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_message_queue.py
+          - group: 23-postgres-model-preferences-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_model_preferences.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_list_performance.py
+          - group: 24-postgres-model-tools
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_model_tools.py
+          - group: 25-postgres-pr-delivery
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_pr_delivery.py
+          - group: 26-postgres-session-folders
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_folders.py
+          - group: 27-postgres-session-metadata
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_metadata.py
+          - group: 28-postgres-session-titles
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_session_titles.py
+          - group: 29-postgres-sessions
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_sessions.py
+          - group: 30-postgres-skills
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_skills.py
+          - group: 31-postgres-slack-chat
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_slack_chat.py
+          - group: 32-postgres-slack-feedback-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_slack_feedback.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_pr_milestones.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_client.py
+          - group: 33-postgres-slack-web-mirror
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_slack_web_mirror.py
+          - group: 34-postgres-spend
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_spend.py
+          - group: 35-postgres-startup-latency
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_startup_latency.py
+          - group: 36-postgres-startup-overlap-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_startup_overlap.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_broker_timing.py
+          - group: 37-postgres-swarm-chat-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_chat.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_automation_concurrency.py
+          - group: 38-postgres-swarm-collaboration-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_collaboration.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_planning.py
+          - group: 39-postgres-swarm-time-controls
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_time_controls.py
+          - group: 40-postgres-swarm-time-runtime-and-related
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_time_runtime.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_backend.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_conversation_responsiveness.py
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_initial_context.py
+          - group: 41-postgres-swarm-timing
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarm_timing.py
+          - group: 42-postgres-swarms
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarms.py
+          - group: 43-postgres-trace-outbox
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_trace_outbox.py
+          - group: 44-postgres-workspace
+            command: |
+              uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_workspace.py
+          - group: 45-http-restart-smoke
+            command: |
+              uv run --frozen --python 3.13 python scripts/postgres_runtime_smoke.py
+          - group: 46-sqlite-admission-scaling
+            command: |
+              uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py
+          - group: 47-sqlite-conversation-responsiveness
+            command: |
+              uv run --frozen --python 3.13 pytest -q --tb=short tests/test_conversation_responsiveness.py
+          - group: 48-sqlite-sessions
+            command: |
+              uv run --frozen --python 3.13 pytest -q --tb=short tests/test_sessions.py
+          - group: 49-sqlite-slack-web-mirror
+            command: |
+              uv run --frozen --python 3.13 pytest -q --tb=short tests/test_slack_web_mirror.py
+          - group: 50-sqlite-spend
+            command: |
+              uv run --frozen --python 3.13 pytest -q --tb=short tests/test_spend.py
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:17-alpine
@@ -51,27 +219,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-      - name: Preserve the default SQLite behavior
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_admission_scaling.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_slack_web_mirror.py tests/test_spend.py
-      - name: Verify import, transactions, ownership and restart
-        run: uv run --frozen --extra postgres-migration --python 3.13 pytest -q --tb=short tests/test_postgres_runtime.py tests/test_postgres_migration.py
-      - name: Verify existing chat, queue, attachment and trace behavior on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_workspace.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_session_list_performance.py tests/test_session_titles.py tests/test_session_metadata.py tests/test_pr_delivery.py tests/test_pr_milestones.py tests/test_github_ci.py tests/test_attachments.py tests/test_message_queue.py tests/test_trace_outbox.py
-      - name: Verify conversation authentication remains readable during writes
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_cloudflare_login.py -k 'conversation or keeps_personal_tools'
-      - name: Verify credentials, permissions, automations and settings on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_credentials.py tests/test_skills.py tests/test_memory.py tests/test_initial_context.py tests/test_automations.py tests/test_automation_events.py tests/test_environments.py tests/test_infrastructure_costs.py tests/test_session_folders.py tests/test_spend.py tests/test_github_write_access.py tests/test_lens_feedback.py
-      - name: Verify durable admission, gateway, identities and Slack recovery on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_admission_scaling.py tests/test_durable.py tests/test_startup_latency.py tests/test_startup_overlap.py tests/test_automation_concurrency.py tests/test_harness_gateway.py tests/test_broker_transport.py tests/test_adoption.py tests/test_identities.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_activity.py
-      - name: Demonstrate real HTTP requests across two server processes
-        run: uv run --frozen --python 3.13 python scripts/postgres_runtime_smoke.py
-      - name: Verify saved model choices and opt-in tiers on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_astra_ultrafast.py tests/test_model_preferences.py tests/test_model_tools.py
-      - name: Verify swarm deadlines, controls and mixed-harness groups on Postgres
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py tests/test_swarm_timing.py tests/test_swarm_time_controls.py tests/test_swarm_time_runtime.py tests/test_swarm_broker_timing.py tests/test_swarm_chat.py
+      - name: Run selected runtime coverage
+        run: ${{ matrix.command }}
+  runtime:
+    if: ${{ always() }}
+    needs: runtime-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Require every runtime group to pass
+        env:
+          RUNTIME_RESULT: ${{ needs.runtime-tests.result }}
+        run: test "$RUNTIME_RESULT" = success
   scheduling:
-    # The broad runtime suite already approaches its job timeout. Keep the
-    # real Temporal/lock-wait regressions independent so neither delays the other.
+    # Keep real Temporal/lock-wait regressions independent of the runtime matrix.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
