@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from app.agents import AgentCoordinator, Artifact, Fanout, Retry
 from app.config import Settings
-from app.db import Store
+from app.db import Store, now
 from app.spend import Spend
 from app.temporal_runtime import TemporalRunManager
 from agent.continuation import AgentWait
@@ -369,6 +369,72 @@ async def test_child_cost_rollup_does_not_duplicate_global_spend(durable):
     assert {c['cost']['spend'] for c in view['groups'][0]['children']} == {'0.2', '0.3'}
     assert coordinator.view(root, include_costs=False)['spend'] is None
     assert all('cost' not in c for c in coordinator.view(root, include_costs=False)['groups'][0]['children'])
+
+
+def test_chat_agent_view_batches_large_trees_and_preserves_latest_status(tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    store = Store(tmp_path)
+    coordinator = AgentCoordinator(store, settings, None)
+    root = store.create_run('Parent conversation', '', 'demo', [])['id']
+    stamp = now()
+    children = []
+    with store.connect() as conn:
+        for group_index in range(12):
+            group_id = f'group-{group_index:02}'
+            conn.execute('''INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at,result_snapshot)
+                VALUES(?,?,1,?,'{}',?,?,?)''',
+                (group_id, root, group_id, 'preparing' if group_index == 0 else 'completed', stamp,
+                 'Large saved group result. ' * 10000))
+            for index in range(5):
+                child_id = f'{group_index * 5 + index + 1:032x}'
+                children.append(child_id)
+                conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,
+                    parent_run_id,agent_group_id,agent_label,summary,side_chat_context)
+                    VALUES(?,'Worker','','demo','idle','[]',?,?,?,?,?,?,?)''',
+                    (child_id, stamp, stamp, root, group_id, 'Worker', 'Saved answer. ' * 10000, 'Saved context. ' * 10000))
+        # A terminal direct child can still be waiting on an injected descendant.
+        grandchild = 'f' * 32
+        conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,parent_run_id)
+            VALUES(?,'Nested worker','','demo','idle','[]',?,?,?)''', (grandchild, stamp, stamp, children[5]))
+        conn.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'user','Queued continuation','injected',?)",
+                     (grandchild, stamp))
+        conn.execute('UPDATE runs SET deletion_requested_at=? WHERE id=?', (stamp, children[10]))
+    legacy = tmp_path / 'artifacts'
+    legacy.mkdir(exist_ok=True)
+    (legacy / (children[0] + '.zip')).write_bytes(b'legacy archive')
+    queries = []
+    connect = store.connect
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        with connect(*args, **kwargs) as conn:
+            if store.database:
+                execute = conn.raw.execute
+                def traced(sql, *args, **kwargs):
+                    queries.append(sql)
+                    return execute(sql, *args, **kwargs)
+                with monkeypatch.context() as tracing:
+                    tracing.setattr(conn.raw, 'execute', traced)
+                    yield conn
+            else:
+                conn.set_trace_callback(queries.append)
+                yield conn
+
+    monkeypatch.setattr(store, 'connect', counted)
+    view = coordinator.view(root, include_costs=False)
+    assert len(queries) <= 8  # Three data reads, plus Postgres transaction setup.
+    assert not any('summary' in sql or 'result_snapshot' in sql or 'r.*' in sql for sql in queries)
+    assert len(json.dumps(view)) < 50_000
+    assert len(view['groups']) == 12 and all(group['total'] == 5 for group in view['groups'])
+    assert view['groups'][0]['settled'] is False
+    assert view['groups'][1]['settled'] is False
+    assert all(group['settled'] for group in view['groups'][2:])
+    assert view['groups'][2]['completed'] == 5
+    assert view['groups'][2]['children'][0]['status'] == 'deleting'
+    assert view['groups'][0]['children'][0]['has_artifact'] is True
+    assert view['groups'][0]['children'][1]['has_artifact'] is False
+    assert view['groups'][1]['children'][0]['children'][0]['id'] == grandchild
+    assert all('summary' not in child and 'cost' not in child for group in view['groups'] for child in group['children'])
 
 
 async def test_agent_billing_states_match_spend_and_stay_hidden_from_members(

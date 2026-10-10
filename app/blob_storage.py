@@ -189,9 +189,40 @@ class ArtifactStore:
         except FileNotFoundError:
             pass
         # A bound string predicate avoids SQL wildcard interpretation of names.
-        names.update(row['name'] for row in conn.execute(
-            'SELECT name FROM artifact_objects WHERE substr(name,1,?)=?', (len(prefix), prefix)))
-        return [info for name in sorted(names) if (info := self.info(name, conn)) is not None]
+        stored = {row['name']: dict(row) | {'revision': row['sha256']} for row in conn.execute(
+            'SELECT * FROM artifact_objects WHERE substr(name,1,?)=?', (len(prefix), prefix))}
+        names.update(stored)
+        result = []
+        for name in sorted(names):
+            self.validate_name(name)
+            # Chat detail checks this inventory on every open. Reuse manifest
+            # metadata instead of issuing another query for every saved capture.
+            info = stored[name] if name in stored else self.info(name, conn)
+            if info is not None:
+                result.append(info)
+        return result
+
+    def available_names(self, names: list[str], conn=None) -> set[str]:
+        """Check a batch without fetching objects or opening one query per file."""
+        for name in names:
+            self.validate_name(name)
+        if not names:
+            return set()
+        if conn is None:
+            with self.store.connect() as current:
+                return self.available_names(names, current)
+        available = set()
+        for offset in range(0, len(names), 400):
+            batch = names[offset:offset + 400]
+            available.update(row['name'] for row in conn.execute(
+                'SELECT name FROM artifact_objects WHERE name IN (' + ','.join('?' for _ in batch) + ')', batch))
+        for name in set(names) - available:
+            try:
+                if stat.S_ISREG(self.path(name).stat(follow_symlinks=False).st_mode):
+                    available.add(name)
+            except FileNotFoundError:
+                pass
+        return available
 
     def save(self, name: str, raw: bytes, *, immutable: bool = False,
              budget: tuple[str, int] | None = None) -> bool:

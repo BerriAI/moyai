@@ -392,9 +392,33 @@ class AgentCoordinator:
             return {'path': args.path, 'content': content, 'untrusted_reference': True}
 
     def view(self, run_id, *, include_costs=True):
-        run = self.store.run(run_id)
-        groups = [self.results(run_id, r['id'], latest=True) for r in self.store.rows('SELECT id FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,))]
-        family = self.store.subtree(run_id)
+        # Opening a chat needs worker status, not saved answers or group handoff
+        # snapshots. Read the whole tree once instead of repeating result and
+        # artifact queries for every group and child.
+        group_rows = self.store.rows('SELECT id,status FROM agent_groups WHERE parent_id=? ORDER BY created_at', (run_id,))
+        family = self.store.rows('''WITH RECURSIVE tree(run_id) AS (
+            SELECT id FROM runs WHERE id=? UNION
+            SELECT r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
+        ) SELECT r.id,r.parent_run_id,r.agent_group_id,r.agent_label,r.mode,r.status,
+            r.created_at,r.updated_at,r.error,r.checkpoint_error,r.pending_result,
+            r.active_message_id,r.deletion_requested_at,r.deleted_at,
+            EXISTS(SELECT 1 FROM messages m WHERE m.run_id=r.id
+                AND m.status IN ('queued','running','injected')) AS pending_messages
+            FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id''', (run_id,))
+        direct = {group['id']: [] for group in group_rows}
+        for row in family:
+            if row['agent_group_id'] in direct:
+                direct[row['agent_group_id']].append(row)
+        artifacts = self.store.artifacts.available_names([child['id'] + '.zip'
+            for children in direct.values() for child in children])
+        groups = [{'group_id': group['id'], 'status': group['status'],
+                   'completed': sum(child['status'] in {'idle', 'completed'} for child in direct[group['id']]),
+                   'total': len(direct[group['id']]),
+                   'children': [{**{key: child[key] for key in ('id', 'error', 'checkpoint_error')},
+                                 'session_url': self.settings.public_url.rstrip('/') + '/#run=' + child['id'],
+                                 'has_artifact': child['id'] + '.zip' in artifacts}
+                                for child in direct[group['id']]]}
+                  for group in group_rows]
         ids = [row['id'] for row in family]
         requests = self.store.rows('SELECT run_id,cost,status,key_hash,gateway_scope,cost_recovery_error FROM model_requests WHERE run_id IN (' + ','.join('?' for _ in ids) + ')',
                                    tuple(ids)) if include_costs else []
@@ -410,6 +434,8 @@ class AgentCoordinator:
             bucket['pending_costs'] += billing == 'pending'
             bucket['missing_costs'] += billing == 'unresolved'
         nodes = {row['id']: {key: row[key] for key in ('id', 'parent_run_id', 'agent_label', 'mode', 'created_at', 'updated_at')} | {'status': response_status(row), 'children': []} for row in family}
+        unsettled = {row['id']: row['status'] not in {'idle', 'completed', 'failed', 'cancelled', 'interrupted'}
+                     or bool(row['pending_messages']) for row in family}
         for node in nodes.values():
             if node['id'] != run_id and node['parent_run_id'] in nodes:
                 nodes[node['parent_run_id']]['children'].append(node)
@@ -419,17 +445,18 @@ class AgentCoordinator:
             for child in node['children']:
                 for key, amount in rollup(child).items():
                     value[key] += amount
+                unsettled[node['id']] |= unsettled[child['id']]
             if include_costs:
                 node['cost'] = {**value, 'spend': str(value['spend'])}
             return value
 
         rollup(nodes[run_id])
         for group in groups:
+            group['settled'] = group['status'] != 'preparing' and not any(
+                unsettled[child['id']] for child in group['children'])
             for child in group['children']:
                 child.update(nodes[child['id']])
-                # Chat progress does not need to repeatedly transfer answers.
-                child.pop('summary')
-        return {'parent_id': run['parent_run_id'], 'groups': groups,
+        return {'parent_id': nodes[run_id]['parent_run_id'], 'groups': groups,
                 'spend': str(sum((c['spend'] for c in costs.values()), Decimal(0))) if include_costs else None,
                 'pending_costs': sum(c['pending_costs'] for c in costs.values()),
                 'missing_costs': sum(c['missing_costs'] for c in costs.values())}

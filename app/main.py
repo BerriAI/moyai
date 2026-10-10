@@ -576,7 +576,7 @@ def _create_app(settings, store):
             return preferred_model(conn, settings, actor)
 
     @app.get("/api/config")
-    async def config(request: Request):
+    def config(request: Request):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
@@ -759,7 +759,7 @@ def _create_app(settings, store):
         project = environments.context(run)
         actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request))
+        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = store.root_id(run_id)
@@ -772,7 +772,7 @@ def _create_app(settings, store):
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
-                "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
+                "credential_requests": credentials.pending(run,actor,security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
 
@@ -785,8 +785,9 @@ def _create_app(settings, store):
         summary = session_pull_requests.summaries([run_id])[run_id]
         return {**result, 'pr_summary': summary, 'pull_requests': summary['pull_requests']}
 
-    def feedback_author(request):
-        actor = store.identity(security.session_info(request))
+    def feedback_author(request, actor=None):
+        if actor is None:
+            actor = store.identity(security.session_info(request))
         rows = store.rows('''
             SELECT COALESCE(NULLIF(linked.email,''),NULLIF(users.email,''),linked.name,users.name,'') AS author
             FROM users
@@ -814,7 +815,7 @@ def _create_app(settings, store):
         return {'message_id': message_id, **result}
 
     @app.get('/api/runs/{run_id}/activity')
-    async def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
+    def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
                                after: int = Query(default=0, ge=0, le=2**63-1),
                                until: int | None = Query(default=None, ge=0, le=2**63-1)):
         security.require(request)
@@ -900,10 +901,25 @@ def _create_app(settings, store):
             manager.submit(store.run(run_id))
         return {'id': result['id'], 'status': result['status'], 'revision': result['revision']}
 
+    def read_event_batch(run_id, cursor):
+        # Each open conversation polls the database. Keep the whole read off
+        # the event loop so a busy database cannot stall navigation in other tabs.
+        row = store.run(run_id)
+        if not row or row['deleted_at']:
+            return None, [], None
+        batch = store.events(run_id, cursor)
+        status = {'status': response_status(row), 'active': manager.is_active(run_id),
+                  'model': row['model'], 'active_model': row['active_model'],
+                  'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'],
+                  'checkpoint_error': row['checkpoint_error'],
+                  'deletion_error': session_lifecycle.deletion_error(run_id),
+                  'slack_mirroring': slack.chat.mirroring(run_id)}
+        return row, batch, status
+
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, request: Request, after: int = 0):
         security.require(request)
-        if not store.run(run_id):
+        if not await run_in_threadpool(store.run, run_id):
             raise HTTPException(404, "Task not found")
         try:
             last_id = int(request.headers.get("last-event-id", "0"))
@@ -913,18 +929,17 @@ def _create_app(settings, store):
         async def stream():
             cursor = max(after, last_id, 0)
             while not await request.is_disconnected():
-                row = store.run(run_id)
-                if not row or row['deleted_at']:
+                row, batch, status = await run_in_threadpool(read_event_batch, run_id, cursor)
+                if row is None:
                     yield "event: deleted\ndata: {}\n\n"
                     break
-                batch = store.events(run_id, cursor)
                 for event in batch:
                     cursor = event["id"]
                     yield f"id: {cursor}\ndata: {json.dumps(event)}\n\n"
-                if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
+                if not row["chat_enabled"] and row["status"] in TERMINAL and not status['active'] and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': response_status(row), 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'deletion_error': session_lifecycle.deletion_error(run_id), 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps(status)}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
