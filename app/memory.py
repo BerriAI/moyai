@@ -277,13 +277,12 @@ class Memory:
             score = len(terms & words)
             if score:
                 ranked.append((score, note['updated_at'], note))
-        selected, size = [], 0
+        selected = []
         for _, _, note in sorted(ranked, key=lambda item: (item[0], item[1], item[2]['id']), reverse=True):
-            # Bound the actual serialized payload, including provenance.
-            length = len(json.dumps(note, ensure_ascii=False))
-            if len(selected) < 5 and size + length <= MAX_CONTEXT:
+            # Match context() exactly: provenance, brackets and separators all
+            # count, so the receipt cannot promise notes the next call drops.
+            if len(selected) < 5 and len(json.dumps([*selected, note], ensure_ascii=False)) <= MAX_CONTEXT:
                 selected.append(note)
-                size += length
         with self.store.connect() as conn:
             conn.begin_write()
             conn.execute('DELETE FROM memory_selections WHERE run_id=?', (run['id'],))

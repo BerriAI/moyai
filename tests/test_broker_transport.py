@@ -585,7 +585,8 @@ def test_sealed_model_keeps_content_model_pin_usage_and_access_checks(workspace,
     guidance, *forwarded = received[0]['messages']
     assert guidance['role'] == 'system' and guidance['content'].startswith('MOYAI SKILLS FOR THE CURRENT REQUESTER.')
     assert json.loads(guidance['content'].split('\n', 1)[1]) == {
-        'turn_id': run['active_message_id'], 'matches': [], 'loaded': [], 'unavailable': []}
+        'turn_id': run['active_message_id'], 'available': [], 'omitted': 0,
+        'matches': [], 'loaded': [], 'unavailable': []}
     assert forwarded == payload['messages']
     assert received[0]['model'] == 'openai/gpt-6-astra'
     record = app.state.store.rows('SELECT * FROM model_requests')[0]

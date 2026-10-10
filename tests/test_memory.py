@@ -332,6 +332,45 @@ def test_retrieval_bounds_expiration_repository_and_new_session(workspace):
     assert MARKER not in app.state.memory.context(next_run)
 
 
+@pytest.mark.parametrize('overflow', [0, 1])
+@pytest.mark.parametrize('padding', ['x', '界', '"'])
+def test_search_receipt_matches_context_at_serialized_array_limit(workspace, overflow, padding):
+    app, client = workspace
+    sign_in(app, client)
+    for i in range(5):
+        assert create(client, key=f'boundary-{i}', request_id=f'boundary-save-{i}',
+            title='Boundary ' + 't'*110, content='boundary ' + 'x'*500).status_code == 201
+    notes = app.state.memory.listing('google:alice')
+    remaining = MAX_CONTEXT + overflow - len(json.dumps(notes, ensure_ascii=False))
+    assert remaining > 0
+    for i, note in enumerate(notes):
+        content = note['content']
+        cost = len(json.dumps(padding, ensure_ascii=False)) - 2
+        count = min(remaining // cost, 1200 - len(content))
+        content += padding * count
+        remaining -= count * cost
+        # Escaped characters cost two serialized characters; cover odd limits.
+        if remaining and len(content) < 1200:
+            content += 'x'
+            remaining -= 1
+        body = {k:note[k] for k in ('key','title','kind','repo_url','revision')}
+        assert client.put('/api/memory/'+note['id'], json={**body, 'content':content,
+            'request_id':f'boundary-edit-{i}'}).status_code == 200
+    assert remaining == 0
+    notes = app.state.memory.listing('google:alice')
+    assert len(json.dumps(notes, ensure_ascii=False)) == MAX_CONTEXT + overflow
+    # Both cases fit if only individual note sizes are summed (the old bug).
+    assert sum(len(json.dumps(note, ensure_ascii=False)) for note in notes) <= MAX_CONTEXT
+
+    run = active(app)
+    result = call(client, run, 'memory_search', query='boundary').json()
+    injected = json.loads(app.state.memory.context(run).split('\n', 1)[1])['notes']
+    expected = 4 if overflow else 5
+    assert result['loaded'] == len(result['matches']) == len(injected) == expected
+    assert {(n['id'], n['revision']) for n in result['matches']} == {(n['id'], n['revision']) for n in injected}
+    assert len(json.dumps(injected, ensure_ascii=False)) <= MAX_CONTEXT
+
+
 def test_restart_preserves_encrypted_notes_and_settings(workspace):
     app,client=workspace
     sign_in(app,client)
