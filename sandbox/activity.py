@@ -99,6 +99,17 @@ def tool_details(name, value):
     return trace_content(value, limit=8000)
 
 
+def formatted_details(name, value):
+    # Formatting is optional; never substitute the raw payload on failure.
+    # Keep durable event emission outside this boundary so persistence failures
+    # still surface instead of silently losing authoritative activity.
+    try:
+        details = tool_details(name, value)
+    except Exception:
+        return None, 'Details omitted because activity formatting failed.'
+    return details, 'Credential, memory and skill payloads are private.' if details is None else ''
+
+
 class ActivityReporter:
     def __init__(self, emit, *, tracing=False, omit_private_tool_payloads=False):
         self.emit = emit
@@ -111,9 +122,9 @@ class ActivityReporter:
 
     def start(self, call_id, name, args):
         data = tool_summary(name, args)
-        details = tool_details(data['tool'], args)
+        details, notice = formatted_details(data['tool'], args)
         if details is None:
-            data['details_notice'] = 'Credential, memory and skill payloads are private.'
+            data['details_notice'] = notice
         else:
             data['input'] = details
         if data['tool'] == 'view_image':
@@ -134,11 +145,11 @@ class ActivityReporter:
             started, data = self.starts.pop(str(call_id), (None, tool_summary(name, args)))
         phase, code = result_status(result)
         data = {**data, 'activity_version': 1, 'call_id': self.prefix + ':' + str(call_id), 'phase': phase}
-        details = tool_details(data['tool'], result)
+        details, notice = formatted_details(data['tool'], result)
         if details is not None:
             data['output'] = details
         else:
-            data['details_notice'] = 'Credential, memory and skill payloads are private.'
+            data['details_notice'] = notice
         if started is not None:
             data['duration_ms'] = round((time.monotonic() - started) * 1000)
         if code is not None:

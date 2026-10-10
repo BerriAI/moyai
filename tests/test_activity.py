@@ -10,6 +10,23 @@ from sandbox.activity import ActivityReporter, public_text, result_status
 from test_durable import durable, drive  # noqa: F401
 
 
+@pytest.mark.parametrize('kind', [{'type': 'string'}, ['string', 'null'], None])
+def test_schema_type_values_are_data_and_private_content_is_still_redacted(kind):
+    from sandbox.trace_content import trace_content
+    result = trace_content({'type': kind, 'password': 'private-schema-secret',
+                            'content': [{'type': 'reasoning', 'text': 'private-reasoning'}]})
+    assert 'private-schema-secret' not in result and 'private-reasoning' not in result
+    assert '[redacted]' in result
+
+
+def test_formatting_fallback_does_not_swallow_durable_emission_errors(monkeypatch):
+    def fail(*args):
+        raise OSError('persistence unavailable')
+    reporter = ActivityReporter(fail)
+    with pytest.raises(OSError, match='persistence unavailable'):
+        reporter.start('x', 'tool_search', {})
+
+
 def test_parallel_tools_pair_by_id_and_do_not_publish_private_bodies():
     events = []
     activity = ActivityReporter(lambda kind, message, data: events.append({'kind': kind, 'message': message, 'data': data}))
