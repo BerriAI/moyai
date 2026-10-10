@@ -25,6 +25,12 @@ A successful HTTP header followed by a stream failure is recorded as
 `response_status`, separate from an HTTP error status. It is response context,
 not the cause of the failure. Both Claude and Codex native categories are shown.
 
-These observations do not change retry eligibility, inference accounting or tool
-replay. Intermediate failures can remain in the durable event history after a
+Known terminal provider codes prevent automatic recovery even when a gateway
+returns a transient HTTP status. For example, `insufficient_quota` with HTTP 429
+stops, while `rate_limit_error` remains eligible for bounded recovery. Older
+saved markers are checked against the same rule. Unknown or absent codes keep
+the existing transport policy; malformed codes cannot authorize recovery.
+
+Inference accounting, retry limits and tool replay are unchanged.
+Intermediate failures can remain in the durable event history after a
 successful recovery; successful answers do not display them as terminal errors.

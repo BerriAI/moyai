@@ -1,8 +1,10 @@
 """Resume from public receipts, never by resending a failed HTTP operation."""
 try:
     from .context_store import ContextUnavailable
+    from .broker_failure import TERMINAL_ERROR_CODES
 except ImportError:
     from context_store import ContextUnavailable
+    from broker_failure import TERMINAL_ERROR_CODES
 
 
 MAX_TRANSPORT_ATTEMPTS = 3
@@ -10,6 +12,10 @@ MAX_TRANSPORT_ATTEMPTS = 3
 
 def retryable_failure(failure, *, live=False):
     return (isinstance(failure, dict) and failure.get('version') == 1
+            # Revalidate persisted markers too; an older transient flag cannot
+            # override a known terminal rejection. Absent codes remain compatible.
+            and isinstance(failure.get('error_code', 'unknown'), str)
+            and failure.get('error_code') not in TERMINAL_ERROR_CODES
             and failure.get('route') in {'/v1/messages', '/v1/responses', '/v1/chat/completions'}
             and failure.get('transient') is True
             and (failure.get('response_started') is False
