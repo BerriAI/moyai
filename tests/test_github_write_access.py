@@ -246,7 +246,7 @@ def test_session_api_and_discovery_schema(external):
     assert response.json()['pr_write_access'][0]['id'] == row['id']
     assert row['url'].endswith('/#run=' + rid)
     from app.github import TOOLS
-    from sandbox.github_tools import advertised_tools
+    from agent.tools.github_tools import advertised_tools
     schema = TOOLS[REQUEST][2].model_json_schema()
     exposed = advertised_tools([{'name': REQUEST, 'inputSchema': schema}])[0]
     assert exposed['inputSchema']['additionalProperties'] is False

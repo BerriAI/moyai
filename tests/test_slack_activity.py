@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.db import Store
 from app.slack_activity import SlackActivity
-from sandbox.activity import ActivityReporter
+from agent.activity import ActivityReporter
 from test_slack import event, signed, slack_app
 from test_slack_chat import ROOT, dm_event, finish, start
 

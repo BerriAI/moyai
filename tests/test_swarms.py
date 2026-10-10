@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import asyncio
 import json
 
 import pytest
@@ -262,6 +263,45 @@ async def test_deadline_between_install_and_launch_cancels_without_execution(dur
     assert manager.swarms.get(run_id)['status'] == 'expired'
     assert not cloud.launches
     assert cloud.terminations
+
+
+@pytest.mark.parametrize('held', ['context', 'provider'])
+async def test_deadline_during_overlapped_startup_cleans_acquired_workspace_without_launch(durable, monkeypatch, held):
+    manager, cloud, run_id = durable
+    enable(manager, run_id)
+    entered = {name: asyncio.Event() for name in ('context', 'provider')}
+    release = asyncio.Event()
+    create = cloud.create
+
+    async def context(identity):
+        entered['context'].set()
+        await entered['provider'].wait()
+        if held == 'context':
+            await release.wait()
+
+    async def provider(**kwargs):
+        entered['provider'].set()
+        await entered['context'].wait()
+        if held == 'provider':
+            await release.wait()
+        return await create(**kwargs)
+
+    manager.prepare_context = context
+    monkeypatch.setattr('app.durable_runner.modal.Sandbox.create.aio', provider)
+    await drive(manager, run_id, phase='provision')
+    task = asyncio.create_task(manager.advance(run_id))
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), 2)
+        assert not task.done() and not cloud.launches
+        expire(manager, run_id)
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 2)
+    await drive(manager, run_id)
+    assert manager.swarms.get(run_id)['status'] == 'expired'
+    assert manager.store.run(run_id)['status'] == 'cancelled'
+    assert len(cloud.machines) == 1 and not cloud.machines[0].alive
+    assert not cloud.launches
 
 
 async def test_deadline_while_waiting_for_children_cascades_stop_and_prevents_child_launch(durable):

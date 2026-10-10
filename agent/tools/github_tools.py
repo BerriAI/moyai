@@ -7,12 +7,8 @@ import stat
 import subprocess
 
 ROOT = Path('/workspace')
-try:
-    from .github_limits import MAX_FILE, MAX_TOTAL
-    from .access_transport import git_environment
-except ImportError:
-    from github_limits import MAX_FILE, MAX_TOTAL
-    from access_transport import git_environment
+from agent.tools.github_limits import MAX_FILE, MAX_TOTAL
+from sandbox.access_transport import git_environment
 
 
 class GitHubToolError(ValueError):

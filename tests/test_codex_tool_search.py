@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import httpx
 
-from sandbox.codex_harness import CodexAgent
-from sandbox.tool_guidance import tool_guidance
+from agent.harnesses.codex_harness import CodexAgent
+from agent.tools.tool_guidance import tool_guidance
 from test_codex_sdk_transport import background_gateway, send_response
 from test_workspace import workspace as broker_workspace  # noqa: F401
 
@@ -75,7 +75,7 @@ def search_case(tmp_path, monkeypatch, broker_workspace, progress=print, *, agen
     with background_gateway(tmp_path, monkeypatch, broker_workspace, 'codex', upstream, progress) as state:
         agent = agent_class(spec={'model': 'openai/gpt-6-astra', 'timeout': 30, 'max_iterations': 5},
             relay=state.relay, config={'mcp_servers': {'workspace': {'command': sys.executable,
-                'args': [str(Path(__file__).resolve().parents[1] / 'sandbox/mcp_bridge.py')],
+                'args': [str(Path(__file__).resolve().parents[1] / 'agent/tools/mcp_bridge.py')],
                 'env': {'WORKSPACE_BROKER_URL': state.relay.url, 'WORKSPACE_RUN_TOKEN': state.capability}}}},
             activity=SimpleNamespace(start=lambda *args: events.append(('start', args)),
                 complete=lambda *args: events.append(('complete', args)), commentary=progress),

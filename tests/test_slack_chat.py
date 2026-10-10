@@ -1728,7 +1728,7 @@ def test_answer_delivers_native_table_in_thread_with_session_link(slack_app):
 @pytest.mark.parametrize('direct', [False, True])
 def test_forwarded_only_messages_and_followups_keep_quoted_body(slack_app, monkeypatch, direct):
     from test_slack import forwarded_attachment
-    from sandbox.agent import conversation_prompt
+    from agent.agent import conversation_prompt
     app, client, submitted, sent = slack_app
     kwargs = {'type': 'message', 'channel_type': 'im', 'channel': 'D12345678'} if direct else {}
     payload = event(text='' if direct else '<@U99999999>', **kwargs,

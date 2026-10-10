@@ -2,6 +2,8 @@ import base64
 import asyncio
 import json
 from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import threading
 from unittest.mock import AsyncMock
@@ -12,6 +14,7 @@ from modal.exception import NotFoundError
 
 from app import captures
 from app.computer import BROWSER_PARTIAL_NOTICE, DesktopConnection
+from app.runtime_files import RUNTIME_COMMAND
 from sandbox import computer
 from test_workspace import workspace
 from storage_fixture import MemoryObjects
@@ -2023,3 +2026,20 @@ async def test_native_wake_starts_display_without_claim_or_browser_navigation(mo
     desktop.refresh_frame.assert_awaited_once()
     desktop.open.assert_not_awaited()
     assert result['controller'] == ''
+
+
+@pytest.mark.parametrize('packaged', [False, True])
+def test_computer_launcher_supports_active_flat_and_packaged_desktops(tmp_path, packaged):
+    runtime = tmp_path / 'workspace-runner'
+    runtime.mkdir()
+    (runtime / 'computer.py').write_text(
+        'import json, sys; print(json.dumps(["legacy", *sys.argv[1:]]))')
+    if packaged:
+        (runtime / 'sandbox').mkdir()
+        (runtime / 'sandbox/computer.py').write_text(
+            'import json, sys; print(json.dumps(["packaged", *sys.argv[1:]]))')
+    result = subprocess.run(
+        [sys.executable, '-I', '-c', RUNTIME_COMMAND, str(runtime), 'computer.py', 'bridge'],
+        check=True, capture_output=True, text=True, timeout=10,
+    )
+    assert json.loads(result.stdout) == ['packaged' if packaged else 'legacy', 'bridge']

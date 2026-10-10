@@ -1,10 +1,7 @@
 """Body-free SDK diagnostics; never publish exception text or native stderr."""
 import re
 
-try:
-    from .broker_failure import safe_id, safe_error, error_summary, CLAUDE_ERRORS, CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
-except ImportError:
-    from broker_failure import safe_id, safe_error, error_summary, CLAUDE_ERRORS, CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
+from sandbox.broker_failure import safe_id, safe_error, error_summary, CLAUDE_ERRORS, CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 
 
 def status(value):

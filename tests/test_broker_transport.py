@@ -13,11 +13,11 @@ import httpx
 import pytest
 
 from app.security import digest
-from sandbox.agent import conversation_prompt
+from agent.agent import conversation_prompt
 from sandbox.broker_relay import BrokerRelay, EDGE_ERROR
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, cipher, seal, unseal
-from sandbox.sdk_failure import codex_details
-from sandbox.transport_recovery import retryable_failure
+from agent.harnesses.sdk_failure import codex_details
+from agent.transport_recovery import retryable_failure
 from test_spend import active
 from test_workspace import workspace, cloud_capability, wait_for, recovery_catalog
 
@@ -30,7 +30,7 @@ Fix merged: https://github.com/BerriAI/litellm/pull/38416
 @pytest.mark.parametrize('sdk', ['codex', 'claude-agent-sdk'])
 def test_sdk_stream_failure_preserves_success_status_as_response_context(sdk):
     from types import SimpleNamespace
-    from sandbox.sdk_failure import failure_diagnostic, failure_summary
+    from agent.harnesses.sdk_failure import failure_diagnostic, failure_summary
     failure = {'http_status': 200, 'request_id': 'request-123'}
     agent = SimpleNamespace(journal=SimpleNamespace(pending={}),
                             context=SimpleNamespace(relay=SimpleNamespace(last_failure=failure)))

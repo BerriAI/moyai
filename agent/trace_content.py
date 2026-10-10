@@ -3,10 +3,7 @@ import json
 import os
 import re
 
-try:
-    from .activity import public_text
-except ImportError:
-    from activity import public_text
+from agent.activity import public_text
 
 PRIVATE_FIELDS = re.compile(r'(?i)(token|secret|password|authorization|api.?key|cookie|reasoning|thinking|instructions|system_prompt|^env$|^environment$)')
 

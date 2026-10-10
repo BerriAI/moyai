@@ -1,16 +1,20 @@
 """Real HTTP/Temporal/Postgres probe: keep native inference across an API restart.
 
 The upstream model is a local streaming fixture. No cloud sandbox, S3 payload or
-paid model call is made. API and broker are separate, unmodified server processes.
+paid model call is made. API and broker are separate server processes. The optional
+mixed-build rehearsal copies the source and adds a synthetic read-only API route;
+it proves this specific compatible change, not arbitrary cross-release safety.
 """
 import argparse
 import asyncio
 from contextlib import contextmanager, ExitStack, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import hashlib
 import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,7 +76,48 @@ def server(environment, role, directory):
                 stop(process)
 
 
-def probe(url, temporal_address, output, hold_seconds, replicated_api=False):
+def source_build(root):
+    digest = hashlib.sha256()
+    for directory in ('app', 'sandbox'):
+        for path in sorted((root / directory).rglob('*')):
+            if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc':
+                digest.update(str(path.relative_to(root)).encode() + b'\0' + path.read_bytes() + b'\0')
+    return digest.hexdigest()[:40]
+
+
+def candidate_builds(root, environment):
+    candidate = root / 'candidate-source'
+    for directory in ('app', 'sandbox'):
+        shutil.copytree(ROOT / directory, candidate / directory, ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    main = candidate / 'app/main.py'
+    main.write_text(main.read_text() + '''
+
+@app.get('/__probe__/api-release')
+async def api_release_probe():
+    return {'release': 'compatible-candidate'}
+''')
+    compatible = {**environment, 'PYTHONPATH': str(candidate), 'MOYAI_BUILD_SHA': source_build(candidate)}
+    incompatible = root / 'incompatible-source'
+    shutil.copytree(candidate, incompatible)
+    contract = incompatible / 'app/runtime_compatibility.py'
+    source = contract.read_text()
+    from app.runtime_compatibility import API_PROTOCOL_REVISION
+    contract.write_text(source.replace(f'API_PROTOCOL_REVISION = {API_PROTOCOL_REVISION}',
+                                       f'API_PROTOCOL_REVISION = {API_PROTOCOL_REVISION + 1}'))
+    rejected = {**environment, 'PYTHONPATH': str(incompatible), 'MOYAI_BUILD_SHA': source_build(incompatible)}
+    return compatible, rejected
+
+
+def reject_incompatible(environment, directory):
+    directory.mkdir()
+    result = subprocess.run([sys.executable, '-m', 'uvicorn', 'app.main:app', '--port', '0'],
+        cwd=directory, env={**environment, 'MOYAI_RUNTIME_ROLE': 'api', 'DATA_DIR': str(directory)},
+        capture_output=True, text=True, timeout=15)
+    assert result.returncode != 0 and 'API requires a compatible protocol' in result.stderr, 'Incompatible API did not fail closed.'
+
+
+def probe(url, temporal_address, output, hold_seconds, replicated_api=False, mixed_build_api=False):
+    replicated_api = replicated_api or mixed_build_api
     started, events = time.monotonic(), []
 
     def record(message):
@@ -134,6 +179,13 @@ def probe(url, temporal_address, output, hold_seconds, replicated_api=False):
                 'LITELLM_API_KEY': 'synthetic-local-key',
             }
             record('START  Real PostgreSQL, Temporal, API and broker processes; local model fixture.')
+            candidate_environment, rejected_environment = environment, None
+            if mixed_build_api:
+                environment['MOYAI_BUILD_SHA'] = source_build(ROOT)
+                # Set verify before copying environments for both candidates.
+                environment['MOYAI_SCHEMA_MODE'] = 'verify'
+                candidate_environment, rejected_environment = candidate_builds(root, environment)
+                record('BUILD  Candidate adds a read-only fixture route; source build IDs differ.')
             with ExitStack() as lifetime:
                 coordinator_process = None
                 if replicated_api:
@@ -212,13 +264,20 @@ def probe(url, temporal_address, output, hold_seconds, replicated_api=False):
                                 assert api.get('/api/session').json()['authenticated']
                                 traffic = threading.Thread(target=requests_during_handoff, daemon=True)
                                 traffic.start()
-                                replacement_process, replacement = lifetime.enter_context(server(environment, 'api', root / 'replica'))
+                                replacement_process, replacement = lifetime.enter_context(server(candidate_environment, 'api', root / 'replica'))
                                 replacement.cookies.update(api.cookies)
                                 assert replacement.get('/api/runs/' + run['id']).json()['id'] == run['id']
                                 assert api.get('/health').status_code == replacement.get('/health').status_code == 200
                                 assert replacement.post('/hooks/slack/events', json={}).status_code == 503
                                 assert coordinator_process.poll() is None
                                 record('READY  Two API replicas serve the same signed session; coordinator stays alive.')
+                                if mixed_build_api:
+                                    assert api.get('/__probe__/api-release').status_code == 404
+                                    assert replacement.get('/__probe__/api-release').json() == {'release': 'compatible-candidate'}
+                                    assert environment['MOYAI_BUILD_SHA'] != candidate_environment['MOYAI_BUILD_SHA']
+                                    record('CHECK  Old API: fixture route 404. New API: compatible-candidate 200.')
+                                    reject_incompatible(rejected_environment, root / 'rejected')
+                                    record('REJECT Incompatible protocol exits before readiness; live inference stays pending.')
                                 selected_api[0] = str(replacement.base_url).rstrip('/')
                                 record('ROUTE  New HTTP requests now go to the ready replacement API.')
                             stop(api_process)
@@ -254,7 +313,12 @@ def probe(url, temporal_address, output, hold_seconds, replicated_api=False):
                                     'native_stream_preserved': True, 'provider_calls': 1,
                                     'capacity_enforced_during_restart': True, 'request_status': 'completed',
                                     'real_postgres': True, 'real_temporal': True, 'upstream': 'local_fixture',
-                                    'same_build': True, 'production_changed': False,
+                                    'same_build': not mixed_build_api, 'production_changed': False,
+                                    'mixed_build_api': mixed_build_api,
+                                    'baseline_build': environment['MOYAI_BUILD_SHA'],
+                                    'candidate_build': candidate_environment['MOYAI_BUILD_SHA'],
+                                    'incompatible_protocol_rejected': mixed_build_api,
+                                    'source_change': 'synthetic_read_only_route' if mixed_build_api else 'none',
                                     'api_replicas_overlapped': replicated_api,
                                     'coordinator_pid_unchanged': bool(coordinator_process and coordinator_process.poll() is None),
                                     'http_reads': len(traffic_samples), 'http_errors': traffic_failures,
@@ -279,7 +343,8 @@ def probe(url, temporal_address, output, hold_seconds, replicated_api=False):
             (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
             header = {'version': 2, 'width': 112, 'height': 18, 'timestamp': int(time.time()),
                       'title': 'Moyai: real broker continuity across an API restart'}
-            (output / ('api-overlap.cast' if replicated_api else 'broker-restart.cast')).write_text('\n'.join(json.dumps(e) for e in [header, *events]) + '\n')
+            name = 'mixed-build-api.cast' if mixed_build_api else ('api-overlap.cast' if replicated_api else 'broker-restart.cast')
+            (output / name).write_text('\n'.join(json.dumps(e) for e in [header, *events]) + '\n')
     return report
 
 
@@ -289,6 +354,8 @@ async def main():
     parser.add_argument('--hold-seconds', type=float, default=0)
     parser.add_argument('--replicated-api', action='store_true',
         help='Migrate the fixture schema and overlap two API replicas under a separate coordinator.')
+    parser.add_argument('--mixed-build-api', action='store_true',
+        help='Overlap source builds differing by a fixture API route, then reject an incompatible protocol.')
     args = parser.parse_args()
     url = os.environ.get('MOYAI_TEST_POSTGRES_URL')
     if not url:
@@ -297,7 +364,7 @@ async def main():
         parser.error('Use --hold-seconds between 0 and 10.')
     async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as temporal:
         await asyncio.to_thread(probe, url, temporal.client.service_client.config.target_host,
-                                args.output, args.hold_seconds, args.replicated_api)
+                                args.output, args.hold_seconds, args.replicated_api, args.mixed_build_api)
 
 
 if __name__ == '__main__':

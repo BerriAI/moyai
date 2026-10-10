@@ -17,14 +17,14 @@ try:
     from .broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from .access_transport import broker_headers, open_broker
     from .broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
-    from .transport_recovery import retryable_failure
     from .startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
 except ImportError:  # Loaded by the sandbox script, outside a Python package.
     from broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
     from access_transport import broker_headers, open_broker
     from broker_failure import MODEL_ROUTES, TRANSIENT_STATUSES, failure
-    from transport_recovery import retryable_failure
     from startup import StartupUnavailable, read_with_reconnect, _read_with_reconnect, REPOSITORY_METADATA_BUDGET
+
+from agent.transport_recovery import retryable_failure
 
 EDGE_ERROR = ('Moyai could not reach the model because the cloud connection rejected the request. '
               'Your conversation and files are saved. An administrator needs to repair the connection; '

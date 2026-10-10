@@ -155,7 +155,7 @@ if __name__ == '__main__':
     operation, directory = sys.argv[1], Path(sys.argv[2])
     if operation == 'run':
         spec = json.loads(Path(sys.argv[3]).read_text())
-        supervise(directory, ['/opt/hermes-env/bin/python', '/opt/workspace-runner/agent.py', sys.argv[3]],
+        supervise(directory, ['/opt/hermes-env/bin/python', '/opt/workspace-runner/sandbox/agent.py', sys.argv[3]],
                   deadline_at=spec.get('deadline_at'))
     elif operation == 'start':
         start(directory, sys.argv[3])

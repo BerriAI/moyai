@@ -7,7 +7,7 @@ from threading import Thread
 
 import pytest
 
-from sandbox import github_tools as local
+from agent.tools import github_tools as local
 
 
 def git(directory, *args):

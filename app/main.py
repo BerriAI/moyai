@@ -49,7 +49,7 @@ from .session_folders import SessionFolders
 from .session_lifecycle import SessionLifecycle
 from .session_metadata import is_session_id_request
 from .session_pull_requests import SessionPullRequests
-from sandbox.memory_history import scrub_memory_history
+from agent.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
 from .lens_feedback import FeedbackNotConfigured, LensFeedback

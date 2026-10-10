@@ -1,8 +1,5 @@
 """Resume from public receipts, never by resending a failed HTTP operation."""
-try:
-    from .context_store import ContextUnavailable
-except ImportError:
-    from context_store import ContextUnavailable
+from agent.context_store import ContextUnavailable
 
 
 MAX_TRANSPORT_ATTEMPTS = 3

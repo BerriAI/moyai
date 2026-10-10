@@ -4,6 +4,8 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,3 +97,35 @@ def test_expired_agent_does_not_start_broker_or_native_runtime(monkeypatch):
     monkeypatch.setattr(agent, 'emit', lambda *a, **k: events.append((a, k)))
     assert agent.run({'deadline_at': time.time() - 1, 'timeout': 100}) == 124
     assert events[0][1] == {'completed': False}
+
+
+@pytest.mark.parametrize('prepared_at', [108, 111])
+def test_workspace_launcher_rechecks_deadline_before_agent_package(monkeypatch, tmp_path, prepared_at):
+    from sandbox import durable_process
+
+    locations = {path: tmp_path / path.removeprefix('/') for path in ('/workspace', '/session', '/artifacts')}
+    monkeypatch.setattr(agent, 'Path', lambda path: locations.get(str(path), Path(path)))
+    monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'test-capability')
+    monkeypatch.setattr(agent.os, 'chdir', lambda path: None)
+    monkeypatch.setattr(agent, 'prepare_attachments', lambda *args, **kwargs: None)
+    clock = [100]
+    monkeypatch.setattr(durable_process.time, 'time', lambda: clock[0])
+    monkeypatch.setattr(agent, 'prepare_project', lambda *args: clock.__setitem__(0, prepared_at))
+    monkeypatch.setattr(agent, 'computer_request', lambda *args, **kwargs: {})
+    monkeypatch.setattr(agent, 'collect_archive', lambda *args: None)
+    captured = []
+
+    def run_conversation(spec, **kwargs):
+        captured.append(spec)
+        return {'exit_code': 0}
+
+    monkeypatch.setattr(agent, 'run_conversation', run_conversation)
+    spec = {'repo_url': '', 'harness': 'codex', 'model': 'test-model', 'timeout': 60, 'deadline_at': 110}
+    relay = SimpleNamespace(url='http://broker')
+    if prepared_at >= spec['deadline_at']:
+        with pytest.raises(DeadlineExpired):
+            agent._run_agent(spec, relay)
+        assert not captured
+    else:
+        assert agent._run_agent(spec, relay) == 0
+        assert captured[0]['timeout'] == 2

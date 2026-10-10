@@ -3,7 +3,7 @@ import json
 
 from fastapi import HTTPException
 
-from sandbox.context_store import SUMMARY_BYTES, BATCH_BYTES, BATCH_ROWS
+from agent.context_store import SUMMARY_BYTES, BATCH_BYTES, BATCH_ROWS
 from sandbox.broker_transport import MAX_BODY
 
 
