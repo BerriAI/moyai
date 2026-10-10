@@ -6,7 +6,7 @@
     "dev": "vite build --watch",
     "preview": "node scripts/settings_ui_preview.cjs",
     "test": "node --test tests/*.cjs",
-    "test:ui": "node --test tests/browser/shadcn_ui.cjs tests/browser/navigation_loading.cjs",
+    "test:ui": "node --test tests/browser/shadcn_ui.cjs tests/browser/navigation_loading.cjs tests/browser/message_history.cjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
