@@ -6,13 +6,29 @@ actions and failed turns require explicit human intervention, never replay.
 from datetime import datetime, timedelta
 import hashlib
 import json
+import random
 import time
+from uuid import uuid4
 
 from .db import database, now
 
 MAX_ROUNDS = 25
 ROUND_DELAY_SECONDS = 30
 MAX_CONTINUATION_CHARACTERS = 16000
+INITIAL_TEAM_SIZE = 10
+INITIAL_TEAM_KEY = 'host-swarm-initial-team'
+INITIAL_ROLES = (
+    ('Mission analyst', 'Clarify the desired outcome, constraints, and acceptance criteria.'),
+    ('Explorer', 'Develop a promising approach and explain why it fits the task.'),
+    ('Alternative thinker', 'Develop a meaningfully different approach and compare its tradeoffs.'),
+    ('Researcher', 'Identify evidence available through the enabled tools; separate findings from assumptions.'),
+    ('Systems thinker', 'Examine how the proposed parts work together and identify dependencies.'),
+    ('Practical planner', 'Produce concrete next steps and the smallest useful deliverable.'),
+    ('Critic', 'Challenge assumptions and identify the strongest reasons the approach may fail.'),
+    ('Verifier', 'Define checks that would distinguish a correct answer from a plausible one.'),
+    ('Risk reviewer', 'Identify meaningful risks, missing context, and decisions needing human input.'),
+    ('Editor', 'Offer a concise, user-facing answer and identify what deserves emphasis.'),
+)
 
 
 def continuation_message(number, original, latest_direction=None):
@@ -96,6 +112,112 @@ class SwarmMissions:
         rows = self.store.rows('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,))
         return rows[0] if rows else None
 
+    def initial_runtimes(self, model):
+        """Randomize a balanced roster once; persisted rows pin it on retries."""
+        from .harnesses import choices
+        settings = self.manager.settings
+        if settings.max_parallel_agents < INITIAL_TEAM_SIZE:
+            raise ValueError('Swarm mode needs a worker-group limit of at least 10. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
+        selected = [item.strip() for item in settings.swarm_models.split(',') if item.strip()] or [model]
+        # Never draw from the broad display catalog implicitly. Administrators
+        # explicitly opt models into automatic work; otherwise inherit the
+        # already selected coordinator model.
+        models = list(dict.fromkeys(settings.resolve_model(value) for value in selected))
+        catalog = []
+        for harness in choices():
+            supported = []
+            for candidate in models:
+                try:
+                    supported.append(settings.harness_model(harness['id'], candidate))
+                except ValueError:
+                    continue
+            if supported:
+                provider = {'codex': 'openai/', 'claude-agent-sdk': 'anthropic/'}.get(harness['id'])
+                preferred = [candidate for candidate in supported if provider and candidate.startswith(provider)]
+                catalog.append((harness['id'], preferred or supported))
+        if not catalog:
+            raise ValueError('No configured model can run the swarm. Check SWARM_MODELS and the selected model.')
+        rng = random.SystemRandom()
+        rng.shuffle(catalog)
+        return [{'id': uuid4().hex, 'harness': catalog[index % len(catalog)][0],
+                 'model': rng.choice(catalog[index % len(catalog)][1])}
+                for index in range(INITIAL_TEAM_SIZE)]
+
+    def bootstrap_in(self, conn, run_id, message_id, stamp):
+        """Commit real child sessions and their dispatch wakes with the mission.
+
+        These agents start from the original task, rather than a coordinator
+        snapshot. Each gets its own scoped copy of the initial uploads. Runtime
+        concurrency still belongs to normal admission, including queueing.
+        """
+        existing = conn.execute('SELECT id FROM agent_groups WHERE parent_id=? AND request_key=?',
+                                (run_id, INITIAL_TEAM_KEY)).fetchone()
+        if existing:
+            return existing['id']
+        mission = execution_policy(self.store, run_id, connection=conn)
+        if not mission or mission['status'] != 'active' or remaining_seconds(mission) <= 0:
+            raise ValueError('This swarm is not active or its time budget has ended. No new workers can start.')
+        run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+        runtimes = self.initial_runtimes(run['model'])
+        pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
+        if pending + INITIAL_TEAM_SIZE > self.manager.settings.max_pending_runs:
+            raise ValueError('The session queue needs room for all 10 swarm workers. Wait for a task to finish.')
+        uploads = conn.execute('SELECT * FROM attachments WHERE message_id=?', (message_id,)).fetchall()
+        if uploads:
+            cutoff = (datetime.fromisoformat(stamp) - timedelta(days=1)).isoformat()
+            used = conn.execute("SELECT COALESCE(SUM(size + CASE WHEN preview_ref!='' THEN preview_size ELSE length(preview) END),0) FROM attachments WHERE message_id IS NOT NULL OR created_at>=?", (cutoff,)).fetchone()[0]
+            copies = INITIAL_TEAM_SIZE * sum(upload['size'] + (upload['preview_size'] if upload['preview_ref'] else len(upload['preview'])) for upload in uploads)
+            if used + copies > self.manager.settings.attachment_storage_limit_mb * 1024 * 1024:
+                raise ValueError('Attachment storage needs room for the 10 swarm workers. Use smaller files or raise the workspace storage limit.')
+        group_id = uuid4().hex
+        conn.execute('''INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at,runtime_assignments)
+            VALUES(?,?,?,?,?,'running',?,?)''',
+            (group_id, run_id, message_id, INITIAL_TEAM_KEY,
+             json.dumps({'host_bootstrap': True, 'source_message_id': message_id}), stamp, json.dumps(runtimes)))
+        for (label, assignment), runtime in zip(INITIAL_ROLES, runtimes, strict=True):
+            prompt = ('You are one member of a 10-agent team working on the same user task. '
+                      f'Your perspective: {label}. {assignment}\n'
+                      'Adapt this perspective to the actual task; simple questions need short, direct answers. '
+                      'Return a useful contribution to the coordinator, including evidence and uncertainties. '
+                      'Do not launch additional agents or duplicate external actions. Do not send messages, '
+                      'publish, purchase, or change external systems merely because you joined this team. '
+                      'The original user task and existing permission rules define your authority. '
+                      'Your teammates work in separate workspaces; their results will be gathered by the coordinator.\n\n'
+                      'ORIGINAL USER TASK:\n' + run['prompt'])
+            child_id = runtime['id']
+            conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,chat_enabled,
+                model,active_model,owner_id,active_user_id,parent_run_id,agent_group_id,agent_label,
+                environment_id,environment_build_id,harness,github_repository_id,sandbox_provider)
+                VALUES(?,?,?,'modal','queued',?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (child_id, prompt, run['repo_url'], run['plugins'], stamp, stamp,
+                 runtime['model'], runtime['model'], run['owner_id'], run['owner_id'], run_id, group_id, label,
+                 run['environment_id'], run['environment_build_id'], runtime['harness'], run['github_repository_id'], run['sandbox_provider']))
+            if run['side_chat_context']:
+                conn.execute('UPDATE runs SET side_chat_context=? WHERE id=?', (run['side_chat_context'], child_id))
+            child_message = conn.execute("""INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id)
+                VALUES(?,'user',?,'queued','initial',?,?,?) RETURNING id""",
+                (child_id, prompt, stamp, runtime['model'], run['owner_id'])).fetchone()[0]
+            # Independent rows keep the existing run-scoped attachment broker
+            # authorization. Object-store references are shared immutably; no
+            # parent attachment access is granted to an arbitrary child.
+            for upload in uploads:
+                copy = dict(upload) | {'id': uuid4().hex, 'message_id': child_message}
+                columns = list(copy)
+                conn.execute('INSERT INTO attachments(' + ','.join(columns) + ') VALUES(' + ','.join('?' for _ in columns) + ')',
+                             tuple(copy[column] for column in columns))
+            self.manager.submit_in(conn, {'id': child_id})
+        conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'agents',?,?,?)",
+                     (run_id, 'Queued 10 agents across configured harnesses. Workers start as capacity becomes available.',
+                      json.dumps({'group_id': group_id, 'phase': 'swarm_team_queued', 'workers': INITIAL_TEAM_SIZE}), stamp))
+        return group_id
+
+    def initial_group(self, run_id, message_id=None):
+        rows = self.store.rows('SELECT id,message_id,status FROM agent_groups WHERE parent_id=? AND request_key=?',
+                               (run_id, INITIAL_TEAM_KEY))
+        if not rows or (message_id is not None and rows[0]['message_id'] != message_id):
+            return None
+        return rows[0]
+
     def change_status(self, run_id, status, reason, *, allowed=('active',)):
         with self.store.connect(write_scope=run_id) as conn:
             conn.begin_write()
@@ -132,13 +254,14 @@ class SwarmMissions:
             return ''
         from .harnesses import choices
         settings = self.manager.settings
-        configured = settings.model_choices()
+        run = self.store.run(run_id)
+        configured = [item.strip() for item in settings.swarm_models.split(',') if item.strip()] or [run['model']]
         catalog = []
         for harness in choices():
             models = []
             for model in configured:
                 try:
-                    selected = settings.harness_model(harness['id'], model['id'])
+                    selected = settings.harness_model(harness['id'], model)
                 except ValueError:
                     continue
                 if selected not in models:
@@ -147,7 +270,9 @@ class SwarmMissions:
                 catalog.append({'harness': harness['id'], 'models': models})
         return (f'\n\nSWARM MODE — HOST POLICY (round {mission["round"]}/{MAX_ROUNDS}; '
                 f'absolute deadline {mission["ends_at"]}):\n'
-                'Work collaboratively on the user’s mission. Use agents_fanout to launch a small team '
+                'Work collaboratively on the user’s mission. For new swarms the host already queued '
+                'an initial team of 10 real workers. Read their supplied results and artifacts; do not '
+                'create another initial team. Use agents_fanout only for necessary follow-up work '
                 'with genuinely independent, complementary assignments, then gather actual results and '
                 'synthesize a useful update. Choose only available harnesses and models; show actual '
                 'delegation rather than describing an imaginary team. The host will schedule another '
@@ -158,7 +283,7 @@ class SwarmMissions:
                 'and blockers. Never retry ambiguous external actions without verification. Existing '
                 'permissions and approval requirements still apply.\n'
                 f'Configured maximum workers per group: {settings.max_parallel_agents}. '
-                'Prefer a small team of two or three complementary workers. '
+                'Keep follow-up work bounded and avoid duplicate assignments. '
                 'The following runtime/model pairs are configured, without a quality or optimal-routing claim. '
                 'Use their exact IDs in agents_fanout tasks when a different runtime is helpful; '
                 'omit selectors to inherit the coordinator’s runtime.\n' + json.dumps(catalog))

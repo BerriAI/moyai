@@ -530,7 +530,7 @@ class Store:
             row['swarm'] = public_mission(mission[0])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None):
         if swarm_budget_seconds is not None and (not chat_enabled or mode != 'modal' or metadata_request or not durable_submit):
             raise ValueError('Swarm mode requires a durable cloud chat session.')
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
@@ -590,6 +590,8 @@ class Store:
             if swarm_budget_seconds is not None:
                 from .swarms import create_in
                 create_in(conn, run_id, swarm_budget_seconds, stamp)
+                if swarm_bootstrap:
+                    swarm_bootstrap(conn, run_id, message_id, stamp)
                 durable_submit(conn, {'id': run_id})
         if not metadata_request:
             self.event(run_id, "status", "Task queued")

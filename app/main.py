@@ -719,7 +719,8 @@ def _create_app(settings, store):
             run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
                                    swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
-                                   durable_submit=manager.submit_in if body.swarm else None)
+                                   durable_submit=manager.submit_in if body.swarm else None,
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()

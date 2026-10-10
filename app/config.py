@@ -223,6 +223,7 @@ class Settings(BaseSettings):
     max_concurrent_runs: int = Field(default=100, ge=1)
     max_pending_runs: int = Field(default=1000, ge=100)
     max_parallel_agents: int = Field(default=100, ge=1, le=100)
+    swarm_models: str = ''
     # Bound response buffers on the web worker independently of sandbox count.
     max_concurrent_model_requests: int = Field(default=8, ge=1)
     # Zero means no overall response deadline or iteration cap.

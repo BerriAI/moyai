@@ -368,6 +368,14 @@ class DurableRunner(RunManager):
             return False
         state = {'version': 1, 'phase': 'prepare', 'message_id': message['id'], 'segment': 0,
                  'snapshot_id': row['snapshot_id'], 'sandbox_id': '', 'cursor': 0, 'turn_started': time.time()}
+        initial_group = self.swarms.initial_group(run_id, message['id']) if self.coordinator else None
+        if initial_group and initial_group['status'] == 'running':
+            # The initial team was committed with the mission. Wait without
+            # acquiring a sandbox or asking a model to invent the same team.
+            state.update(phase='waiting_children', wait_group=initial_group['id'], context_pending=True)
+            self.save(run_id, state)
+            self.store.update_run(run_id, status='waiting_children')
+            return True
         if warm and warm.get('sandbox_id'):
             state.update(sandbox_id=warm['sandbox_id'], machine_started=warm['machine_started'], reused_machine=True)
             self.store.event(run_id, 'status', 'Reusing the saved session sandbox for this response.')

@@ -12,7 +12,7 @@ from app.main import NewRun, create_app, public_messages
 from app.swarms import create_in, execution_policy, MAX_ROUNDS
 from app.temporal_runtime import TemporalRunManager
 from test_durable import durable, drive
-from test_agents import launch, pause_parent
+from test_agents import attach, launch, pause_parent
 
 
 def enable(manager, run_id, seconds=300):
@@ -53,6 +53,183 @@ def test_create_commits_mission_initial_input_and_outbox_atomically_and_idempote
         store.create_run('Rollback this mission', '', 'modal', [], **{**options, 'client_id': 'another-request', 'durable_submit': broken_dispatch})
     assert len(store.rows('SELECT id FROM runs')) == count
     assert len(store.rows('SELECT run_id FROM swarm_missions')) == 1
+
+
+def bootstrap(manager, *, client_id='ten-agent-mission', attachment_ids=None):
+    attach(manager)
+    return manager.store.create_run('Compare options and deliver a recommendation. Preserve this final constraint.',
+        '', 'modal', [], chat_enabled=True, model='anthropic/claude-opus-5-5', user_id='user:swarm',
+        client_id=client_id, swarm_budget_seconds=300, attachment_ids=attachment_ids,
+        durable_submit=manager.submit_in, swarm_bootstrap=manager.swarms.bootstrap_in)
+
+
+def test_initial_team_commits_ten_native_workers_with_pinned_diverse_runtimes(durable):
+    manager, cloud, _ = durable
+    manager.settings.swarm_models = 'anthropic/claude-opus-5-5,openai/gpt-6.1-sol'
+    run = bootstrap(manager)
+    children = manager.store.rows('SELECT * FROM runs WHERE parent_run_id=?', (run['id'],))
+    assert len(children) == 10 and len({child['agent_label'] for child in children}) == 10
+    assert {child['harness'] for child in children} == {
+        'codex', 'claude-agent-sdk', 'hermes', 'opencode', 'deepagents', 'tool-loop', 'pi'}
+    counts = [sum(child['harness'] == harness for child in children) for harness in {child['harness'] for child in children}]
+    assert max(counts) - min(counts) <= 1
+    for child in children:
+        assert child['status'] == 'queued'
+        assert child['model'] in {'anthropic/claude-opus-5-5', 'openai/gpt-6.1-sol'}
+        if child['harness'] == 'codex':
+            assert child['model'] == 'openai/gpt-6.1-sol'
+        if child['harness'] == 'claude-agent-sdk':
+            assert child['model'] == 'anthropic/claude-opus-5-5'
+        assert child['owner_id'] == child['active_user_id'] == 'user:swarm'
+        assert child['prompt'].endswith(run['prompt'])
+        assert manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (child['id'],))[0]['revision'] == 1
+        assert execution_policy(manager.store, child['id'])['ends_at'] == run['swarm']['ends_at']
+    assert not cloud.machines and not cloud.launches
+    group = manager.swarms.initial_group(run['id'])
+    assert manager.coordinator.results(run['id'], group['id'])['total'] == 10
+    pinned = {child['id']: (child['harness'], child['model']) for child in children}
+    again = bootstrap(manager)
+    assert again['id'] == run['id']
+    assert {child['id']: (child['harness'], child['model']) for child in manager.coordinator.children(group['id'])} == pinned
+    assert len(manager.store.rows('SELECT id FROM agent_groups WHERE parent_id=?', (run['id'],))) == 1
+
+
+def test_initial_team_uses_only_selected_model_without_automatic_allowlist(durable):
+    manager, _, _ = durable
+    run = bootstrap(manager)
+    assert {child['model'] for child in manager.coordinator.children(manager.swarms.initial_group(run['id'])['id'])} == {run['model']}
+
+
+@pytest.mark.parametrize('failure', ['group_limit', 'queue_limit', 'unknown_model', 'dispatch'])
+def test_initial_team_failure_rolls_back_mission_children_and_dispatch(durable, monkeypatch, failure):
+    manager, _, _ = durable
+    attach(manager)
+    before = {table: len(manager.store.rows('SELECT * FROM ' + table))
+              for table in ('runs', 'messages', 'agent_groups', 'swarm_missions', 'durable_sessions')}
+    if failure == 'group_limit':
+        manager.settings.max_parallel_agents = 3
+    elif failure == 'queue_limit':
+        manager.settings.max_pending_runs = 10
+    elif failure == 'unknown_model':
+        manager.settings.swarm_models = 'disabled-model'
+    else:
+        original = manager.submit_in
+        def dispatch(conn, run):
+            original(conn, run)
+            raise ValueError('Simulated dispatch failure after child creation')
+        monkeypatch.setattr(manager, 'submit_in', dispatch)
+    with pytest.raises(ValueError):
+        bootstrap(manager)
+    assert {table: len(manager.store.rows('SELECT * FROM ' + table)) for table in before} == before
+
+
+async def test_initial_team_queues_under_capacity_then_resumes_coordinator_with_real_results(durable):
+    manager, cloud, _ = durable
+    manager.settings.max_concurrent_runs = 1
+    cloud.saving_before_answer = False
+    run = bootstrap(manager)
+    root = run['id']
+    await drive(manager, root, phase='waiting_children')
+    assert not cloud.machines
+    group = manager.swarms.initial_group(root)
+    children = manager.coordinator.children(group['id'])
+    # The waiting coordinator owns no execution slot. A second child queues
+    # while the first runs; completing one releases the single available slot.
+    await drive(manager, children[0]['id'], phase='monitor')
+    assert await manager.advance(children[1]['id']) == 'capacity'
+    assert len(cloud.machines) == 1
+    for child in children:
+        await drive(manager, child['id'])
+        assert not any(machine.alive for machine in cloud.machines)
+    assert len(cloud.launches) == 10
+    # Worker replacement retains the initial waiting state and pinned roster.
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    attach(replacement)
+    await drive(replacement, root, phase='launch')
+    spec = cloud.machines[-1].spec
+    assert spec['prompt'].startswith(run['prompt'])
+    assert spec['agent_results']['total'] == spec['agent_results']['completed'] == 10
+    assert all(child['summary'] == 'Saved answer' for child in spec['agent_results']['children'])
+    assert len(cloud.launches) == 10  # Coordinator has not called a model yet.
+    await drive(replacement, root)
+    assert len(cloud.launches) == 11
+    assert len(replacement.coordinator.children(group['id'])) == 10
+
+
+@pytest.mark.parametrize('control', ['pause', 'stop', 'expire'])
+async def test_initial_team_cannot_start_after_mission_is_inactive(durable, control):
+    manager, cloud, _ = durable
+    run = bootstrap(manager)
+    root = run['id']
+    children = manager.coordinator.children(manager.swarms.initial_group(root)['id'])
+    if control == 'pause':
+        await manager.swarms.pause(root)
+    elif control == 'stop':
+        await manager.cancel(root)
+    else:
+        expire(manager, root)
+    for child in children:
+        await manager.advance(child['id'])
+    assert not cloud.machines and not cloud.launches
+    assert all(manager.store.run(child['id'])['status'] == 'cancelled' for child in children)
+
+
+def test_initial_uploads_are_copied_into_each_child_attachment_scope(durable):
+    from app.attachments import inspect_file
+    from fastapi import HTTPException
+    manager, _, unrelated = durable
+    upload = manager.store.attachments.save('initial-swarm-upload', 'user:swarm', 'context.txt', b'Important source',
+                                           inspect_file(b'Important source'), 1024 * 1024)
+    run = bootstrap(manager, attachment_ids=[upload['id']])
+    group = manager.swarms.initial_group(run['id'])
+    ids = set()
+    for child in manager.coordinator.children(group['id']):
+        initial = manager.store.messages(child['id'])[0]
+        manager.store.claim_message(child['id'])
+        copied = manager.store.attachments.for_run(child['id'], initial['id'])
+        assert len(copied) == 1 and copied[0]['id'] != upload['id']
+        ids.add(copied[0]['id'])
+        row = manager.store.attachments.broker_row(manager.store.run(child['id']), copied[0]['id'])
+        assert manager.store.attachments.payload(row) == b'Important source'
+        with pytest.raises(HTTPException):
+            manager.store.attachments.broker_row(manager.store.run(unrelated), copied[0]['id'])
+    assert len(ids) == 10
+    assert manager.store.messages(run['id'])[0]['attachments'][0]['id'] == upload['id']
+
+
+def test_initial_upload_copies_respect_storage_limit_and_rollback_binding(durable):
+    from app.attachments import inspect_file
+    manager, _, _ = durable
+    attach(manager)
+    manager.settings.attachment_storage_limit_mb = 1
+    raw = b'x' * (100 * 1024)
+    upload = manager.store.attachments.save('quota-swarm-upload', 'user:swarm', 'context.txt', raw,
+                                           inspect_file(raw), 1024 * 1024)
+    with pytest.raises(ValueError, match='storage needs room'):
+        bootstrap(manager, attachment_ids=[upload['id']])
+    assert manager.store.rows('SELECT message_id FROM attachments WHERE id=?', (upload['id'],))[0]['message_id'] is None
+    assert not manager.store.rows('SELECT * FROM swarm_missions')
+    assert not manager.store.rows('SELECT * FROM agent_groups')
+
+
+def test_api_new_swarm_returns_ten_persisted_children_and_retry_keeps_same_team(tmp_path):
+    from test_spend import sign_in
+    settings = Settings(_env_file=None, data_dir=tmp_path, public_url='https://workspace.test', workspace_password='test-workspace-password',
+                        temporal_enabled=True, session_secret='stable-test-key', modal_token_id='fixture-token',
+                        modal_token_secret='fixture-secret', litellm_api_key='fixture-key', litellm_api_base='https://gateway.test/v1', session_titles_enabled=False,
+                        agent_model='anthropic/claude-opus-5-5', swarm_models='opus,sol')
+    app = create_app(settings)
+    # Endpoint verification without starting a Temporal client or cloud worker.
+    client = TestClient(app, base_url=settings.public_url)
+    sign_in(app, client)
+    body = {'prompt': 'Compare two approaches', 'mode': 'modal', 'swarm': {'budget_seconds': 300}, 'client_id': 'api-ten-workers'}
+    response = client.post('/api/runs', json=body)
+    assert response.status_code == 201, response.text
+    root = response.json()['id']
+    children = app.state.store.rows('SELECT id FROM runs WHERE parent_run_id=?', (root,))
+    assert len(children) == 10
+    assert client.post('/api/runs', json=body).json()['id'] == root
+    assert app.state.store.rows('SELECT id FROM runs WHERE parent_run_id=?', (root,)) == children
 
 
 async def test_completed_round_waits_durably_then_queues_one_identified_continuation(durable):
