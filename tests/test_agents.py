@@ -257,10 +257,14 @@ async def test_hundred_active_slots_queue_the_101st_and_waiting_parent_is_free(d
     results = await asyncio.gather(*(manager.advance(run_id) for run_id in ids))
     assert results.count('capacity') == 1
     assert len([r for r in manager.store.rows('SELECT state FROM durable_sessions') if json.loads(r['state']).get('phase') == 'provision']) == 100
-    state = manager.state(root)
+    # Concurrent database reads can complete in any order. Resume the session
+    # actually queued, rather than assuming it was the last task created.
+    queued = ids[results.index('capacity')]
+    occupied = next(run_id for run_id, result in zip(ids, results) if result != 'capacity')
+    state = manager.state(occupied)
     state['phase'] = 'waiting_children'
-    manager.save(root, state)
-    assert await manager.advance(ids[-1]) is True
+    manager.save(occupied, state)
+    assert await manager.advance(queued) is True
     assert not manager.has_capacity()
     assert not cloud.machines  # admission never eagerly creates a warm pool
 

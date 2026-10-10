@@ -53,7 +53,8 @@ def worker(arguments):
                 return await manager.advance(run_id)
 
         results = await asyncio.gather(*(advance(run_id) for run_id in ids))
-        return {'pid': os.getpid(), 'admitted': results.count(True), 'queued': results.count('capacity')}
+        return {'pid': os.getpid(), 'admitted': results.count(True), 'queued': results.count('capacity'),
+                'pool': store.database.pool.get_stats()}
 
     try:
         return asyncio.run(run())
@@ -81,7 +82,7 @@ async def model_probe(requests, capacity):
     return {'requests': requests, 'completed': len(tasks), 'peak': peak, 'final': slots.snapshot()}
 
 
-def measure(sessions=3000, workers=4, overflow=20):
+def measure(sessions=3000, workers=4, overflow=20, pool_size=16):
     url = os.environ.get('MOYAI_TEST_POSTGRES_URL')
     if not url:
         raise SystemExit('Set MOYAI_TEST_POSTGRES_URL to a disposable PostgreSQL database.')
@@ -97,7 +98,7 @@ def measure(sessions=3000, workers=4, overflow=20):
                 moyai_runtime_role='coordinator', temporal_enabled=True, object_storage_bucket='synthetic-only',
                 session_secret=uuid4().hex, encryption_key=Fernet.generate_key().decode(),
                 max_concurrent_runs=sessions, max_pending_runs=max(100, sessions + overflow),
-                max_concurrent_model_requests=256, moyai_database_pool_size=16)
+                max_concurrent_model_requests=256, moyai_database_pool_size=pool_size)
             store = open_store(settings)
             manager = DurableRunner(store, settings)
             ids = []
@@ -130,7 +131,7 @@ def measure(sessions=3000, workers=4, overflow=20):
             return {'backend': 'postgresql', 'synthetic_provider_work': True,
                 'sandbox_limit': sessions, 'submitted': len(ids), 'occupied': occupied,
                 'admitted': admitted, 'queued': queued, 'pending_overflow_rejected': True,
-                'worker_processes': workers, 'workers': results, 'pool_per_process': 16,
+                'worker_processes': workers, 'workers': results, 'pool_per_process': pool_size,
                 'seed_ms': seeded_ms, 'admission_ms': admission_ms,
                 'model': asyncio.run(model_probe(sessions, 256)), 'no_provider_calls': True}
     finally:
@@ -144,7 +145,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--sessions', type=int, default=3000)
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--pool-size', type=int, default=16)
     args = parser.parse_args()
-    if not 1 <= args.sessions <= 10000 or not 1 <= args.workers <= 16:
-        parser.error('Use 1–10000 sessions and 1–16 workers.')
-    print(json.dumps(measure(args.sessions, args.workers), indent=2))
+    if not 1 <= args.sessions <= 10000 or not 1 <= args.workers <= 16 or not 1 <= args.pool_size <= 256:
+        parser.error('Use 1–10000 sessions, 1–16 workers and pool size 1–256.')
+    print(json.dumps(measure(args.sessions, args.workers, pool_size=args.pool_size), indent=2))

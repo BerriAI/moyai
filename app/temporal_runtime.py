@@ -104,14 +104,19 @@ class TemporalRunManager(DurableRunner):
                     # A lost database fence must stop activities, including
                     # when the task queue currently has no work to deliver.
                     await database(self.store.rows, 'SELECT 1')
+                    backlog = False
                     if self.settings.moyai_runtime_role != 'worker':
                         try:
-                            await self.dispatch()
+                            backlog = await self.dispatch()
                         except Exception as exc:
                             # One failed wake must not tear down a healthy
                             # worker and detach all sandbox observations.
                             log.warning('Temporal wake delivery will retry (%s)', type(exc).__name__)
-                    await asyncio.sleep(2)
+                    # Drain successful full batches immediately. Waiting two
+                    # seconds per 200 wakes adds 28 seconds to a 3,000-row burst.
+                    # Empty/partial batches and failures retain bounded polling.
+                    if not backlog:
+                        await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -151,6 +156,7 @@ class TemporalRunManager(DurableRunner):
         for result in results:
             if isinstance(result, BaseException):
                 raise result
+        return len(rows) == self.settings.temporal_dispatch_batch_size
 
     @activity.defn(name='advance_session')
     async def advance_session(self, run_id: str) -> bool | str | dict:
@@ -166,7 +172,7 @@ class TemporalRunManager(DurableRunner):
                 await asyncio.sleep(5)
         pulse = asyncio.create_task(heartbeat())
         try:
-            state = self.state(run_id)
+            state = await database(self.state, run_id)
             before = state.get('phase', 'idle')
             return await self.advance(run_id)
         except asyncio.CancelledError:

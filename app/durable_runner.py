@@ -18,6 +18,7 @@ from .environments import EnvironmentPending
 from .runner import RunManager, SAVE_WARNING, TERMINAL, completed_response, safe_error_detail, refresh_sandbox_files, stop_requested
 from .security import digest
 from .sandboxes import ProvisioningTerminated
+from .db import database
 from sandbox.transport_recovery import MAX_TRANSPORT_ATTEMPTS, valid_retry
 
 
@@ -43,6 +44,8 @@ class DurableRunner(RunManager):
             revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
         store.execute(f"""CREATE INDEX IF NOT EXISTS idx_durable_sessions_occupied
             ON durable_sessions(run_id) WHERE {self.occupied_session}""")
+        store.execute('''CREATE INDEX IF NOT EXISTS idx_durable_sessions_wake
+            ON durable_sessions(run_id) WHERE revision>delivered''')
 
     def state(self, run_id):
         rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
@@ -228,11 +231,11 @@ class DurableRunner(RunManager):
     async def advance(self, run_id):
         async with self.session_guard(run_id):
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
-                self.credentials.reconcile_resolutions(run_id)
-            row = self.store.run(run_id)
+                await database(self.credentials.reconcile_resolutions, run_id)
+            row = await database(self.store.run, run_id)
             if not row or row['deleted_at']:
                 return False
-            state = self.state(run_id)
+            state = await database(self.state, run_id)
             # Stop only at boundaries before a process is launched. Active
             # execution, checkpoint saving and cleanup keep running. The saved
             # state and inbox are resumed by the replacement worker.
@@ -248,32 +251,32 @@ class DurableRunner(RunManager):
                 reuse = await self.warm(run_id, state)
                 if reuse is not True:
                     return reuse
-                row = self.store.run(run_id)
-                state = self.state(run_id)
+                row = await database(self.store.run, run_id)
+                state = await database(self.state, run_id)
                 if state.get('phase') == 'warm':
                     # A queued follow-up claims the already occupied slot.
-                    if not self.begin_turn(run_id, row, state):
+                    if not await database(self.begin_turn, run_id, row, state):
                         return True
-                    state = self.state(run_id)
+                    state = await database(self.state, run_id)
             if not state or state.get('phase') == 'idle':
                 if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
                     if row['status'] == 'stopping':
-                        self.store.update_run(run_id, status='cancelled')
+                        await database(self.store.update_run, run_id, status='cancelled')
                     return False
-                if not self.store.has_queued_messages(run_id) and not self.store.rows(
+                if not await database(self.store.has_queued_messages, run_id) and not await database(self.store.rows,
                         "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
                     return False
                 async with self.admission_lock:
                     if not await self.make_capacity(run_id):
                         return 'capacity'
-                    if not self.begin_turn(run_id, self.store.run(run_id)):
+                    if not await database(self.begin_turn, run_id, await database(self.store.run, run_id)):
                         return True
-                    state = self.state(run_id)
+                    state = await database(self.state, run_id)
                 if state.get('phase') == 'idle' or not state:
                     return False
             # Cancellation is persistent, including across worker restarts.
-            if stop_requested(self.store.run(run_id)) and state['phase'] not in {'cleanup', 'finish'}:
-                self.fail(run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
+            if stop_requested(await database(self.store.run, run_id)) and state['phase'] not in {'cleanup', 'finish'}:
+                await database(self.fail, run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
             try:
                 return await self.step(run_id, state)
             except EnvironmentPending as pending:
@@ -343,13 +346,13 @@ class DurableRunner(RunManager):
         # Persist before the provider call: a lost termination ACK is retryable
         # and never publishes the previous answer a second time.
         state.update(phase='warm_cleanup', idle_reason=reason)
-        self.save(run_id, state)
+        await database(self.save, run_id, state)
         await self.cleanup(state, run_id)
         state.update(phase='idle', sandbox_id='')
         state.pop('idle_until', None)
-        self.save(run_id, state)
-        self.store.update_run(run_id, sandbox_id='', token_hash='')
-        self.store.event(run_id, 'status', 'Idle sandbox released: ' + reason + '.')
+        await database(self.save, run_id, state)
+        await database(self.store.update_run, run_id, sandbox_id='', token_hash='')
+        await database(self.store.event, run_id, 'status', 'Idle sandbox released: ' + reason + '.')
 
     async def warm(self, run_id, state):
         row = self.store.run(run_id)
@@ -387,9 +390,9 @@ class DurableRunner(RunManager):
     async def make_capacity(self, run_id):
         # Caller holds admission_lock until its own slot is persisted. Skip
         # busy per-session locks rather than deadlocking competing admissions.
-        if self.has_capacity():
+        if await database(self.has_capacity):
             return True
-        candidates = [(r['run_id'], json.loads(r['state'])) for r in self.store.rows(f"""
+        candidates = [(r['run_id'], json.loads(r['state'])) for r in await database(self.store.rows, f"""
             SELECT run_id,state FROM durable_sessions WHERE {self.occupied_session}
             AND json_text(state, 'phase') IN ('warm', 'warm_cleanup') ORDER BY run_id""")]
         for other, state in sorted(candidates, key=lambda entry: entry[1].get('idle_until') or float('inf')):
@@ -399,13 +402,13 @@ class DurableRunner(RunManager):
             async with self.session_guard(other, wait=False) as acquired:
                 if not acquired:
                     continue
-                state = self.state(other)
+                state = await database(self.state, other)
                 if state.get('phase') not in {'warm', 'warm_cleanup'}:
                     continue
-                if self.store.has_queued_messages(other):
+                if await database(self.store.has_queued_messages, other):
                     continue
                 await self.release_warm(other, state, 'capacity needed by another session')
-                if self.has_capacity():
+                if await database(self.has_capacity):
                     return True
         return False
 

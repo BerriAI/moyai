@@ -146,3 +146,147 @@ steps and model completions are synthetic and incur no provider calls. Tests als
 exercise lease expiry, a killed process, stale-write fencing, overlapping writes
 and real Temporal worker recovery. These establish admission/ownership behavior,
 not 3,000 real sandboxes, streaming responses, or production throughput.
+
+## Startup measurements after #328
+
+The coordinator now drains successful full wake batches immediately. Previously
+it slept two seconds after each 200-row batch, adding 28 seconds of deliberate
+pauses to a 3,000-wake burst. Idle polling and failed batches still back off for
+two seconds; failed wakes remain in the outbox. A partial index limits each poll
+to undelivered rows, rather than scanning retained session history.
+
+Admission database calls and the activity's initial state read run off the event
+loop. Cancellation waits for an in-flight claim to finish before releasing its
+session/admission leases. This keeps ownership intact without pausing every other
+activity during a database lock or pool wait. Other synchronous database paths
+remain, especially inside execution phases; watch `slow_database` records with
+`on_event_loop=true` before raising per-worker activity concurrency.
+
+Local results on PostgreSQL 18.6, with no provider calls:
+
+| Probe | Before | After |
+| --- | ---: | ---: |
+| Last wake of 3,000, default batch 200/concurrency 10, simulated 5 ms Temporal RPC | 30.51 s | 2.33 s |
+| Worker event-loop lag during a real 700 ms writer lock | 702.58 ms | 1.22 ms |
+
+These are observations on one developer machine, not production latency targets.
+The admission operation still waits for the lock (~736 ms); other work can run
+during that wait. Tests also hold a real pool connection, verify cancellation
+ownership, retry failed deliveries, and check the wake index against 30,000
+historical rows. Existing real Temporal tests cover worker replacement, retained
+sandbox identity, offline follow-ups, and workflow replay.
+
+The actual local Temporal server, with 200 synthetic 250 ms activities and eight
+slots per worker, measured p95 schedule-to-start delays of 5.54 s / 2.54 s / 1.16 s
+with 1 / 2 / 4 worker instances. Peaks were exactly 8 / 16 / 32 activities and all
+200 completed in each run. These workers have separate SDK runtimes but share a
+process; the experiment validates queue capacity, not multi-CPU efficiency.
+A second 1,024-activity probe accepted 256 slots per worker and completed with
+1 / 2 / 4 workers. It was arrival-limited (peak 196 / 279 / 405), so it does not
+demonstrate saturated throughput at 1,024 simultaneous activities.
+
+The separate PostgreSQL admission probe used real OS processes. All five cases
+reserved exactly 3,000 sessions, queued 20, and rejected pending overflow:
+
+| Worker processes | Maximum pool per process | Admission phase |
+| ---: | ---: | ---: |
+| 1 | 4 | 17.23 s |
+| 2 | 4 | 16.80 s |
+| 4 | 4 | 17.80 s |
+| 4 | 8 | 18.77 s |
+| 4 | 16 | 18.99 s |
+
+These single-run samples overlapped some local regression work. They provide no
+evidence that a larger pool speeds this workload. Admission retains a global
+lease; adding workers helps available execution slots, not that serial decision.
+Provider cleanup during warm eviction also still holds admission. Increasing
+sandbox CPU does not remove either queue.
+
+Reproduce locally with a disposable PostgreSQL URL and Python 3.13:
+
+```sh
+uv run --frozen --python 3.13 python scripts/runtime_startup_probe.py --sessions 3000
+uv run --frozen --python 3.13 python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4 --pool-size 4
+uv run --frozen --python 3.13 python scripts/temporal_queue_probe.py --output temporal-queue.json
+uv run --frozen --python 3.13 python scripts/temporal_queue_probe.py --sessions 1024 --slots 256 --activity-seconds .5 --output temporal-queue-256.json
+uv run --frozen --python 3.13 pytest -q tests/test_runtime_performance.py tests/test_runtime_scaling.py tests/test_temporal_integration.py
+```
+
+## Capacity rollout recommendation
+
+1. Deploy this performance change with existing standalone budgets. Coordinate
+   that deploy with the production-cutover owner. This PR does not change any
+   deployment setting. The pending-wake index is created at startup; include its
+   creation in the normal coordinated startup window.
+2. Finish and verify the PostgreSQL-compatible shared-file migration in
+   [#330](https://github.com/BerriAI/moyai/pull/330) before
+   starting distributed workers. Verify archives, browser captures and frozen
+   handoffs from an empty replacement disk, with identical keys and object
+   destination. All user/sandbox traffic still requires one coordinator.
+3. Start staging at 100 occupied sandboxes, two workers, 120 activity slots per
+   worker, pools of 8, and the existing model budget of 8. Keep dispatch batch
+   200/concurrency 10 initially: the artificial batch pauses are already removed.
+   Two workers plus one coordinator use at most 27 DB connections; budget 36
+   during one overlapping replacement, plus administration/reserve. Four-slot
+   pools passed admission tests, but mixed execution/provider traffic still
+   needs measurement before reducing the default eight.
+4. Increase active work through 100, 250, 500, 1,000 and 3,000 only after measuring
+   schedule-to-start p95, event-loop lag, database pool waits, first model token,
+   provider startup/429s, error rate, and coordinator CPU/memory. Start with p95
+   activity queue delay below 1 s and event-loop lag below 100 ms as staging
+   acceptance targets, not measurements already achieved in production. Exercise
+   stop, follow-up, upload/download and one-worker failure at every step.
+
+For a 3,000-session staging trial, explicitly set `MAX_CONCURRENT_RUNS=3000`
+and `MAX_PENDING_RUNS=10000`; the unchanged 1,000 pending default would reject
+the larger workload. Consider workflow caches of 512 per worker after measuring
+replay and memory; cache eviction is safe but adds replay work. Change shared
+budgets/builds through the coordinated drain described above, since #328 fences
+workers with a different policy. This is separate from scaling replicas of the
+same build. Infrastructure autoscaling is still external: use sustained Temporal
+queue delay and occupied slots to request another replica, bounded by DB and
+provider budgets, and drain a worker before scale-down.
+
+For planning, a monitoring activity holds a slot for roughly 20 seconds and is
+immediately rescheduled. Fully running sessions can therefore approach one
+occupied activity slot each; warm/idle sessions with durable timers do not.
+At 70% planned utilization, use `ceil(active_sessions / (slots_per_worker * .7))`:
+
+| Simultaneously running sessions | Slots per worker | Planning worker count |
+| ---: | ---: | ---: |
+| 100 | 120 | 2 |
+| 500 | 256 | 3 |
+| 3,000 | 256 | 17 |
+
+Those larger counts are arithmetic targets, not tested production sizing. To
+retain the same 30% headroom after losing one worker, add another worker. With
+17 workers at pool 8 and one coordinator at pool 16, budget 170 connections;
+two overlapping replacement workers and 20 reserved connections bring that to
+208. A 256-connection database leaves margin for that topology only if other
+clients fit within the remaining budget. More connections do not create more
+database CPU or I/O capacity. Keep session-preserving connections for ownership.
+
+Model capacity must be sized separately per upstream model. At 20 seconds per
+request, 256 slots allow at most 768 requests/minute before RPM/TPM limits; for
+an illustrative 10,000 input + 2,000 output tokens/call that is 9.216M tokens/min
+(validate the provider's separate token buckets and caching rules). Serving
+3,000 simultaneous model calls at that duration would require roughly 9,000 RPM
+and 108M aggregate tokens/min plus coordinator/network memory headroom. Foreground
+requests currently receive an explicit unbilled 429 with `Retry-After: 3` when
+the model gate is full. Three thousand live sandboxes do not imply all 3,000 must
+call a model at once. Measure their actual model duty cycle and per-model usage
+before moving from 8 to 32/64/128/256 slots.
+
+Provider requirements for 3,000 occupied sandboxes include at least that many
+concurrent sandbox reservations, creation/termination burst allowance, image
+availability and shared-storage bandwidth. Modal currently requests 2 vCPU and
+4 GiB per sandbox by default: 3,000 is up to 6,000 requested vCPU and about
+11.7 TiB RAM. Actual pricing/allocation rules depend on the provider. Confirm
+quota, region capacity and cold/warm startup p95 directly; these local probes
+do not query quotas, create paid sandboxes, call models, or certify that load.
+
+Use existing `session_turn_claimed` queue wait, `session_wake_batch` delivery,
+`session_activity` phase duration/schedule-to-start and `slow_database` logs to
+separate the delays. Compare cold `provision` and `install` phases with warm
+reuse before changing sandbox CPU. No current production trace sample or quota
+verification is included in these local results.
