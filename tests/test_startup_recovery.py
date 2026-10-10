@@ -118,7 +118,7 @@ def test_repository_metadata_reconnects_only_during_startup(route, name, startin
         relay.repository_startup = starting
         body = {'name': name, 'arguments': {'repository_id': 101}}
         response = client.post(route, json=body)
-        assert response.status_code == (200 if recovers else 502 if status == 403 else status)
+        assert response.status_code == (200 if recovers else status)
         assert calls == [(route, body)] * (2 if recovers else 1)
         if recovers:
             assert not diagnostics and not relay.last_error and not relay.uncertain_tool
