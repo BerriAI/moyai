@@ -277,6 +277,7 @@ class Store:
             for name in ('model', 'active_model', 'pending_result', 'checkpoint_error', 'parent_run_id', 'agent_group_id', 'agent_label', 'side_chat_of', 'side_chat_context', 'display_title', 'title_attempted_at', 'deleted_at', 'deletion_requested_at'):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE runs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_runs_pending_deletion ON runs(deletion_requested_at,id) WHERE parent_run_id='' AND deletion_requested_at!='' AND deleted_at=''")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_runs_owner ON runs(owner_id,id)')
             conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_participant ON messages(user_id,run_id) WHERE role='user'")
             conn.execute('CREATE INDEX IF NOT EXISTS idx_users_linked ON users(linked_user_id)')

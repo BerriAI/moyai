@@ -19,7 +19,8 @@ production and then use that action unchanged.
 - PostgreSQL, Temporal, verified shared object storage and explicit stable keys.
 - `MOYAI_SEPARATE_BROKER=true` and `MOYAI_SCHEMA_MODE=verify` on all roles.
 - Offline schema migration to revision 2. This adds the durable session-title
-  inbox; it preserves saved sessions, keys and runtime policy. Follow
+  inbox and a partial index for pending deletion scans; it preserves saved
+  sessions, keys and runtime policy. Follow
   [schema migrations](schema-migrations.md), including stopping **all** runtime
   owners before `python -m app.schema_migrations --apply`.
 - One coordinator publishes the shared policy first, then one broker and the

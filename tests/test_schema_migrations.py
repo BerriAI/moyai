@@ -244,7 +244,7 @@ def test_opt_in_preserves_existing_data_keys_and_runtime_policy(split_settings):
 
 def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
     # Reproduce revision 1's receipt and schema: the only new table is the
-    # durable title inbox. Existing keys, sessions and runtime policy survive.
+    # durable title inbox and deletion scan index. Existing state survives.
     settings = ready(split_settings)
     app = main.create_app(settings)
     run = app.state.store.create_run('Saved before API split', '', 'demo', [], chat_enabled=True)
@@ -254,6 +254,7 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
     with psycopg.connect(settings.moyai_database_url) as conn:
         conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
         conn.execute('DROP TABLE session_title_requests')
+        conn.execute('DROP INDEX idx_runs_pending_deletion')
         conn.execute('UPDATE schema_state SET revision=1')
     with pytest.raises(DatabaseError, match='incompatible'):
         main.create_app(settings)
@@ -262,6 +263,7 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
     try:
         assert {name: app.state.store.rows('SELECT * FROM ' + name) for name in before} == before
         assert app.state.store.rows('SELECT * FROM session_title_requests') == []
+        assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_runs_pending_deletion'")
         assert app.state.store.run(run['id'])['prompt'] == 'Saved before API split'
     finally:
         app.state.store.close()
