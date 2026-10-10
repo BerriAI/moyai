@@ -721,3 +721,29 @@ and documentation were inspected at desktop/mobile widths; the registration
 button is reachable at 1440/768/320. Provider responses are simulated; no GitHub
 App permissions were changed externally. Schema remains 13, role protocols are
 14, and nothing was deployed.
+
+## Shared environment readiness and complete setup evidence (WP7)
+
+Snapshotless children resolve preparation through their persisted parent chain.
+They wait on the existing shared build journal, release execution capacity while
+waiting, and inherit the parent's pinned version before computer allocation.
+Concurrent starts coalesce; later admin rebuilds cannot split the team across
+versions. Existing workspace snapshots and Base tools only retain precedence.
+Missing/cyclic ancestry is explicit. No new scheduler or dependency table is used.
+
+Every restored computer runs service startup and verification before advertising
+readiness. These scripts use the computer lifecycle rather than a separate
+five-minute timeout. Removed recipe-command/instruction lengths, package-count
+ceilings, repository-JSON size rejection and both 48 KB build-log cuts. Logs are
+currently retrieved as a complete response, so very large logs incur full-read
+cost on each status poll; no streaming-performance claim is made.
+
+Validation: 60 initial environment contracts passed; 163 environment, swarm and
+delegation checks passed on PostgreSQL. The final setup/automation suite passed
+73 cases, and all 40 revised environment cases passed on PostgreSQL. Another
+40 package/startup/independent-runtime checks passed with one optional skip.
+Cases cover twenty-worker bootstrap before coordinator preparation, shared
+failure, stop, restart, immutable version inheritance, long setup/log sources and
+actual local shell verification. The updated guide was rendered and inspected.
+No real cloud build or live model was used. Schema remains 13; role protocols are
+15. Nothing was deployed.

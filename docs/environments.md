@@ -18,6 +18,12 @@ or sandbox-capacity slot; deployment does not lose that wait. Once the build
 passes, matching sessions get isolated copies of its snapshot. Failed builds
 produce an actionable session error and need a manual retry, avoiding retry loops.
 
+Initial swarm workers wait on their coordinator's shared preparation before
+acquiring computers. They inherit the same pinned build even when another build
+becomes available while workers are starting. Failed preparation keeps workers
+from starting with missing dependencies; stopping the swarm also stops that wait.
+The build runs once, and each computer restarts and verifies its own services.
+
 Sessions without a repository use base tools unless an administrator explicitly
 chooses a workspace default. LiteLLM is an optimized preset for `BerriAI/litellm`,
 not a default injected into unrelated work. Existing session checkpoints, admin
@@ -58,7 +64,8 @@ limited preparation stated in the agent's project instructions.
 Admins can open **Environments** to create an organization recipe from the LiteLLM
 starter or a custom project. Configure a GitHub repository and branch/tag/commit,
 Debian packages, install commands, idempotent service startup, verification,
-clean shutdown, and short project instructions. Choose **Public repository** for
+clean shutdown, and project instructions. Commands, instructions, package lists
+and build logs retain their complete content. Choose **Public repository** for
 public code, or **Shared GitHub connection** for repositories granted to the
 existing GitHub App. Private clones use an ephemeral read-only installation
 credential for Git only; model and connected-app credentials are not supplied to
@@ -84,8 +91,10 @@ and selects it for sessions without a repository. Existing sessions keep their
 checkpoints. Each session pins its selected build; subagents inherit it and the
 parent's copied filesystem. Session snapshots take precedence over the clean
 project snapshot, so rebuilding cannot erase ongoing work. Startup commands run
-again after restore and must be idempotent; running processes are not preserved
-by a filesystem snapshot. The session Activity panel identifies its environment
+again after restore and must be idempotent; verification must also be safe to
+repeat. Running processes are not preserved by a filesystem snapshot. A failed
+verification stops startup before Moyai reports the environment ready. The
+session Activity panel identifies its environment
 and source commit.
 
 **Refresh daily and after recipe edits** is optional and off initially. When
