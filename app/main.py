@@ -68,7 +68,17 @@ AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 class SwarmOptions(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    budget_seconds: int = Field(ge=60, le=86400, strict=True)
+    budget_seconds: int = Field(default=0, strict=True)
+
+    @field_validator('budget_seconds')
+    @classmethod
+    def valid_budget(cls, value):
+        from agent.swarm.timing import validate_swarm_budget
+        return validate_swarm_budget(value)
+
+
+class SwarmTimeChange(SwarmOptions):
+    budget_seconds: int = Field(strict=True)
 
 
 class NewRun(BaseModel):
@@ -935,7 +945,17 @@ def _create_app(settings, store):
     async def send_message(run_id: str, body: ChatMessage, request: Request):
         # Validation and the enqueue transaction stay off the event loop so a
         # slow database cannot stall other conversations' streams and pages.
-        message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+        security.require(request, mutation=True)
+        run = await run_in_threadpool(store.run, run_id)
+        if run and run.get('swarm') and not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        if settings.temporal_enabled and run and run.get('swarm'):
+            # Time edits and expiry share the root execution lease. A deadline
+            # observer cannot cancel a swarm after a human has extended it.
+            async with manager.session_guard(run_id):
+                message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+        else:
+            message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
         if not metadata_request:
@@ -978,9 +998,14 @@ def _create_app(settings, store):
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel(run_id: str, request: Request):
         security.require(request, mutation=True)
-        if not store.run(run_id):
+        run = await run_in_threadpool(store.run, run_id)
+        if not run:
             raise HTTPException(404, "Task not found")
-        await manager.cancel(run_id)
+        if settings.temporal_enabled and run.get('swarm'):
+            async with manager.session_guard(run_id):
+                await manager.cancel(run_id)
+        else:
+            await manager.cancel(run_id)
         return public_run(store.run(run_id))
 
     @app.post('/api/runs/{run_id}/swarm/{action}')
@@ -992,6 +1017,20 @@ def _create_app(settings, store):
             raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
         try:
             await getattr(manager.swarms, action)(run_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        await checkpoints.flush()
+        return public_run(store.run(run_id))
+
+    @app.patch('/api/runs/{run_id}/swarm/time')
+    async def swarm_time(run_id: str, body: SwarmTimeChange, request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Task not found')
+        if not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        try:
+            await manager.swarms.set_time(run_id, body.budget_seconds)
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()
@@ -1160,12 +1199,22 @@ def _create_app(settings, store):
         store.event(row["run_id"], "approval", f"{row['tool']}: {status}")
         return {"status": status}
 
-    def require_run(run_id, request):
+    def require_run(run_id, request, *, enforce_swarm_time=True):
         run = store.run(run_id)
         token = request.headers.get("authorization", "").removeprefix("Bearer ")
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
+        if enforce_swarm_time and (run.get('swarm') or run['parent_run_id']):
+            # Admission reads current root policy even if its execution worker
+            # is offline. An extension keeps the same authenticated capability;
+            # no cached native deadline decides whether new work is allowed.
+            from .swarms import execution_policy, remaining_seconds
+            mission = (execution_policy(store, run_id) if run['parent_run_id'] else run['swarm'])
+            if mission and mission['status'] != 'active':
+                raise HTTPException(401, 'Swarm is on hold. Resume it before requesting more work.')
+            if mission and remaining_seconds(mission) <= 0:
+                raise HTTPException(401, 'Swarm time window ended. Add more time or resume it to continue.')
         observation = request.scope.get('moyai_model_diagnostic')
         if observation is not None:
             observation.setdefault('run', dict(run))
@@ -1173,6 +1222,12 @@ def _create_app(settings, store):
 
     from .broker_payloads import BrokerPayloads
     broker_payloads = BrokerPayloads(store, security)
+
+    def require_run_state(run_id, request):
+        # Already-admitted results and SDK checkpoints must survive the end of
+        # a work window. Keep capability, turn and stop fences; this callback
+        # never authorizes inference, tool execution or new steering delivery.
+        return require_run(run_id, request, enforce_swarm_time=False)
 
     async def broker_body(request, route):
         # Called only after require_run. The edge carries opaque authenticated
@@ -1190,14 +1245,19 @@ def _create_app(settings, store):
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, 'Invalid broker request JSON.')
         if isinstance(body, dict) and 'moyai_payload' in body:
-            caller = await asyncio.to_thread(require_run, request.path_params['run_id'], request)
+            admission = require_run_state if route == '/context/native' else require_run
+            caller = await asyncio.to_thread(admission, request.path_params['run_id'], request)
             return await asyncio.to_thread(broker_payloads.resolve, caller, route, body)
         return body
 
     @app.post('/broker/{run_id}/payloads')
     async def upload_broker_payload(run_id: str, request: Request):
-        caller = await asyncio.to_thread(require_run, run_id, request)
+        caller = await asyncio.to_thread(require_run_state, run_id, request)
         body = await broker_body(request, '/payloads')
+        # Native checkpoint parts only save already-admitted state. Computer
+        # action payloads still require a current work window before upload.
+        if not isinstance(body, dict) or body.get('route') != '/context/native':
+            caller = await asyncio.to_thread(require_run, run_id, request)
         result = await asyncio.to_thread(broker_payloads.upload, caller, body)
         await checkpoints.flush()
         return result
@@ -1208,7 +1268,7 @@ def _create_app(settings, store):
     @app.post('/broker/{run_id}/control')
     async def session_control(run_id: str, request: Request):
         from .db import database
-        await database(require_run, run_id, request)
+        await database(require_run_state, run_id, request)
         body = await broker_body(request, '/control')
         result = await database(apply_session_control, run_id, request, body)
         await checkpoints.flush()
@@ -1218,9 +1278,10 @@ def _create_app(settings, store):
         # Revalidate after reading the body: a stop or capability rotation can
         # race a slow upload. Connections stay inside this worker thread, and
         # cancellation waits for any outstanding receipt write.
-        run = require_run(run_id, request)
+        receipt_only = isinstance(body, dict) and body.get('version') == 2 and body.get('receipt_only') is True
+        run = (require_run_state if receipt_only else require_run)(run_id, request)
         if isinstance(body, dict) and body.get('version') == 2:
-            if body.get('receipt_only') is True:
+            if receipt_only:
                 message_queue.acknowledge(run_id, run['active_message_id'], body.get('applied', []))
                 result = {'steer_message_id': None}
             else:
@@ -1536,13 +1597,13 @@ def _create_app(settings, store):
 
     @app.post('/broker/{run_id}/context/journal')
     async def conversation_journal(run_id: str, request: Request):
-        caller = require_run(run_id, request)
+        caller = require_run_state(run_id, request)
         result = await asyncio.to_thread(session_journal.exchange, caller, await broker_body(request, '/context/journal'))
         await checkpoints.flush()
         return result
 
     from .native_sessions import NativeSessions
-    native_sessions = NativeSessions(settings, store, security, checkpoints, require_run, broker_body)
+    native_sessions = NativeSessions(settings, store, security, checkpoints, require_run_state, broker_body)
     harness_gateway.native_sessions = native_sessions
 
     @app.post('/broker/{run_id}/context/native')

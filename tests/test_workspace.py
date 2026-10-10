@@ -100,7 +100,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
     read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file'''.split())
-    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
+    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel agents_wait agents_send automation_webhook_setup automation_create
         automation_update automation_enable automation_pause automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request

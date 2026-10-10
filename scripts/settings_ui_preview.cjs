@@ -21,6 +21,7 @@ const agentSessions=[
 const model='openai/gpt-6-astra';
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
 let fixture='populated';
+let swarmFixtureBudget=1800;
 let swarmFixtureState='active',swarmFixtureDeadline=new Date(Date.now()+1800000).toISOString(),swarmFixtureMessages=[];
 const swarmRoot='a'.repeat(32);
 function swarmFixtureRun(id=swarmRoot){
@@ -37,7 +38,7 @@ function swarmFixtureRun(id=swarmRoot){
  const flat=children.flatMap(child=>[child,...child.children]);
  if(swarmFixtureState!=='active')flat.forEach(child=>{if(child.status==='running')child.status='cancelled';});
  const child=flat.find(child=>child.id===id);
- return {id,display_title:child?.agent_label||'Build a better way to work together',prompt:child?'Review the implementation and report findings.':'Research a useful feature, build a small prototype, and review the result.',status:child?.status||(swarmFixtureState==='active'?'waiting_children':swarmFixtureState==='blocked'?'failed':'cancelled'),chat_enabled:true,mode:'modal',harness:child?.harness||'claude-agent-sdk',model:child?.model||'anthropic/claude-opus-4-6',active_model:child?.model||'anthropic/claude-opus-4-6',plugins:[],repo_url:'',parent_run_id:child?swarmRoot:null,snapshot_id:'synthetic',created_at:stamp,updated_at:stamp,approvals:[],credential_requests:[],artifacts:[],pull_requests:[],agents:{groups:child?[]:[{id:'fixture-team',label:'Prototype team',status:'working',children}]},...(child?{}:{swarm:{status:swarmFixtureState,budget_seconds:1800,ends_at:swarmFixtureDeadline,round:2,reason:swarmFixtureState==='paused'?'Paused by you. Resume before the original time limit.':swarmFixtureState==='blocked'?'The model request failed. Your work is saved.':''}}),messages:child?[{id:11,role:'assistant',status:'completed',created_at:stamp,content:`${child.agent_label}: I checked the implementation and saved the findings for the coordinator. This is a synthetic preview response.`}]:[{id:1,role:'user',user_name:'Alex',status:'completed',content:'Research a useful feature, build a small prototype, and review the result.'},{id:2,role:'assistant',status:'completed',content:'Research is complete. Build and review are working in parallel.'},{id:3,role:'user',source:'swarm',client_id:'swarm:fixture:2',status:'completed',content:'Continue the mission with the next useful step.'},...swarmFixtureMessages],events:[{id:1,kind:'agents',message:'Research saved its findings. Build and Review are working.',created_at:stamp,data:{phase:'agent-result',input_id:3}},{id:2,kind:'tool',message:'Build is checking the prototype.',created_at:stamp,data:{phase:'tool',name:'terminal',input_id:3}}]};
+ return {id,display_title:child?.agent_label||'Build a better way to work together',prompt:child?'Review the implementation and report findings.':'Research a useful feature, build a small prototype, and review the result.',status:child?.status||(swarmFixtureState==='active'?'waiting_children':swarmFixtureState==='blocked'?'failed':'cancelled'),chat_enabled:true,mode:'modal',harness:child?.harness||'claude-agent-sdk',model:child?.model||'anthropic/claude-opus-4-6',active_model:child?.model||'anthropic/claude-opus-4-6',plugins:[],repo_url:'',parent_run_id:child?swarmRoot:null,snapshot_id:'synthetic',created_at:stamp,updated_at:stamp,approvals:[],credential_requests:[],artifacts:[],pull_requests:[],agents:{groups:child?[]:[{id:'fixture-team',label:'Prototype team',status:'working',children}]},...(child?{}:{swarm:{status:swarmFixtureState,budget_seconds:swarmFixtureBudget,ends_at:swarmFixtureDeadline,round:2,reason:swarmFixtureState==='paused'?'Paused by you. Resume anytime.':swarmFixtureState==='blocked'?'The model request failed. Your work is saved.':''}}),messages:child?[{id:11,role:'assistant',status:'completed',created_at:stamp,content:`${child.agent_label}: I checked the implementation and saved the findings for the coordinator. This is a synthetic preview response.`}]:[{id:1,role:'user',user_name:'Alex',status:'completed',content:'Research a useful feature, build a small prototype, and review the result.'},{id:2,role:'assistant',status:'completed',content:'Research is complete. Build and review are working in parallel.'},{id:3,role:'user',source:'swarm',client_id:'swarm:fixture:2',status:'completed',content:'Continue the mission with the next useful step.'},...swarmFixtureMessages],events:[{id:1,kind:'agents',message:'Research saved its findings. Build and Review are working.',created_at:stamp,data:{phase:'agent-result',input_id:3}},{id:2,kind:'tool',message:'Build is checking the prototype.',created_at:stamp,data:{phase:'tool',name:'terminal',input_id:3}}]};
 }
 
 let accountLinkPolls=0;
@@ -125,9 +126,9 @@ const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'applicatio
 const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
  if(p==='/'){
-  fixture=url.searchParams.get('fixture')||'populated';
+  const previousFixture=fixture;fixture=url.searchParams.get('fixture')||'populated';
   accountLinkPolls=0;
-  if(fixture.startsWith('swarm')){swarmFixtureState=fixture==='swarm-paused'?'paused':fixture==='swarm-expired'?'expired':fixture==='swarm-error'?'blocked':'active';swarmFixtureDeadline=new Date(Date.now()+(swarmFixtureState==='expired'?-60000:1800000)).toISOString();swarmFixtureMessages=[];}
+  if(fixture.startsWith('swarm')&&fixture!==previousFixture){swarmFixtureBudget=fixture==='swarm-continuous'?0:1800;swarmFixtureState=fixture==='swarm-paused'?'paused':fixture==='swarm-expired'?'expired':fixture==='swarm-error'?'blocked':'active';swarmFixtureDeadline=swarmFixtureBudget===0?null:new Date(Date.now()+(swarmFixtureState==='expired'?-60000:1800000)).toISOString();swarmFixtureMessages=[];}
   let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
   res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
  }
@@ -139,7 +140,7 @@ const server=http.createServer(async(req,res)=>{
  if(delayMs&&req.method==='GET'&&p.startsWith('/api/'))await new Promise(resolve=>setTimeout(resolve,delayMs));
  let body={};if(req.method!=='GET'){const chunks=[];for await(const chunk of req)chunks.push(chunk);try{body=JSON.parse(Buffer.concat(chunks).toString()||'{}');}catch{return json(res,400,{detail:'Invalid JSON'});}}
  const swarmPreview=fixture.startsWith('swarm');
- const supportedWrite = (swarmPreview&&req.method==='POST'&&(p==='/api/runs'||/^\/api\/runs\/[a-f0-9]{32}\/(messages|cancel|swarm\/(pause|resume))$/.test(p))) || (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
+ const supportedWrite = (swarmPreview&&req.method==='PATCH'&&/^\/api\/runs\/[a-f0-9]{32}\/swarm\/time$/.test(p)) || (swarmPreview&&req.method==='POST'&&(p==='/api/runs'||/^\/api\/runs\/[a-f0-9]{32}\/(messages|cancel|swarm\/(pause|resume))$/.test(p))) || (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
   (req.method==='POST' && p==='/api/memory') ||
   (['PUT','DELETE'].includes(req.method) && /^\/api\/memory\/[^/]+$/.test(p)) ||
   (req.method==='POST' && /^\/api\/automations\/[^/]+\/state$/.test(p));
@@ -156,9 +157,10 @@ const server=http.createServer(async(req,res)=>{
   }
   return json(res,200,role==='admin'?sandboxConnection:{provider:sandboxConnection.provider});
  }
- if(swarmPreview&&p==='/api/runs'&&req.method==='POST'){swarmFixtureState='active';swarmFixtureDeadline=new Date(Date.now()+(body.swarm?.budget_seconds||1800)*1000).toISOString();return json(res,200,swarmFixtureRun());}
+ if(swarmPreview&&p==='/api/runs'&&req.method==='POST'){swarmFixtureState='active';swarmFixtureBudget=body.swarm?.budget_seconds??0;swarmFixtureDeadline=swarmFixtureBudget===0?null:new Date(Date.now()+swarmFixtureBudget*1000).toISOString();return json(res,200,swarmFixtureRun());}
+ if(swarmPreview&&p.endsWith('/swarm/time')&&req.method==='PATCH'){swarmFixtureBudget=body.budget_seconds;swarmFixtureDeadline=swarmFixtureBudget===0?null:new Date(Date.now()+swarmFixtureBudget*1000).toISOString();swarmFixtureState='active';return json(res,200,swarmFixtureRun());}
  if(swarmPreview&&/^\/api\/runs\/[a-f0-9]{32}\/(swarm\/(pause|resume)|cancel)$/.test(p)){swarmFixtureState=p.endsWith('/pause')?'paused':p.endsWith('/resume')?'active':'stopped';const {messages,events,agents,approvals,credential_requests,...summary}=swarmFixtureRun();return json(res,200,summary);}
- if(swarmPreview&&p.endsWith('/messages')&&req.method==='POST'){swarmFixtureMessages.push({id:10+swarmFixtureMessages.length,role:'user',user_name:'Alex',status:'completed',content:body.content});return json(res,200,swarmFixtureRun());}
+ if(swarmPreview&&p.endsWith('/messages')&&req.method==='POST'){swarmFixtureState='active';swarmFixtureMessages.push({id:10+swarmFixtureMessages.length,role:'user',user_name:'Alex',status:'completed',content:body.content});return json(res,200,swarmFixtureRun());}
  if(swarmPreview&&/^\/api\/runs\/[a-f0-9]{32}\/events$/.test(p)){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});res.write(': synthetic preview connected\n\n');return;}
  if(swarmPreview&&p.endsWith('/files'))return json(res,200,{files:[]});
  if(swarmPreview&&p.endsWith('/activity'))return json(res,200,{events:swarmFixtureRun().events,has_more:false});

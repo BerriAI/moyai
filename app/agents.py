@@ -461,7 +461,8 @@ class AgentCoordinator:
                 if child['status'] not in {'idle', 'completed', 'failed', 'cancelled', 'interrupted'}:
                     conn.execute("UPDATE runs SET status='stopping',token_hash='' WHERE id=?", (child['id'],))
                     conn.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status='queued'", (child['id'],))
-                    self.manager.submit_in(conn, child)
+                    if self.settings.temporal_enabled:
+                        self.manager.submit_in(conn, child)
         results = await asyncio.gather(*(self.manager.cancel(child['id']) for child in selected),
                                        return_exceptions=True)
         for result in results:
