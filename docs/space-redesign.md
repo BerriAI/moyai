@@ -67,7 +67,7 @@ npm test
 npm run test:ui
 ```
 
-Generated `app/static/ui` assets are checked in with their sources. The existing
+Generated `app/static/generated/ui` assets are checked in with their sources. The existing
 browser suite covers desktop/tablet/mobile navigation, dialogs, dropdowns,
 keyboard paths, and populated/empty/error/member fixtures. New canvas tests cover
 motion preferences, hidden tabs, cleanup, and hub alignment. The local demo was

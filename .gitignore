@@ -8,3 +8,14 @@ __pycache__/
 *.pyc
 node_modules/
 test-results/
+playwright-report/
+*.tsbuildinfo
+
+# Vite's compiled SPA assets are built locally and during image creation.
+app/static/spa/
+
+# Recreated from Python contracts and TanStack file routes.
+frontend/api/openapi.json
+frontend/api/generated/
+frontend/routeTree.gen.ts
+.tanstack/

@@ -82,6 +82,7 @@ class SessionTitles:
         return rows[0]['model'] if rows else self.settings.session_title_model
 
     def routes(self, security):
+        from .frontend_contracts import SessionTitleConfiguration, SavedTitleModel
         router = APIRouter()
 
         @router.put('/api/runs/{run_id}/title')
@@ -101,13 +102,13 @@ class SessionTitles:
             await self.checkpoints.flush()
             return {'id': run_id, 'display_title': body.title}
 
-        @router.get('/api/settings/session-titles')
+        @router.get('/api/settings/session-titles', response_model=SessionTitleConfiguration, operation_id='get_session_title_configuration')
         async def get_settings(request: Request):
             security.require(request)
             return {'model': self.model_name(), 'enabled': self.settings.session_titles_enabled,
                     'gateway_configured': bool(self.settings.litellm_api_base and self.settings.litellm_api_key)}
 
-        @router.put('/api/settings/session-titles')
+        @router.put('/api/settings/session-titles', response_model=SavedTitleModel, operation_id='update_session_title_configuration')
         async def save_settings(body: TitleSettings, request: Request):
             security.require(request, mutation=True, admin=True)
             self.store.execute('INSERT INTO session_title_settings(id,model) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET model=excluded.model', (body.model,))

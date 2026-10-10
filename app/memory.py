@@ -393,19 +393,20 @@ class Memory:
                             'auto_save': bool(can_save), 'selected_repository_url': repo, 'notes': notes}, ensure_ascii=False))
 
     def routes(self):
+        from .frontend_contracts import MemoryLibrary, MemoryPreferences, SavedMemory, ForgottenMemory
         router = APIRouter()
 
         def actor(request, mutation=False):
             self.security.require(request, mutation=mutation)
             return self.owner(self.store.identity(self.security.session_info(request)))
 
-        @router.get('/api/memory')
+        @router.get('/api/memory', response_model=MemoryLibrary, response_model_exclude_unset=True, operation_id='get_memory_library')
         async def listing(request: Request):
             owner = actor(request)
             return {'preferences': self.preferences(owner), 'memories': self.listing(owner), 'limit': MAX_NOTES,
                     'review': self.reviewer.status(owner) if self.reviewer else None}
 
-        @router.put('/api/memory/preferences')
+        @router.put('/api/memory/preferences', response_model=MemoryPreferences, operation_id='update_memory_preferences')
         async def preferences(body: Preferences, request: Request):
             owner = actor(request, True)
             with self.store.connect() as conn:
@@ -420,19 +421,19 @@ class Memory:
             await self.checkpoints.flush()
             return self.preferences(owner)
 
-        @router.post('/api/memory', status_code=201)
+        @router.post('/api/memory', status_code=201, response_model=SavedMemory, operation_id='create_memory')
         async def create(body: Note, request: Request):
             result = self.save(actor(request, True), body)
             await self.checkpoints.flush()
             return result
 
-        @router.put('/api/memory/{note_id}')
+        @router.put('/api/memory/{note_id}', response_model=SavedMemory, operation_id='update_memory')
         async def update(note_id: str, body: Note, request: Request):
             result = self.save(actor(request, True), body, note_id=note_id)
             await self.checkpoints.flush()
             return result
 
-        @router.delete('/api/memory/{note_id}')
+        @router.delete('/api/memory/{note_id}', response_model=ForgottenMemory, operation_id='delete_memory')
         async def delete(note_id: str, body: Revision, request: Request):
             result = self.forget(actor(request, True), note_id, body.revision)
             await self.checkpoints.flush()

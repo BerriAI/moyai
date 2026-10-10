@@ -7,6 +7,7 @@ Radix UI. The workspace palette and layout remain in place.
 ## Build and preview
 
 ```sh
+uv sync --frozen
 npm ci
 npm run build
 npm run typecheck
@@ -53,9 +54,18 @@ open the account menu during that lookup delay. It stays open when the response
 arrives; choose an account and click the top bar to see the deferred status apply
 without another cost poll or network request. Reload to restart the fixture.
 
-The production bundle lives in `app/static/ui` and is checked in. Python, Docker
+The compatibility bundle lives in `app/static/generated/ui` and is checked in. Python, Docker
 and Modal serve the same assets without a Node runtime. CI rebuilds the bundle and
 checks that it matches its source. Commit bundle changes together with source.
+
+The React SPA builds into `app/static/spa`, which is ignored by Git. Run
+`npm ci && npm run build` before starting Python locally or deploying with Modal.
+Docker builds both frontend bundles in a Node build stage; the Python runtime
+serves the resulting static files without Node. The generated API client, Zod
+schemas, OpenAPI snapshot, and router tree are ignored. `npm run generate`
+recreates them from Python response models and frontend route sources. Build,
+typecheck, and development commands run generation automatically; install Python
+dependencies with `uv sync --frozen` first.
 
 The session integration suite uses real local session APIs and demo execution:
 

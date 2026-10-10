@@ -70,6 +70,36 @@ print('PASS: sessions, encrypted connection, keys and archive survive; SQLite wr
 print('PASS: PID 1 runs as UID/GID 10001; private modes and external symlink targets unchanged.')
 """
 
+VERIFY_UI = """
+import re
+import shutil
+from pathlib import Path
+import httpx
+
+with httpx.Client(base_url='http://127.0.0.1:8787', headers={'Host': 'vm.example'}) as client:
+    for path in ('/', '/sessions/new', '/settings', '/settings/memory'):
+        response = client.get(path)
+        assert response.status_code == 200, (path, response.status_code)
+        assert '/static/spa/app.js' in response.text
+    html = client.get('/').text
+    assets = re.findall(r'(?:src|href)="(/static/[^"?]+)', html)
+    assert '/static/spa/app.js' in assets
+    for asset in assets:
+        response = client.get(asset)
+        assert response.status_code == 200, (asset, response.status_code)
+    for chunk in Path('/app/app/static/spa').glob('*.js'):
+        response = client.get('/static/spa/' + chunk.name)
+        assert response.status_code == 200, chunk.name
+    assert client.get('/api/not-a-real-endpoint').status_code == 404
+    assert client.get('/static/spa/missing.js').status_code == 404
+assert not shutil.which('node') and not shutil.which('npm')
+assert not Path('/app/node_modules').exists()
+cache = Path('/root/.cache/uv')
+assert not cache.exists() or not any(cache.iterdir())
+print('PASS: SPA deep links, CSS, scripts and route chunks serve from the built image; missing APIs/assets stay 404.')
+print('PASS: Node, npm, frontend dependencies and Python download caches stay outside the runtime image.')
+"""
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -180,6 +210,7 @@ def main():
         start(name, empty, "-e", "PUBLIC_URL=https://vm.example")
         healthy(name)
         log("PASS: ordinary Docker startup still works on port 8787.")
+        log(docker("exec", name, python, "-c", VERIFY_UI).stdout.strip())
         log("All Docker smoke checks passed. No cloud credentials or production data used.")
     finally:
         for name in containers:

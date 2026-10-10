@@ -37,7 +37,7 @@ for (const width of [1440, 768, 320]) for (const fixture of ['populated', 'membe
     await tooltip.waitFor();
     if (activation === 'mouse') await gear.click();
     else await gear.press(activation);
-    await page.waitForURL(url => url.hash === '#settings', { timeout: 3000 });
+    await page.waitForURL(url => url.pathname === '/settings', { timeout: 3000 });
     await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor();
     assert.equal(await page.locator('#content h1').evaluate(el => el === document.activeElement), true);
     if (width <= 850) {
@@ -2190,7 +2190,7 @@ test('palette session search isolates results, escapes message matches and disca
   assert.deepEqual(await page.locator('#session-list [data-run]').evaluateAll(rows => rows.map(row => row.dataset.run)), sidebar, 'Palette searches do not filter the sidebar');
   await match.click();
   await dialog.waitFor({ state: 'detached' });
-  await page.waitForFunction(id => location.hash === '#run=' + id, worker);
+  await page.waitForFunction(id => location.pathname === '/sessions/' + id, worker);
   await page.locator('#content h1').waitFor();
   await page.locator('#search-sessions').click();
   const closedRequest = waitForQuery('closed needle');
@@ -2266,7 +2266,7 @@ test('palette hands off to the existing folder dialog and new-session shortcuts 
     await page.getByRole('dialog').waitFor({ state: 'detached' });
     await page.locator('#prompt').waitFor();
     await page.waitForFunction(() => document.activeElement?.id === 'prompt');
-    assert.equal(new URL(page.url()).hash, '#tasks');
+    assert.equal(new URL(page.url()).pathname, '/sessions/new');
   }
   await page.evaluate(() => { applyUserSession({ authenticated: false, role: 'member', user_id: '', csrf: '' }); });
   const version = await page.evaluate(() => state.pageVersion);

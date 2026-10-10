@@ -501,7 +501,9 @@ def _create_app(settings, store):
                 raise HTTPException(503, 'Database is unavailable.', headers=headers) from None
         return JSONResponse({"status": "ok"}, headers=headers)
 
-    @app.get("/api/session")
+    from .frontend_contracts import WorkspaceSession
+
+    @app.get("/api/session", response_model=WorkspaceSession, operation_id='get_workspace_session')
     async def session(request: Request):
         sid = security.session(request)
         response = JSONResponse({})
@@ -1464,6 +1466,14 @@ def _create_app(settings, store):
     @app.get("/")
     async def index():
         return FileResponse(STATIC / "index.html")
+
+    # Explicit SPA routes: missing APIs/assets must still return their own 404.
+    @app.get('/sessions/new', include_in_schema=False)
+    @app.get('/sessions/{session_id}', include_in_schema=False)
+    @app.get('/settings', include_in_schema=False)
+    @app.get('/settings/{page}', include_in_schema=False)
+    async def frontend_route():
+        return FileResponse(STATIC / 'index.html')
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

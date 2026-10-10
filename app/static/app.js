@@ -259,17 +259,19 @@ function bindComposer(input,form){
   input.addEventListener('keydown',e=>{if(form.inert)return;if(skills.keydown(e))return;if(history(e))return;if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();const now=(e.ctrlKey||e.metaKey)&&input.id==='followup';if(now&&!input.value.trim()&&!state.attachments.hasFiles()){state.messageQueue?.sendFirst();return;}if(!form.querySelector('[type="submit"]').disabled)form.requestSubmit(now?form.querySelector('[data-send-now]'):undefined);}});
   autoSize(input);
 }
-async function navigate(view,initialConfig) {
+async function navigate(view,initialConfig,fromRouter=false) {
+  if(globalThis.MoyaiApp&&!fromRouter)return globalThis.MoyaiApp.navigate(view);
   if(view==='adoption'){spendAnalyticsState.tab='users';view='spend';}
   stopStream();state.pageVersion++;state.view=view;state.selected=null;
   const version=state.pageVersion;
   setView(view,{settings:'Settings',automations:'Automations',tasks:'New session',connections:'Connections',runtime:'Runtime',spend:state.role==='admin'?'Spend & usage':'Spend',users:'Users',environments:'Environments',secrets:'Secrets',skills:'Skills',memory:'Memory'}[view]);
-  history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
+  if(!globalThis.MoyaiApp)history.replaceState(null,'',view==='tasks'?'#tasks':'#'+view);
   if(settingsViews.has(view)) {
     MoyaiUI.render($('#content'), '<p class="settings-loading" role="status">Loading…</p>');
     $('#content').scrollTop=0;
   }
   try {
+  if(globalThis.MoyaiApp?.renderPage(view))return;
   if(view==='settings')await renderSettings(true);else if(view==='automations')await renderAutomations(false,true);else if(view==='tasks')await renderHome(initialConfig,true);else if(view==='connections')await renderConnections(true);else if(view==='spend')await renderSpend(false,true);else if(view==='users')await renderUsers(true);else if(view==='environments')await renderEnvironments(false,true);else if(view==='secrets')await renderSecrets();else if(view==='skills')await renderSkills(true);else if(view==='memory')await renderMemory(true);else await renderRuntime(true);
   } catch(error) {
     if(version!==state.pageVersion)return;
@@ -283,7 +285,7 @@ async function navigate(view,initialConfig) {
   }
 }
 async function refreshRuns(){
-  const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';
+  const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(globalThis.MoyaiApp?.legacyHash()||location.hash)?.runId||'';
   const params=new URLSearchParams({scope:sessionListScope(),view:'sidebar'});
   if(focus)params.set('focus',focus);
   try{
@@ -410,14 +412,15 @@ async function submitTask(e){
   };
   await send();
 }
-async function openRun(id,hash='#run='+id,submission=null){
+async function openRun(id,hash='#run='+id,submission=null,fromRouter=false){
+  if(globalThis.MoyaiApp&&!fromRouter)return globalThis.MoyaiApp.openRun(id,hash,submission);
   const link=parseSessionLink(hash);
   const sessionEdits=state.sessionEdits||0;
   const titleEdits=state.titleEdits||0;
   stopStream();const version=++state.pageVersion;state.selected=id;
   if(link?.runId===id&&link.credentialId)state.credentialLink={...link,pageVersion:version};
   const targetHash=link?.runId===id?link.hash:'#run='+id;
-  history.replaceState(null,'',targetHash);
+  if(!globalThis.MoyaiApp)history.replaceState(null,'',targetHash);
   const cachedTitle=sessionRows(state.runs).find(run=>run.id===id);
   setView('chat',cachedTitle?sessionTitle(cachedTitle):'Loading conversation');
   const path=`/api/runs/${id}?activity=summary`;
@@ -466,7 +469,7 @@ async function openRun(id,hash='#run='+id,submission=null){
   if(titleEdits!==(state.titleEdits||0))run.display_title=state.runs.find(item=>item.id===id)?.display_title??run.display_title;
   if(!document.hidden)markSessionRead(run);state.view='tasks';
   if(!preview||!run.chat_enabled)setView(run.chat_enabled?'chat':'legacy',sessionTitle(run));
-  history.replaceState(null,'',targetHash);
+  if(!globalThis.MoyaiApp)history.replaceState(null,'',targetHash);
   if(run.chat_enabled){
     if(preview){if(refreshVersion===state.chatRefresh)updateChat(run);}else renderChat(run);
     if(link?.fileRef)await openLinkedFile(link,version);return;
@@ -956,8 +959,8 @@ window.addEventListener('keydown',e=>{
 });
 $('.dialog-close').onclick=()=>$('#connection-dialog').close();
 window.addEventListener('hashchange',()=>{
-  if(!state.csrf)return;
-  const linkedRun=parseSessionLink(location.hash);
+  if(globalThis.MoyaiApp||!state.csrf)return;
+  const linkedRun=parseSessionLink(globalThis.MoyaiApp?.legacyHash()||location.hash);
   (linkedRun?openRun(linkedRun.runId,linkedRun.hash):navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks')).catch(showError);
 });
 document.querySelector('.skip-link')?.addEventListener('click',event=>{event.preventDefault();$('#content').focus();});
@@ -974,6 +977,7 @@ async function boot(){
       const signInError=new URLSearchParams(location.search).get('signin');
       if(signInError){$('#signin-error').textContent=signInError==='cancelled'?'Sign-in was cancelled. You can try again.':'We couldn’t sign you in. Use your BerriAI Google Workspace account and try again.';history.replaceState(null,'','/'+location.hash);}
       document.querySelectorAll('.rail button').forEach(b=>b.disabled=true);
+      globalThis.MoyaiApp?.ready();
       return;
     }
     registerWebMCP();
@@ -990,6 +994,7 @@ async function boot(){
     // Navigation can supersede this route while authentication is pending,
     // but identity, configuration and the sidebar still belong to the app.
     if(page!==state.pageVersion){await state.configReady;return;}
+    if(globalThis.MoyaiApp){await state.configReady;globalThis.MoyaiApp.ready();return;}
     const linkedRun=parseSessionLink(location.hash);
     if(linkedRun){loadingChat=true;const opening=openRun(linkedRun.runId,linkedRun.hash);page=state.pageVersion;await opening;}
     else {await state.configReady;if(page!==state.pageVersion)return;const navigation=navigate(settingsViews.has(location.hash.slice(1))?location.hash.slice(1):'tasks',state.config);page=state.pageVersion;await navigation;}
@@ -1014,6 +1019,17 @@ function registerWebMCP(){
 matchMedia('(max-width:850px)').addEventListener('change',()=>setSidebar(false));
 document.addEventListener('change',e=>{const picker=e.target.closest?.('.model-picker select'),logo=picker?.closest('.model-picker')?.querySelector('.provider-logo');if(logo&&picker.id!=='new-harness')MoyaiProviderLogos.sync(logo,picker.value,MoyaiProviderLogos.src);});
 setInterval(()=>{if(state.authenticated&&!document.hidden)refreshRuns().catch(()=>{});},15000);
+globalThis.MoyaiControllers={
+  authenticated:()=>!!state.authenticated,
+  csrf:()=>state.csrf,
+  userId:()=>state.userId||null,
+  role:()=>state.role,
+  page:view=>navigate(view,undefined,true),
+  session:(id,hash,submission)=>openRun(id,hash,submission,true),
+  applySession:session=>applyUserSession(session),
+  updatePreferences:preferences=>Object.assign(state.preferences,preferences),
+  invalidate:()=>state.navigationCache?.clear(),
+};
 boot();
 
 setInterval(()=>{if(state.authenticated&&!document.hidden&&state.selected&&(state.chatRun?.agents?.groups?.length||state.runs.find(r=>r.id===state.selected)?.children?.length))refreshChat(state.selected).catch(()=>{});},10000);

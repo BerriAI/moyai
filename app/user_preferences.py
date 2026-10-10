@@ -32,12 +32,12 @@ class UserPreferences:
     def routes(self):
         router = APIRouter()
 
-        @router.get('/api/settings/preferences')
+        @router.get('/api/settings/preferences', response_model=ChatPreferences, operation_id='get_chat_preferences')
         async def read(request: Request):
             self.security.require(request)
             return self.get(self.store.identity(self.security.session_info(request)))
 
-        @router.put('/api/settings/preferences')
+        @router.put('/api/settings/preferences', response_model=ChatPreferences, operation_id='update_chat_preferences')
         async def save(body: ChatPreferences, request: Request):
             self.security.require(request, mutation=True)
             user_id = self.store.identity(self.security.session_info(request))

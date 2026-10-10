@@ -30,6 +30,20 @@ async function click(page,selector,ready){
     document.querySelector(selector).click();check();
   }),{selector,ready});
 }
+test('typed Memory shows access errors and can retry after access is restored',async t=>{
+  const page=await browser.newPage(),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  t.after(async()=>{await page.close();assert.deepEqual(errors,[]);});
+  await page.route('**/api/memory',route=>route.fulfill({status:403,contentType:'application/json',body:JSON.stringify({detail:'Sign in with your Google account to use personal memory.'})}));
+  await page.goto(base+'/#memory');
+  await page.locator('#memory-retry').waitFor({timeout:5000});
+  assert.match(await page.locator('#content').innerText(),/Sign in with your Google account/);
+  assert.equal(await page.getByText('Loading your memories…',{exact:true}).count(),0);
+  await page.unroute('**/api/memory');
+  await page.locator('#memory-retry').click();
+  await page.locator('#memory-search').waitFor({timeout:5000});
+  assert.equal(await page.locator('#memory-retry').count(),0);
+});
 test('returning to Settings and Users uses recent data; a settings write invalidates it',async t=>{
   const {page,reads}=await setup(t);
   await click(page,'a[href="#users"]','#user-search');

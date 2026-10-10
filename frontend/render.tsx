@@ -143,6 +143,16 @@ export function render(host: HTMLElement, html: string, { preserve = [] }: Rende
   regions.set(host, { root, nodes: [...host.childNodes], connected: host.isConnected })
 }
 
+// Native React pages share the same disposal boundary as remaining controllers.
+// A controller must dispose a page before writing into its host.
+export function renderComponent(host: HTMLElement, content: React.ReactNode) {
+  dispose(host)
+  host.replaceChildren()
+  const root = createRoot(host)
+  flushSync(() => root.render(<TooltipProvider delayDuration={500}>{content}</TooltipProvider>))
+  regions.set(host, { root, nodes: [...host.childNodes], connected: host.isConnected })
+}
+
 export function insert(host: HTMLElement, position: InsertPosition, html: string) {
   // A display:contents region owns only this insertion. Sibling handlers, focus,
   // drafts and streamed message nodes remain untouched.

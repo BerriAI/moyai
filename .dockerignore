@@ -5,4 +5,13 @@
 __pycache__
 .pytest_cache
 tests
+node_modules
+test-results
+playwright-report
+app/static/spa
+app/static/generated
+frontend/api/generated
+frontend/api/openapi.json
+frontend/routeTree.gen.ts
+.tanstack
 

@@ -105,7 +105,7 @@ let sandboxConnection={provider:'modal',revision:0,public_key:'c3ludGhldGljLXByZ
 const json=(res,status,value)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify(value));};
 const server=http.createServer(async(req,res)=>{
  const url=new URL(req.url,'http://localhost'),p=url.pathname;
- if(p==='/'){
+ if(p==='/'||/^\/sessions\/[^/]+$/.test(p)||/^\/settings(?:\/[^/]+)?$/.test(p)){
   fixture=url.searchParams.get('fixture')||'populated';
   accountLinkPolls=0;
   let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
@@ -135,7 +135,7 @@ const server=http.createServer(async(req,res)=>{
   }
   return json(res,200,role==='admin'?sandboxConnection:{provider:sandboxConnection.provider});
  }
- if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
+ if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',google_enabled:false,google_domains:[],password_enabled:false,preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
  if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
  if(p==='/api/runs')return json(res,200,fixture==='agent-sidebar'?agentSessions:['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
@@ -153,9 +153,9 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/skills')return json(res,200,{skills:empty?[]:fixture==='skill-picker'?pickerSkills:skills});
  if(p.startsWith('/api/skills/'))return json(res,200,[...skills,...pickerSkills].find(s=>s.id===p.split('/')[3])||{});
  if(p==='/api/memory/preferences'){preferences={...preferences,...body,revision:preferences.revision+1};return json(res,200,preferences);}
- if(p==='/api/memory'&&req.method==='POST'){memories.push({...body,id:'memory-new',updated_at:stamp,source:{type:'manual'}});return json(res,200,{});}
- if(p.startsWith('/api/memory/')&&req.method==='PUT'){const note=memories.find(n=>n.id===p.split('/')[3]);Object.assign(note,body);return json(res,200,note);}
- if(p.startsWith('/api/memory/')&&req.method==='DELETE'){memories=memories.filter(n=>n.id!==p.split('/')[3]);return json(res,200,{});}
+ if(p==='/api/memory'&&req.method==='POST'){memories.push({...body,id:'memory-new',revision:1,updated_at:stamp,source:{type:'manual'}});return json(res,201,{saved:true,id:'memory-new',revision:1});}
+ if(p.startsWith('/api/memory/')&&req.method==='PUT'){const note=memories.find(n=>n.id===p.split('/')[3]);Object.assign(note,body);return json(res,200,{saved:true,id:note.id,revision:note.revision});}
+ if(p.startsWith('/api/memory/')&&req.method==='DELETE'){memories=memories.filter(n=>n.id!==p.split('/')[3]);return json(res,200,{forgotten:true});}
  if(p==='/api/memory')return json(res,200,{memories:empty?[]:memories,preferences,limit:200});
  if(p==='/api/credentials')return json(res,200,{secrets:empty?[]:secrets,providers:[{id:'generic',name:'Other service',setup_url:''}],requests:[]});
  if(p==='/api/admin/users')return json(res,200,{users:empty?[]:users,domains:['example.com'],activity:[]});

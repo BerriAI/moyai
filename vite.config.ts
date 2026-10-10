@@ -8,7 +8,7 @@ export default defineConfig({
   resolve: { alias: { "@": resolve(__dirname, "frontend") } },
   build: {
     rollupOptions: { onwarn(warning, warn) { if (warning.code !== "MODULE_LEVEL_DIRECTIVE") warn(warning) } },
-    outDir: "app/static/ui",
+    outDir: "app/static/generated/ui",
     emptyOutDir: true,
     lib: { entry: "frontend/index.tsx", name: "MoyaiUI", formats: ["iife"], fileName: () => "moyai-ui.js", cssFileName: "moyai-ui" },
   },

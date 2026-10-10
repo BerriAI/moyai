@@ -143,14 +143,14 @@ export function createPopover(id: string): PopoverHost {
   return host
 }
 
-export function initializeShell() {
+export function initializeShell({ renderShell = true } = {}) {
   const dialogs = [...document.querySelectorAll("dialog")].map(node => {
     const value = { attributes: [...node.attributes], html: node.innerHTML }
     node.remove()
     return value
   })
   document.querySelector("#session-actions")?.remove()
-  render(document.body, document.body.innerHTML)
+  if (renderShell) render(document.body, document.body.innerHTML)
   for (const { attributes, html } of dialogs) {
     const host = createDialog()
     for (const attribute of attributes) host.setAttribute(attribute.name, attribute.value)
