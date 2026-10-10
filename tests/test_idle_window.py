@@ -211,7 +211,7 @@ async def test_stop_at_finish_or_during_idle_releases_without_losing_answer(dura
     try:
         if delete:
             manager.coordinator = AgentCoordinator(manager.store, manager.settings, manager)
-            lifecycle = SessionLifecycle(manager.store, None, manager, SimpleNamespace(flush=AsyncMock()))
+            lifecycle = SessionLifecycle(manager.store, SimpleNamespace(settings=manager.settings), manager, SimpleNamespace(flush=AsyncMock()))
             lifecycle.request_delete(root, '', True)
             deletion = lifecycle.schedule_delete(root)
             await asyncio.sleep(0)
@@ -549,7 +549,7 @@ async def test_real_message_reuses_awakened_computer_with_real_turn_capability(d
 async def test_computer_wake_reserves_capacity_and_blocks_delete_until_cleanup(durable):
     manager, cloud, run_id = await sleeping_computer(durable)
     manager.settings.max_concurrent_runs = 1
-    lifecycle = SessionLifecycle(manager.store, None, manager, None)
+    lifecycle = SessionLifecycle(manager.store, SimpleNamespace(settings=manager.settings), manager, None)
     await manager.wake_computer(run_id)
     other = new_chat(manager)
     assert await manager.advance(other) == 'capacity'
@@ -581,7 +581,7 @@ async def test_confirmed_delete_drains_warm_workspace_and_blocks_new_work(durabl
     async def checkpoint():
         flushed.append((bool(manager.store.run(run_id)['deleted_at']), any(machine.alive for machine in cloud.machines)))
     checkpoints = SimpleNamespace(flush=AsyncMock(side_effect=checkpoint))
-    lifecycle = SessionLifecycle(manager.store, None, manager, checkpoints)
+    lifecycle = SessionLifecycle(manager.store, SimpleNamespace(settings=manager.settings), manager, checkpoints)
     assert lifecycle.request_delete(run_id, '', True) is False
     requested = manager.store.run(run_id)['deletion_requested_at']
     assert requested and not manager.store.run(run_id)['deleted_at']
@@ -625,7 +625,7 @@ async def test_confirmed_delete_stops_active_family_and_retains_independent_sess
         await drive(manager, child, phase='monitor')
     unrelated = new_chat(manager)
     queued, _ = manager.store.enqueue_message(root, 'Queued follow-up', 'queued-before-delete')
-    lifecycle = SessionLifecycle(manager.store, None, manager, SimpleNamespace(flush=AsyncMock()))
+    lifecycle = SessionLifecycle(manager.store, SimpleNamespace(settings=manager.settings), manager, SimpleNamespace(flush=AsyncMock()))
     lifecycle.request_delete(root, '', True)
     task = lifecycle.schedule_delete(root)
     try:
@@ -668,9 +668,9 @@ async def test_delete_recovers_agent_create_ack_lost_before_worker_restart(durab
         state.pop('sandbox_name', None)
         manager.save(run_id, state)
     checkpoints = SimpleNamespace(flush=AsyncMock())
-    SessionLifecycle(manager.store, None, manager, checkpoints).request_delete(run_id, '', True)
+    SessionLifecycle(manager.store, SimpleNamespace(settings=manager.settings), manager, checkpoints).request_delete(run_id, '', True)
     successor = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
-    lifecycle = SessionLifecycle(successor.store, None, successor, checkpoints)
+    lifecycle = SessionLifecycle(successor.store, SimpleNamespace(settings=successor.settings), successor, checkpoints)
     lifecycle.start()
     deletion = lifecycle.deletions[run_id]
     try:
@@ -705,7 +705,7 @@ async def test_delete_retries_unknown_historical_sandbox_cleanup_before_tombston
             raise ConnectionError('Checkpoint unavailable')
         flushed.append((bool(manager.store.run(run['id'])['deleted_at']), machine.alive))
     checkpoints = SimpleNamespace(flush=AsyncMock(side_effect=checkpoint))
-    lifecycle = SessionLifecycle(manager.store, None, manager, checkpoints)
+    lifecycle = SessionLifecycle(manager.store, SimpleNamespace(settings=manager.settings), manager, checkpoints)
     lifecycle.request_delete(run['id'], '', True)
     task = lifecycle.schedule_delete(run['id'])
     try:
@@ -788,7 +788,7 @@ async def test_recover_dispatches_computer_intent_on_a_cancelled_session(durable
 async def test_computer_admission_rechecks_writes_committed_during_capacity_wait(durable, monkeypatch, other_action):
     manager, _, run_id = await sleeping_computer(durable)
     other_store = Store(manager.settings.data_dir)
-    lifecycle = SessionLifecycle(other_store, None, manager, None)
+    lifecycle = SessionLifecycle(other_store, SimpleNamespace(settings=manager.settings), manager, None)
     before = manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,))
     admission = manager.admission
     @asynccontextmanager
@@ -813,7 +813,7 @@ async def test_computer_admission_rechecks_writes_committed_during_capacity_wait
 async def test_computer_admission_holds_writer_lock_until_intent_and_wake_commit(durable, monkeypatch, other_action):
     manager, _, run_id = await sleeping_computer(durable)
     other_store = Store(manager.settings.data_dir)
-    lifecycle = SessionLifecycle(other_store, None, manager, None)
+    lifecycle = SessionLifecycle(other_store, SimpleNamespace(settings=manager.settings), manager, None)
     submit = manager.submit_in
     started, competing = Event(), []
     def write():
