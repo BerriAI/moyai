@@ -115,7 +115,10 @@ async def test_capacity_uses_one_connection_per_broker_not_per_request(verified)
     one, two = await first_slots.acquire(), await first_slots.acquire()
     assert first_slots._connection.info.backend_pid in owners
     assert second_slots.locked()
-    rows = second.state.store.rows("SELECT DISTINCT pid FROM pg_locks WHERE locktype='advisory' AND classid=726947 AND granted")
+    rows = second.state.store.rows("""SELECT DISTINCT pid FROM pg_locks
+        WHERE locktype='advisory' AND classid=726947 AND objsubid=2 AND granted
+        AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+        AND objid=ANY(?::oid[])""", (list(first_slots._unsigned_keys),))
     assert {row['pid'] for row in rows} <= owners
     first_slots.release(one)
     three = await second_slots.acquire()
@@ -436,3 +439,83 @@ async def test_cancelled_admission_drains_and_releases_an_acquired_slot(verified
     finally:
         finish.set()
         await asyncio.gather(claiming, return_exceptions=True)
+
+
+@pytest.mark.parametrize('released_at_server', [False, True])
+async def test_unacknowledged_unlock_never_reenters_or_silently_leaks_a_slot(verified, monkeypatch, released_at_server):
+    import psycopg
+    from app.database import DatabaseError
+
+    broker, _ = verified
+    first = broker()
+    slots = first.state.model_slots
+    permit = await slots.acquire()
+    connection = slots._connection
+
+    class Unacknowledged:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+
+        def execute(self, sql, params=()):
+            if 'pg_advisory_unlock' in sql:
+                if released_at_server:
+                    connection.execute(sql, params)
+                raise psycopg.OperationalError('synthetic lost acknowledgement')
+            return connection.execute(sql, params)
+
+    monkeypatch.setattr(slots, '_connection', Unacknowledged())
+    with pytest.raises(DatabaseError, match='not acknowledged'):
+        await slots.release_async(permit)
+    assert permit in slots._permits
+    with pytest.raises(DatabaseError, match='ownership was lost'):
+        await slots.acquire()
+    with pytest.raises(DatabaseError, match='ownership was lost'):
+        slots.check()
+
+
+@pytest.mark.parametrize('close_error', [False, True])
+async def test_lifespan_drains_live_route_cleanup_even_when_a_component_close_fails(verified, monkeypatch, close_error):
+    from app.broker_ownership import BrokerOwnershipMiddleware
+
+    broker, _ = verified
+    first, replacement = broker(), broker()
+    started, cleaning, cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def handler(scope, receive, send):
+        async with first.state.model_slots:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await cleanup.wait()
+
+    async def fail_close():
+        raise RuntimeError('synthetic component close failure')
+
+    context = first.router.lifespan_context(first)
+    await context.__aenter__()
+    if close_error:
+        monkeypatch.setattr(first.state.memory_review, 'close', fail_close)
+    route = asyncio.create_task(BrokerOwnershipMiddleware(handler, first.state.broker_requests)(
+        {'type': 'http', 'path': '/broker/fixture/v1/responses'}, None, None))
+    await asyncio.wait_for(started.wait(), 2)
+    other = await replacement.state.model_slots.acquire()
+    closing = asyncio.create_task(context.__aexit__(None, None, None))
+    try:
+        await asyncio.wait_for(cleaning.wait(), 2)
+        assert not closing.done()
+        assert await replacement.state.model_slots.is_full()
+        assert not first.state.model_slots._closed
+        cleanup.set()
+        if close_error:
+            with pytest.raises(RuntimeError, match='component close failure'):
+                await asyncio.wait_for(closing, 2)
+        else:
+            await asyncio.wait_for(closing, 2)
+        assert first.state.model_slots._closed
+        assert not await replacement.state.model_slots.is_full()
+    finally:
+        cleanup.set()
+        await asyncio.gather(route, closing, return_exceptions=True)
+        replacement.state.model_slots.release(other)

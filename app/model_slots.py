@@ -134,6 +134,7 @@ class PostgresModelSlots(ModelSlots):
         self._guard = threading.RLock()
         self._connection = None
         self._closed = False
+        self._failed = False
         self._keys = tuple(int.from_bytes(hashlib.sha256(
             f'moyai:model-slot:{database.schema}:{index}'.encode()).digest()[:4], 'big', signed=True)
             for index in range(capacity))
@@ -147,7 +148,7 @@ class PostgresModelSlots(ModelSlots):
 
         try:
             with self._guard:
-                if self._closed:
+                if self._closed or self._failed:
                     raise DatabaseError('Shared model capacity ownership was lost.')
                 if self._connection is None:
                     self._connection = psycopg.connect(self.database.pool.conninfo, autocommit=True, connect_timeout=10)
@@ -246,10 +247,26 @@ class PostgresModelSlots(ModelSlots):
     def release(self, permit=None, *, counted=True):
         from .database import DatabaseError
 
+        import psycopg
+
         with self._guard:
             if permit not in self._permits:
                 raise DatabaseError('Shared model capacity permit is missing or already released.')
-            key, holder = self._permits.pop(permit)
+            key, holder = self._permits[permit]
+            # Keep the local permit until PostgreSQL acknowledges release. An
+            # uncertain unlock must never make a session lock reentrant again.
+            if self._connection.closed or self._connection.broken:
+                self._failed = True
+            else:
+                try:
+                    unlocked = self._connection.execute('SELECT pg_advisory_unlock(726947,%s)', (key,)).fetchone()[0]
+                except psycopg.Error:
+                    self._failed = True
+                    raise DatabaseError('Shared model capacity release was not acknowledged.') from None
+                if not unlocked:
+                    self._failed = True
+                    raise DatabaseError('Shared model capacity ownership was lost.')
+            del self._permits[permit]
             if counted:
                 self.active -= 1
             if holder in self._holders:
@@ -258,9 +275,6 @@ class PostgresModelSlots(ModelSlots):
                     self._holders[holder] = remaining
                 else:
                     del self._holders[holder]
-            # Once the provider is closed a lost slot session is already free.
-            if not self._connection.closed and not self._connection.broken:
-                self._connection.execute('SELECT pg_advisory_unlock(726947,%s)', (key,))
 
     async def release_async(self, permit=None):
         from .db import database

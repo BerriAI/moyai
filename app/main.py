@@ -387,19 +387,22 @@ def _create_app(settings, store):
                         memory_review.start()
                     yield
                 finally:
+                    errors = []
+                    closes = ([broker_requests.close] if broker_requests else []) + [
+                        memory_review.close, spend.recovery.close,
+                        harness_gateway.maintenance.close, harness_gateway.live_context.close,
+                        manager.shutdown, manager.modal_clients.close, environments.close,
+                        session_lifecycle.close, computer.close, session_pull_requests.close, tracing.close,
+                    ]
+                    for close in closes:
+                        try:
+                            await close()
+                        except BaseException as exc:
+                            errors.append(exc)
                     if broker_requests:
-                        await broker_requests.close()
-                    await memory_review.close()
-                    await spend.recovery.close()
-                    await harness_gateway.maintenance.close()
-                    await harness_gateway.live_context.close()
-                    await manager.shutdown()
-                    await manager.modal_clients.close()
-                    await environments.close()
-                    await session_lifecycle.close()
-                    await computer.close()
-                    await session_pull_requests.close()
-                    await tracing.close()
+                        await broker_requests.drain()
+                    if errors:
+                        raise errors[0]
                 return
             if handoff:
                 try:

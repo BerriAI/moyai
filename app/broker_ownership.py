@@ -81,8 +81,16 @@ class BrokerMaintenance:
             self.memory_review.start()
             await asyncio.Event().wait()
         finally:
-            await self.memory_review.close()
-            await self.spend_recovery.close()
+            errors = []
+            for close in (self.memory_review.close, self.spend_recovery.close):
+                try:
+                    await close()
+                except BaseException as exc:
+                    errors.append(exc)
+            # An incomplete close retains leadership until process retirement;
+            # never let a successor reset a possibly still-running review.
+            if errors:
+                raise errors[0]
             if self.owned:
                 # A dead session already released its lock; never reconnect it.
                 owner = self.store.database.owner
@@ -148,6 +156,17 @@ class BrokerRequests:
             await asyncio.gather(self.task, return_exceptions=True)
             self.task = None
         await self.maintenance.close()
+
+    async def drain(self):
+        # Uvicorn may start lifespan shutdown immediately after cancelling its
+        # overdue HTTP tasks. Wait for their transport/accounting cleanup before
+        # the owner or shared-slot sessions can be closed by the lifespan.
+        current = asyncio.current_task()
+        tasks = (set(self.tasks) | set(self.slots._maintenance)) - {current}
+        for task in tasks:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class BrokerOwnershipMiddleware:
