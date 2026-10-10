@@ -713,9 +713,15 @@ def test_delete_automatically_stops_family_and_waits_for_receipts(workspace, bus
     elif busy in {'queued', 'injected'}:
         store.execute('UPDATE messages SET status=? WHERE run_id=?', (busy, child))
     elif busy == 'slack_sending':
-        store.execute("INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,status,created_at) VALUES(?,'sending','answer','Answer','sending',?)", (child, now()))
-        receipt = store.rows("SELECT id FROM slack_outbox WHERE run_id=? AND dedupe_key='sending'", (child,))[0]['id']
-        app.state.slack.chat.delivering.add(receipt)
+        async def begin_delivery():
+            # Model the real owner's atomic claim. Background reconciliation
+            # must not see a sending receipt before its in-memory owner exists.
+            async with app.state.slack.chat.delivery_claim:
+                store.execute("INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,status,created_at) VALUES(?,'sending','answer','Answer','sending',?)", (child, now()))
+                receipt = store.rows("SELECT id FROM slack_outbox WHERE run_id=? AND dedupe_key='sending'", (child,))[0]['id']
+                app.state.slack.chat.delivering.add(receipt)
+                return receipt
+        receipt = client.portal.call(begin_delivery)
     else:
         store.execute('CREATE TABLE IF NOT EXISTS durable_sessions(run_id TEXT PRIMARY KEY,state TEXT NOT NULL)')
         store.execute('INSERT INTO durable_sessions VALUES(?,?)', (child, json.dumps({'phase': busy})))
