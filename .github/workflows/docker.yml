@@ -23,7 +23,7 @@ jobs:
       - name: Test Slack requester identity and DM delivery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
       - name: Test private storage, migration and legacy file compatibility
         run: uv run --python 3.13 pytest -q --tb=line tests/test_blob_storage.py tests/test_storage_maintenance.py tests/test_attachments.py tests/test_audio.py tests/test_slack_files.py tests/test_skill_saving.py tests/test_artifact_files.py tests/test_agents.py tests/test_persistence.py tests/test_capture_release.py
       - uses: actions/setup-node@v4
@@ -56,7 +56,7 @@ jobs:
       - name: Test cloud diagnostics and durable recovery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_startup_overlap.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py
       - name: Test durable swarm mode and mixed-harness delegation
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_planning.py tests/test_swarm_backend.py
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py
       - name: Build production image
         run: docker build -t moyai-docker-smoke .
       - name: Exercise mounted disk migration and restart
