@@ -101,7 +101,10 @@ def test_pending_ingress_survives_replacement_and_signature_expiry(handoff_setti
             monkeypatch.setattr(second.state.slack, 'verify_signature', Mock(side_effect=AssertionError('Revalidated saved signature')))
             first.state.store.close()
             wait_leader(second)
-            wait_for(lambda: len(calls) == 1)
+            # The handler returns before the inbox commits its completion.
+            wait_for(lambda: second.state.store.rows('SELECT payload,status FROM coordinator_hooks')
+                     == [{'payload': '', 'status': 'done'}])
+            assert len(calls) == 1
             assert calls[0]['event_id'] == 'EvTest1'
             assert second.state.store.rows('SELECT payload,status FROM coordinator_hooks')[0] == {'payload': '', 'status': 'done'}
     finally:
