@@ -257,7 +257,10 @@ class DurableRunner(RunManager):
                 state = await database(self.state, run_id)
                 if state.get('phase') == 'warm':
                     # A queued follow-up claims the already occupied slot.
-                    if not await database(self.begin_turn, run_id, row, state):
+                    started = await database(self.begin_turn, run_id, row, state)
+                    if started == 'capacity':
+                        return 'capacity'
+                    if not started:
                         return True
                     state = await database(self.state, run_id)
             if not state or state.get('phase') == 'idle':
@@ -278,7 +281,10 @@ class DurableRunner(RunManager):
                 async with self.admission(run_id, prepared=True) as available:
                     if not available:
                         return 'capacity'
-                    if not await database(self.begin_turn, run_id, await database(self.store.run, run_id)):
+                    started = await database(self.begin_turn, run_id, await database(self.store.run, run_id))
+                    if started == 'capacity':
+                        return 'capacity'
+                    if not started:
                         return True
                     state = await database(self.state, run_id)
                 if state.get('phase') == 'idle' or not state:
@@ -341,8 +347,9 @@ class DurableRunner(RunManager):
         elif not self.has_capacity():
             # A prepared entry may expire after admission's optimistic check.
             # Keep the claimed input durable, but do not create a cold-machine
-            # reservation until ordinary capacity is available.
-            return False
+            # reservation until ordinary capacity is available. Tell the
+            # workflow to use its normal capacity backoff before retrying.
+            return 'capacity'
         self.save(run_id, state)
         return True
 

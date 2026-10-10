@@ -314,7 +314,8 @@ async def test_computer_wake_cannot_spend_an_unclaimed_pool_reservation(durable,
 
 
 async def test_pool_expiry_between_capacity_check_and_assignment_does_not_over_admit(durable, monkeypatch):
-    manager, _, run_id = durable
+    from app.session_workflow import SessionWorkflow
+    manager, cloud, run_id = durable
     enable_pool(manager)
     await manager.prepared.maintain()
     occupied = manager.store.create_run('Active work', '', 'modal', [])
@@ -327,10 +328,41 @@ async def test_pool_expiry_between_capacity_check_and_assignment_does_not_over_a
         return assign(*args)
 
     monkeypatch.setattr(manager.prepared, 'assign', expired)
-    await manager.advance(run_id)
+    # Exercise the workflow boundary: this race must wait on the same durable
+    # timer as ordinary capacity exhaustion, rather than immediately retrying.
+    class BackoffReached(Exception):
+        pass
+
+    outcomes = []
+
+    async def advance_activity(name, activity_run_id, **kwargs):
+        assert name == 'advance_session' and activity_run_id == run_id
+        assert not outcomes, 'Capacity miss retried before the workflow backoff'
+        result = await manager.advance(run_id)
+        outcomes.append(result)
+        return result
+
+    sleep = AsyncMock(side_effect=BackoffReached)
+    monkeypatch.setattr('app.session_workflow.workflow.execute_activity', advance_activity)
+    monkeypatch.setattr('app.session_workflow.workflow.sleep', sleep)
+    with pytest.raises(BackoffReached):
+        await SessionWorkflow().run(run_id)
+    assert outcomes == ['capacity']
+    sleep.assert_awaited_once_with(5)
     assert manager.state(run_id) == {}  # Claimed input survives without an extra machine slot.
-    assert manager.store.messages(run_id)[0]['status'] == 'running'
+    message = manager.store.messages(run_id)[0]
+    assert message['status'] == 'running'
     assert not manager.has_capacity()
+    assert not cloud.launches
+
+    # Once the expired reservation can be reclaimed, retry the original input.
+    monkeypatch.setattr(manager.prepared, 'assign', assign)
+    await drive(manager, run_id)
+    messages = manager.store.messages(run_id)
+    assert [(item['id'], item['status']) for item in messages if item['role'] == 'user'] == [
+        (message['id'], 'completed')]
+    assert len(cloud.launches) == 1
+    assert len([item for item in messages if item['role'] == 'assistant']) == 1
 
 
 async def test_pool_reclaim_never_waits_on_local_inflight_preparation(durable):
