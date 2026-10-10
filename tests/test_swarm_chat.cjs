@@ -73,3 +73,11 @@ test('watch batches rotate so more than one hundred pending replies eventually s
  const watched=new Set(calls.slice(1).flatMap(call=>new URL(call.url,'https://test').searchParams.get('watch').split(',')));
  assert.equal(watched.size,150);feed.dispose();
 });
+
+test('history preparation is neutral and retries after one second only while following',async()=>{
+ const preparing=Object.assign(new Error('Preparing saved team messages. Please try again shortly.'),{status:503});
+ let time=0,following=true;const {feed,calls}=setup([preparing,page([item('ready')])],{now:()=>time,following:()=>following});
+ await feed.poll();assert.equal(feed.snapshot().error,'');assert.equal(feed.snapshot().preparing,preparing.message);
+ time=999;await feed.poll();assert.equal(calls.length,1);time=1000;following=false;await feed.poll();assert.equal(calls.length,1);
+ following=true;await feed.poll();assert.equal(calls.length,2);assert.equal(feed.snapshot().preparing,'');assert.equal(feed.snapshot().items[0].id,'ready');feed.dispose();
+});

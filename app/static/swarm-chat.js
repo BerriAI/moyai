@@ -10,14 +10,14 @@
     return (Array.isArray(items)?items:[]).filter(item=>typeof item?.id==='string'&&identifier(item.run_id)&&kinds.has(item.kind)&&typeof item.content==='string'&&item.author&&['human','coordinator','agent'].includes(item.author.role));
   }
   function store({runId,api,onChange=()=>{},active=()=>true,following=()=>true,now=()=>Date.now()}){
-    let pages=[],live=[],local=[],loaded=false,older=false,history=false,error='',denied=false,disposed=false,request=null,generation=0,watchOffset=0,next=null,due=0,lastMode='latest';
+    let pages=[],live=[],local=[],loaded=false,older=false,history=false,error='',preparing='',denied=false,disposed=false,request=null,generation=0,watchOffset=0,next=null,due=0,lastMode='latest';
     function snapshot(){
       const items=new Map();for(const page of pages)for(const item of page.items)items.set(item.id,item);
       if(!history){
         for(const item of live)if(!items.has(item.id)||pending.has(items.get(item.id).status))items.set(item.id,{...item,live:true});
         for(const item of local)if(!items.has(item.id))items.set(item.id,item);
       }
-      return {items:[...items.values()].sort(order),loaded,older,history,error,denied,loading:!!request};
+      return {items:[...items.values()].sort(order),loaded,older,history,error,preparing,denied,loading:!!request};
     }
     function changed(mode){if(!disposed)onChange(snapshot(),mode);}
     async function load(mode){
@@ -25,7 +25,7 @@
       if(mode==='before'&&(!older||!pages[0]?.previous))return;
       const cursor=mode==='before'?pages[0].previous:mode==='after'?next:null;
       if(mode==='after'&&!loaded)mode='latest';
-      const token={generation,controller:new AbortController()};request=token;lastMode=mode;error='';changed('status');
+      const token={generation,controller:new AbortController()};request=token;lastMode=mode;error='';preparing='';changed('status');
       try{
         const query=new URLSearchParams({limit:'50'});if(cursor)query.set(mode==='before'?'before':'after',cursor);
         const mutable=snapshot().items.filter(item=>!item.id.startsWith('board:')&&pending.has(item.status)).map(item=>item.id);
@@ -47,6 +47,9 @@
         loaded=true;due=now()+(mode==='after'&&result.has_more?1000:4000);changed(mode);
       }catch(failure){
         if(disposed||token.generation!==generation||failure?.name==='AbortError')return;
+        if(failure?.status===503&&failure.message==='Preparing saved team messages. Please try again shortly.'){
+          preparing=failure.message;due=now()+1000;changed('status');return;
+        }
         denied=[401,403,404].includes(failure?.status);
         if(denied){pages=[];live=[];local=[];next=null;older=false;error='This team chat is no longer available.';}
         else error='Couldn’t refresh team messages.';
@@ -54,7 +57,7 @@
       }finally{if(request===token){request=null;if(!disposed&&token.generation===generation)changed('status');}}
     }
     return {snapshot,inject(items){if(disposed||denied)return;local=[...new Map([...local,...publicItems(items)].map(item=>[item.id,item])).values()].slice(-50);changed('local');},earlier:()=>load('before'),latest:()=>load('latest'),
-      poll(){if(!history&&following()&&now()>=due)return load(loaded?'after':'latest');},
+      poll(){if((!history||preparing)&&following()&&now()>=due)return load(preparing?lastMode:loaded?'after':'latest');},
       retry(){due=0;return load(lastMode);},
       pause(){generation++;request?.controller.abort();request=null;due=0;},
       dispose(){disposed=true;generation++;request?.controller.abort();request=null;pages=[];live=[];local=[];},
@@ -92,8 +95,8 @@
       }
       q('[data-room-earlier]').hidden=!snapshot.older;q('[data-room-earlier]').disabled=snapshot.loading;
       q('[data-room-latest]').hidden=!snapshot.history;q('[data-room-latest]').disabled=snapshot.loading;
-      q('[data-room-retry]').hidden=!snapshot.error||snapshot.denied;q('[data-room-retry]').disabled=snapshot.loading;
-      q('[data-room-notice]').textContent=snapshot.error||(!snapshot.loaded?'Loading team messages…':!snapshot.items.length?'The team’s messages will appear here.':'');
+      q('[data-room-retry]').hidden=(!snapshot.error&&!snapshot.preparing)||snapshot.denied;q('[data-room-retry]').disabled=snapshot.loading;
+      q('[data-room-notice]').textContent=snapshot.error||snapshot.preparing||(!snapshot.loaded?'Loading team messages…':!snapshot.items.length?'The team’s messages will appear here.':'');
       syncJump();
     }
     const feed=store({runId:run.id,api,onChange:draw,active,following:()=>!scrolled||nearBottom()});
