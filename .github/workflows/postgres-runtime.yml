@@ -95,7 +95,9 @@ jobs:
 
   distributed:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The PostgreSQL lifecycle suites plus three real process probes now take
+    # more than ten minutes on hosted runners. Keep every assertion and probe.
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
