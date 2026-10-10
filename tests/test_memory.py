@@ -137,7 +137,7 @@ def test_identity_isolation_including_administrator_and_requester_switch(workspa
     sign_in(app, client)
     note_id = create(client).json()['id']
     run = active(app)
-    assert MARKER not in app.state.memory.context(run)
+    assert MARKER in app.state.memory.context(run)  # Automatic authorized recall.
     assert call(client, run, 'memory_search', query='response preferences').json()['loaded'] == 1
     assert MARKER in app.state.memory.context(run)
     sign_in(app, client, 'bob', 'bob@berri.ai')
@@ -150,7 +150,9 @@ def test_identity_isolation_including_administrator_and_requester_switch(workspa
     assert client.request('DELETE','/api/memory/'+bob_id, json={'revision': 1}).status_code == 404
     # Keep the original run object: authority must still be refreshed.
     app.state.store.execute("UPDATE runs SET active_user_id='google:bob' WHERE id=?", (run['id'],))
-    assert MARKER not in app.state.memory.context(run)
+    notes = json.loads(app.state.memory.context(run).split('\n', 1)[1])['notes']
+    assert note_id not in {note['id'] for note in notes}
+    assert bob_id in {note['id'] for note in notes}
     assert call(client, run, 'memory_search', query='response preferences').json()['loaded'] == 1
     assert app.state.store.rows('SELECT owner_id FROM memory_selections')[0]['owner_id'] == 'google:bob'
 
@@ -195,7 +197,7 @@ def test_pause_and_manual_mode_apply_to_running_agents(workspace):
     assert len(client.get('/api/memory').json()['memories']) == 1
     assert client.put('/api/memory/preferences',json={'enabled':True,'auto_save':True,'revision':0}).status_code == 409
     assert client.put('/api/memory/preferences',json={'enabled':True,'auto_save':True,'revision':2}).status_code == 200
-    assert MARKER not in app.state.memory.context(run)  # Must recall again after resume.
+    assert MARKER in app.state.memory.context(run)  # Re-enabling permits automatic recall.
     assert app.state.store.rows('SELECT tainted FROM native_sessions WHERE run_id=?', (run['id'],))[0]['tainted'] == 1
 
 
@@ -319,7 +321,9 @@ def test_retrieval_bounds_expiration_repository_and_new_session(workspace):
     assert len(json.dumps(context['notes'],ensure_ascii=False))-2 <= MAX_CONTEXT+10
     assert scoped not in [n['id'] for n in context['notes']] and expired not in [n['id'] for n in context['notes']]
     next_run=active(app)
-    assert not json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']
+    automatic = json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']
+    assert 0 < len(automatic) <= 3
+    assert scoped not in {n['id'] for n in automatic} and expired not in {n['id'] for n in automatic}
     app.state.store.execute("UPDATE runs SET repo_url='https://github.com/BerriAI/litellm' WHERE id=?",(next_run['id'],))
     call(client,next_run,'memory_search',query='quartz')
     assert scoped in [n['id'] for n in json.loads(app.state.memory.context(next_run).split('\n',1)[1])['notes']]

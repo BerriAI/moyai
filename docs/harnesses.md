@@ -227,11 +227,32 @@ Native reuse has three independent gates:
 - Compatibility: the harness, installed runtime version, adapter instructions,
   working directory, effective model and gateway configuration must match
 - Privacy: the broker requires the exact current requester. A turn that injected
-  personal memory, loaded skills, skill excerpts or search descriptions cannot
+  personal memory, skill directory entries, loaded skills, skill excerpts or search descriptions cannot
   publish reusable native state, even if those selections are later removed
 - Restart: the saved public journal epoch and append position must match the
   restored filesystem. The preceding canonical turn must have completed, with no
   intervening metadata reply, failed turn or changed delivered steering input
+
+Automatic memory and the initial skill directory use this same privacy gate.
+They can avoid discovery round trips, but more turns may lose native session
+reuse. The public journal still supports continuation. A smaller core prompt
+does not establish lower end-to-end latency; measure with representative
+libraries and follow-up turns. This changes inference context, not sandbox
+startup or deployment topology.
+
+The core prompt keeps task continuity, progress, trust boundaries and delivery
+requirements. Skill saving, memory capture and credential procedures live in
+their tool schemas/descriptions; the detailed 1Password procedure is supplied
+with `credentials_run`. Runtime tool discovery determines when those schemas
+enter the model request. Full request size still depends on the selected skills,
+notes, tools and history, not just the core prompt.
+
+Run `uv run python -m scripts.initial_context_demo --output /tmp/moyai-context-demo --delay 3`
+to record first-inference recall, direct skill loading and immediate revocation.
+Open the generated `recording.html` to replay the timestamped output. This is a
+real local broker demonstration using disposable identities and a synthetic
+inference upstream; it does not evaluate model quality. Add `--baseline REF` to
+compare core Codex prompt characters against another local Git revision.
 
 The broker stores one encrypted, bounded native record per run, separately from
 public history, activity and downloadable artifacts. `/context/native` accepts

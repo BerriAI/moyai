@@ -304,15 +304,17 @@ def test_search_keeps_gateway_prompt_bounded_and_returns_only_references(workspa
     for i in range(12):
         assert create(client,'organization',name=f'workflow-{i}',client_id=f'workflow-{i}').status_code==201
     assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
-    assert captured[0]==captured[1]
-    assert skill_context(app,run)=={'turn_id':run['active_message_id'],'matches':[],'loaded':[],'unavailable':[]}
+    assert captured[0]!=captured[1]
+    initial = skill_context(app,run)
+    assert len(initial['available']) == 12 and initial['omitted'] == 0
+    assert not initial['matches'] and not initial['loaded'] and not initial['unavailable']
     response=search(client,run,'coverage')
     assert response.status_code==200 and len(response.json()['matches'])==5
     assert all(set(m)=={'reference','revision'} for m in response.json()['matches'])
     assert 'Review benchmark coverage and results.' not in response.text and MARKER not in response.text
     assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
     context=json.loads(captured[-1][0]['content'].split('\n',1)[1])
-    assert len(context['matches'])==5 and not context['loaded'] and 'available' not in context
+    assert len(context['matches'])==5 and not context['loaded'] and len(context['available'])==7
     assert context['matches'][0]['description']=='Review benchmark coverage and results.'
     assert MARKER not in json.dumps(captured) and not app.state.store.rows('SELECT * FROM skill_uses')
     assert 'Review benchmark coverage and results.' not in client.get('/api/runs/'+run['id']).text

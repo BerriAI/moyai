@@ -19,7 +19,7 @@ jobs:
       - name: Test Cloudflare identity gate and sandbox transport
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py
       - name: Test personal memory ownership, capture and privacy
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py tests/test_initial_context.py
       - name: Test Slack requester identity and DM delivery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
