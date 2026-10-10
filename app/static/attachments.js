@@ -1,5 +1,4 @@
 const attachmentDrafts = new Map();
-const attachmentLimits = {count:8, file:10*1024*1024, total:20*1024*1024};
 const imageFile = file => /^image\/(png|jpeg|webp|gif)$/.test(file.type || file.media_type || '');
 const audioFile = file => /^(audio\/|video\/(webm|mp4))/.test(file.media_type || file.type || '') || /\.(mp3|mpga|mpeg|wav|m4a|mp4|webm|ogg|oga|flac)$/i.test(file.name);
 function fileSize(size){return size<1024?`${size} B`:size<1024*1024?`${Math.ceil(size/1024)} KB`:`${(size/1024/1024).toFixed(1)} MB`;}
@@ -9,9 +8,6 @@ function transferFiles(transfer){
 }
 function attachmentError(files,file){
   if(!file.size)return `${file.name} is empty.`;
-  if(file.size>attachmentLimits.file)return `${file.name} is larger than 10 MB.`;
-  if(files.length>=attachmentLimits.count)return `Attach up to ${attachmentLimits.count} files per message.`;
-  if(files.reduce((size,item)=>size+item.size,0)+file.size>attachmentLimits.total)return 'Attachments must total 20 MB or less.';
   return '';
 }
 function fileVisual(file,src=''){
@@ -19,7 +15,7 @@ function fileVisual(file,src=''){
 }
 function showAttachment(file,useTranscript=null){
   const dialog=MoyaiUI.createDialog();dialog.className='attachment-preview';
-  MoyaiUI.render(dialog, `<div class="attachment-preview-heading"><div><strong>${esc(file.name)}</strong><small>${fileSize(file.size)}</small></div><button class="icon-button" aria-label="Close preview">×</button></div>${audioFile(file)?`<div class="audio-preview"><audio controls preload="metadata" src="${esc(file.audio_url||file.localUrl||'')}"></audio><h3>Transcript</h3><p class="audio-transcript">${esc(file.transcript||'The transcript will appear after this recording finishes uploading.')}</p>${useTranscript&&file.transcript?'<button type="button" class="use-transcript">Edit in message</button><p class="subtext">Review names and instructions before sending.</p>':''}</div>`:file.preview_url||file.localUrl?`<img class="attachment-full-image" src="${esc(file.preview_url||file.localUrl)}" alt="${esc(file.name)}">`:file.preview_text?`<pre>${esc(file.preview_text)}</pre><p class="subtext">Text preview · the full file is available to Moyai.</p>`:'<div class="attachment-no-preview">'+fileVisual(file)+'<p>This file will be available in your session.</p></div>'}${file.url?`<a class="attachment-download" href="${esc(file.url)}" download>Download original ↗</a>`:''}`);
+  MoyaiUI.render(dialog, `<div class="attachment-preview-heading"><div><strong>${esc(file.name)}</strong><small>${fileSize(file.size)}</small></div><button class="icon-button" aria-label="Close preview">×</button></div>${file.processing_error?`<p class="subtext">${esc(file.processing_error)}</p>`:''}${audioFile(file)?`<div class="audio-preview"><audio controls preload="metadata" src="${esc(file.audio_url||file.localUrl||'')}"></audio><h3>Transcript</h3><p class="audio-transcript">${esc(file.transcript||'The transcript will appear after this recording finishes uploading.')}</p>${useTranscript&&file.transcript?'<button type="button" class="use-transcript">Edit in message</button><p class="subtext">Review names and instructions before sending.</p>':''}</div>`:file.preview_url||file.localUrl?`<img class="attachment-full-image" src="${esc(file.preview_url||file.localUrl)}" alt="${esc(file.name)}">`:file.preview_text?`<pre>${esc(file.preview_text)}</pre><p class="subtext">Text preview · the full file is available to Moyai.</p>`:'<div class="attachment-no-preview">'+fileVisual(file)+'<p>This file will be available in your session.</p></div>'}${file.url?`<a class="attachment-download" href="${esc(file.url)}" download>Download original ↗</a>`:''}`);
   document.body.append(dialog);dialog.querySelector('button').onclick=()=>dialog.close();
   const use=dialog.querySelector('.use-transcript');if(use)use.onclick=()=>{if(useTranscript(file.transcript))dialog.close();};
   dialog.addEventListener('close',()=>dialog.remove());
@@ -44,12 +40,11 @@ function bindAttachments(input,form,key){
   const render=()=>{
     region.hidden=!draft.items.length;button.disabled=!!draft.locked;
     input.required=!draft.items.length;recorder?.render();
-    MoyaiUI.render(region, draft.items.map(file=>`<div class="draft-attachment ${imageFile(file)?'is-image':''} ${file.status==='error'?'upload-error':''}"><button type="button" class="attachment-open" data-preview="${file.id}" aria-label="Preview ${esc(file.name)}">${fileVisual(file,file.preview_url||file.localUrl)}<span><strong>${esc(file.name)}</strong><small>${file.status==='uploading'?(audioFile(file)?'Uploading & transcribing…':'Uploading…'):file.status==='error'?'Upload failed':file.transcript?'Transcript ready · '+fileSize(file.size):fileSize(file.size)}</small></span></button><button type="button" class="attachment-remove" data-remove="${file.id}" aria-label="Remove ${esc(file.name)}" ${draft.locked?'disabled':''}>×</button>${file.status==='error'?`<p class="attachment-error-detail">${esc(file.error)}</p><button type="button" class="attachment-retry" data-retry="${file.id}" ${draft.locked?'disabled':''}>Retry</button>`:''}</div>`).join(''));
+    MoyaiUI.render(region, draft.items.map(file=>`<div class="draft-attachment ${imageFile(file)?'is-image':''} ${file.status==='error'?'upload-error':''}"><button type="button" class="attachment-open" data-preview="${file.id}" aria-label="Preview ${esc(file.name)}">${fileVisual(file,file.preview_url||file.localUrl)}<span><strong>${esc(file.name)}</strong><small>${file.status==='uploading'?(audioFile(file)?'Uploading & transcribing…':'Uploading…'):file.status==='error'?'Upload failed':file.transcript?'Transcript ready · '+fileSize(file.size):fileSize(file.size)}</small></span></button><button type="button" class="attachment-remove" data-remove="${file.id}" aria-label="Remove ${esc(file.name)}" ${draft.locked?'disabled':''}>×</button>${file.processing_error?`<p class="subtext">${esc(file.processing_error)}</p>`:''}${file.status==='error'?`<p class="attachment-error-detail">${esc(file.error)}</p><button type="button" class="attachment-retry" data-retry="${file.id}" ${draft.locked?'disabled':''}>Retry</button>`:''}</div>`).join(''));
   };
   function insertTranscript(text){
     if(!active||draft.locked)return false;
     const addition=(input.value.trim()?'\n\n':'')+text;
-    if(input.value.length+addition.length>16000){toast('The transcript is too long to add to this message. Shorten the message first.');return false;}
     input.value+=addition;input.dispatchEvent(new Event('input',{bubbles:true}));input.focus();return true;
   }
   draft.listeners.add(render);render();
@@ -57,9 +52,7 @@ function bindAttachments(input,form,key){
   async function upload(item){
     item.status='uploading';item.abort=new AbortController();notify();
     try{
-      const body=await sealAttachment(item.file,item.id,item.name,state.csrf);
-      if(!draft.items.includes(item))return;
-      const saved=await api('/api/attachments/'+item.id+'?name='+encodeURIComponent(item.name),{method:'PUT',body,headers:{'Content-Type':attachmentContentType},signal:item.abort.signal});
+      const saved=await uploadAttachment(item.file,item.id,item.name,state.csrf,api,item.abort.signal);
       if(!draft.items.includes(item)){await discard(item);return;}
       Object.assign(item,saved,{status:'ready'});announce.textContent=item.name+' attached';
       if(item.dictate&&saved.transcript)insertTranscript(saved.transcript);

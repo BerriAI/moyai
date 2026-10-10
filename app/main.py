@@ -53,7 +53,7 @@ from agent.memory_history import scrub_memory_history
 from .environments import Environments
 from .tracing import AgentTracing
 from .lens_feedback import FeedbackNotConfigured, LensFeedback
-from .attachments import MAX_FILES, upload_limit
+from .attachments import upload_limit
 from .artifact_files import routes as artifact_file_routes
 from .automations import Automations
 from .computer import Computer
@@ -92,7 +92,7 @@ class NewRun(BaseModel):
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
     chat_enabled: bool = True
     model: str | None = Field(default=None, max_length=120)
-    attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
+    attachment_ids: list[AttachmentId] = Field(default_factory=list)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
     side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
     swarm: SwarmOptions | None = None
@@ -143,7 +143,7 @@ class ChatMessage(BaseModel):
     content: str = Field(default="")
     client_id: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
     model: str | None = Field(default=None, max_length=120)
-    attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
+    attachment_ids: list[AttachmentId] = Field(default_factory=list)
     send_now: bool = False
 
     @model_validator(mode='after')

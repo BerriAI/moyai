@@ -636,3 +636,49 @@ was rendered and inspected at desktop/mobile widths. These are source/protocol
 checks, not live model-quality evidence.
 
 Schema remains 12; all role protocols are 12. Nothing was deployed.
+
+## Complete input files and transcripts (WP2/WP6)
+
+Web uploads publish complete files through immutable, authenticated parts and a
+verified attachment manifest. Drafts reserve their declared storage before
+transfer; incomplete files cannot be sent. Lost acknowledgments can retry the
+same part without replacing its bytes. Ownership, generation and quota checks
+fence publication after remote I/O. The existing database/object store holds
+parts; migration and verification understand them. Older clients retain their
+single-request compatibility route; new clients use multipart transfer.
+
+Removed the eight-file, 10 MiB per-file, 20 MiB per-message and 50 MiB draft
+ceilings. The configured workspace storage budget remains. Slack normalizes all
+file references in SDK batches and streams private-host downloads, checking exact
+provider size and live access before binding. Computer restoration streams and
+verifies complete files before atomic replacement. Audio playback reads verified
+part ranges. Whole-file memory buffers are unnecessary in these transfer paths.
+
+Every referenced image can enter the model request instead of silently dropping
+images after the tenth. Actual model/media capacity still applies. Removed the
+16,000-character transcript/composer cutoffs and the microphone's two-minute and
+10 MiB automatic stops. Decoder/transcription failure preserves the original,
+with an explicit processing error in the UI and agent context. Bounded image/text
+previews are labeled views; original bytes remain available.
+
+Validation: the initial focused run passed 99 cases; four old eight-file Slack
+expectations were corrected. Storage/source checks passed 59 cases, PostgreSQL
+intake checks passed 69 with one legacy-only skip, and 84 migration/role checks
+passed. The final audio, file, skill-import and storage run passed 115 cases;
+all 11 updated input contracts passed on PostgreSQL. Two publication-race cases
+also passed. The broader session, Slack, gateway and artifact run passed 403
+cases. All 557 Node checks passed. The real local UI/API flow, using fixture
+sign-in and demo execution, passed at 1440/768/320 pixels with twelve files,
+two files over 10 MiB, an acknowledgment lost after part storage, retry, exact
+download and reload. Matched baseline/current screens and product/storage guides
+were rendered and inspected. No live Slack, transcription or cloud provider was
+used to claim end-to-end deployment quality.
+
+The earlier frozen full regression finished with 5,388 passes, 298 skips and eight
+failures: seven obsolete automation-validation fixtures already fixed on main,
+and one timing-sensitive SDK outage assertion. All 39 affected recovery/validation
+cases passed on the newer source. The outage fixture now waits for the actual
+admission fence instead of sleeping one second; its focused real SDK case passes.
+
+Schema is revision 13; all role protocols are 13. Earlier schema digests are
+preserved. Release roles together after the offline migration; nothing was deployed.
