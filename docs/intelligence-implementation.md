@@ -612,3 +612,27 @@ inspected. The UI build and typecheck passed. This is local behavior with a fake
 clock and synthetic Slack; the live three-hour release rehearsal remains open.
 
 Schema remains 12; all role protocols are 11. Nothing was deployed.
+
+## Complete side-chat snapshots and instruction references (WP2/WP5)
+
+Side conversations retain the complete original task, latest result and every
+undeleted message at creation time, including queued inputs. IDs, authors,
+timestamps, delivery status and input provenance remain explicit. Removed the
+30-message, per-field character and total-snapshot cuts. Later changes to the
+parent do not rewrite the snapshot or grant access to its live computer.
+
+System context composition uses the selected model window to allocate optional
+source components: the skill catalog, root repository guidance, project setup
+instructions and side-chat reference. Oversized components become explicit
+references to complete immutable records outside the repository. Their scope
+and authority remain labeled, and older references survive later compositions.
+Core orientation stays inline; complete-request admission remains authoritative.
+The allocation is conservative UTF-8 sizing, not optimal token packing.
+
+Validation: 20 focused source, lifecycle and snapshot cases passed. Four side-chat
+cases passed against PostgreSQL. The broader context, SDK, runtime and harness
+suite passed 380 cases with 66 optional runtime/database skips. The product guide
+was rendered and inspected at desktop/mobile widths. These are source/protocol
+checks, not live model-quality evidence.
+
+Schema remains 12; all role protocols are 12. Nothing was deployed.

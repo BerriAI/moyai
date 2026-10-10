@@ -578,15 +578,15 @@ class Store:
                 parent = conn.execute("SELECT prompt,summary FROM runs WHERE id=? AND deleted_at='' AND deletion_requested_at=''", (side_chat_of,)).fetchone()
                 if not parent:
                     raise ValueError('The original session no longer exists.')
-                recent = conn.execute("SELECT role,content FROM messages WHERE run_id=? AND status NOT IN ('queued','deleted') ORDER BY id DESC LIMIT 30", (side_chat_of,)).fetchall()
-                context_data = {'task': parent['prompt'][:4000], 'latest_result': parent['summary'][:8000],
-                                'conversation': [dict(row) | {'content': row['content'][:3000]} for row in reversed(recent)]}
-                while len(json.dumps(context_data, ensure_ascii=False)) > 48000:
-                    if context_data['conversation']:
-                        context_data['conversation'].pop(0)
-                    else:
-                        field = max(('task', 'latest_result'), key=lambda key: len(context_data[key]))
-                        context_data[field] = context_data[field][:len(context_data[field]) // 2]
+                messages = conn.execute('''SELECT id,role,content,status,user_id,created_at,input_kind,source_json,response_to_id
+                    FROM messages WHERE run_id=? AND status!='deleted' ORDER BY id''', (side_chat_of,)).fetchall()
+                conversation = []
+                for row in messages:
+                    item = dict(row)
+                    item['source'] = json.loads(item.pop('source_json'))
+                    conversation.append(item)
+                context_data = {'source_run_id':side_chat_of, 'captured_at':stamp,
+                                'task':parent['prompt'], 'latest_result':parent['summary'], 'conversation':conversation}
                 context = json.dumps(context_data, ensure_ascii=False)
             pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
             if pending >= self.max_pending_runs and not metadata_request:

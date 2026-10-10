@@ -18,13 +18,15 @@ from .schema_migrations import SCHEMA_REVISION
 # to understand self-management and immutable owner-authored workflow sources.
 # Public progress is complete and requested goal checkpoints have durable
 # reporting schedules/receipts; old roles can discard or omit their delivery.
-API_PROTOCOL_REVISION = 11
+# Side-chat snapshots retain complete attributed inputs; workers compose large
+# instruction sources as immutable references using the selected model window.
+API_PROTOCOL_REVISION = 12
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 11
-BROKER_PROTOCOL_REVISION = 11
-COORDINATOR_PROTOCOL_REVISION = 11
+WORKER_PROTOCOL_REVISION = 12
+BROKER_PROTOCOL_REVISION = 12
+COORDINATOR_PROTOCOL_REVISION = 12
 
 
 def api_fingerprint(settings):
