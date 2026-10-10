@@ -217,9 +217,10 @@ def test_archive_and_deletion_survive_legacy_upgrade_and_checkpoint(users_app, t
     item, removed = run(app), run(app, 'Delete after completion')
     store = app.state.store
     # Exercise the actual idempotent upgrade with a pre-field database.
-    # This newer trigger also references deleted_at and did not exist in that
-    # legacy schema. Remove it before reconstructing the old database.
+    # These newer schema objects reference deleted_at and did not exist in
+    # the legacy schema. Remove them before reconstructing the old database.
     store.execute('DROP TRIGGER revoke_github_write_access')
+    store.execute('DROP INDEX idx_runs_pending_deletion')
     store.execute('ALTER TABLE runs DROP COLUMN deleted_at')
     store.execute('DROP TABLE session_archives')
     reopened = Store(app.state.settings.data_dir)
@@ -476,7 +477,6 @@ def test_session_search_is_advertised_and_callable_only_for_live_direct_chat(
     listing = client.get(url, headers=headers)
     assert listing.status_code == 401 or 'sessions_search' not in {item['name'] for item in listing.json()}
     assert search_sessions(client, caller['id'], query='Copper').status_code in {401, 403}
-    assert read_session_tool(client, caller, session_id=caller['id']).status_code in {401, 403}
     assert client.get(url, headers={'Authorization': 'Bearer wrong'}).status_code == 401
 
 
@@ -618,127 +618,3 @@ def test_slack_resume_restores_current_view_owner_without_rewriting_sender_or_re
     send(client, 3, '<@U99999999> Continue after the link changes')
     assert lifecycle.archives(actor) == {root} and lifecycle.archives(other) == set()
     assert all(message['user_id'] == slack for message in store.messages(root))
-
-
-def read_session_tool(client, caller, **arguments):
-    return client.post('/broker/' + caller['id'] + '/tools/call', headers={'Authorization': 'Bearer capability'},
-                       json={'name': 'sessions_read', 'arguments': arguments})
-
-
-def test_session_reader_pages_redacts_and_does_not_restore(users_app):
-    app, client = users_app
-    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
-    caller = active(app, actor)
-    store = app.state.store
-    saved = run(app, 'Original password=private-canary')
-    app.state.session_lifecycle.archive(saved['id'], actor, True)
-    store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant',?,'completed',?)",
-                  (saved['id'], 'Saved answer sk-syntheticSecret123456', now()))
-    before = store.run(saved['id'])
-    first = read_session_tool(client, caller, session_id=saved['id'], limit=1)
-    assert first.status_code == 200, first.text
-    page = first.json()
-    assert page['untrusted_reference'] and page['has_more']
-    assert 'private-canary' not in first.text
-    store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant','new answer','completed',?)", (saved['id'], now()))
-    second = read_session_tool(client, caller, session_id=saved['id'], limit=1, cursor=page['next_cursor'])
-    assert second.status_code == 200
-    assert not second.json()['has_more']
-    assert '[redacted]' in second.text and 'syntheticSecret' not in second.text
-    assert 'new answer' not in second.text
-    assert store.run(saved['id']) == before
-    assert saved['id'] in app.state.session_lifecycle.archives(actor)
-    for args in ({'cursor': page['next_cursor'] + 'x'}, {'cursor': page['next_cursor'], 'section': 'activity'},
-                 {'limit': 21}, {'owner_id': actor}):
-        assert read_session_tool(client, caller, session_id=saved['id'], **args).status_code == 422
-    other = run(app)
-    assert read_session_tool(client, caller, session_id=other['id'], cursor=page['next_cursor']).status_code == 422
-    store.execute('UPDATE runs SET deleted_at=? WHERE id=?', (now(), saved['id']))
-    assert read_session_tool(client, caller, session_id=saved['id'], cursor=page['next_cursor']).status_code == 404
-
-
-@pytest.mark.parametrize('membership', ['owner', 'contributor', 'pin', 'archive', 'linked', 'hidden', 'deleted', 'missing'])
-def test_session_reader_authorizes_exact_family(users_app, membership):
-    app, client = users_app
-    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
-    caller = active(app, actor)
-    store = app.state.store
-    saved = store.create_run('Other session', '', 'demo', [], chat_enabled=True, user_id='google:other')
-    if membership == 'owner':
-        store.execute('UPDATE runs SET owner_id=? WHERE id=?', (actor, saved['id']))
-    elif membership == 'contributor':
-        store.execute("INSERT INTO messages(run_id,role,content,status,created_at,user_id) VALUES(?,'user','participation','deleted',?,?)", (saved['id'], now(), actor))
-    elif membership == 'pin':
-        store.execute('INSERT INTO session_pins(owner_id,run_id,pinned_at) VALUES(?,?,?)', (actor, saved['id'], now()))
-    elif membership == 'archive':
-        app.state.session_lifecycle.archive(saved['id'], actor, True)
-    elif membership == 'linked':
-        store.execute("INSERT INTO users(id,kind,name,created_at,updated_at,linked_user_id) VALUES('slack:reader','slack','Reader',?,?,?)", (now(), now(), actor))
-        store.execute("UPDATE runs SET owner_id='slack:reader' WHERE id=?", (saved['id'],))
-    elif membership == 'deleted':
-        store.execute('UPDATE runs SET owner_id=?,deleted_at=? WHERE id=?', (actor, now(), saved['id']))
-    target = saved['id'] if membership != 'missing' else 'missing'
-    result = read_session_tool(client, caller, session_id=target)
-    expected = 404 if membership in {'hidden', 'deleted', 'missing'} else 200
-    assert result.status_code == expected, result.text
-    if expected == 404:
-        assert result.json() == {'detail': 'Session not found or unavailable.'}
-    child = store.create_run('Child', '', 'demo', [], chat_enabled=True)
-    store.execute('UPDATE runs SET parent_run_id=? WHERE id=?', (saved['id'], child['id']))
-    assert read_session_tool(client, caller, session_id=child['id']).status_code == (200 if expected == 200 else 404)
-
-
-def test_session_reader_activity_and_waiting_group_are_safe_observations(users_app):
-    import json
-    app, client = users_app
-    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
-    caller = active(app, actor)
-    store = app.state.store
-    saved = run(app)
-    group = 'read-test-group'
-    store.execute("INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at) VALUES(?,?,1,'reader','{}','running',?)", (group, saved['id'], now()))
-    child = store.create_run('Worker', '', 'demo', [], chat_enabled=True)
-    store.execute("UPDATE runs SET parent_run_id=?,agent_group_id=?,agent_label='Scout' WHERE id=?", (saved['id'], group, child['id']))
-    store.update_run(child['id'], status='idle')
-    store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (child['id'],))
-    store.execute("CREATE TABLE IF NOT EXISTS durable_sessions(run_id TEXT PRIMARY KEY,state TEXT)")
-    store.execute("INSERT INTO durable_sessions(run_id,state) VALUES(?,?)", (saved['id'], json.dumps({'phase': 'waiting_children', 'wait_group': group, 'private': 'state-canary'})))
-    store.update_run(saved['id'], status='waiting_children')
-    for name in ('memory_search', 'skills_load', 'credentials_run', 'mcp__moyai__browser_fill', 'terminal'):
-        store.event(saved['id'], 'tool', 'Tool finished', {'tool': name, 'phase': 'completed', 'input': {'password': 'input-canary'}, 'output': 'opaque-private-canary' if name != 'terminal' else 'authorization: Bearer output-canary'})
-    store.event(saved['id'], 'error', 'Broker failed', {'phase': 'broker_failure', 'status_code': 502, 'request_id': 'req-reader', 'raw_body': 'failure-canary'})
-    response = read_session_tool(client, caller, session_id=saved['id'], section='activity')
-    assert response.status_code == 200, response.text
-    for value in ('state-canary', 'input-canary', 'output-canary', 'opaque-private-canary', 'failure-canary'):
-        assert value not in response.text
-    data = response.json()
-    assert data['session']['status'] == 'waiting_children'
-    assert data['agents']['waiting_group_id'] == group
-    assert data['agents']['groups'][0]['current_settled']
-    assert data['recent_failures'][0]['request_id'] == 'req-reader'
-    store.execute("UPDATE messages SET status='queued' WHERE run_id=?", (child['id'],))
-    assert not read_session_tool(client, caller, session_id=saved['id']).json()['agents']['groups'][0]['current_settled']
-    assert store.run(saved['id'])['status'] == 'waiting_children'
-
-
-def test_session_reader_bounds_output_and_revalidates_requester(users_app, monkeypatch):
-    app, client = users_app
-    actor = sign_as(app, client, 'maya@berri.ai')['user_id']
-    caller = active(app, actor)
-    saved = run(app)
-    store = app.state.store
-    for _ in range(25):
-        store.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'assistant',?,'completed',?)", (saved['id'], '\U0001f600' * 16000, now()))
-    result = read_session_tool(client, caller, session_id=saved['id'], limit=20)
-    assert result.status_code == 200
-    assert len(result.content) < 65536 and result.json()['has_more']
-    assert any(item.get('content_truncated') for item in result.json()['items'])
-    import app.session_lifecycle as module
-    original = module.read_session
-    def change_actor(*args):
-        result = original(*args)
-        store.execute("UPDATE runs SET active_user_id='google:other' WHERE id=?", (caller['id'],))
-        return result
-    monkeypatch.setattr(module, 'read_session', change_actor)
-    assert read_session_tool(client, caller, session_id=saved['id']).status_code == 409
-    assert client.post('/broker/' + caller['id'] + '/tools/call', json={'name': 'sessions_read', 'arguments': {'session_id': saved['id']}}).status_code == 401

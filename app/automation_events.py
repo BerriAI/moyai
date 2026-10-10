@@ -50,27 +50,8 @@ class AutomationEvents:
         self.automations = automations
         self.store, self.security = automations.store, automations.security
         self.lock = asyncio.Lock()
-        with self.store.connect() as conn:
-            conn.begin_write()
-            columns = conn.column_names('automation_webhooks')
-            if columns and 'provider' not in columns:
-                conn.execute('ALTER TABLE automation_webhooks RENAME TO automation_webhooks_legacy')
-            conn.execute("""CREATE TABLE IF NOT EXISTS automation_webhooks (
-                automation_id TEXT NOT NULL REFERENCES automations(id), provider TEXT NOT NULL,
-                encrypted TEXT NOT NULL, PRIMARY KEY(automation_id,provider))""")
-            if columns and 'provider' not in columns:
-                for key in conn.execute('SELECT k.*,a.definition FROM automation_webhooks_legacy k JOIN automations a ON a.id=k.automation_id').fetchall():
-                    providers = {t.provider for _, t in sources(key) if t.provider != 'slack'}
-                    if len(providers) == 1:
-                        conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?)', (key['automation_id'], providers.pop(), key['encrypted']))
-                conn.execute('DROP TABLE automation_webhooks_legacy')
-        self.store.execute("""CREATE TABLE IF NOT EXISTS automation_events (
-            occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
-            revision INTEGER NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-            detail TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
-        self.store.execute('CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(status,received_at)')
-        self.store.execute('''CREATE TABLE IF NOT EXISTS automation_session_cursors (
-            automation_id TEXT PRIMARY KEY REFERENCES automations(id), message_id INTEGER NOT NULL)''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     def source_ready(self, row, event):
         if event.provider == 'session':
@@ -392,3 +373,27 @@ class AutomationEvents:
 
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.begin_write()
+        columns = conn.column_names('automation_webhooks')
+        if columns and 'provider' not in columns:
+            conn.execute('ALTER TABLE automation_webhooks RENAME TO automation_webhooks_legacy')
+        conn.execute("""CREATE TABLE IF NOT EXISTS automation_webhooks (
+            automation_id TEXT NOT NULL REFERENCES automations(id), provider TEXT NOT NULL,
+            encrypted TEXT NOT NULL, PRIMARY KEY(automation_id,provider))""")
+        if columns and 'provider' not in columns:
+            for key in conn.execute('SELECT k.*,a.definition FROM automation_webhooks_legacy k JOIN automations a ON a.id=k.automation_id').fetchall():
+                providers = {t.provider for _, t in sources(key) if t.provider != 'slack'}
+                if len(providers) == 1:
+                    conn.execute('INSERT INTO automation_webhooks VALUES(?,?,?)', (key['automation_id'], providers.pop(), key['encrypted']))
+            conn.execute('DROP TABLE automation_webhooks_legacy')
+    store.execute("""CREATE TABLE IF NOT EXISTS automation_events (
+        occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
+        revision INTEGER NOT NULL, context TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+        detail TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, expires_at TEXT NOT NULL)""")
+    store.execute('CREATE INDEX IF NOT EXISTS automation_events_pending ON automation_events(status,received_at)')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_session_cursors (
+        automation_id TEXT PRIMARY KEY REFERENCES automations(id), message_id INTEGER NOT NULL)''')

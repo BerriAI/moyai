@@ -39,13 +39,8 @@ class DurableRunner(RunManager):
         self.coordinated_database = store.database if settings.moyai_runtime_role != 'standalone' else None
         self.admission_lock = AdmissionLock(self.coordinated_database)
         self.occupied_session = POSTGRES_OCCUPIED_SESSION if store.database else OCCUPIED_SESSION
-        store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
-            run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
-            revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
-        store.execute(f"""CREATE INDEX IF NOT EXISTS idx_durable_sessions_occupied
-            ON durable_sessions(run_id) WHERE {self.occupied_session}""")
-        store.execute('''CREATE INDEX IF NOT EXISTS idx_durable_sessions_wake
-            ON durable_sessions(run_id) WHERE revision>delivered''')
+        if store.schema_updates:
+            initialize_schema(store)
         from .prepared_sandboxes import PreparedSandboxes
         self.prepared = PreparedSandboxes(self)
 
@@ -1046,3 +1041,13 @@ class DurableRunner(RunManager):
                 return
         await super().cleanup(state, run_id)
         state.pop('sandbox_name', None)
+
+
+def initialize_schema(store):
+    store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0)""")
+    store.execute(f"""CREATE INDEX IF NOT EXISTS idx_durable_sessions_occupied
+        ON durable_sessions(run_id) WHERE {(POSTGRES_OCCUPIED_SESSION if store.database else OCCUPIED_SESSION)}""")
+    store.execute('''CREATE INDEX IF NOT EXISTS idx_durable_sessions_wake
+        ON durable_sessions(run_id) WHERE revision>delivered''')

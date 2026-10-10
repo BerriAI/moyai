@@ -224,8 +224,8 @@ prototypes or watch the DOM to replace controls after handlers have been bound.
 ## Styling
 
 `components.json` configures the official shadcn CLI and TypeScript aliases.
-`frontend/theme.css` maps its semantic roles to Moyai's existing purple, lavender,
-white and neutral colors. Tailwind utilities are scoped through CSS layers and do
+`frontend/theme.css` maps its semantic roles to Moyai's deep-space navy, icy blue,
+ivory and semantic status colors. Tailwind utilities are scoped through CSS layers and do
 not introduce Preflight, so existing page geometry stays intact. Component rules
 for portals, fields and controls are shared here; do not add page-specific copies.
 

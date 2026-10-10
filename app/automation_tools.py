@@ -74,10 +74,8 @@ class AutomationTools:
         self.service = automations
         self.store = automations.store
         self.same_requester = same_requester
-        self.store.execute('''CREATE TABLE IF NOT EXISTS automation_operations (
-            owner_id TEXT NOT NULL, run_id TEXT NOT NULL, request_key TEXT NOT NULL,
-            fingerprint TEXT NOT NULL, automation_id TEXT NOT NULL, revision INTEGER NOT NULL,
-            PRIMARY KEY(owner_id,run_id,request_key))''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     def actor(self, run, turn_id=None):
         run = self.store.run(run['id'])
@@ -303,3 +301,10 @@ class AutomationTools:
                   else await self.result(row, synchronize=name == 'automation_enable'))
         self.unchanged(run, actor)
         return result
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_operations (
+        owner_id TEXT NOT NULL, run_id TEXT NOT NULL, request_key TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, automation_id TEXT NOT NULL, revision INTEGER NOT NULL,
+        PRIMARY KEY(owner_id,run_id,request_key))''')

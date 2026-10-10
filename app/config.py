@@ -32,9 +32,10 @@ class Settings(BaseSettings):
     data_dir: Path = Path(".data")
     moyai_database_url: str = Field(default='', repr=False)
     moyai_database_initialize: bool = False
+    moyai_schema_mode: Literal['auto', 'verify'] = 'auto'
     moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
     moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
-    moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker'] = 'standalone'
+    moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker', 'api'] = 'standalone'
     moyai_separate_broker: bool = False
     temporal_startup_timeout_seconds: float = Field(default=60, ge=1, le=600)
     temporal_worker_activities: int = Field(default=120, ge=1, le=10000)
@@ -46,6 +47,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def database_backend(self):
+        if self.moyai_schema_mode == 'verify' and not self.moyai_database_url:
+            raise ValueError('MOYAI_SCHEMA_MODE=verify requires PostgreSQL.')
         if self.sandbox_prepared_pool_size:
             if not self.temporal_enabled or self.sandbox_provider != 'modal':
                 raise ValueError('Prepared workspaces require Temporal and the Modal provider.')
@@ -61,6 +64,8 @@ class Settings(BaseSettings):
                 raise ValueError('Distributed roles require PostgreSQL and Temporal.')
             if not self.object_storage_bucket or not self.session_secret or not self.encryption_key:
                 raise ValueError('Distributed roles require shared object storage and explicit SESSION_SECRET and ENCRYPTION_KEY.')
+        if self.moyai_runtime_role == 'api' and (self.moyai_schema_mode != 'verify' or not self.moyai_separate_broker):
+            raise ValueError('API replicas require MOYAI_SCHEMA_MODE=verify and MOYAI_SEPARATE_BROKER=true.')
         if self.moyai_runtime_role == 'broker' and not self.moyai_separate_broker:
             raise ValueError('The broker role requires MOYAI_SEPARATE_BROKER=true on every cluster process.')
         if self.moyai_separate_broker and self.moyai_runtime_role == 'standalone':

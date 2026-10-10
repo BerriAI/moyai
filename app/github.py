@@ -188,20 +188,8 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
         self.tokens = {}
         self.init_repositories()
         self.init_write_access()
-        store.execute('CREATE TABLE IF NOT EXISTS github_app (id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL)')
-        store.execute('''CREATE TABLE IF NOT EXISTS github_publications (
-            id TEXT PRIMARY KEY, run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
-            arguments_hash TEXT NOT NULL, branch TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '',
-            result TEXT NOT NULL DEFAULT '', connection_version TEXT NOT NULL, created_at TEXT NOT NULL)''')
-        with store.connect() as conn:
-            if 'attempted' not in conn.column_names('github_publications'):
-                conn.execute('ALTER TABLE github_publications ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0')
-                conn.execute("UPDATE github_publications SET attempted=1 WHERE commit_sha!='' AND result=''")
-
-        store.execute("""CREATE TABLE IF NOT EXISTS github_followups (
-            id TEXT PRIMARY KEY, arguments_hash TEXT NOT NULL, connection_version TEXT NOT NULL,
-            commit_sha TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0,
-            result TEXT NOT NULL DEFAULT '')""")
+        if store.schema_updates:
+            initialize_schema(store)
 
     def app_config(self):
         rows = self.store.rows('SELECT encrypted FROM github_app WHERE id=1')
@@ -740,3 +728,20 @@ class GitHub(GitHubWriteAccess, GitHubRepositories):
         result = {'id': comment['id'], 'url': comment['html_url'], 'number': args.number, 'repository_id': target, 'repository': self.repository_name(target)}
         self.store.execute('UPDATE github_followups SET result=? WHERE id=?', (json.dumps(result), row['id']))
         return result
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS github_app (id INTEGER PRIMARY KEY CHECK(id=1), encrypted TEXT NOT NULL)')
+    store.execute('''CREATE TABLE IF NOT EXISTS github_publications (
+        id TEXT PRIMARY KEY, run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+        arguments_hash TEXT NOT NULL, branch TEXT NOT NULL, commit_sha TEXT NOT NULL DEFAULT '',
+        result TEXT NOT NULL DEFAULT '', connection_version TEXT NOT NULL, created_at TEXT NOT NULL)''')
+    with store.connect() as conn:
+        if 'attempted' not in conn.column_names('github_publications'):
+            conn.execute('ALTER TABLE github_publications ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0')
+            conn.execute("UPDATE github_publications SET attempted=1 WHERE commit_sha!='' AND result=''")
+
+    store.execute("""CREATE TABLE IF NOT EXISTS github_followups (
+        id TEXT PRIMARY KEY, arguments_hash TEXT NOT NULL, connection_version TEXT NOT NULL,
+        commit_sha TEXT NOT NULL DEFAULT '', sent INTEGER NOT NULL DEFAULT 0,
+        result TEXT NOT NULL DEFAULT '')""")

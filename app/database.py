@@ -21,6 +21,16 @@ class IntegrityError(DatabaseError):
     pass
 
 
+RUNTIME_SETTINGS = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
+             'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
+             'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
+             'moyai_separate_broker', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
+
+
+def runtime_fingerprint(settings):
+    return hashlib.sha256(json.dumps({name: getattr(settings, name) for name in RUNTIME_SETTINGS}, sort_keys=True).encode()).hexdigest()
+
+
 INTEGRITY_ERRORS = (sqlite3.IntegrityError, IntegrityError)
 
 # Quoted strings/identifiers and comments must not be rewritten as parameters or
@@ -124,12 +134,14 @@ def row_factory(cursor):
 
 
 class PostgresConnection:
-    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy=''):
+    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy='', api_policy='', schema_updates=True):
         self.raw, self.schema, self.owner_pid = raw, schema, owner_pid
         self.write_scope, self.policy = write_scope, policy
+        self.api_policy = api_policy
         self.changed = False
         self.write_locked = False
         self.owner_checked = False
+        self.schema_updates = schema_updates
 
     def begin_write(self):
         if not self.write_locked:
@@ -141,7 +153,7 @@ class PostgresConnection:
                 self.raw.execute('SELECT pg_advisory_xact_lock_shared(726941, %s::regnamespace::oid::int)', (self.schema,))
                 key = int.from_bytes(hashlib.sha256((self.schema + ':' + self.write_scope).encode()).digest()[:8], 'big', signed=True)
                 self.raw.execute('SELECT pg_advisory_xact_lock(%s::bigint)', (key,))
-            self.check_owner()
+            self.check_owner(lock_api_policy=True)
             from .runtime_coordination import held_leases
             for lease in held_leases.get():
                 if lease.schema != self.schema:
@@ -152,7 +164,7 @@ class PostgresConnection:
                     raise DatabaseError('Execution ownership expired. The transaction was not acknowledged.')
             self.write_locked = True
 
-    def check_owner(self):
+    def check_owner(self, *, lock_api_policy=False):
         if self.owner_pid is None:
             self.owner_checked = True
             return
@@ -163,6 +175,14 @@ class PostgresConnection:
             raise DatabaseError('Postgres ownership was lost. Restart this application process.')
         if self.policy and not self.raw.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=%s', (self.policy,)).fetchone():
             raise DatabaseError('Runtime configuration changed. Restart workers with the coordinator configuration.')
+        if self.api_policy:
+            # Writes hold this row through commit; revocation waits for already
+            # admitted writes. Snapshot reads cannot acquire a row lock.
+            lock = ' FOR SHARE' if lock_api_policy else ''
+            if not self.raw.execute('''SELECT 1 FROM runtime_api_policy
+                WHERE id=1 AND cluster_fingerprint=%s AND fingerprint=%s''' + lock,
+                (self.policy, self.api_policy)).fetchone():
+                raise DatabaseError('API compatibility changed. Restart with a compatible API release.')
         self.owner_checked = True
 
     def begin_read(self):
@@ -173,6 +193,8 @@ class PostgresConnection:
     def execute(self, statement, params=()):
         # Ignore literals/comments when classifying CTEs or leading comments.
         unquoted = ' '.join(SQL_PARTS.split(statement)[::2])
+        if not self.schema_updates and re.search(r'\b(CREATE|ALTER|DROP|TRUNCATE|REINDEX)\b', unquoted, re.I):
+            raise DatabaseError('Schema changes require the offline migration command.')
         if re.search(r'\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b', unquoted, re.I):
             self.begin_write()
             self.changed = True
@@ -215,6 +237,8 @@ class PostgresConnection:
         return {row[0] for row in self.raw.execute('SELECT tablename FROM pg_tables WHERE schemaname=%s', (self.schema,))}
 
     def create_view(self, name, query):
+        if not self.schema_updates:
+            raise DatabaseError('Schema changes require the offline migration command.')
         self.begin_write()
         if not self.raw.execute('SELECT 1 FROM pg_views WHERE schemaname=%s AND viewname=%s', (self.schema, name)).fetchone():
             self.raw.execute(f'CREATE VIEW {identifier(name)} AS {query}')
@@ -226,15 +250,26 @@ class PostgresConnection:
 
 
 class PostgresDatabase:
-    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone'):
+    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto'):
         import psycopg
         from psycopg_pool import ConnectionPool
 
         identifier(schema)
         self.schema = schema
         self.runtime_role, self.policy = runtime_role, ''
+        self.api_policy = ''
         self.broker_owner = False
+        self.startup_exclusive = False
         self.pool = None
+        if schema_mode not in {'auto', 'verify', 'migrate'}:
+            raise ValueError('Unknown schema mode.')
+        if schema_mode == 'migrate' and (not application_instance or runtime_role != 'standalone'):
+            raise ValueError('Schema migration requires exclusive application ownership.')
+        if runtime_role == 'api' and schema_mode != 'verify':
+            raise DatabaseError('API replicas require verified schema startup.')
+        self.schema_updates = schema_mode != 'verify'
+        if application_instance and runtime_role != 'standalone' and runtime_settings is None:
+            raise DatabaseError('Distributed application startup requires its runtime configuration before schema setup.')
         try:
             # A session lock prevents a second process from running global
             # startup recovery. Keep this connection for the Store's lifetime.
@@ -245,7 +280,7 @@ class PostgresDatabase:
             if not self.owner.execute('SELECT 1 FROM pg_namespace WHERE nspname=%s', (schema,)).fetchone():
                 raise DatabaseError('Postgres schema does not exist. Import a verified copy or create an empty schema explicitly.')
             tables = {r[0] for r in self.owner.execute('SELECT tablename FROM pg_tables WHERE schemaname=%s', (schema,))}
-            if (not tables and not initialize) or (tables and 'runs' not in tables):
+            if (not tables and not initialize) or (tables and 'runs' not in tables and not (schema_mode == 'migrate' and 'schema_state' in tables)):
                 raise DatabaseError('Postgres schema is not an initialized Moyai database. Import a verified copy; empty initialization requires MOYAI_DATABASE_INITIALIZE=true.')
             if application_instance:
                 function = 'pg_try_advisory_lock' if runtime_role == 'standalone' else 'pg_try_advisory_lock_shared'
@@ -255,24 +290,14 @@ class PostgresDatabase:
                 if runtime_role == 'coordinator' and not self.owner.execute(
                         'SELECT pg_try_advisory_lock(726943, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]:
                     raise DatabaseError('Another coordinator owns this Postgres schema.')
-            with self.owner.transaction():
-                self.owner.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (schema,))
-                self.owner.execute(f'SET LOCAL search_path TO {identifier(schema)}, pg_catalog')
-                self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_leases (
-                    name TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)''')
-                self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_policy (
-                    id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL)''')
-                self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
-                    LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
-                self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
-                    LANGUAGE sql IMMUTABLE STRICT AS $fn$
-                    SELECT CASE WHEN jsonb_typeof($1::jsonb -> $2)='string' THEN $1::jsonb ->> $2 END $fn$''')
-                self.owner.execute('''CREATE OR REPLACE FUNCTION json_number(text,text) RETURNS numeric
-                    LANGUAGE sql IMMUTABLE STRICT AS $fn$
-                    SELECT CASE jsonb_typeof($1::jsonb -> $2)
-                        WHEN 'number' THEN ($1::jsonb ->> $2)::numeric
-                        WHEN 'boolean' THEN CASE WHEN ($1::jsonb ->> $2)::boolean THEN 1 ELSE 0 END
-                        ELSE NULL END $fn$''')
+                if runtime_settings is not None and runtime_role != 'standalone':
+                    # Reject incompatible builds/keys and duplicate brokers before
+                    # even CREATE IF NOT EXISTS or legacy data backfills can run.
+                    self.admit_runtime(runtime_settings)
+            from .schema_migrations import prepare_schema
+            prepare_schema(self.owner, schema, schema_mode)
+            if self.schema_updates:
+                self._initialize_schema()
 
             def configure(conn):
                 conn.execute(f'SET search_path TO {identifier(schema)}, pg_catalog')
@@ -292,6 +317,30 @@ class PostgresDatabase:
                 raise
             raise DatabaseError('Postgres initialization failed. Check database availability and configuration.') from None
 
+    def _initialize_schema(self):
+        schema = self.schema
+        with self.owner.transaction():
+            self.owner.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (schema,))
+            self.owner.execute(f'SET LOCAL search_path TO {identifier(schema)}, pg_catalog')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_leases (
+                name TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)''')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_policy (
+                id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL)''')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_api_policy (
+                id INTEGER PRIMARY KEY CHECK(id=1), cluster_fingerprint TEXT NOT NULL,
+                fingerprint TEXT NOT NULL)''')
+            self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
+                LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
+            self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
+                LANGUAGE sql IMMUTABLE STRICT AS $fn$
+                SELECT CASE WHEN jsonb_typeof($1::jsonb -> $2)='string' THEN $1::jsonb ->> $2 END $fn$''')
+            self.owner.execute('''CREATE OR REPLACE FUNCTION json_number(text,text) RETURNS numeric
+                LANGUAGE sql IMMUTABLE STRICT AS $fn$
+                SELECT CASE jsonb_typeof($1::jsonb -> $2)
+                    WHEN 'number' THEN ($1::jsonb ->> $2)::numeric
+                    WHEN 'boolean' THEN CASE WHEN ($1::jsonb ->> $2)::boolean THEN 1 ELSE 0 END
+                    ELSE NULL END $fn$''')
+
     @contextmanager
     def connect(self, *, write_scope=None):
         import psycopg
@@ -302,17 +351,27 @@ class PostgresDatabase:
             if self.owner_pid is not None and (self.owner.closed or self.owner.broken):
                 raise DatabaseError('Postgres ownership connection was lost. Restart this application process.')
             with self.pool.connection() as raw:
-                yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy)
+                yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy,
+                                         api_policy=self.api_policy, schema_updates=self.schema_updates)
         except psycopg.IntegrityError:
             raise IntegrityError('Database constraint rejected the change.') from None
         except psycopg.Error:
             raise DatabaseError('Postgres operation failed; the transaction was not acknowledged.') from None
 
-    def configure_runtime(self, settings):
-        if self.runtime_role == 'standalone':
-            return
-        # Exactly one process owns live inference and its startup recovery.
-        # The coordinator retains this ownership in the original topology.
+    def stored_policy(self):
+        if not self.owner.execute('SELECT to_regclass(%s)',
+                                  (f'{identifier(self.schema)}.runtime_policy',)).fetchone()[0]:
+            return None
+        row = self.owner.execute(f'SELECT fingerprint FROM {identifier(self.schema)}.runtime_policy WHERE id=1').fetchone()
+        return row[0] if row else None
+
+    def admit_runtime(self, settings):
+        if settings.moyai_runtime_role != self.runtime_role:
+            raise DatabaseError('Runtime role does not match the database owner.')
+        if self.runtime_role == 'api' and not settings.moyai_separate_broker:
+            raise DatabaseError('API replicas require a separate inference broker.')
+        if self.runtime_role == 'api':
+            return self.admit_api(settings)
         owns_broker = self.runtime_role == 'broker' or (
             self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
         if owns_broker and self.owner_pid is not None and not self.broker_owner:
@@ -320,19 +379,61 @@ class PostgresDatabase:
                                       (self.schema,)).fetchone()[0]:
                 raise DatabaseError('Another inference broker owns this Postgres schema.')
             self.broker_owner = True
-        # Store only a fingerprint. Different signing keys, storage destinations,
-        # task queues or workspace limits must never silently form one cluster.
-        names = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
-                 'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
-                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
-                 'moyai_separate_broker', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
-        policy = hashlib.sha256(json.dumps({name: getattr(settings, name) for name in names}, sort_keys=True).encode()).hexdigest()
-        with self.connect() as conn:
-            if self.runtime_role == 'coordinator':
-                conn.execute('INSERT INTO runtime_policy VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint', (policy,))
-            elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
+        policy = runtime_fingerprint(settings)
+        if self.stored_policy() != policy:
+            if self.runtime_role != 'coordinator':
                 raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
-        self.policy = policy
+            if not self.startup_exclusive:
+                # Upgrade our shared runtime lock without waiting. This both
+                # proves old workers/brokers have exited and prevents new ones
+                # from joining while the replacement constructs its schema.
+                if not self.owner.execute('SELECT pg_try_advisory_lock(726940, %s::regnamespace::oid::int)',
+                                          (self.schema,)).fetchone()[0]:
+                    raise DatabaseError('Drain and stop other runtime owners before changing the shared runtime configuration.')
+                self.startup_exclusive = True
+        elif not self.policy:
+            self.policy = policy
+        return policy
+
+    def admit_api(self, settings):
+        from .runtime_compatibility import api_fingerprint
+
+        fingerprint = api_fingerprint(settings)
+        schema = identifier(self.schema)
+        if not self.owner.execute('SELECT to_regclass(%s)', (f'{schema}.runtime_api_policy',)).fetchone()[0]:
+            raise DatabaseError('API compatibility is unavailable. Migrate offline and start the coordinator first.')
+        # Read the two records in one snapshot. A stale admission record cannot
+        # grant access to a different cluster policy. APIs never publish policy.
+        row = self.owner.execute(f'''SELECT p.fingerprint FROM {schema}.runtime_policy p
+            JOIN {schema}.runtime_api_policy a ON a.id=p.id AND a.cluster_fingerprint=p.fingerprint
+            WHERE p.id=1 AND a.fingerprint=%s''', (fingerprint,)).fetchone()
+        if not row or (self.policy and self.policy != row[0]) or (self.api_policy and self.api_policy != fingerprint):
+            raise DatabaseError('API requires a compatible protocol, schema and the same shared runtime configuration as the coordinator.')
+        self.policy, self.api_policy = row[0], fingerprint
+        return self.policy
+
+    def configure_runtime(self, settings):
+        if self.runtime_role == 'standalone':
+            return
+        policy = self.admit_runtime(settings)
+        try:
+            with self.connect() as conn:
+                if self.runtime_role == 'coordinator':
+                    conn.execute('INSERT INTO runtime_policy VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint', (policy,))
+                    if not self.schema_updates and settings.moyai_separate_broker:
+                        from .runtime_compatibility import api_fingerprint
+                        conn.execute('''INSERT INTO runtime_api_policy VALUES(1,?,?) ON CONFLICT(id)
+                            DO UPDATE SET cluster_fingerprint=excluded.cluster_fingerprint,fingerprint=excluded.fingerprint''',
+                            (policy, api_fingerprint(settings)))
+                    else:
+                        conn.execute('DELETE FROM runtime_api_policy')
+                elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
+                    raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
+            self.policy = policy
+        finally:
+            if self.startup_exclusive:
+                self.owner.execute('SELECT pg_advisory_unlock(726940, %s::regnamespace::oid::int)', (self.schema,))
+                self.startup_exclusive = False
 
     def acquire_lease(self, name, token, ttl):
         with self.connect() as conn:

@@ -25,7 +25,8 @@ class ExistingApp(BaseModel):
 def routes(connectors, security, store, settings):
     router = APIRouter()
     github = connectors.github
-    store.execute('CREATE TABLE IF NOT EXISTS github_registration (state_hash TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, owner_login TEXT NOT NULL)')
+    if store.schema_updates:
+        initialize_schema(store)
 
     def state_for(sid, provider):
         state = secrets.token_urlsafe(32)
@@ -227,3 +228,7 @@ def routes(connectors, security, store, settings):
         return RedirectResponse('/?connection=success#connections', status_code=303)
 
     return router
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS github_registration (state_hash TEXT PRIMARY KEY, owner_id INTEGER NOT NULL, owner_login TEXT NOT NULL)')

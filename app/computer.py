@@ -95,7 +95,8 @@ class Computer:
         self.checkpoint_locks = {}
         self.checkpoint_times = {}
         self.restore_failures = {}
-        store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def restore_error(self, connection, run_id, fingerprint, detail):
         self.restore_failures[run_id] = (connection.identity, fingerprint, time.monotonic() + 10, detail)
@@ -445,3 +446,7 @@ class Computer:
             return captures.response(captures.directory(self.settings, run_id) / name, request, download, store=self.store)
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS computer_activity (run_id TEXT PRIMARY KEY, touched REAL NOT NULL)')

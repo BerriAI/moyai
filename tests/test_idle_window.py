@@ -28,7 +28,8 @@ from test_workspace import workspace
 
 def clock(monkeypatch):
     tick = SimpleNamespace(now=100000.0)
-    monkeypatch.setattr('app.durable_runner.time', SimpleNamespace(time=lambda: tick.now))
+    monkeypatch.setattr('app.durable_runner.time', SimpleNamespace(
+        time=lambda: tick.now, time_ns=lambda: int(tick.now * 1_000_000_000)))
     return tick
 
 

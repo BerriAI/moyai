@@ -125,28 +125,8 @@ class Memory:
         self.store, self.security = store, security
         self.same_requester, self.checkpoints = same_requester, checkpoints
         self.reviewer = None
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS memory_preferences (
-                    owner_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
-                    auto_save INTEGER NOT NULL, revision INTEGER NOT NULL);
-                CREATE TABLE IF NOT EXISTS personal_memories (
-                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, key_hash TEXT NOT NULL,
-                    encrypted TEXT NOT NULL, revision INTEGER NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-                    deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_id,key_hash));
-                CREATE INDEX IF NOT EXISTS memory_owner ON personal_memories(owner_id,deleted);
-                CREATE TABLE IF NOT EXISTS memory_operations (
-                    owner_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
-                    memory_id TEXT NOT NULL, revision INTEGER NOT NULL,
-                    PRIMARY KEY(owner_id,request_id));
-                CREATE TABLE IF NOT EXISTS memory_selections (
-                    run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    owner_id TEXT NOT NULL, memory_id TEXT NOT NULL,
-                    PRIMARY KEY(run_id,turn_id,memory_id));
-                CREATE TABLE IF NOT EXISTS memory_capture_barriers (
-                    owner_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL);
-            ''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def owner(self, actor):
         if self.security.local_preview() and actor == 'shared:local:admin':
@@ -448,3 +428,28 @@ class Memory:
             return result
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS memory_preferences (
+                owner_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                auto_save INTEGER NOT NULL, revision INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS personal_memories (
+                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, key_hash TEXT NOT NULL,
+                encrypted TEXT NOT NULL, revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+                deleted INTEGER NOT NULL DEFAULT 0, UNIQUE(owner_id,key_hash));
+            CREATE INDEX IF NOT EXISTS memory_owner ON personal_memories(owner_id,deleted);
+            CREATE TABLE IF NOT EXISTS memory_operations (
+                owner_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+                memory_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                PRIMARY KEY(owner_id,request_id));
+            CREATE TABLE IF NOT EXISTS memory_selections (
+                run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL, memory_id TEXT NOT NULL,
+                PRIMARY KEY(run_id,turn_id,memory_id));
+            CREATE TABLE IF NOT EXISTS memory_capture_barriers (
+                owner_id TEXT PRIMARY KEY, message_id INTEGER NOT NULL);
+        ''')

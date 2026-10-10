@@ -2,20 +2,21 @@
    .settings-view belongs to the page/rail and explicitly owned dialog mounts,
    never body: workspace overlays and the composer have their own density. */
 .settings-view {
-  --settings-text: var(--text);
-  --settings-muted: var(--ui-muted, #68636f);
-  --settings-surface: #fff;
-  --settings-subtle: #faf9fc;
-  --settings-line: var(--line);
-  --settings-control-border: var(--ui-control-border, #908996);
-  --settings-accent: var(--purple);
-  --settings-selected: var(--soft);
-  --settings-danger: #a33946;
-  --settings-danger-bg: #fff3f4;
-  --settings-success: #32664a;
-  --settings-success-bg: #edf6ef;
-  --settings-warning: #775818;
-  --settings-warning-bg: #fff9eb;
+  --settings-text: var(--ui-foreground);
+  --settings-muted: var(--ui-muted);
+  --settings-surface: var(--ui-background);
+  --settings-subtle: var(--ui-subtle);
+  --settings-line: var(--ui-border);
+  --settings-control-border: var(--ui-control-border);
+  --settings-accent: var(--ui-primary);
+  --settings-accent-foreground: var(--ui-primary-foreground);
+  --settings-selected: var(--ui-secondary);
+  --settings-danger: var(--ui-danger);
+  --settings-danger-bg: var(--ui-danger-bg);
+  --settings-success: var(--ui-success);
+  --settings-success-bg: var(--ui-success-bg);
+  --settings-warning: var(--ui-warning);
+  --settings-warning-bg: var(--ui-warning-bg);
   --settings-radius: 12px;
   --settings-control-radius: 8px;
   --settings-caption: .866667rem;
@@ -24,17 +25,17 @@
   --settings-title: 1.866667rem;
   --muted: var(--settings-muted);
 }
-.skip-link { position: fixed; inset-inline-start: 16px; inset-block-start: -100px; z-index: 100; padding: 12px 18px; background: white; color: #543d79; border: 2px solid #7155ba; border-radius: 8px; }
+.skip-link { position: fixed; inset-inline-start: 16px; inset-block-start: -100px; z-index: 100; padding: 12px 18px; background: var(--ui-background); color: var(--ui-primary); border: 2px solid var(--ui-primary); border-radius: 8px; }
 .skip-link:focus { inset-block-start: 12px; }
 /* Inherit the chat rail width, brand inset, and responsive shell spacing. */
 .settings-view :is(.rail-links,.sessions-label,#session-search-field,#session-list,#new-task,#search-sessions) { display: none !important; }
 #settings-navigation { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 0 0 20px; }
 #settings-navigation a { display: flex; align-items: center; gap: 10px; padding: 7px 8px; margin: 0; border-radius: 7px; color: var(--settings-muted); font-size: 14px; text-decoration: none; line-height: normal; }
-#settings-navigation a[aria-current] { background: var(--brand-selected); color: #543d79; font-weight: 550; }
+#settings-navigation a[aria-current] { background: var(--settings-selected); color: var(--settings-text); font-weight: 500; box-shadow: inset 2px 0 var(--settings-accent); }
 #settings-navigation svg { width: 18px; height: 17px; flex: 0 0 18px; }
 #settings-navigation .settings-back { margin-block: 2px 20px; }
 .settings-overview-icon { width: 18px; flex: 0 0 18px; text-align: center; font-size: 19px; line-height: 1; }
-.settings-nav-title { padding: 0 8px 12px; font-size: 1.066667rem; font-weight: 600; }
+.settings-nav-title { padding: 0 8px 12px; font-size: 1.066667rem; font-weight: 450; }
 .settings-nav-group { margin-block-start: 20px; }
 .settings-nav-group h2 { font-size: .733333rem; font-weight: 500; margin: 0 8px 6px; color: var(--settings-muted); letter-spacing: .04em; }
 .settings-view #page-title { font-size: var(--settings-caption); }
@@ -42,10 +43,10 @@
 .settings-view #content { padding: 40px max(32px, calc((100% - 1056px)/2)) 64px; overflow-y: auto; scroll-padding-block: 24px; color: var(--settings-text); font-size: var(--settings-body); line-height: 1.55; }
 .settings-view #content > :is(section,div,form,p,details) { max-width: 1056px; margin-inline: auto; }
 .settings-view #content > :is(.settings-page,.automations-page,.skills-page,.secrets-page,.memory-page,.users-page,.environments-page) { width: 100%; margin-block: 0; padding: 0; }
-.settings-view #content h1 { font-size: var(--settings-title); line-height: 1.25; font-weight: 600; letter-spacing: 0; margin: 0 0 8px; text-wrap: balance; }
+.settings-view #content h1 { font-size: var(--settings-title); line-height: 1.25; font-weight: 350; letter-spacing: -.035em; margin: 0 0 8px; text-wrap: balance; }
 .settings-view #content h1:focus { outline: none; }
-.settings-view #content h2 { font-size: var(--settings-heading); line-height: 1.4; font-weight: 550; letter-spacing: 0; }
-.settings-view #content h3 { font-size: var(--settings-body); line-height: 1.4; font-weight: 550; }
+.settings-view #content h2 { font-size: var(--settings-heading); line-height: 1.4; font-weight: 450; letter-spacing: -.015em; }
+.settings-view #content h3 { font-size: var(--settings-body); line-height: 1.4; font-weight: 450; }
 .settings-view #content p { line-height: 1.6; text-wrap: pretty; }
 .settings-view #content :is(.subtext,small) { color: var(--settings-muted); font-size: var(--settings-caption); line-height: 1.6; }
 .settings-view #content :is(.page-heading,.skills-page>.section-header,.secrets-page>.section-header,.memory-page>.section-header) { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 0; margin: 0 0 32px; }
@@ -56,7 +57,7 @@
 .settings-view #content .section-header:has(p) h2 { margin-block-end: 6px; }
 .settings-view :where(#content,[data-slot="dialog-content"]) :is(button,input,select,textarea) { font-size: var(--settings-body); line-height: 1.45; }
 .settings-view :where(#content,[data-slot="dialog-content"]) button { min-height: 36px; border-radius: var(--settings-control-radius); padding: 8px 12px; font-weight: 500; box-shadow: none; }
-.settings-view button.primary { color: #fff; background: var(--settings-accent); border-color: var(--settings-accent); }
+.settings-view button.primary { color: var(--settings-accent-foreground); background: var(--settings-accent); border-color: var(--settings-accent); }
 .settings-view button.quiet { color: var(--settings-muted); background: transparent; border-color: transparent; }
 .settings-view button.danger { color: var(--settings-danger); }
 .settings-view :is(#content,[data-slot="dialog-content"]) :is(input:not([type=checkbox]):not([type=radio]),select,textarea) { border: 1px solid var(--settings-control-border); border-radius: var(--settings-control-radius); padding: 9px 12px; min-width: 0; background: var(--settings-surface); }
@@ -65,13 +66,13 @@
 .settings-view input::placeholder,.settings-view textarea::placeholder { color: var(--settings-muted); }
 .settings-view :is(button,a,input,select,textarea,summary):focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 3px; }
 .settings-view :is(button,a,input,select,textarea,summary) { scroll-margin-block: 24px; }
-.settings-view #content :is(.badge,.secret-scope,.user-role,.memory-kind,.connection-state,.infra-status) { display: inline-flex; align-items: center; gap: 5px; font-size: .733333rem; font-weight: 500; line-height: 1.5; padding: 3px 8px; border-radius: 5px; color: #60516f; background: var(--settings-selected); white-space: normal; }
+.settings-view #content :is(.badge,.secret-scope,.user-role,.memory-kind,.connection-state,.infra-status) { display: inline-flex; align-items: center; gap: 5px; font-size: .733333rem; font-weight: 500; line-height: 1.5; padding: 3px 8px; border-radius: 5px; color: var(--settings-accent); background: var(--settings-selected); white-space: normal; }
 .settings-view #content :is(.healthy,.env-ready,.complete) { color: var(--settings-success); background: var(--settings-success-bg); }
 .settings-view #content :is(.incomplete,.settings-status-warning) { color: var(--settings-warning); background: var(--settings-warning-bg); }
 .settings-view #content .settings-status-danger { color: var(--settings-danger); background: var(--settings-danger-bg); }
 .settings-view #content :is(.card,.connection-card,.automation-card,.memory-card,.environment-card,.users-panel) { border: 1px solid var(--settings-line); border-radius: var(--settings-radius); background: var(--settings-surface); box-shadow: none; padding: 24px; min-width: 0; }
-.settings-view #content :is(.note,.automation-notice,.spend-reconciliation) { color: var(--settings-warning); background: var(--settings-warning-bg); border: 1px solid #eadfc3; border-radius: var(--settings-control-radius); padding: 16px 20px; font-size: var(--settings-caption); margin-block: 20px; }
-.settings-view #content .spend-reconciliation.verified { background: var(--settings-success-bg); color: var(--settings-success); border-color: #cbdccd; }
+.settings-view #content :is(.note,.automation-notice,.spend-reconciliation) { color: var(--settings-warning); background: var(--settings-warning-bg); border: 1px solid var(--ui-warning-border); border-radius: var(--settings-control-radius); padding: 16px 20px; font-size: var(--settings-caption); margin-block: 20px; }
+.settings-view #content .spend-reconciliation.verified { background: var(--settings-success-bg); color: var(--settings-success); border-color: var(--ui-success-border); }
 .settings-view #content :is(.note,.automation-notice,.spend-reconciliation) p:last-child { margin-bottom: 0; }
 .settings-view #content details > summary { cursor: pointer; min-height: 36px; padding-block: 8px; font-size: var(--settings-caption); font-weight: 500; color: var(--settings-text); }
 .settings-view #content details > summary::marker { color: var(--settings-muted); font-size: .8em; }
@@ -217,13 +218,13 @@
 .settings-view .environment-card-actions button { font-size: var(--settings-caption); }
 .settings-view .users-overview { display: flex; flex-wrap: wrap; gap: 24px; padding: 0; margin-block: 0 24px; border: 0; background: none; }
 .settings-view .users-overview span { font-size: var(--settings-caption); color: var(--settings-muted); }
-.settings-view .users-overview strong { color: var(--settings-text); font-weight: 600; }
+.settings-view .users-overview strong { color: var(--settings-text); font-weight: 500; }
 .settings-view #content .users-panel { padding: 0; overflow: hidden; }
 .settings-view .users-toolbar { display: flex; gap: 12px; padding: 20px; border-bottom: 1px solid var(--settings-line); }
 .settings-view .users-toolbar>label:not(.users-search) { flex-shrink: 0; }
 .settings-view .users-domain { margin: 0; padding: 16px 20px; font-size: var(--settings-caption); background: var(--settings-subtle); color: var(--settings-muted); }
 .settings-view .user-person { gap: 12px; }
-.settings-view .user-avatar { width: 32px; height: 32px; border-radius: 50%; font-size: var(--settings-caption); background: var(--settings-selected); color: #60516f; }
+.settings-view .user-avatar { width: 32px; height: 32px; border-radius: 50%; font-size: var(--settings-caption); background: var(--settings-selected); color: var(--settings-accent); }
 .settings-view .user-person strong { font-weight: 500; }
 .settings-view .user-person span,.settings-view .user-access { color: var(--settings-muted); font-size: var(--settings-caption); }
 .settings-view .user-role-guide { margin-block: 24px; padding: 0; gap: 32px; }
@@ -260,21 +261,21 @@
 .settings-view .spend-note { max-width: 75ch; }
 .settings-view .adoption-definition { max-width: 75ch; }
 .settings-view .adoption-bar { fill: var(--settings-accent); }
-.settings-view .adoption-average { stroke: #a15b28; }
+.settings-view .adoption-average { stroke: var(--settings-warning); }
 .settings-view .adoption-legend span:first-child { color: var(--settings-accent); }
-.settings-view .adoption-legend span:last-child { color: #a15b28; }
+.settings-view .adoption-legend span:last-child { color: var(--settings-warning); }
 .settings-view .spend-section svg text { fill: var(--settings-muted); }
-.settings-view [data-slot="dialog-content"] { width: min(520px,calc(100% - 32px)); border: 1px solid var(--settings-line); border-radius: 16px; max-height: calc(100dvh - 40px); max-width: calc(100% - 32px); overscroll-behavior: contain; box-shadow: 0 16px 64px #28202f29; }
-.settings-view [data-slot="dialog-content"]::backdrop { background: #221b2d66; }
+.settings-view [data-slot="dialog-content"] { width: min(520px,calc(100% - 32px)); border: 1px solid var(--settings-line); border-radius: 16px; max-height: calc(100dvh - 40px); max-width: calc(100% - 32px); overscroll-behavior: contain; box-shadow: var(--ui-shadow); }
+.settings-view [data-slot="dialog-content"]::backdrop { background: var(--ui-overlay); }
 .settings-view [data-slot="dialog-content"] :is(h2,p) { overflow-wrap: anywhere; }
-.settings-view [data-slot="dialog-content"] h2 { font-size: 1.333333rem; font-weight: 600; letter-spacing: -.02em; }
+.settings-view [data-slot="dialog-content"] h2 { font-size: 1.333333rem; font-weight: 500; letter-spacing: -.02em; }
 .settings-view [data-slot="dialog-content"] .dialog-close { min-width: 36px; min-height: 36px; }
 .settings-view [data-slot="dialog-content"] .field { margin-block-end: 20px; }
 .settings-view [data-slot="dialog-content"] .field>label { display: block; margin-block-end: 8px; }
 .settings-view [data-slot="dialog-content"] :is(.subtext,small,.automation-policy) { color: var(--settings-muted); font-size: var(--settings-caption); line-height: 1.6; }
 .settings-view .environment-dialog-header p { color: var(--settings-muted); }
 .settings-view [data-slot="dialog-content"] :is(.credential-actions,.role-actions,.environment-dialog-actions) { gap: 12px; margin-block-start: 24px; padding-block-start: 20px; border-top: 1px solid var(--settings-line); }
-.settings-view [data-slot="dialog-content"] [type=submit] { background: var(--settings-accent); color: #fff; border-color: var(--settings-accent); }
+.settings-view [data-slot="dialog-content"] [type=submit] { background: var(--settings-accent); color: var(--settings-accent-foreground); border-color: var(--settings-accent); }
 .settings-view [data-slot="dialog-content"] .field :is(input,select,textarea) { width: 100%; }
 .settings-view .settings-load-error { max-width: 65ch !important; }
 .settings-view .settings-load-error>div { margin-block: 24px; }
@@ -391,8 +392,8 @@
 
 /* Spend and adoption: compact report navigation, open chart sections, and quiet data tables. */
 .settings-view .analytics-page {
-  --chart-blue: #2863ed; --chart-teal: #069db2; --chart-green: #2b9861;
-  --chart-amber: #b98208; --chart-violet: #8056ce;
+  --chart-blue: #b7cdfa; --chart-teal: #8fd9e5; --chart-green: #a9dcc9;
+  --chart-amber: #efd398; --chart-violet: #c4b8ee;
   width: 100%; min-width: 0;
 }
 .settings-view #content .analytics-page>.page-heading { margin-bottom: 24px; align-items: flex-start; }
@@ -402,19 +403,19 @@
 .analytics-actions { justify-content: flex-end; }
 .analytics-toolbar { justify-content: space-between; padding-bottom: 20px; border-bottom: 1px solid var(--settings-line); margin-bottom: 32px; gap: 12px; }
 .settings-view .analytics-tabs button { border-color: transparent; background: transparent; color: var(--settings-muted); padding: 6px 10px; min-height: 34px; }
-.settings-view .analytics-tabs button[aria-pressed=true] { background: #efedf1; color: var(--settings-text); }
-.settings-view .analytics-export { background: #353238; color: white; border-color: #353238; }
+.settings-view .analytics-tabs button[aria-pressed=true] { background: var(--settings-selected); color: var(--settings-text); }
+.settings-view .analytics-export { background: var(--settings-accent); color: var(--settings-accent-foreground); border-color: var(--settings-accent); }
 .analytics-range { position: relative; }
 .settings-view #content .analytics-range>summary { display:flex;align-items:center;gap:18px;border:1px solid var(--settings-control-border);border-radius:var(--settings-control-radius);padding:6px 12px;min-height:36px;font-weight:400;margin:0;list-style:none; }
 .analytics-range>summary::-webkit-details-marker { display: none; }
-.analytics-range-menu { position:absolute;inset-block-start:calc(100% + 8px);inset-inline-end:0;z-index:5;width:320px;max-width:calc(100vw - 48px);padding:20px;background:var(--settings-surface);border:1px solid var(--settings-line);border-radius:12px;box-shadow:0 8px 24px #28202f18; }
+.analytics-range-menu { position:absolute;inset-block-start:calc(100% + 8px);inset-inline-end:0;z-index:5;width:320px;max-width:calc(100vw - 48px);padding:20px;background:var(--settings-surface);border:1px solid var(--settings-line);border-radius:12px;box-shadow:var(--ui-shadow); }
 .analytics-range-menu label { display:grid;gap:6px;font-size:var(--settings-caption); }
 .analytics-range-menu select { width:100%; }
 .analytics-date-form { display:grid;grid-template-columns:1fr 1fr;gap:16px 12px;margin:16px 0 0; }
 .analytics-date-form input { width:100%; }
 .analytics-date-form small { grid-column:1/-1; }
 .settings-view #content .analytics-section { margin:0 0 48px;padding:0;min-width:0; }
-.settings-view #content .analytics-section h2 { font-size:.933333rem;margin:0 0 20px;font-weight:550; }
+.settings-view #content .analytics-section h2 { font-size:.933333rem;margin:0 0 20px;font-weight:450; }
 .settings-view #content .analytics-section>h2:has(+.analytics-description) { margin-bottom:8px; }
 .settings-view #content .analytics-section .section-header { margin-bottom:16px;display:flex;justify-content:space-between;flex-wrap:wrap; }
 .settings-view #content .analytics-section .section-header h2 { margin:0; }
@@ -443,9 +444,9 @@
 .analytics-area { fill:var(--chart-blue);opacity:.07; }
 .analytics-trend { fill:none;stroke:var(--chart-blue);stroke-width:2;stroke-linejoin:round; }
 .analytics-point { fill:var(--chart-blue); }
-.analytics-cumulative { fill:none;stroke:#45414b;stroke-width:2;stroke-linejoin:round; }
-.analytics-cumulative-point { fill:#45414b; }
-.analytics-legend .analytics-line-key { width:12px;height:0;border-top:2px solid #45414b; }
+.analytics-cumulative { fill:none;stroke:var(--settings-text);stroke-width:2;stroke-linejoin:round; }
+.analytics-cumulative-point { fill:var(--settings-text); }
+.analytics-legend .analytics-line-key { width:12px;height:0;border-top:2px solid var(--settings-text); }
 .settings-view #content .analytics-footnote { font-size:.733333rem;margin:10px 0 0; }
 .analytics-page .cost-summary { margin:0 0 16px;gap:24px; }
 .settings-view #content .analytics-page .cost-summary>.card { padding:0;border:0;border-radius:0;background:transparent;gap:4px; }
@@ -453,7 +454,7 @@
 .settings-view #content .analytics-page .spend-reconciliation { padding:10px 14px;margin:16px 0 32px;font-size:.8rem; }
 .settings-view #content .analytics-page .spend-reconciliation p { font-size:.8rem;margin:4px 0 0; }
 .analytics-history-card { border:1px solid var(--settings-line);border-radius:12px;padding:24px; }
-.analytics-total { display:block;font-size:2rem;font-weight:550;font-variant-numeric:tabular-nums;letter-spacing:-.03em;margin:4px 0 16px; }
+.analytics-total { display:block;font-size:2rem;font-weight:450;font-variant-numeric:tabular-nums;letter-spacing:-.03em;margin:4px 0 16px; }
 .analytics-composition { display:flex;height:6px;background:var(--settings-subtle);border-radius:6px;overflow:hidden;margin-bottom:16px; }
 .settings-view #content .analytics-status { font-size:var(--settings-caption);color:var(--settings-muted);margin:16px 0 0; }
 .settings-view #content .analytics-status-warning { color:var(--settings-warning); }
@@ -494,7 +495,7 @@
 }
 .analytics-tabs a,.analytics-tabs>span { display:inline-block;padding:6px 10px;font-size:var(--settings-caption);border-radius:6px; }
 .analytics-tabs a { color:var(--settings-muted); }
-.analytics-tabs>span[aria-current] { background:#efedf1;color:var(--settings-text); }
+.analytics-tabs>span[aria-current] { background:var(--settings-selected);color:var(--settings-text); }
 .analytics-average { fill:none;stroke:var(--chart-amber);stroke-width:2;stroke-linejoin:round; }
 .analytics-legend .analytics-average-key { width:12px;height:0;border-top:2px solid var(--chart-amber); }
 .analytics-partial { opacity:.5; }
@@ -539,9 +540,9 @@
 
 /* Automation library, creation menu, and side-panel editor. */
 .settings-view .automation-create { position: relative; flex-shrink: 0; }
-.settings-view #content .automation-create > summary { display: flex; align-items: center; gap: 12px; list-style: none; background: var(--settings-accent); color: white; border-radius: 8px; padding: 9px 14px; font-size: var(--settings-body); margin: 0; }
+.settings-view #content .automation-create > summary { display: flex; align-items: center; gap: 12px; list-style: none; background: var(--settings-accent); color: var(--settings-accent-foreground); border-radius: 8px; padding: 9px 14px; font-size: var(--settings-body); margin: 0; }
 .settings-view .automation-create > summary::-webkit-details-marker { display: none; }
-.automation-create-options { position: absolute; z-index: 5; inset-inline-end: 0; inset-block-start: calc(100% + 6px); width: 224px; padding: 6px; background: var(--settings-surface); border: 1px solid var(--settings-line); border-radius: 12px; box-shadow: 0 8px 24px #28202f1a; }
+.automation-create-options { position: absolute; z-index: 5; inset-inline-end: 0; inset-block-start: calc(100% + 6px); width: 224px; padding: 6px; background: var(--settings-surface); border: 1px solid var(--settings-line); border-radius: 12px; box-shadow: var(--ui-shadow); }
 .settings-view .automation-create-options button { display: block; width: 100%; text-align: start; background: transparent; border-color: transparent; }
 .settings-view .automation-create-options button:hover { background: var(--settings-selected); }
 .automation-discover { display: flex; align-items: center; justify-content: space-between; gap: 24px; border: 1px solid var(--settings-line); border-inline-start: 3px solid var(--settings-accent); border-radius: 12px; padding: 20px 24px; }
@@ -564,7 +565,7 @@
 .automation-editor > header > div { display: flex; align-items: center; gap: 8px; }
 .automation-editor-body { padding: 24px; }
 .automation-editor-section { margin: 24px 0; padding: 24px; border: 1px solid var(--settings-line); border-radius: 12px; }
-.automation-editor-section h3 { margin: 0 0 8px; font-size: var(--settings-heading); font-weight: 600; }
+.automation-editor-section h3 { margin: 0 0 8px; font-size: var(--settings-heading); font-weight: 500; }
 .automation-editor-section > .subtext { margin: 0 0 20px; }
 .automation-editor-section :is(h4,legend) { font-size: var(--settings-body); font-weight: 500; }
 .automation-editor-section .automation-trigger-group { margin: 16px 0 0; }

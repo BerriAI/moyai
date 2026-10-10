@@ -35,19 +35,8 @@ class TraceOutbox:
         self.wake = asyncio.Event()
         self.task = None
         self.loop = None
-        with store.connect() as conn:
-            conn.executescript(f'''
-                CREATE TABLE IF NOT EXISTS {table} (
-                    trace_id TEXT NOT NULL, span_id TEXT NOT NULL, payload BLOB,
-                    created_at REAL NOT NULL, delivered_at REAL,
-                    attempts INTEGER NOT NULL DEFAULT 0,
-                    next_attempt_at REAL NOT NULL DEFAULT 0,
-                    last_error TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY(trace_id,span_id)
-                );
-                CREATE INDEX IF NOT EXISTS {table}_pending
-                    ON {table}(next_attempt_at,created_at) WHERE delivered_at IS NULL;
-            ''')
+        if store.schema_updates:
+            initialize_schema(store, table)
 
     def enqueue(self, span, connection=None):
         payload = encode_spans([span]).SerializeToString()
@@ -212,3 +201,21 @@ class RaindropEventOutbox(TraceOutbox):
         # The documented API returns 204; the current hosted API returns 200
         # with the accepted event IDs. Both acknowledge the batch.
         return '' if response.status_code in {200, 204} else 'HTTP ' + str(response.status_code)
+
+
+def initialize_schema(store, table):
+    if table not in TABLES:
+        raise ValueError('Unknown trace outbox')
+    with store.connect() as conn:
+        conn.executescript(f'''
+            CREATE TABLE IF NOT EXISTS {table} (
+                trace_id TEXT NOT NULL, span_id TEXT NOT NULL, payload BLOB,
+                created_at REAL NOT NULL, delivered_at REAL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at REAL NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(trace_id,span_id)
+            );
+            CREATE INDEX IF NOT EXISTS {table}_pending
+                ON {table}(next_attempt_at,created_at) WHERE delivered_at IS NULL;
+        ''')

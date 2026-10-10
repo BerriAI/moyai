@@ -5,7 +5,7 @@ description: Build or refine Moyai frontend pages using the repository’s estab
 
 # Moyai UI
 
-Keep Moyai’s calm, practical workspace identity: white content, a quiet lavender rail, neutral typography, purple for the primary action and selection. A new screen should look like a sibling of the existing screens. The current implementation and [screenshot gallery](../../../docs/settings-redesign.md) are the visual reference; do not start a new aesthetic for a feature.
+Keep Moyai’s deep-space workspace identity: near-black navy surfaces, icy blue actions, ivory text, thin local Geist typography, and restrained glass panels. The new-session screen uses a deterministic constellation around the Moyai hub; conversation and Settings surfaces stay quiet for sustained work. A new screen should look like a sibling of the existing screens. Use the current implementation and [space redesign gallery](../../../docs/space-redesign.md) as the visual reference; do not start a new aesthetic for a feature.
 
 ## Read the source of the primitive
 
@@ -27,19 +27,19 @@ Use the existing React/shadcn stack and do not restyle chat for a Settings-only 
 | Page shell | `.settings-view`, one persistent Settings rail, breadcrumb in the topbar, content measure of 1056px, 40px top inset and 32px minimum desktop side inset. Mobile content uses 16px side insets. |
 | Navigation | Add destinations to `settingsGroups` once. Overview and rail use the same registry and admin visibility. Links use hashes and `aria-current`; “Back to workspace” returns to chat. |
 | Page heading | One `h1`, 28px/1.25, weight 600; short purpose sentence at 14px. Align the primary action with the heading. No all-caps eyebrow repeating the breadcrumb. |
-| Text | Keep the workspace’s system font stack. Body/control text 14px, captions 13px, section headings 16px/1.4. Use the role tokens, unitless line heights, and weights 400–600. Keep prose around 65–75ch. |
+| Text | Keep the workspace’s locally served Geist and Geist Mono font stacks. Body/control text 14px, captions 13px, section headings 16px/1.4. Use the role tokens, unitless line heights, and weights 400–600. Keep prose around 65–75ch. |
 | Spacing | Use 4, 8, 12, 16, 20, 24, 32, 40px steps. Related labels/controls are close; separate sections by at least twice that space. Preserve shared leading edges. |
-| Surfaces | Flat white surfaces; 12px cards, 8px controls. Borders organize tables and groups. Shadows are reserved for dialogs and overlays. Do not nest a card inside every card. |
+| Surfaces | Flat navy surfaces; 12px cards, 8px controls. Borders organize tables and groups. Shadows are reserved for dialogs and overlays. Do not nest a card inside every card. |
 | Lists | Repeated library objects use compact rows with identity first, supporting copy next, actions last. Search/filter before a large library. Preserve full labels and identifiers or provide an explicit expansion. |
 | Search toolbars | Search fills the available row width; filters, toggles, and counts retain compact intrinsic widths at the trailing edge. Do not cap search and leave a large empty gap. On narrow screens, search takes a full row above the remaining controls. |
-| Controls | One filled purple primary action; secondary buttons neutral, quiet actions in consistent action areas. Use the shared shadcn Button, Label, Input, Select, Checkbox, Switch and Collapsible through the component renderer. Single-choice menus anchor outside their field; do not reintroduce platform popups. 36–40px desktop controls; touch controls at least 44px when space permits. |
-| State | Pair status text with a semantic treatment. Green = ready, amber = incomplete/needs attention, red = destructive/error. Purple is selection and primary action, not a generic status signal. |
+| Controls | One filled icy-blue primary action with dark foreground; secondary buttons neutral, quiet actions in consistent action areas. Use the shared shadcn Button, Label, Input, Select, Checkbox, Switch and Collapsible through the component renderer. Single-choice menus anchor outside their field; do not reintroduce platform popups. 36–40px desktop controls; touch controls at least 44px when space permits. |
+| State | Pair status text with a semantic treatment. Green = ready, amber = incomplete/needs attention, red = destructive/error. Icy blue is selection and primary action, not a generic status signal. |
 | Details | Use `<details><summary>` for longer explanations, automation instructions, billing methodology, and history. The summary names the hidden content. Never clamp essential text without a way to read all of it. |
 | Tables | Quiet header surface, clear row rules, tabular numbers, numeric totals at the trailing edge. Keep exact costs in request detail; round summary amounts to cents. At narrow widths, scroll the table’s own labelled, keyboard-focusable container. |
 | Dialogs | Use `MoyaiUI.createDialog()` and the existing `showModal()`/`close()` controller contract. The visible surface is shadcn Dialog with focus trapping and Escape. Give the dialog a name, explicit labels, an error region, and a visible close/cancel control. Measure `[data-slot="dialog-content"]`, not its inner content host. Cap height to the viewport and contain scrolling. |
 | Empty/error | Explain the state and offer the next action. Filtered emptiness has a clear-filters action. Failed loading has a retry; keep API details escaped. |
 
-Color values come from the existing workspace palette and `--settings-*` role tokens. Avoid adding almost-identical hex values in feature files. Measure contrast when changing text, borders, or focus colors; keep ordinary text at 4.5:1 and meaningful control boundaries/focus at 3:1. Do not introduce dark mode as an incidental change.
+Color values come from the existing workspace palette and `--settings-*` role tokens. Avoid adding almost-identical hex values in feature files. Measure contrast when changing text, borders, or focus colors; keep ordinary text at 4.5:1 and meaningful control boundaries/focus at 3:1. Preserve the shared dark palette; do not add a separate feature-specific theme.
 
 ## Interaction invariants
 

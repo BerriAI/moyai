@@ -48,7 +48,7 @@
       if(action==='discard'){drafts.delete(id);render();return;}
       if(action==='followup'){if(draft){useDraft(draft.content);drafts.delete(id);render();}return;}
       if(!message||message.status!=='queued'||!canEdit(message,user,role)){toast('Moyai already picked up this message, or it belongs to a teammate.');return;}
-      if(action==='edit'){drafts.set(id,{content:message.content,revision:message.revision});render();element.querySelector(`[data-queue-edit="${id}"]`)?.focus();return;}
+      if(action==='edit'){if(!draft)drafts.set(id,{content:message.content,revision:message.revision});render();element.querySelector(`[data-queue-edit="${id}"]`)?.focus();return;}
       if((action==='save'||action==='save-now')&&!draft?.content.trim())return;
       busy=true;render();
       try{

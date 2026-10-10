@@ -2,17 +2,20 @@
   width: min(720px, calc(100vw - 32px)); padding: 0; border-radius: 16px;
   max-height: min(720px, calc(100dvh - 32px)); overflow: hidden;
   display: flex; flex-direction: column;
+  background: var(--ui-background); border-color: var(--ui-control-border);
+  box-shadow: var(--ui-shadow);
 }
 .command-search-bar { display: flex; align-items: center; gap: 12px; padding: 20px; border-bottom: 1px solid var(--ui-border); }
 .command-search-icon, .command-icon { color: var(--ui-muted); flex-shrink: 0; display: grid; place-items: center; }
-#command-search { flex: 1; min-width: 0; height: 40px; padding: 4px; border: 0; box-shadow: none; background: transparent; font-size: 20px; }
+#command-search { flex: 1; min-width: 0; height: 40px; padding: 4px; border: 0; box-shadow: none; background: transparent; color: var(--ui-foreground); font-size: 20px; font-weight: 350; letter-spacing: -.02em; }
 #command-search:focus-visible { outline: 2px solid var(--ui-primary); outline-offset: 2px; border-radius: 4px; }
 .command-close { flex-shrink: 0; padding: 6px; border: 0; background: transparent; color: var(--ui-muted); }
 .command-body { overflow-y: auto; min-height: 0; padding: 8px; overscroll-behavior: contain; }
 #command-scope { margin: 8px 12px 12px; font-size: 12px; color: var(--ui-muted); }
-.command-group-title { margin: 16px 12px 6px; font-size: 13px; color: var(--ui-muted); }
+.command-group-title { margin: 16px 12px 6px; font: 11px/1.5 var(--mono); letter-spacing: .06em; color: var(--ui-muted); }
 .command-option { display: flex; align-items: center; gap: 14px; padding: 12px; min-height: 48px; border-radius: 8px; cursor: pointer; }
-.command-option[aria-selected="true"] { background: var(--ui-secondary); color: var(--ui-foreground); }
+.command-option[aria-selected="true"] { background: var(--ui-secondary); color: var(--ui-foreground); box-shadow: inset 2px 0 var(--ui-primary); }
+.command-option[aria-selected="true"] .command-icon { color: var(--ui-primary); }
 .command-copy { flex: 1; min-width: 0; display: grid; gap: 3px; }
 .command-label { font-size: 15px; line-height: 1.4; overflow-wrap: anywhere; }
 .command-description, .command-snippet { color: var(--ui-muted); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }

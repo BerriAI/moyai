@@ -37,8 +37,9 @@ model capacity only with upstream RPM/TPM and measured coordinator headroom.
 
 Run one server process per container. A worker can be replicated independently.
 There must still be exactly one coordinator; a second coordinator is refused.
-This is not support for arbitrary API replicas or uninterrupted coordinator
-deployments. The single API/model broker remains a capacity and availability
+This base topology does not support arbitrary API replicas or uninterrupted coordinator
+deployments. The opt-in [API role](api-replicas.md) adds compatible API build overlap
+under an independent singleton coordinator. The single API/model broker remains a capacity and availability
 boundary that must be measured before a 3,000-live-session production commitment.
 
 The opt-in [separate broker topology](separate-broker.md) moves sandbox inference
@@ -49,10 +50,20 @@ updates and does not enable multiple coordinators.
 
 All roles must use the same PostgreSQL schema, encryption/session keys, shared
 object destination, public URL, Temporal target/namespace/task queue, global
-budgets and application build. A stored fingerprint rejects mismatches. Set the
-same full `MOYAI_BUILD_SHA` on every process. Pool sizes and per-worker concurrency
+budgets. Coordinator/broker/worker builds must match; set the same full
+`MOYAI_BUILD_SHA` on those processes. API replicas may use a different build only
+under the [reviewed API compatibility contract](api-replicas.md#compatibility-contract-and-review).
+A stored fingerprint rejects mismatches. Pool sizes and per-worker concurrency
 may differ. Keep other runtime/provider settings aligned too: the fingerprint
 does not validate every application setting or contact the external services.
+
+Distributed application startup checks this fingerprint and inference ownership
+before schema setup or legacy data backfills. A coordinator that needs to create
+or change the shared policy must be the only runtime owner. It holds an exclusive
+startup lock through component construction, then publishes the policy and lets
+matching workers/brokers join. If component construction fails, the previous
+policy stays in place and the process releases its locks. This is not a rollback
+of schema writes already completed by an admitted process.
 
 Session and global admission ownership use renewable 30-second database-clock
 leases. They release pool connections between operations. Lease loss cancels an
@@ -91,10 +102,12 @@ loops; use scheduling diagnostics to find remaining stalls.
    cancellation and recovery when a worker stops. Keep the API only on the
    coordinator. Start with existing budgets, then increase in measured steps.
 5. Replicas of the same build/policy may overlap during worker replacement.
-   For build/policy changes, drain and stop old workers before changing the
-   coordinator; restart workers with the new configuration. Old-policy workers
-   are fenced. Schema upgrades still occur at startup: incompatible code/schema
-   upgrades require a coordinated maintenance window.
+   For build/policy changes, drain and stop old workers and the separate broker
+   before changing the coordinator; restart them with the new configuration.
+   The replacement coordinator refuses startup while any old runtime owner
+   remains, preserving its shared policy and active work. Schema upgrades still
+   occur at startup: incompatible code/schema upgrades require a coordinated
+   maintenance window.
 
 Use a direct database connection or session-preserving proxy, not transaction-mode
 pooling. Budget worst-case connections as `sum(pool_size + 1)` across all processes,
@@ -142,6 +155,7 @@ Use a disposable PostgreSQL database via `MOYAI_TEST_POSTGRES_URL`:
 ```sh
 uv run --frozen pytest -q tests/test_runtime_scaling.py
 uv run --frozen python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4
+uv run --frozen python -m scripts.runtime_startup_fence_probe --output /tmp/moyai-startup-fences
 ```
 
 Do not add `--postgres-backend` to the distributed suite: it deliberately opens
@@ -153,6 +167,14 @@ steps and model completions are synthetic and incur no provider calls. Tests als
 exercise lease expiry, a killed process, stale-write fencing, overlapping writes
 and real Temporal worker recovery. These establish admission/ownership behavior,
 not 3,000 real sandboxes, streaming responses, or production throughput.
+
+The startup-fence probe uses real PostgreSQL and application constructors with
+synthetic settings. It rejects mismatched workers, duplicate brokers and a
+changed coordinator while old owners remain; verifies unchanged schema function
+versions, legacy data and a pending model receipt; then exercises a same-build
+API restart and a drained build upgrade. It writes a JSON report and timestamped
+terminal recording. It does not start background lifecycles or call Temporal,
+object storage, sandbox or model providers, and is not a streaming/HTTP demo.
 
 ## Startup measurements after #328
 

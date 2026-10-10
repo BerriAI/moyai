@@ -16,10 +16,8 @@ class GitHubRepositories:
     def init_repositories(self):
         self.identity_lock = asyncio.Lock()
         self.references_dirty = True
-        self.store.execute('''CREATE TABLE IF NOT EXISTS github_repositories (
-            installation_id INTEGER NOT NULL, repository_id INTEGER NOT NULL,
-            owner_id INTEGER NOT NULL, full_name TEXT NOT NULL, aliases TEXT NOT NULL,
-            PRIMARY KEY(installation_id,repository_id))''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     def saved_credentials(self):
         rows = self.store.rows("SELECT encrypted FROM connections WHERE provider='github'")
@@ -327,3 +325,10 @@ class GitHubRepositories:
         self.store.execute("UPDATE connections SET label=? WHERE provider='github'", (label,))
         self.connectors.record_check('github', 'healthy')
         return credentials
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS github_repositories (
+        installation_id INTEGER NOT NULL, repository_id INTEGER NOT NULL,
+        owner_id INTEGER NOT NULL, full_name TEXT NOT NULL, aliases TEXT NOT NULL,
+        PRIMARY KEY(installation_id,repository_id))''')

@@ -26,10 +26,8 @@ class PreparedSandboxes:
     def __init__(self, manager):
         self.manager, self.store, self.settings = manager, manager.store, manager.settings
         self.lock = asyncio.Lock()
-        self.store.execute('''CREATE TABLE IF NOT EXISTS prepared_sandboxes (
-            name TEXT PRIMARY KEY, build TEXT NOT NULL, status TEXT NOT NULL,
-            sandbox_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
-            expires_at REAL NOT NULL)''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
         root = Path(__file__).resolve().parents[1]
         revision = hashlib.sha256()
         for path in sorted([*(root / 'sandbox').glob('*.py'), *(root / 'sandbox').glob('hermes-*.patch')]):
@@ -182,3 +180,10 @@ class PreparedSandboxes:
             except Exception as exc:
                 log.warning('Prepared workspace maintenance will retry (%s)', type(exc).__name__)
             await asyncio.sleep(5)
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS prepared_sandboxes (
+        name TEXT PRIMARY KEY, build TEXT NOT NULL, status TEXT NOT NULL,
+        sandbox_id TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL,
+        expires_at REAL NOT NULL)''')

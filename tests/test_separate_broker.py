@@ -198,7 +198,12 @@ def test_broker_health_fails_when_database_ownership_is_lost(split_settings):
             assert client.get('/health').status_code == 503
 
 
-async def test_broker_does_not_accept_tcp_until_temporal_is_ready(split_settings, monkeypatch):
+@pytest.mark.parametrize('role', ['broker', 'api'])
+async def test_role_does_not_accept_tcp_until_temporal_is_ready(split_settings, monkeypatch, role):
+    if role == 'api':
+        from app.schema_migrations import migrate
+        migrate(split_settings)
+        split_settings = split_settings.model_copy(update={'moyai_schema_mode': 'verify'})
     connecting, connected = asyncio.Event(), asyncio.Event()
 
     async def delayed(self):
@@ -208,7 +213,7 @@ async def test_broker_does_not_accept_tcp_until_temporal_is_ready(split_settings
 
     monkeypatch.setattr(TemporalRunManager, 'connect_temporal', delayed)
     coordinator = create_app(split_settings)
-    broker = create_app(split_settings.model_copy(update={'moyai_runtime_role': 'broker'}))
+    broker = create_app(split_settings.model_copy(update={'moyai_runtime_role': role}))
     with socket.socket() as available:
         available.bind(('127.0.0.1', 0))
         port = available.getsockname()[1]

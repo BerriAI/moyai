@@ -110,3 +110,9 @@ or cloud-provider behavior during deployment.
 The optional [coordinator/worker topology](runtime-scaling.md) provides independent
 execution replicas after shared file migration. Multiple API replicas and
 uninterrupted coordinator deployments remain future work.
+
+## Explicit schema preparation
+
+For startup that skips schema changes and legacy backfills, see
+[explicit schema migrations](schema-migrations.md). This opt-in prerequisite
+retains the existing single-coordinator and exact-build ownership rules.

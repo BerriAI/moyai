@@ -7,9 +7,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from .session_reader import READ_TOOL, ReadSession, read_session
-from .db import now
+from .db import now, database
 from .runner import TERMINAL, response_status
+from .session_read import READ_TOOL
 
 log = logging.getLogger(__name__)
 
@@ -31,12 +31,34 @@ class SessionLifecycle:
         self.manager, self.checkpoints = manager, checkpoints
         self.deletions = {}
         self.deletion_errors = {}
+        self.watcher = None
+
+    def pending_deletions(self):
+        limit = ' LIMIT 100' if self.security.settings.moyai_runtime_role == 'coordinator' else ''
+        return self.store.rows("SELECT id FROM runs WHERE parent_run_id='' AND deletion_requested_at!='' AND deleted_at='' ORDER BY deletion_requested_at,id" + limit)
 
     def start(self):
-        for row in self.store.rows("SELECT id FROM runs WHERE parent_run_id='' AND deletion_requested_at!='' AND deleted_at=''"):
+        if self.security.settings.moyai_runtime_role == 'api':
+            return
+        for row in self.pending_deletions():
             self.schedule_delete(row['id'])
+        if self.security.settings.moyai_runtime_role == 'coordinator' and self.watcher is None:
+            self.watcher = asyncio.create_task(self.watch())
+
+    async def watch(self):
+        while True:
+            try:
+                for row in await database(self.pending_deletions):
+                    self.schedule_delete(row['id'])
+            except Exception as exc:
+                log.warning('Deletion scan will retry (%s)', type(exc).__name__)
+            await asyncio.sleep(1)
 
     async def close(self):
+        if self.watcher:
+            self.watcher.cancel()
+            await asyncio.gather(self.watcher, return_exceptions=True)
+            self.watcher = None
         tasks = list(self.deletions.values())
         for task in tasks:
             task.cancel()
@@ -45,6 +67,8 @@ class SessionLifecycle:
         await asyncio.gather(*self.manager.releases.values(), return_exceptions=True)
 
     def schedule_delete(self, run_id):
+        if self.security.settings.moyai_runtime_role == 'api':
+            return None  # request_delete already persisted the coordinator's work.
         task = self.deletions.get(run_id)
         if task is None or task.done():
             task = asyncio.create_task(self.complete_delete(run_id))
@@ -138,23 +162,6 @@ class SessionLifecycle:
                              'url': self.security.settings.public_url.rstrip('/') + '/#run=' + run_id})
         return {'sessions': sessions, 'has_more': len(ids) > args.limit}
 
-    def read(self, run, arguments):
-        args = ReadSession.model_validate(arguments)
-        actor = self.search_actor(run)
-        saved = self.readable_session(actor, args.session_id)
-        result = read_session(self.store, self.security, saved, args)
-        self.search_actor(run)
-        self.readable_session(actor, args.session_id)
-        return result
-
-    def readable_session(self, actor, session_id):
-        saved = self.store.run(session_id)
-        root_id = self.store.root_id(session_id) if saved else ''
-        if (not saved or saved['deleted_at'] or not self.store.sidebar_run_ids(
-                actor, archive_owner=actor, archived=None, pin_owner=actor, target_id=root_id, limit=1)):
-            raise HTTPException(404, 'Session not found or unavailable.')
-        return saved
-
     def require_live_api(self, request: Request):
         """Guard the actual dispatched run routes, including files and computer."""
         route = request.scope.get('route')
@@ -245,8 +252,9 @@ class SessionLifecycle:
             deleted = self.request_delete(run_id, actor, self.security.role(request) == 'admin')
             if not deleted:
                 task = self.schedule_delete(run_id)
-                await asyncio.wait({task}, timeout=1)
-                deleted = task.done() and bool(self.store.run(run_id)['deleted_at'])
+                if task is not None:
+                    await asyncio.wait({task}, timeout=1)
+                deleted = bool(self.store.run(run_id)['deleted_at'])
             if deleted:
                 await self.checkpoints.flush()
                 return {'id': run_id, 'deleted': True}
