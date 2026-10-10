@@ -71,3 +71,37 @@ def test_legacy_incomplete_publication_migration_is_conservative(workspace):
         store.execute('INSERT INTO github_publications VALUES(?,?,1,?,?,?,?,?,?)',(identity,'run','hash','branch',commit,result,'connection','now'))
     GitHub(store, app.state.security, app.state.settings, app.state.connectors)
     assert {r['id']:r['attempted'] for r in store.rows('SELECT * FROM github_publications')} == {'unsent':0,'uncertain':1,'done':0}
+
+
+@pytest.mark.parametrize('visible', [False, True])
+def test_recovery_does_not_recreate_deleted_branch(workspace, monkeypatch, visible):
+    app, client = workspace
+    run_id, headers = connected(app)
+    github = app.state.connectors.github
+    api = GitHubAPI(github, monkeypatch)
+    api.lose = 'pr'
+    reveal = False
+
+    async def request(method, path, **kwargs):
+        result = await api.request(method, path, **kwargs)
+        if method == 'GET' and path.endswith('/pulls') and not reveal:
+            return []
+        return result
+
+    monkeypatch.setattr(github, 'request', request)
+    body = {'name': 'github_create_pull_request', 'arguments': PAYLOAD}
+    url = f'/broker/{run_id}/tools/call'
+    assert client.post(url, headers=headers, json=body).json()['outcome_uncertain']
+    # A human or GitHub's automatic cleanup deleted the branch after creation.
+    api.branch = None
+    reveal = visible
+    api.calls.clear()
+    result = client.post(url, headers=headers, json=body).json()
+    assert all(method == 'GET' for method, _, _ in api.calls)
+    assert api.branch is None
+    if visible:
+        assert result['number'] == 100
+        assert result['url'] == api.pr['html_url']
+    else:
+        assert result['outcome_uncertain']
+        assert not app.state.store.rows('SELECT result FROM github_publications')[0]['result']

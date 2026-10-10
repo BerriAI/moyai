@@ -587,7 +587,9 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
         existing = await self.request('GET', prefix + '/git/ref/heads/' + branch, token=token, missing=True)
         if existing and existing['object']['sha'] != commit:
             raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
-        if not existing:
+        # After a PR creation attempt, recovery must not resurrect a branch
+        # deleted by a person or GitHub cleanup. Reconcile the PR below instead.
+        if not existing and not row['attempted']:
             self.ensure_publish_allowed(run, version)
             await self.request('POST', prefix + '/git/refs', token=token, json={'ref': 'refs/heads/' + branch, 'sha': commit})
         def receipt(pr):
