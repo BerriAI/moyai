@@ -41,6 +41,117 @@ def drain(app):
     raise AssertionError('Outbox did not drain')
 
 
+@pytest.mark.parametrize('checkpoint_saved', [False, True])
+@pytest.mark.parametrize('receipt', ['current', 'missing', 'unrelated'])
+def test_unexpected_driver_failure_settles_published_answer_and_notice(mirror, checkpoint_saved, receipt):
+    from app.runner import RunManager
+    app, client, run_id = start(mirror)
+    store = app.state.store
+    manager = RunManager(store, app.state.settings)
+    published = []
+    store.enqueue_message(run_id, 'Do not replay this follow-up', 'queued-after-failure')
+
+    async def fail_after_receipt(run):
+        store.update_run(run_id, status='running')
+        manager.receive_result(run_id, {'message_id': run['message_id'], 'completed': True,
+                                       'message': 'The implementation is ready.', 'checkpoint_saved': checkpoint_saved})
+        published.extend(m for m in store.messages(run_id) if m['role'] == 'assistant')
+        app.state.slack.chat.collect()
+        assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer_settlement'") == [{'status': 'waiting'}]
+        if receipt != 'current':
+            stale = {'message_id': run['message_id'] + 1000, 'message': 'Unrelated retained answer'}
+            store.update_run(run_id, pending_result='' if receipt == 'missing' else json.dumps(stale))
+        raise RuntimeError('Unexpected finalizer failure')
+
+    manager.execute = fail_after_receipt
+
+    async def drive():
+        manager.submit(store.run(run_id))
+        await asyncio.gather(*manager.jobs.values(), return_exceptions=True)
+
+    client.portal.call(drive)
+    unsaved = not checkpoint_saved and receipt == 'current'
+    expected = 'save_failed' if unsaved else 'interrupted'
+    answers = [m for m in store.messages(run_id) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['status'] == expected
+    assert answers[0]['id'] == published[0]['id']
+    assert answers[0]['response_to_id'] == published[0]['response_to_id']
+    assert answers[0]['created_at'] == published[0]['created_at']
+    assert store.run(run_id)['status'] == 'failed'
+    assert [m['status'] for m in store.messages(run_id) if m['role'] == 'user'] == [expected, 'interrupted']
+    assert bool(store.run(run_id)['checkpoint_error']) is unsaved
+    assert 'Unrelated retained answer' not in answers[0]['content']
+    # Recovery and repeated collection must not reopen or replay the receipt.
+    client.portal.call(manager.recover)
+    app.state.slack.chat.collect()
+    app.state.slack.chat.collect()
+    drain(app)
+    assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer_settlement'") == [{'status': 'settled'}]
+    posts = [r['text'] for r in mirror[3] if 'text' in r]
+    assert sum('The implementation is ready.' in text for text in posts) == 1
+    assert len(posts) == 2
+    assert ('latest workspace files could not be saved' if unsaved else 'Response interrupted') in posts[-1]
+
+
+@pytest.mark.parametrize('source_interrupted', [False, True])
+@pytest.mark.parametrize('followup', ['none', 'injected', 'queued'])
+def test_restart_closes_orphaned_slack_receipt_without_reposting(mirror, source_interrupted, followup):
+    from app.runner import RunManager
+    from test_slack_chat import receive
+    app, client, run_id = start(mirror)
+    store = app.state.store
+    message = receive(app, run_id, 'Published before the job disappeared.')
+    published = store.messages(run_id)[-1]
+    drain(app)
+    if followup != 'none':
+        queued, _ = store.enqueue_message(run_id, 'Another input', 'restart-followup')
+        # Acknowledged steering shares the parent outcome. An unacknowledged
+        # input remains a separate request even if steering reserved it.
+        store.execute('UPDATE messages SET steering_parent_id=?,started_at=? WHERE id=?',
+                      (message['id'], message['created_at'] if followup == 'injected' else '', queued['id']))
+        if followup == 'injected':
+            store.execute("UPDATE messages SET status='injected' WHERE id=?", (queued['id'],))
+    if source_interrupted:
+        store.execute("UPDATE messages SET status='interrupted' WHERE id=?", (message['id'],))
+    store.update_run(run_id, status='interrupted', pending_result='')
+    recovery = RunManager(store, app.state.settings)
+    client.portal.call(recovery.recover)
+    app.state.slack.chat.collect()
+    app.state.slack.chat.collect()
+    drain(app)
+    assert next(m for m in store.messages(run_id) if m['id'] == published['id']) == {**published, 'status': 'interrupted'}
+    assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer_settlement'") == [{'status': 'settled'}]
+    posts = [r['text'] for r in mirror[3] if 'text' in r]
+    assert len(posts) == (3 if followup == 'queued' else 2)
+    assert sum('Response interrupted' in text for text in posts) == 1
+    assert sum('Published before the job disappeared.' in text for text in posts) == 1
+
+
+@pytest.mark.parametrize('prior_answer', ['none', 'completed', 'saving'])
+def test_interruption_notice_keeps_current_source_and_coalesces_late_settlement(mirror, prior_answer):
+    from test_slack_chat import receive
+    app, client, run_id = start(mirror)
+    store, chat = app.state.store, app.state.slack.chat
+    if prior_answer != 'none':
+        source = receive(app, run_id, 'Earlier answer')
+        if prior_answer == 'completed':
+            store.finish_message(run_id, source['id'], 'Earlier answer')
+            store.update_run(run_id, status='idle')
+            store.enqueue_message(run_id, 'Unclaimed follow-up', 'unclaimed')
+        drain(app)
+    store.update_run(run_id, status='interrupted', pending_result='')
+    chat.collect()  # Run status can become terminal before message settlement.
+    drain(app)
+    store.interrupt_messages(run_id)
+    chat.collect()
+    chat.collect()
+    drain(app)
+    posts = [r['text'] for r in mirror[3] if 'text' in r]
+    assert len(posts) == (1 if prior_answer == 'none' else 2)
+    assert 'The workspace restarted.' in posts[-1]
+    assert not store.rows("SELECT 1 FROM slack_outbox WHERE status='waiting'")
+
+
 def test_web_attachment_mirrors_a_protected_link_once_without_file_bytes(mirror):
     from test_attachments import upload
     app, client, run_id = start(mirror)
@@ -223,7 +334,7 @@ def test_routine_progress_stays_on_web_and_direct_reply_precedes_web_input(mirro
     assert all(p['channel'] == 'C12345678' and p['thread_ts'] == ROOT for p in posts)
 
 
-@pytest.mark.parametrize('transition', ['finish', 'next-turn', 'stopping', 'sleep', 'disabled', 'team', 'flush-finish'])
+@pytest.mark.parametrize('transition', ['finish', 'received', 'next-turn', 'stopping', 'sleep', 'disabled', 'team', 'flush-finish', 'flush-received'])
 def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, transition, monkeypatch):
     app, client, run_id = start(mirror)
     store, chat = app.state.store, app.state.slack.chat
@@ -231,7 +342,10 @@ def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, t
     direct_update(store, run_id, active, 'Update before transition')
     chat.collect()
     assert store.rows("SELECT status FROM slack_outbox WHERE kind='progress'") == [{'status': 'pending'}]
-    if transition in {'finish', 'next-turn'}:
+    if transition == 'received':
+        app.state.manager.receive_result(run_id, {'message_id': active['id'], 'completed': True, 'message': 'Final received'})
+        chat.collect()
+    elif transition in {'finish', 'next-turn'}:
         store.finish_message(run_id, active['id'], 'Final')
         if transition == 'next-turn':
             store.enqueue_message(run_id, 'Next task', 'next')
@@ -248,9 +362,12 @@ def test_progress_delivery_rechecks_scope_and_binding_without_backfill(mirror, t
         chat.collect()
         store.execute("UPDATE connection_policies SET enabled=1 WHERE provider='slack'")
         chat.collect()
-    elif transition == 'flush-finish':
+    elif transition in {'flush-finish', 'flush-received'}:
         async def finish_during_flush():
-            store.finish_message(run_id, active['id'], 'Final during checkpoint')
+            if transition == 'flush-received':
+                app.state.manager.receive_result(run_id, {'message_id': active['id'], 'completed': True, 'message': 'Final received during checkpoint'})
+            else:
+                store.finish_message(run_id, active['id'], 'Final during checkpoint')
         monkeypatch.setattr(app.state.slack.checkpoints, 'flush', finish_during_flush)
     else:
         store.execute("UPDATE slack_threads SET team_id='TOTHER123'")

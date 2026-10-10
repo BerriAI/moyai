@@ -89,7 +89,7 @@ class SessionLifecycle:
                 conn.execute(f"UPDATE messages SET status='cancelled' WHERE status='queued' AND run_id IN ({family})", (run_id,))
                 conn.execute(f"UPDATE approvals SET status='expired' WHERE status IN ('pending','approved') AND run_id IN ({family})", (run_id,))
                 conn.execute(f"UPDATE agent_groups SET status='cancelled' WHERE status IN ('preparing','running') AND parent_id IN ({family})", (run_id,))
-                conn.execute(f"UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND run_id IN ({family})", (run_id,))
+                conn.execute(f"UPDATE slack_outbox SET status='skipped' WHERE status IN ('pending','waiting') AND run_id IN ({family})", (run_id,))
         return bool(run['deleted_at'])
 
     def require_delete(self, run, actor, admin):
@@ -206,7 +206,7 @@ class SessionLifecycle:
                 conn.execute("UPDATE runs SET deleted_at=?,token_hash='' WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?)", (now(), run_id))
                 conn.execute("DELETE FROM native_sessions WHERE run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
                 conn.execute("DELETE FROM browser_sessions WHERE run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
-                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE status='pending' AND run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
+                conn.execute("UPDATE slack_outbox SET status='skipped' WHERE status IN ('pending','waiting') AND run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
         return {'id': run_id, 'deleted': True}
 
     def routes(self):

@@ -189,7 +189,9 @@ async def test_answer_is_durable_before_snapshot_and_survives_restart(runner, mo
     assert json.loads(row['pending_result'])['message'] == 'Tests passed'
     visible = public_messages(row, reopened.messages(run['id']))
     assert [m['content'] for m in visible if m['role'] == 'assistant'] == ['Tests passed']
-    assert not [m for m in reopened.messages(run['id']) if m['role'] == 'assistant']
+    assert len([m for m in reopened.messages(run['id']) if m['role'] == 'assistant']) == 1
+    answer_id = visible[1]['id']
+    assert answer_id > 0 and visible[1]['response_to_id'] == row['active_message_id']
     from app.runner import RunManager
     recovery = RunManager(reopened, runner.settings)
     recovery.settings = runner.settings.model_copy(update={'modal_token_id': ''})
@@ -197,7 +199,7 @@ async def test_answer_is_durable_before_snapshot_and_survives_restart(runner, mo
     await recovery.recover()
     answers = [m for m in reopened.messages(run['id']) if m['role'] == 'assistant']
     assert len(answers) == 1 and answers[0]['content'].startswith('Tests passed')
-    assert answers[0]['status'] == 'save_failed'
+    assert answers[0]['status'] == 'save_failed' and answers[0]['id'] == answer_id
     release.set()
     await wait_jobs(runner)
     assert len([m for m in reopened.messages(run['id']) if m['role'] == 'assistant']) == 1
@@ -263,7 +265,10 @@ def test_response_receipt_marks_only_a_final_answer_for_the_active_turn(runner, 
     assert receipt['data']['response_complete'] is (control is None)
     assert row['status'] == 'queued'  # Receiving a result does not settle a turn.
     assert runner.store.messages(run['id'])[0]['status'] == 'running'
-    assert not [m for m in runner.store.messages(run['id']) if m['role'] == 'assistant']
+    answers = [m for m in runner.store.messages(run['id']) if m['role'] == 'assistant']
+    assert len(answers) == (1 if control is None else 0)
+    if answers:
+        assert answers[0]['status'] == 'saving' and answers[0]['response_to_id'] == message['id']
     assert completed_response(row, []) is False
     assert completed_response(row, None) is False
 
@@ -504,6 +509,60 @@ async def test_restart_preserves_idle_session_and_interrupts_unfinished_messages
     assert runner.store.run(pending['id'])['status'] == 'interrupted'
     assert runner.store.messages(pending['id'])[0]['status'] == 'interrupted'
     assert not runner.jobs
+
+
+@pytest.mark.parametrize('operation', ['recover', 'stop_for_deletion', 'cancel'])
+@pytest.mark.parametrize('source_status', ['running', 'interrupted', 'cancelled', 'completed', 'steered'])
+@pytest.mark.parametrize('receipt', ['missing', 'unrelated'])
+async def test_orphaned_published_answer_settles_without_replay_or_replacing_history(
+    runner: RunManager, operation: str, source_status: str, receipt: str,
+) -> None:
+    store = runner.store
+    run = store.create_run('Previous request', '', 'demo', [], chat_enabled=True)
+    previous = store.claim_message(run['id'])
+    store.finish_message(run['id'], previous['id'], 'Previous saved answer')
+    store.update_run(run['id'], status='idle')
+    settled = store.messages(run['id'])
+    current, _ = store.enqueue_message(run['id'], 'Current request', 'orphaned-answer')
+    assert store.claim_message(run['id'])['id'] == current['id']
+    runner.receive_result(run['id'], {'message_id': current['id'], 'message': 'Current published answer',
+                                     'completed': True, 'exit_code': 0})
+    published = store.messages(run['id'])[-1]
+    assert published['role'] == 'assistant' and published['status'] == 'saving'
+    assert published['response_to_id'] == current['id']
+    # Model a lost job/receipt, or an older restart sweep that settled only the
+    # input. Terminal runs have no queued input to make recovery discover them.
+    queued = None
+    if source_status == 'running':
+        queued, _ = store.enqueue_message(run['id'], 'Do not replay this', 'orphaned-followup')
+    else:
+        store.execute('UPDATE messages SET status=? WHERE id=?', (source_status, current['id']))
+    stale = {'message_id': previous['id'], 'message': 'Unrelated retained answer', 'completed': True,
+             'exit_code': 0, 'checkpoint_saved': False}
+    run_status = ('interrupted' if operation == 'cancel' else 'saving') if source_status == 'running' else source_status
+    store.update_run(run['id'], status=run_status,
+                     pending_result=json.dumps(stale) if receipt == 'unrelated' else '',
+                     summary='Unrelated retained summary')
+
+    recovery = RunManager(Store(runner.settings.data_dir), runner.settings)
+    assert not recovery.jobs
+    await getattr(recovery, operation)(*([run['id']] if operation != 'recover' else []))
+    messages = recovery.store.messages(run['id'])
+    assert messages[:2] == settled
+    terminal = ('interrupted' if operation == 'recover' else 'cancelled') if source_status == 'running' else source_status
+    answer = next(message for message in messages if message['id'] == published['id'])
+    assert answer == {**published, 'status': terminal}
+    assert next(message for message in messages if message['id'] == current['id'])['status'] == terminal
+    assert len([message for message in messages if message['role'] == 'assistant']) == 2
+    if queued:
+        followup = next(message for message in messages if message['id'] == queued['id'])
+        assert followup['status'] == ('interrupted' if operation == 'recover' else 'cancelled')
+        assert followup['started_at'] == ''
+    assert not recovery.jobs and not recovery.store.has_queued_messages(run['id'])
+    assert recovery.store.claim_message(run['id']) is None
+    # Cleanup/recovery retry must retain the same terminal receipts.
+    await getattr(recovery, operation)(*([run['id']] if operation != 'recover' else []))
+    assert recovery.store.messages(run['id']) == messages
 
 
 def test_followup_api_keeps_one_session_and_enforces_auth_csrf_and_legacy_boundary(tmp_path):

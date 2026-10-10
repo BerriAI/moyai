@@ -54,7 +54,7 @@ def test_native_working_refresh_clear_and_restart(activity):
 
 
 @pytest.mark.parametrize('control', [None, 'continuation', 'steer_message_id', 'startup_retry', 'wait_group', 'wait_credential', 'incomplete', 'wrong_turn', 'empty', 'malformed', 'non_object'])
-def test_received_answer_shows_saving_without_delivering_before_checkpoint(activity, control):
+def test_received_answer_delivers_while_working_indicator_shows_saving(activity, control):
     app, _, run_id = start(activity)
     store = app.state.store
     turn = store.claim_message(run_id)
@@ -68,14 +68,20 @@ def test_received_answer_shows_saving_without_delivering_before_checkpoint(activ
     elif control:
         result[control] = True
     raw = '{' if control == 'malformed' else '[]' if control == 'non_object' else json.dumps(result)
-    store.update_run(run_id, status='running', pending_result=raw)
+    store.update_run(run_id, status='running')
+    if control in {'malformed', 'non_object'}:
+        store.update_run(run_id, pending_result=raw)
+    else:
+        app.state.manager.receive_result(run_id, result)
     sync(app)
     expected = 'is saving the work…' if control is None else 'is working…'
     assert activity[3][-1]['status'] == expected
     assert app.state.slack.chat.activity.desired_status(run_id) == expected
     app.state.slack.chat.collect()
-    assert not store.rows("SELECT 1 FROM slack_outbox WHERE kind='answer'")
-    assert not [m for m in store.messages(run_id) if m['role'] == 'assistant']
+    assert bool(store.rows("SELECT 1 FROM slack_outbox WHERE kind='answer'")) is (control is None)
+    answers = [m for m in store.messages(run_id) if m['role'] == 'assistant']
+    assert len(answers) == (0 if control else 1)
+    assert store.messages(run_id)[0]['status'] == 'running'
     store.update_run(run_id, status='failed')
     sync(app)
     assert activity[3][-1]['status'] == ''

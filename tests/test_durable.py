@@ -522,11 +522,129 @@ async def test_final_receipt_is_visible_before_save_and_survives_worker_restart(
     manager.receive_result(run_id, json.loads(row['pending_result']))
     assert len([e for e in manager.store.events(run_id) if e['message'] == 'Response received']) == 1
     answers = [m for m in public_messages(row, manager.store.messages(run_id)) if m['role'] == 'assistant']
-    assert len(answers) == 1 and answers[0]['content'] == 'Saved answer' and answers[0]['id'] < 0
-    assert not [m for m in manager.store.messages(run_id) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['content'] == 'Saved answer' and answers[0]['id'] > 0
+    answer_id = answers[0]['id']
+    assert answers[0]['response_to_id'] == row['active_message_id']
+    assert len([m for m in manager.store.messages(run_id) if m['role'] == 'assistant']) == 1
     await drive(manager, run_id)
     answers = [m for m in public_messages(manager.store.run(run_id), manager.store.messages(run_id)) if m['role'] == 'assistant']
-    assert len(answers) == 1 and answers[0]['status'] == 'completed' and answers[0]['id'] > 0
+    assert len(answers) == 1 and answers[0]['status'] == 'completed' and answers[0]['id'] == answer_id
+
+
+@pytest.mark.parametrize('operation', ['recover', 'cancel'])
+@pytest.mark.parametrize('source_status', ['interrupted', 'cancelled'])
+@pytest.mark.parametrize('journal', ['idle', 'missing'])
+async def test_terminal_published_orphan_wakes_idle_owner_without_replaying_work(
+    durable: tuple[TemporalRunManager, Cloud, str], monkeypatch: pytest.MonkeyPatch,
+    operation: str, source_status: str, journal: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='save')
+    published = manager.store.messages(run_id)[-1]
+    await manager.cleanup(manager.state(run_id), run_id)
+    manager.store.execute('UPDATE messages SET status=? WHERE id=?', (source_status, published['response_to_id']))
+    manager.store.update_run(run_id, status=source_status, pending_result='', sandbox_id='')
+    if journal == 'missing':
+        manager.store.execute('DELETE FROM durable_sessions WHERE run_id=?', (run_id,))
+    else:
+        manager.save(run_id, {'phase': 'idle'})
+    before = sum(row['revision'] for row in manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,)))
+    monkeypatch.setattr(manager, 'serve', AsyncMock())
+    try:
+        if operation == 'recover':
+            await manager.recover()
+        else:
+            await manager.cancel(run_id)
+        after = manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (run_id,))
+        assert after and after[0]['revision'] > before
+        assert await manager.advance(run_id) is False
+        assert manager.store.messages(run_id)[-1] == {**published, 'status': source_status}
+        assert len(cloud.launches) == 1 and not manager.store.has_queued_messages(run_id)
+        assert await manager.advance(run_id) is False
+        assert manager.store.messages(run_id)[-1] == {**published, 'status': source_status}
+    finally:
+        await manager.shutdown()
+
+
+async def test_idle_orphan_repair_preserves_fresh_queued_followup(
+    durable: tuple[TemporalRunManager, Cloud, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='save')
+    published = manager.store.messages(run_id)[-1]
+    await manager.cleanup(manager.state(run_id), run_id)
+    manager.store.execute("UPDATE messages SET status='interrupted' WHERE id=?", (published['response_to_id'],))
+    manager.store.update_run(run_id, status='interrupted', pending_result='', sandbox_id='')
+    manager.save(run_id, {'phase': 'idle'})
+    fresh, _ = manager.store.enqueue_message(run_id, 'A fresh explicit followup', 'after-orphan')
+    monkeypatch.setattr(manager, 'make_capacity', AsyncMock(return_value=False))
+    assert await manager.advance(run_id) == 'capacity'
+    messages = manager.store.messages(run_id)
+    assert next(message for message in messages if message['id'] == published['id']) == {**published, 'status': 'interrupted'}
+    followup = next(message for message in messages if message['id'] == fresh['id'])
+    assert followup['status'] == 'queued' and followup['started_at'] == ''
+    assert manager.store.has_queued_messages(run_id) and len(cloud.launches) == 1
+
+
+async def test_recovery_leaves_published_answer_with_active_durable_save_owner(
+    durable: tuple[TemporalRunManager, Cloud, str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    manager, cloud, run_id = durable
+    await drive(manager, run_id, phase='save')
+    published = manager.store.messages(run_id)
+    state = manager.state(run_id)
+    manager.store.update_run(run_id, status='interrupted')
+    monkeypatch.setattr(manager, 'serve', AsyncMock())
+    try:
+        await manager.recover()
+        assert manager.state(run_id) == state and manager.store.messages(run_id) == published
+        await drive(manager, run_id)
+        messages = manager.store.messages(run_id)
+        assert [message['id'] for message in messages] == [message['id'] for message in published]
+        assert all(message['status'] == 'completed' for message in messages)
+        assert len(cloud.launches) == cloud.snapshots == 1
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.parametrize('phase', ['save', 'finish'])
+@pytest.mark.parametrize('source_status', ['interrupted', 'cancelled'])
+async def test_durable_finish_repairs_terminal_source_without_replaying_queued_work(
+    durable: tuple[TemporalRunManager, Cloud, str], monkeypatch: pytest.MonkeyPatch,
+    phase: str, source_status: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    manager, cloud, run_id = durable
+    manager.settings.sandbox_idle_seconds = 300 if phase == 'finish' else 0
+    await drive(manager, run_id, phase=phase)
+    published = manager.store.messages(run_id)[-1]
+    queued, _ = manager.store.enqueue_message(run_id, 'Queued before the interruption', 'before-interruption')
+    manager.store.execute('UPDATE messages SET status=? WHERE id=?', (source_status, published['response_to_id']))
+    manager.store.update_run(run_id, status=source_status)
+    owned = manager.store.messages(run_id)
+    state = manager.state(run_id)
+    monkeypatch.setattr(manager, 'serve', AsyncMock())
+    try:
+        await manager.recover()
+        assert manager.state(run_id) == state and manager.store.messages(run_id) == owned
+        await drive(manager, run_id)
+        messages = manager.store.messages(run_id)
+        assert next(message for message in messages if message['id'] == published['id']) == {**published, 'status': source_status}
+        followup = next(message for message in messages if message['id'] == queued['id'])
+        assert followup['status'] == 'cancelled' and followup['started_at'] == ''
+        assert manager.store.run(run_id)['status'] == source_status
+        assert not manager.store.has_queued_messages(run_id) and len(cloud.launches) == 1
+        assert all(not machine.alive for machine in cloud.machines)
+        assert await manager.advance(run_id) is False
+    finally:
+        await manager.shutdown()
 
 
 async def test_queued_followup_restores_checkpoint_and_has_own_user_and_model(durable, monkeypatch):

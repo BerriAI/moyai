@@ -1377,8 +1377,9 @@ def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -
     active = next((m for m in messages if m['id'] == message_id and m['role'] == 'user' and m['status'] == 'running'), None)
     if not active or not completed_response(run, result):
         return messages
-    # Keep settlement, model history and Slack delivery owned by finish_message.
-    # Its user-status update removes this projection, even across a stale run read.
+    if any(m['role'] == 'assistant' and m.get('response_to_id') == message_id for m in messages):
+        return messages
+    # Compatibility for receipts written before canonical answer publication.
     reply = {'id': -message_id, 'role': 'assistant', 'content': run.get('summary') or result['message'],
              'status': 'save_failed' if result.get('save_failed') else 'saving',
              'model': run.get('active_model') or active.get('model', ''),

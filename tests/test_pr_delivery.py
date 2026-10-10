@@ -337,6 +337,7 @@ def test_capture_selection_uses_this_answers_exact_paths_and_one_of_each_kind(wo
         'https://workspace.example/api/runs/' + 'f' * 32 + '/computer/captures/first.png',
     ]:
         assert pr_delivery.select_captures(app.state.settings, run_id, f'[Other]({reference})', store=store) == [], reference
+        assert pr_delivery.link_captures(app.state.settings, run_id, f'[Other]({reference})', selected) == f'[Other]({reference})'
 
 
 def test_capture_selection_skips_symlinks_invalid_bytes_and_oversized_files(workspace, monkeypatch):

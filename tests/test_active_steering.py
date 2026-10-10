@@ -53,6 +53,9 @@ async def checkpoint_wait(durable, phase):
 async def test_checkpointed_steering_resumes_same_turn_and_survives_worker_restarts(durable, phase):
     manager, cloud, run_id = durable
     original = await checkpoint_wait(durable, phase)
+    published = manager.store.messages(run_id)[1]
+    assert published['role'] == 'assistant' and published['status'] == 'saving'
+    assert published['response_to_id'] == original
     target, _ = manager.store.enqueue_message(run_id, 'What is the status? Continue the task.', 'status-during-wait')
     manager.message_queue.change(run_id, target['id'], '', False, 0, 'steer')
     await manager.advance(run_id)
@@ -80,10 +83,13 @@ async def test_checkpointed_steering_resumes_same_turn_and_survives_worker_resta
     last.coordinator, last.credentials = manager.coordinator, manager.credentials
     await drive(last, run_id)
     messages = last.store.messages(run_id)
-    assert [m['role'] for m in messages] == ['user', 'user', 'assistant']
+    assert [m['id'] for m in messages] == [original, published['id'], target['id']]
+    assert [m['role'] for m in messages] == ['user', 'assistant', 'user']
     assert all(m['status'] == 'completed' for m in messages)
-    assert messages[1]['steering_parent_id'] == original
-    assert messages[-1]['content'] == 'Saved answer'
+    assert messages[2]['steering_parent_id'] == original
+    assert messages[1]['content'] == 'Saved answer'
+    assert messages[1]['response_to_id'] == original
+    assert messages[1]['created_at'] == published['created_at']
     expected_segments = 3 if phase == 'waiting_children' else 2
     assert len(cloud.launches) == len(cloud.machines) == expected_segments
     assert len(last.store.rows("SELECT id FROM events WHERE run_id=? AND message='Response started'", (run_id,))) == 1
@@ -94,12 +100,20 @@ async def test_checkpointed_steering_resumes_same_turn_and_survives_worker_resta
 async def test_checkpointed_steering_waits_for_capacity_without_acknowledging_or_finishing(durable):
     manager, cloud, run_id = durable
     original = await checkpoint_wait(durable, 'waiting_children')
+    published = manager.store.messages(run_id)[1]
+    assert published['role'] == 'assistant' and published['response_to_id'] == original
     target, _ = manager.store.enqueue_message(run_id, 'Status?', 'waiting-capacity')
     manager.message_queue.change(run_id, target['id'], '', False, 0, 'steer')
     manager.make_capacity = AsyncMock(return_value=False)
     assert await manager.advance(run_id) == 'capacity'
     assert manager.state(run_id)['phase'] == 'waiting_children'
-    assert [m['status'] for m in manager.store.messages(run_id)] == ['running', 'queued']
+    messages = manager.store.messages(run_id)
+    assert [m['id'] for m in messages] == [original, published['id'], target['id']]
+    assert [m['status'] for m in messages] == ['running', 'saving', 'queued']
+    assert messages[1] == published
+    assert messages[2]['started_at'] == ''
+    assert manager.store.run(run_id)['active_message_id'] == original
+    assert manager.store.claim_message(run_id) is None
     assert len(cloud.launches) == 1
     manager.make_capacity = AsyncMock(return_value=True)
     await manager.advance(run_id)

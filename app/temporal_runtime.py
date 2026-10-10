@@ -35,6 +35,8 @@ class TemporalRunManager(DurableRunner):
         if (not (self.store.run(run_id) or {}).get('deletion_requested_at')
                 and not self.is_active(run_id) and state.get('phase') not in {'warm', 'warm_cleanup'}
                 and not (state.get('computer_only') and state.get('phase') != 'idle')):
+            if self.store.rows("SELECT 1 FROM messages WHERE run_id=? AND status='saving'", (run_id,)):
+                self.submit(self.store.run(run_id))
             if self.coordinator:
                 await self.coordinator.cancel_children(run_id)
             return
@@ -61,7 +63,7 @@ class TemporalRunManager(DurableRunner):
             AND NOT EXISTS(SELECT 1 FROM durable_sessions WHERE run_id=runs.id)""")
         if legacy:
             raise RuntimeError('Finish or stop legacy active sessions before enabling Temporal')
-        for row in self.store.rows("SELECT id FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted') OR (deletion_requested_at!='' AND deleted_at='') OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status='queued')"):
+        for row in self.store.rows("SELECT id FROM runs WHERE status NOT IN ('idle','completed','failed','cancelled','interrupted') OR (deletion_requested_at!='' AND deleted_at='') OR EXISTS(SELECT 1 FROM messages WHERE run_id=runs.id AND status IN ('queued','saving'))"):
             self.submit(self.store.run(row['id']))
         for row in self.store.rows('SELECT run_id,state FROM durable_sessions'):
             state = json.loads(row['state'])

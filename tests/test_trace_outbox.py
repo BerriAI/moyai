@@ -297,24 +297,40 @@ async def test_shutdown_during_request_leaves_payload_for_restart(tmp_path):
     assert row['payload'] and row['delivered_at'] is None
 
 
-async def test_answer_and_root_span_rollback_together(tmp_path, monkeypatch):
+@pytest.mark.parametrize('interrupt', [False, True])
+async def test_answer_and_root_span_rollback_together(tmp_path, monkeypatch, interrupt):
     store, tracing, run, message = setup(tmp_path)
+    if interrupt:
+        from app.runner import RunManager
+        RunManager(store, tracing.settings).receive_result(run['id'], {
+            'message_id': message['id'], 'completed': True, 'message': 'hello'})
+    before = store.messages(run['id'])
+    contexts = store.rows('SELECT * FROM trace_contexts')
+
+    def settle():
+        if interrupt:
+            store.interrupt_messages(run['id'])
+        else:
+            store.finish_message(run['id'], message['id'], 'hello')
+
     original = store.connect
     @contextmanager
-    def interrupted_commit():
-        with original() as conn:
+    def interrupted_commit(**kwargs):
+        with original(**kwargs) as conn:
             yield conn
             raise RuntimeError('process interrupted before commit')
     with monkeypatch.context() as patch:
         patch.setattr(store, 'connect', interrupted_commit)
         with pytest.raises(RuntimeError, match='before commit'):
-            store.finish_message(run['id'], message['id'], 'hello')
+            settle()
     assert not store.rows('SELECT * FROM trace_outbox')
-    assert not store.rows('SELECT * FROM trace_contexts')
-    assert not [m for m in store.messages(run['id']) if m['role'] == 'assistant']
-    store.finish_message(run['id'], message['id'], 'hello')
+    assert store.rows('SELECT * FROM trace_contexts') == contexts
+    assert store.messages(run['id']) == before
+    settle()
+    settle()
     assert len(store.rows('SELECT * FROM trace_outbox')) == 1
-    assert len([m for m in store.messages(run['id']) if m['role'] == 'assistant']) == 1
+    answers = [m for m in store.messages(run['id']) if m['role'] == 'assistant']
+    assert len(answers) == 1 and answers[0]['status'] == ('interrupted' if interrupt else 'completed')
     await tracing.close()
 
 

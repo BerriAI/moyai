@@ -39,8 +39,8 @@ def complete_in(conn: Connection, run_id: str, message_id: int, stamp: str, *, i
     response = session_id_response(run_id)
     conn.execute("UPDATE messages SET status='completed',started_at=? WHERE id=? AND run_id=?",
                  (stamp, message_id, run_id))
-    conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id)
-        SELECT run_id,'assistant',?,'completed',?,'',user_id FROM messages WHERE id=? AND run_id=?""",
+    conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id,response_to_id)
+        SELECT run_id,'assistant',?,'completed',?,'',user_id,id FROM messages WHERE id=? AND run_id=?""",
                  (response, stamp, message_id, run_id))
     conn.execute("UPDATE runs SET updated_at=? WHERE id=?", (stamp, run_id))
     if initial:

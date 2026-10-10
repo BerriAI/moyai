@@ -34,6 +34,15 @@ def finish(app, run_id, answer):
     app.state.slack.chat.collect()
 
 
+def receive(app, run_id, answer):
+    message = app.state.store.claim_message(run_id)
+    assert message
+    app.state.store.update_run(run_id, status='running')
+    app.state.manager.receive_result(run_id, {'message_id': message['id'], 'completed': True, 'message': answer})
+    app.state.slack.chat.collect()
+    return message
+
+
 def test_web_reply_attribution_uses_current_sender_profile_without_rewriting_history(slack_app):
     from test_spend import sign_in
 
@@ -122,24 +131,48 @@ def test_pr_completion_uses_confirmed_receipt_and_preserves_plain_replies(slack_
 
 
 @pytest.mark.parametrize('remote', [False, True])
-def test_capture_handoff_selects_only_referenced_saved_files_and_handles_old_grant(slack_app, remote):
-    app, _, run_id = start(slack_app)
+@pytest.mark.parametrize('delivery', ['completed', 'saving', 'deferred'])
+def test_capture_handoff_selects_only_referenced_saved_files_and_handles_old_grant(slack_app, remote, delivery):
+    app, client, run_id = start(slack_app)
+    client.portal.call(app.state.slack.chat.shutdown)
     store = app.state.store
     if remote:
         store.objects = MemoryObjects()
     url = publication(app, run_id)
-    for name, raw in [('demo.webm', b'\x1aE\xdf\xa3webm-recording-fixture'),
-                      ('result.png', b'\x89PNG\r\n\x1a\nscreenshot-fixture'),
-                      ('unrelated.png', b'\x89PNG\r\n\x1a\nunrelated-private-content')]:
-        store.artifacts.save(run_id + '-captures/' + name, raw)
-    finish(app, run_id, f'[PR]({url})\n[Video](/workspace/moyai-captures/demo.webm)\n'
-           '![Screenshot](/workspace/moyai-captures/result.png)')
+    files = [('demo.webm', b'\x1aE\xdf\xa3webm-recording-fixture'),
+             ('result.png', b'\x89PNG\r\n\x1a\nscreenshot-fixture'),
+             ('unrelated.png', b'\x89PNG\r\n\x1a\nunrelated-private-content')]
+    if delivery != 'deferred':
+        for name, raw in files:
+            store.artifacts.save(run_id + '-captures/' + name, raw)
+    answer = (f'[PR]({url})\n[Video](/workspace/moyai-captures/demo.webm)\n'
+              '![Screenshot](/workspace/moyai-captures/result.png)\n'
+              '`moyai-captures/result.png` and "/workspace/moyai-captures/demo.webm"')
+    message = (finish if delivery == 'completed' else receive)(app, run_id, answer)
+    rows = store.rows("SELECT * FROM slack_outbox WHERE kind='answer' ORDER BY id")
+    if delivery == 'deferred':
+        assert f'<https://workspace.example/#run={run_id}|Video>' in rows[0]['text']
+        assert not any('/computer/captures/' in row['text'] for row in rows)
+    else:
+        assert any(f'https://workspace.example/api/runs/{run_id}/computer/captures/demo.webm' in row['text'] for row in rows)
+    assert not any('moyai-captures/' in row['text'] for row in rows)
+    if delivery != 'completed':
+        assert not any('captures' in json.loads(row['metadata']) for row in rows)
+        if remote:
+            assert store.objects.reads == 0
+        drain_answers(app)
+        if delivery == 'deferred':
+            for name, raw in files:
+                store.artifacts.save(run_id + '-captures/' + name, raw)
+        store.finish_message(run_id, message['id'], answer)
+        app.state.slack.chat.collect()
     rows = app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer' ORDER BY id")
     media = next(json.loads(row['metadata']) for row in rows if 'captures' in json.loads(row['metadata']))
     assert [capture['name'] for capture in media['captures']] == ['demo.webm', 'result.png']
-    assert any(f'https://workspace.example/api/runs/{run_id}/computer/captures/demo.webm' in row['text'] for row in rows)
     assert not any('/workspace/moyai-captures/' in row['text'] for row in rows)
-    wait_for(lambda: any('Reconnect Slack' in message.get('text', '') for message in slack_app[3]))
+    drain_answers(app)
+    assert sum(f'<{url}|PR>' in message.get('text', '') for message in slack_app[3]) == 1
+    assert any('Reconnect Slack' in message.get('text', '') for message in slack_app[3])
     assert not any('unrelated.png' in json.dumps(message) for message in slack_app[3])
     app.state.slack.chat.collect()
     assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='answer'")) == len(rows)
@@ -203,6 +236,66 @@ def test_workspace_save_failure_delivers_the_preserved_answer_once(slack_app):
     assert answers[0]['text'].startswith('Implementation prepared')
     assert 'latest workspace files could not be saved' in answers[0]['text']
     assert 'Response failed:' not in answers[0]['text']
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'save_failed', 'failed', 'cancelled', 'interrupted'])
+def test_received_answer_settles_once_after_restart_without_reposting(slack_app, outcome):
+    from app.slack_chat import SlackChat
+    app, client, run_id = start(slack_app)
+    client.portal.call(app.state.slack.chat.shutdown)
+    message = receive(app, run_id, 'The implementation is ready.')
+    store = app.state.store
+    assert store.messages(run_id)[0]['status'] == 'running'
+    store.enqueue_message(run_id, 'Continue later', 'queued-next')
+    assert store.claim_message(run_id) is None
+    assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer_settlement'") == [{'status': 'waiting'}]
+    drain_answers(app)
+    # A replacement collector reads the saved publication and settlement receipts.
+    app.state.slack.chat = SlackChat(app.state.slack)
+    store.finish_message(run_id, message['id'], 'The implementation is ready.', outcome)
+    app.state.slack.chat.collect()
+    app.state.slack.chat.collect()
+    drain_answers(app)
+    rows = store.rows("SELECT text FROM slack_outbox WHERE kind='answer' ORDER BY id")
+    assert sum('The implementation is ready.' in row['text'] for row in rows) == 1
+    assert len(rows) == (1 if outcome == 'completed' else 2)
+    if outcome != 'completed':
+        assert ('latest workspace files could not be saved' if outcome == 'save_failed' else
+                'Response ' + outcome) in rows[-1]['text']
+    assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer_settlement'") == [{'status': 'settled'}]
+
+
+@pytest.mark.parametrize('transition', ['sleep', 'wake_before_collect', 'disabled', 'team', 'deletion'])
+def test_received_answer_settlement_never_backfills_after_suppression(slack_app, transition):
+    app, client, run_id = start(slack_app)
+    client.portal.call(app.state.slack.chat.shutdown)
+    message = receive(app, run_id, 'An answer before workspace saving.')
+    store, chat = app.state.store, app.state.slack.chat
+    if transition == 'sleep':
+        send(client, 1, 'sleep')
+    elif transition == 'wake_before_collect':
+        store.execute('UPDATE slack_threads SET paused=1 WHERE run_id=?', (run_id,))
+    elif transition == 'disabled':
+        app.state.settings.slack_thread_chat_enabled = False
+        chat.collect()
+    elif transition == 'team':
+        app.state.connectors.save('slack', {'bot': {'access_token': 'replacement-bot',
+            'team': {'id': 'T87654321'}, 'bot_user_id': 'U99999999'}}, 'Other team')
+        chat.collect()
+    else:
+        app.state.session_lifecycle.request_delete(run_id, '', True)
+    store.finish_message(run_id, message['id'], 'An answer before workspace saving.', 'save_failed')
+    store.update_run(run_id, status='idle')
+    if transition in {'sleep', 'wake_before_collect'}:
+        send(client, 2, 'wake')
+    elif transition == 'disabled':
+        app.state.settings.slack_thread_chat_enabled = True
+    elif transition == 'team':
+        app.state.connectors.save('slack', {'bot': {'access_token': 'separate-bot-secret',
+            'team': {'id': 'T12345678'}, 'bot_user_id': 'U99999999'}}, 'Original team')
+    chat.collect()
+    assert store.rows("SELECT status FROM slack_outbox WHERE kind='answer_settlement'") == [{'status': 'skipped'}]
+    assert not store.rows("SELECT 1 FROM slack_outbox WHERE dedupe_key LIKE '%:outcome'")
 
 
 def test_checkpoint_handoffs_do_not_post_synthetic_answers_to_slack(slack_app):
@@ -791,17 +884,21 @@ def test_plain_yes_never_grants_external_write_approval(slack_app):
     assert len(app.state.store.rows("SELECT * FROM slack_outbox WHERE kind='approval'")) == 1
 
 
-def test_no_historical_answer_backfill_and_legacy_requires_a_new_mention(slack_app):
+@pytest.mark.parametrize('saving', [False, True])
+def test_no_historical_answer_backfill_and_legacy_requires_a_new_mention(slack_app, saving):
     app, client, _, _ = slack_app
     old = app.state.store.create_slack_run('EvOld', 'Old request', [], 'C12345678', ROOT, 'U12345678')
     app.state.store.execute("UPDATE slack_events SET reply_status='sent'")
-    finish(app, old['id'], 'Old answer must stay in the app')
+    message = (receive if saving else finish)(app, old['id'], 'Old answer must stay in the app')
     send(client, 1, 'An unrelated reply in an old thread')
     assert not app.state.store.rows('SELECT * FROM slack_threads')
     send(client, 2, '<@U99999999> Continue the previous conversation')
     assert len(app.state.store.rows('SELECT * FROM runs')) == 1
+    if saving:
+        app.state.store.finish_message(old['id'], message['id'], 'Old answer must stay in the app')
     app.state.slack.chat.collect()
     assert not app.state.store.rows("SELECT * FROM slack_outbox WHERE text LIKE '%Old answer%'")
+    assert not app.state.store.rows("SELECT 1 FROM slack_outbox WHERE kind='answer_settlement'")
     assert 'Continue the previous conversation' in app.state.store.messages(old['id'])[-1]['content']
 
 
@@ -1366,7 +1463,7 @@ def drain_answers(app) -> None:
 
 
 @pytest.mark.parametrize('dm', [False, True])
-def test_native_media_batch_then_one_card_and_dm_notice(media_delivery, dm):
+def test_answer_and_card_precede_native_media_batch_and_preserve_dm_notice(media_delivery, dm):
     app, prepare, calls, uploaded = media_delivery
     run_id, answer = prepare(dm)
     finish(app, run_id, ('Verified behavior. ' * 200) + answer)
@@ -1379,6 +1476,8 @@ def test_native_media_batch_then_one_card_and_dm_notice(media_delivery, dm):
     assert [raw for _, raw in uploaded] == [b'\x1aE\xdf\xa3webm-demo', b'\x89PNG\r\n\x1a\nresult']
     replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
     assert len(replies) == 2 and not replies[0].get('attachments') and replies[1]['attachments']
+    methods = [method for method, _ in calls]
+    assert max(i for i, method in enumerate(methods) if method == 'chat.postMessage') < methods.index('files.getUploadURLExternal')
     assert all(reply['thread_ts'] == completions[0]['thread_ts'] for reply in replies)
     for reply in replies:
         sections = [block for block in reply['blocks'] if block['type'] == 'section']
@@ -1401,6 +1500,8 @@ def test_media_rechecks_destination_after_awaits(media_delivery, monkeypatch, bo
     app, prepare, calls, uploaded = media_delivery
     run_id, answer = prepare()
     finish(app, run_id, answer)
+    app.state.slack.chat.last_post.clear()
+    asyncio.run(app.state.slack.chat.deliver_one(media=False))
 
     def revoke() -> None:
         if change == 'pause':
@@ -1435,11 +1536,62 @@ def test_media_rechecks_destination_after_awaits(media_delivery, monkeypatch, bo
     monkeypatch.setattr(app.state.connectors, 'request', request)
     monkeypatch.setattr(slack_media, 'upload_bytes', upload)
     app.state.slack.chat.last_post.clear()
-    asyncio.run(app.state.slack.chat.deliver_one())
+    asyncio.run(app.state.slack.chat.deliver_one(media=True))
     assert not any(method == 'files.completeUploadExternal' for method, _ in calls)
     assert len(uploaded) == (1 if boundary == 'bytes' else 0)
     media = app.state.store.rows("SELECT status FROM slack_outbox WHERE dedupe_key LIKE '%:media'")
     assert media[0]['status'] == 'uncertain'
+
+
+def test_media_lane_does_not_block_new_answers_and_preserves_live_send_owner(media_delivery, slack_app, monkeypatch):
+    from agentchat.channels import slack_media
+    app, prepare, calls, uploaded = media_delivery
+    client, chat, store = slack_app[1], app.state.slack.chat, app.state.store
+    run_id, answer = prepare()
+    first = receive(app, run_id, answer)
+    assert not store.rows("SELECT 1 FROM slack_outbox WHERE dedupe_key LIKE '%:media'")
+    drain_answers(app)
+    store.finish_message(run_id, first['id'], answer)
+    chat.collect()
+    original_upload = slack_media.upload_bytes
+
+    async def verify():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def upload(url: str, raw: bytes) -> None:
+            started.set()
+            await release.wait()
+            await original_upload(url, raw)
+
+        monkeypatch.setattr(slack_media, 'upload_bytes', upload)
+        chat.last_post.clear()
+        chat.recover()
+        try:
+            await asyncio.wait_for(started.wait(), timeout=3)
+            chat.reconcile_sending()
+            assert store.rows("SELECT status FROM slack_outbox WHERE dedupe_key LIKE '%:media'") == [{'status': 'sending'}]
+            assert chat.last_post['C12345678'] > time.monotonic() - 1.1
+            store.enqueue_message(run_id, 'Another question', 'next-while-uploading')
+            receive(app, run_id, 'A new answer while the earlier upload is blocked.')
+            chat.wake.set()
+            async with asyncio.timeout(4):
+                while not any('A new answer while' in kwargs.get('json', {}).get('text', '')
+                              for method, kwargs in calls if method == 'chat.postMessage'):
+                    await asyncio.sleep(.02)
+            assert not release.is_set() and not uploaded
+            assert store.rows("SELECT status FROM slack_outbox WHERE dedupe_key LIKE '%:media'") == [{'status': 'sending'}]
+            release.set()
+            async with asyncio.timeout(3):
+                while store.rows("SELECT 1 FROM slack_outbox WHERE dedupe_key LIKE '%:media' AND status='sending'"):
+                    await asyncio.sleep(.02)
+        finally:
+            release.set()
+            await chat.shutdown()
+        assert chat.watcher.cancelled() and chat.media_watcher.cancelled()
+
+    client.portal.call(verify)
+    assert len(uploaded) == 2
+    assert sum(method == 'files.completeUploadExternal' for method, _ in calls) == 1
 
 
 def test_lost_media_completion_is_not_replayed_and_card_still_delivers(media_delivery, slack_app, monkeypatch):
@@ -1484,15 +1636,37 @@ def test_cancelled_final_does_not_start_media_delivery(media_delivery):
     assert not uploaded and not any(method.startswith('files.') for method, _ in calls)
 
 
-def test_explicit_capture_followup_delivers_without_a_new_pr(media_delivery):
+@pytest.mark.parametrize('deferred', [False, True])
+def test_explicit_capture_followup_delivers_without_a_new_pr(media_delivery, deferred):
+    from app import captures
     app, prepare, calls, uploaded = media_delivery
     run_id, _ = prepare()
-    finish(app, run_id, '[Video](/workspace/moyai-captures/demo.webm) '
-           '![Screenshot](/workspace/moyai-captures/result.png)')
+    answer = ('[Video](/workspace/moyai-captures/demo.webm) '
+              '![Screenshot](/workspace/moyai-captures/result.png)')
+    if deferred:
+        root = captures.directory(app.state.settings, run_id)
+        files = {path.name: path.read_bytes() for path in root.iterdir()}
+        for path in root.iterdir():
+            path.unlink()
+        message = receive(app, run_id, answer)
+        drain_answers(app)
+        assert not uploaded and not any(method.startswith('files.') for method, _ in calls)
+        for name, raw in files.items():
+            app.state.store.artifacts.save(run_id + '-captures/' + name, raw)
+        app.state.store.finish_message(run_id, message['id'], answer)
+        app.state.slack.chat.collect()
+        app.state.slack.chat.collect()
+    else:
+        finish(app, run_id, answer)
     drain_answers(app)
     assert len(uploaded) == 2
     replies = [kwargs['json'] for method, kwargs in calls if method == 'chat.postMessage']
     assert len(replies) == 1 and not replies[0].get('attachments')
+    assert 'moyai-captures/' not in replies[0]['text']
+    methods = [method for method, _ in calls]
+    assert methods.index('chat.postMessage') < methods.index('files.getUploadURLExternal')
+    if deferred:
+        assert f'<https://workspace.example/#run={run_id}|Video>' in replies[0]['text']
 
 
 def test_deleted_slack_binding_cannot_continue_or_be_readopted(slack_app):

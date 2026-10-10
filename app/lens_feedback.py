@@ -52,15 +52,12 @@ class LensFeedback:
     @staticmethod
     def trace_for(conn, run_id, assistant_message_id):
         row = conn.execute('''
-            SELECT trace_id FROM trace_contexts
-            WHERE run_id=? AND message_id=(
-                SELECT id FROM messages
-                WHERE run_id=? AND role='user' AND id<?
-                  AND steering_parent_id IS NULL
-                ORDER BY id DESC
-                LIMIT 1
-            )
-        ''', (run_id, run_id, assistant_message_id)).fetchone()
+            SELECT t.trace_id FROM messages a JOIN trace_contexts t
+                ON t.run_id=a.run_id AND t.message_id=COALESCE(a.response_to_id,(
+                    SELECT id FROM messages WHERE run_id=a.run_id AND role='user'
+                        AND id<a.id AND steering_parent_id IS NULL ORDER BY id DESC LIMIT 1))
+            WHERE a.run_id=? AND a.id=? AND a.role='assistant'
+        ''', (run_id, assistant_message_id)).fetchone()
         return row['trace_id'] if row else None
 
     def submit(self, run_id, message_id, author, score, comment, source):

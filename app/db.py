@@ -287,6 +287,9 @@ class Store:
             if 'started_at' not in columns:
                 conn.execute("ALTER TABLE messages ADD COLUMN started_at TEXT NOT NULL DEFAULT ''")
                 conn.execute("UPDATE messages SET started_at=created_at WHERE status!='queued'")
+            if 'response_to_id' not in columns:
+                conn.execute('ALTER TABLE messages ADD COLUMN response_to_id INTEGER')
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_response_to ON messages(run_id,response_to_id)')
             if 'steering_parent_id' not in columns:
                 conn.execute('ALTER TABLE messages ADD COLUMN steering_parent_id INTEGER')
             if 'steer_message_id' not in conn.column_names('runs'):
@@ -605,7 +608,7 @@ class Store:
 
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
-            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,
+            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,
             COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
@@ -726,26 +729,56 @@ class Store:
         self.event(run_id, "chat", "Response started", {"message_id": row["id"], "model": row['model']})
         return dict(row)
 
+    def save_answer_in(self, conn, run_id, message_id, content, status):
+        # Server-owned source identity survives receipt, settlement and restart.
+        # A replayed receipt cannot reopen or replace a settled answer.
+        conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id,response_to_id)
+            SELECT ?,'assistant',?,?,?,CASE WHEN r.active_message_id=m.id AND r.active_model!=''
+            THEN r.active_model ELSE m.model END,m.user_id,m.id
+            FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=? AND m.run_id=?
+            ON CONFLICT(run_id,response_to_id) DO UPDATE SET content=excluded.content,
+                status=excluded.status,model=excluded.model
+            WHERE messages.status='saving' AND excluded.status!='saving'""",
+                     (run_id, content, status, now(), message_id, run_id))
+
+    def finish_message_in(self, conn, run_id, message_id, content, status):
+        changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
+        if not changed:
+            # Older interruption paths may have settled the input alone. Repair
+            # only its still-saving answer, never rewrite a terminal outcome.
+            source = conn.execute("SELECT status FROM messages WHERE id=? AND run_id=? AND role='user'", (message_id, run_id)).fetchone()
+            if (not source or source['status'] != status or status in {'running', 'queued', 'injected'}
+                    or not conn.execute("SELECT 1 FROM messages WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id)).fetchone()):
+                return
+        conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
+        conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
+        if status != 'steered':
+            self.save_answer_in(conn, run_id, message_id, content, status)
+        else:
+            conn.execute("UPDATE messages SET status='steered' WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id))
+        if self.tracing:
+            # Commit the answer and its pending span together. A crash
+            # after saving the answer must not lose its root trace.
+            self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
+        if status == 'completed' and self.memory_review:
+            self.memory_review.enqueue_in(conn, message_id)
+
     def finish_message(self, run_id, message_id, content, status="completed"):
-        with self.connect() as conn:
-            changed = conn.execute("UPDATE messages SET status=? WHERE id=? AND run_id=? AND status='running'", (status, message_id, run_id)).rowcount
-            if changed:
-                conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
-                conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
-                if status != 'steered':
-                    # Input models remain the original admission receipt. The
-                    # answer records the final model after a conversational switch.
-                    conn.execute("""INSERT INTO messages(run_id,role,content,status,created_at,model,user_id)
-                        SELECT ?,'assistant',?,?,?,CASE WHEN r.active_message_id=m.id AND r.active_model!=''
-                        THEN r.active_model ELSE m.model END,m.user_id FROM messages m JOIN runs r ON r.id=m.run_id WHERE m.id=?""",
-                                 (run_id, content, status, now(), message_id))
-                if self.tracing:
-                    # Commit the answer and its pending span together. A crash
-                    # after saving the answer must not lose its root trace.
-                    self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
-                if status == 'completed' and self.memory_review:
-                    self.memory_review.enqueue_in(conn, message_id)
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            self.finish_message_in(conn, run_id, message_id, content, status)
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
+
+    def interrupt_messages(self, run_id, status='interrupted'):
+        """Retire orphaned inputs and published answers together, without replay."""
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            conn.execute("UPDATE messages SET status=? WHERE run_id=? AND status IN ('running','queued','injected')", (status, run_id))
+            answers = conn.execute("""SELECT a.response_to_id,a.content,m.status FROM messages a
+                JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                WHERE a.run_id=? AND a.status='saving'""", (run_id,)).fetchall()
+            for answer in answers:
+                self.finish_message_in(conn, run_id, answer['response_to_id'], answer['content'], answer['status'])
 
     def has_queued_messages(self, run_id):
         return bool(self.rows("SELECT id FROM messages WHERE run_id=? AND status='queued' LIMIT 1", (run_id,)))

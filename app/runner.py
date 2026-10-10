@@ -9,6 +9,7 @@ from uuid import uuid4
 import modal
 from fastapi import HTTPException
 
+from .db import now
 from .environments import EnvironmentPending
 from .security import digest
 from .message_queue import MessageQueue
@@ -93,14 +94,23 @@ class RunManager:
         """Replaced by the cloud checkpoint callback when hosted on Modal."""
 
     def receive_result(self, run_id: str, result: dict[str, object]) -> None:
-        """Persist the answer and wake browser readers without settling its turn."""
+        """Publish the durable answer before saving files, without settling its turn."""
         serialized = json.dumps(result)
-        run = self.store.run(run_id)
-        if run['pending_result'] == serialized:
-            return
-        self.store.update_run(run_id, summary=str(result.get('message', '')), pending_result=serialized)
-        self.store.event(run_id, 'chat', 'Response received',
-                         {'message_id': result.get('message_id'), 'response_complete': completed_response(run, result)})
+        with self.store.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            run = dict(conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone())
+            if run['pending_result'] == serialized:
+                return
+            complete = completed_response(run, result)
+            conn.execute('UPDATE runs SET summary=?,pending_result=?,updated_at=? WHERE id=?',
+                         (str(result.get('message', '')), serialized, now(), run_id))
+            if complete and conn.execute("SELECT 1 FROM messages WHERE run_id=? AND id=? AND role='user' AND status='running'",
+                                         (run_id, result['message_id'])).fetchone():
+                self.store.save_answer_in(conn, run_id, result['message_id'], result['message'], 'saving')
+                if self.store.tracing:
+                    self.store.tracing.identity(run, result['message_id'], connection=conn)
+            conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'chat','Response received',?,?)",
+                         (run_id, json.dumps({'message_id': result.get('message_id'), 'response_complete': complete}), now()))
 
     def preserve_answer(self, run_id, reason=SAVE_WARNING):
         """Called on failure/restart; never turn an unsaved workspace into success."""
@@ -165,7 +175,7 @@ class RunManager:
             await self.wait_for_stop(row['id'])
             # The runtime has settled its answers and released its workspace.
             # Retain orphaned inputs without replaying or inventing an answer.
-            self.store.execute("UPDATE messages SET status='cancelled' WHERE run_id=? AND status IN ('queued','running','injected')", (row['id'],))
+            self.store.interrupt_messages(row['id'], 'cancelled')
             if self.store.run(row['id'])['status'] not in TERMINAL:
                 self.store.update_run(row['id'], status='cancelled', token_hash='')
 
@@ -179,8 +189,12 @@ class RunManager:
             if any(json.loads(row['state']).get('phase', 'idle') != 'idle'
                    for row in self.store.rows('SELECT state FROM durable_sessions')):
                 raise RuntimeError('Drain Temporal sessions before disabling Temporal; unfinished work was preserved')
-        rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued'))")
+        rows = self.store.rows("SELECT * FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle') OR EXISTS(SELECT 1 FROM messages WHERE messages.run_id=runs.id AND messages.status IN ('running','queued','saving'))")
         for row in rows:
+            if row['status'] in TERMINAL and not self.store.rows(
+                    "SELECT 1 FROM messages WHERE run_id=? AND status IN ('running','queued','injected')", (row['id'],)):
+                self.store.interrupt_messages(row['id'])
+                continue
             pending = json.loads(row.get("pending_result") or "null")
             # Finished turns retain their receipt until the next claim. A new
             # unclaimed input cannot recover that old answer as its outcome.
@@ -202,7 +216,7 @@ class RunManager:
                 self.store.update_run(row["id"], status="interrupted", token_hash="", error="The workspace restarted. This task was not replayed.")
             self.store.execute("UPDATE approvals SET status='expired' WHERE run_id=? AND status IN ('pending','approved')", (row["id"],))
             self.store.execute("UPDATE approvals SET status='uncertain' WHERE run_id=? AND status='executing'", (row["id"],))
-            self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (row["id"],))
+            self.store.interrupt_messages(row["id"])
             self.store.event(row["id"], "error", "Workspace restarted. Received answers were preserved; unfinished messages were interrupted and not replayed.")
             if row["sandbox_id"] and not self.settings.missing_sandbox(row.get("sandbox_provider")):
                 try:
@@ -232,7 +246,18 @@ class RunManager:
                 self.jobs.pop(run["id"], None)
             if not completed.cancelled() and completed.exception():
                 self.store.update_run(run["id"], status="failed", token_hash="", error="Session processing stopped unexpectedly. No unfinished messages were replayed.")
-                self.store.execute("UPDATE messages SET status='interrupted' WHERE run_id=? AND status IN ('running','queued','injected')", (run["id"],))
+                # A driver/finalizer failure can bypass chat's normal settlement.
+                # Finish the published receipt before interrupting its input,
+                # while preserving finish_message's trace and steering ownership.
+                pending = json.loads(self.store.run(run['id']).get('pending_result') or '{}')
+                for answer in self.store.rows("""SELECT a.response_to_id,a.content FROM messages a
+                        JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                        WHERE a.run_id=? AND a.status='saving' AND m.status='running'""", (run['id'],)):
+                    preserved = pending.get('message_id') == answer['response_to_id'] and self.preserve_answer(run['id'])
+                    content = self.store.run(run['id'])['summary'] if preserved else answer['content']
+                    self.store.finish_message(run['id'], answer['response_to_id'], content,
+                                              'save_failed' if preserved else 'interrupted')
+                self.store.interrupt_messages(run["id"])
             # A message may arrive while the last checkpoint is being saved.
             if not self.closing and run.get("chat_enabled") and self.store.has_queued_messages(run["id"]):
                 self.submit(self.store.run(run["id"]))
@@ -288,6 +313,7 @@ class RunManager:
     async def cancel(self, run_id):
         run = self.store.run(run_id)
         if run["status"] in TERMINAL and run_id not in self.jobs:
+            self.store.interrupt_messages(run_id, 'cancelled')
             if self.coordinator:
                 await self.coordinator.cancel_children(run_id)
             return
@@ -302,6 +328,8 @@ class RunManager:
             # Slack may already have atomically reserved the stop while the
             # background job is still fetching context, before claiming a turn.
             self.store.update_run(run_id, status="cancelled")
+            if run_id not in self.jobs:
+                self.store.interrupt_messages(run_id, 'cancelled')
         pending = ([self.terminate(sandbox, run_id)] if sandbox else [])
         if self.coordinator:
             pending.append(self.coordinator.cancel_children(run_id))
@@ -435,7 +463,7 @@ class RunManager:
                 "slack_source": self.store.slack_source(run_id),
                 "slack_thread_chat": bool(self.store.rows("SELECT 1 FROM slack_threads WHERE run_id=?", (run_id,))) if self.settings.slack_thread_chat_enabled else False,
                 "history_fallback": [] if context_checkpoint else [{"role": m["role"], "content": (f"[Prior {m['status']} message; context only, do not replay] " if m["role"] == "user" and m["status"] != "completed" else "") + m["content"] + attachment_context(by_message.get(m['id'], []))} for m in self.store.messages(run_id)
-                                     if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "deleted"}]}
+                                     if m["id"] != run.get("message_id", 0) and m["status"] not in {"queued", "running", "saving", "deleted"}]}
         if self.environments:
             spec["project_environment"] = self.environments.context(run)
             if spec['project_environment']:

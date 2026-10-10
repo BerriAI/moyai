@@ -102,6 +102,8 @@ async def test_real_temporal_restarts_worker_and_drains_offline_followup(durable
             successor.connect_temporal = connect
             await successor.recover()
             await eventually(lambda: len([m for m in successor.store.messages(run_id) if m['role'] == 'assistant']) == 2)
+            # Answer publication can precede checkpoint and sandbox settlement.
+            await eventually(lambda: successor.store.run(run_id)['status'] == 'idle')
             assert len(cloud.machines) == len(cloud.launches) == len(cloud.terminations) == 2
             assert successor.store.run(run_id)['status'] == 'idle'
             handle = env.client.get_workflow_handle('moyai-session-' + run_id)
@@ -214,6 +216,7 @@ async def test_real_temporal_idle_timer_wakes_reuses_and_survives_restart(durabl
             manager.store.enqueue_message(run_id, 'Within the idle window', 'warm-followup')
             manager.submit(manager.store.run(run_id))
             await eventually(lambda: len([m for m in manager.store.messages(run_id) if m['role'] == 'assistant']) == 2)
+            await eventually(lambda: manager.state(run_id).get('phase') == 'warm')
             assert len(cloud.machines) == 1 and len(cloud.launches) == 2
             assert cloud.launch_tokens[0] != cloud.launch_tokens[1]
             deadline = manager.state(run_id)['idle_until']

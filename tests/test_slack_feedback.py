@@ -3,10 +3,11 @@ import json
 import time
 
 import httpx
+import pytest
 
 from app.lens_feedback import LensFeedback
 from test_slack import event, signed, slack_app, wait_for
-from test_slack_chat import finish, start
+from test_slack_chat import finish, receive, start
 
 
 def wait_for_reply(predicate):
@@ -75,11 +76,12 @@ def test_slack_feedback_button_is_on_the_last_chunk_and_survives_long_replies(sl
     asyncio.run(service.close())
 
 
-def test_slack_feedback_interactions_open_submit_and_preserve_credentials(slack_app):
+@pytest.mark.parametrize('saving', [False, True])
+def test_slack_feedback_interactions_open_submit_and_preserve_credentials(slack_app, saving):
     app, client, _, posted = slack_app
     service = enable_feedback(app)
     _, _, run_id = start(slack_app)
-    finish(app, run_id, 'A completed answer.')
+    (receive if saving else finish)(app, run_id, 'A completed answer.')
     wait_for(lambda: any(
         any(block.get('block_id') == 'moyai_feedback' for block in message.get('blocks', []))
         for message in posted
@@ -88,8 +90,13 @@ def test_slack_feedback_interactions_open_submit_and_preserve_credentials(slack_
         block.get('block_id') == 'moyai_feedback' for block in message.get('blocks', [])))
     action = next(block['elements'][0] for block in rich['blocks'] if block.get('block_id') == 'moyai_feedback')
     assistant = app.state.store.messages(run_id)[-1]
-    app.state.store.execute('INSERT INTO trace_contexts VALUES(?,?,?,?,?,?,?)', (
-        run_id, app.state.store.messages(run_id)[0]['id'], 'ab' * 16, 'cd' * 8, None, run_id, 'moyai'))
+    source = app.state.store.messages(run_id)[0]
+    if saving:
+        assert source['status'] == 'running'
+        assert app.state.store.rows('SELECT 1 FROM trace_contexts WHERE run_id=? AND message_id=?', (run_id, source['id']))
+    else:
+        app.state.store.execute('INSERT INTO trace_contexts VALUES(?,?,?,?,?,?,?)', (
+            run_id, source['id'], 'ab' * 16, 'cd' * 8, None, run_id, 'moyai'))
     message_ts = app.state.store.rows(
         "SELECT slack_ts FROM slack_outbox WHERE run_id=? AND kind='answer' ORDER BY id DESC LIMIT 1",
         (run_id,),

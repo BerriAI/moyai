@@ -203,7 +203,9 @@ async def test_cross_scope_checkpointed_steering_keeps_the_saved_handoff(durable
     await drive(manager,run_id,phase='idle')
     assert manager.store.rows('SELECT status FROM messages WHERE id=?',(old,))[0]['status']=='steered'
     assert len(cloud.launches)==1 and cloud.snapshots==1
-    assert not [m for m in manager.store.messages(run_id) if m['role']=='assistant']
+    # The completed receipt was already published before this saved handoff.
+    answers=[m for m in manager.store.messages(run_id) if m['role']=='assistant']
+    assert len(answers)==1 and answers[0]['status']=='steered' and answers[0]['response_to_id']==old
     assert manager.store.has_queued_messages(run_id)
 
 

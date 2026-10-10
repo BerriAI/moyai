@@ -11,6 +11,7 @@ from . import captures
 from .config import Settings
 
 TOKENS = re.compile(r'[^\s<>()`"\[\]]+')
+CAPTURE_PATH = re.compile(r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))')
 
 
 class PullRequest(BaseModel):
@@ -52,8 +53,7 @@ def select_prs(conn: Connection, run_id: str, answer: str) -> list[PullRequest]:
 def select_captures(settings: Settings, run_id: str, answer: str, *, store,
                     conn: Connection | None = None) -> list[Capture]:
     tokens = TOKENS.findall(answer)
-    names = [match[1] for token in tokens if (match := re.fullmatch(
-        r'(?:/workspace/)?moyai-captures/([A-Za-z0-9_-]{1,100}\.(?:png|webm))', token))]
+    names = [match[1] for token in tokens if (match := CAPTURE_PATH.fullmatch(token))]
     result = []
     kinds = set()
     for name in names:
@@ -86,7 +86,14 @@ def link_captures(settings: Settings, run_id: str, answer: str, selected: list[C
         url = f'{settings.public_url.rstrip("/")}/api/runs/{run_id}/computer/captures/{capture.name}'
         links['moyai-captures/' + capture.name] = url
         links['/workspace/moyai-captures/' + capture.name] = url
-    return TOKENS.sub(lambda match: links.get(match[0], match[0]), answer)
+    session_url = f'{settings.public_url.rstrip("/")}/#run={run_id}'
+
+    def replace(match: re.Match[str]) -> str:
+        # Capture bytes may arrive with the workspace save after this answer.
+        # Keep those references usable without claiming the file exists yet.
+        return links.get(match[0], session_url) if CAPTURE_PATH.fullmatch(match[0]) else match[0]
+
+    return TOKENS.sub(replace, answer)
 
 
 def attachment(pr: PullRequest, public_url: str, run_id: str) -> dict:

@@ -256,6 +256,13 @@ class DurableRunner(RunManager):
                         return True
                     state = self.state(run_id)
             if not state or state.get('phase') == 'idle':
+                # Only an idle journal has relinquished turn ownership. Repair
+                # old terminal inputs without interrupting a fresh queued turn.
+                for answer in self.store.rows("""SELECT a.response_to_id,a.content,m.status FROM messages a
+                        JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                        WHERE a.run_id=? AND a.status='saving' AND m.role='user'
+                        AND m.status IN ('completed','failed','cancelled','interrupted','steered','save_failed')""", (run_id,)):
+                    self.store.finish_message(run_id, answer['response_to_id'], answer['content'], answer['status'])
                 if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
                     if row['status'] == 'stopping':
                         self.store.update_run(run_id, status='cancelled')
@@ -892,6 +899,19 @@ class DurableRunner(RunManager):
             if stop_requested(run):
                 state['outcome'] = 'cancelled'
                 if state.get('keep_warm'):
+                    state.update(phase='cleanup', keep_warm=False)
+                    self.save(run_id, state)
+                    return True
+            # Older cleanup could interrupt the source before this journal
+            # finished. Its owner must retire the receipt with that outcome.
+            retired = self.store.rows("""SELECT a.content,m.status FROM messages a
+                JOIN messages m ON m.id=a.response_to_id AND m.run_id=a.run_id
+                WHERE a.run_id=? AND a.response_to_id=? AND a.status='saving'
+                AND m.status IN ('completed','failed','cancelled','interrupted','steered','save_failed')""",
+                (run_id, state['message_id']))
+            if retired:
+                state.update(outcome=retired[0]['status'], response='' if retired[0]['status'] == 'steered' else retired[0]['content'])
+                if state['outcome'] not in {'completed', 'steered'} and state.get('keep_warm'):
                     state.update(phase='cleanup', keep_warm=False)
                     self.save(run_id, state)
                     return True

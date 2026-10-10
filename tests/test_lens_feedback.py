@@ -45,7 +45,7 @@ def test_trace_resolution_ignores_injected_steering_and_uses_latest_turn(tmp_pat
     store.execute('UPDATE messages SET status=?,steering_parent_id=? WHERE id=?',
                   ('injected', first['id'], steering['id']))
     store.finish_message(run['id'], first['id'], 'First answer')
-    first_assistant = store.messages(run['id'])[-1]
+    first_assistant = next(m for m in store.messages(run['id']) if m['role'] == 'assistant')
     with store.connect() as conn:
         assert service.trace_for(conn, run['id'], first_assistant['id']) is not None
     first_trace_id = store.rows(
@@ -67,6 +67,34 @@ def test_trace_resolution_ignores_injected_steering_and_uses_latest_turn(tmp_pat
     with store.connect() as conn:
         assert service.trace_for(conn, run['id'], second_assistant['id']) == second_trace_id
     assert second_trace_id != first_trace_id
+    # Old saved assistants have no explicit source identity.
+    store.execute('UPDATE messages SET response_to_id=NULL WHERE id=?', (second_assistant['id'],))
+    with store.connect() as conn:
+        assert service.trace_for(conn, run['id'], second_assistant['id']) == second_trace_id
+    asyncio.run(service.close())
+    store.close()
+
+
+def test_early_feedback_uses_exact_turn_even_with_queued_and_inline_inputs(tmp_path):
+    from app.runner import RunManager
+    store, settings, service, run, first = setup_feedback(tmp_path)
+    store.enqueue_message(run['id'], 'Next question', 'next')
+    with store.connect() as conn:
+        conn.begin_write()
+        store.enqueue_message_in(conn, run['id'], 'Session ID?', 'inline', metadata_request=True, restore_archived=False)
+    manager = RunManager(store, settings)
+    result = {'message_id': first['id'], 'message': 'First answer', 'completed': True}
+    manager.receive_result(run['id'], result)
+    assistant = next(m for m in store.messages(run['id']) if m.get('response_to_id') == first['id'])
+    assert assistant['status'] == 'saving'
+    service.submit(run['id'], assistant['id'], 'person@example.com', 8, 'Useful', 'web')
+    feedback = store.rows('SELECT trace_id FROM lens_feedback')[0]
+    trace = store.rows('SELECT trace_id FROM trace_contexts WHERE message_id=?', (first['id'],))[0]
+    assert feedback == trace
+    store.finish_message(run['id'], first['id'], 'First answer')
+    manager.receive_result(run['id'], {**result, 'checkpoint_saved': True})
+    assert next(m for m in store.messages(run['id']) if m['id'] == assistant['id'])['status'] == 'completed'
+    assert len([m for m in store.messages(run['id']) if m.get('response_to_id') == first['id']]) == 1
     asyncio.run(service.close())
     store.close()
 
