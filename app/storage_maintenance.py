@@ -15,9 +15,6 @@ from . import captures
 from .database import PostgresConnection, SQLiteConnection, identifier, row_factory
 
 
-ARCHIVE_LIMIT = 20 * 1024 * 1024
-
-
 class MaintenanceError(ValueError):
     """Operator-facing messages containing no provider errors or secret values."""
 
@@ -109,7 +106,7 @@ def acknowledged_files(directory: Path, conn):
         name = path.name
         if path.is_file() and ((re.fullmatch(r'[0-9a-f]{32}\.zip', name) and name[:-4] in run_ids)
                               or (name in frozen and re.fullmatch(r'group-[0-9a-f]{32}-[0-9a-f]{32}-[0-9]+\.zip', name))):
-            yield name, ARCHIVE_LIMIT
+            yield name, path.stat().st_size
         elif (path.is_dir() and re.fullmatch(r'[0-9a-f]{32}-captures', name) and name[:-9] in run_ids):
             for capture in sorted(path.iterdir()):
                 if not capture.is_symlink() and capture.is_file() and captures.valid_name(capture.name):
@@ -132,6 +129,8 @@ def plan_connection(directory: Path, conn) -> dict:
     manifested = ({row['name'] for row in conn.execute("SELECT name FROM artifact_objects WHERE reference!=''")}
                   if table_exists(conn, 'artifact_objects') else set())
     artifacts = {'count': 0, 'retained_bytes': 0, 'pending': 0}
+    parts = dict(conn.execute('''SELECT count(*) AS count, coalesce(sum(length(data)),0) AS retained_bytes,
+        coalesce(sum(CASE WHEN reference='' THEN 1 ELSE 0 END),0) AS pending FROM artifact_parts''').fetchone()) if table_exists(conn, 'artifact_parts') else {'count': 0, 'retained_bytes': 0, 'pending': 0}
     for name, _ in acknowledged_files(directory, conn):
         try:
             size = (directory / 'artifacts' / name).stat(follow_symlinks=False).st_size
@@ -153,7 +152,7 @@ def plan_connection(directory: Path, conn) -> dict:
                 inventory['unmanifested'] += path.relative_to(root).as_posix() not in manifested
     return {'operation': 'plan', 'schema_ready': upgraded and table_exists(conn, 'artifact_objects'),
             'attachments': attachments, 'legacy_artifacts': artifacts, 'local_inventory': inventory,
-            'remote_artifacts': len(manifested), 'source_files_preserved': True}
+            'remote_artifacts': len(manifested), 'artifact_parts': parts, 'source_files_preserved': True}
 
 
 def verified_payload(objects, raw: bytes, reference: str = '') -> str:
@@ -193,17 +192,24 @@ def migrate_artifact(store, name: str, limit: int) -> bool:
     before = store.artifacts.info(name)
     if before is None or before['reference']:
         return False
-    raw = store.artifacts.read(name, limit, revision=before['revision'])
-    if '/' in name:
-        captures.media_type(name.rsplit('/', 1)[-1], raw)
-    reference = verified_payload(store.objects, raw)
+    import shutil
+    with tempfile.TemporaryDirectory(prefix='moyai-migration-') as temporary:
+        path = Path(temporary)/'artifact'
+        with store.artifacts.open(name, revision=before['revision']) as source, path.open('wb') as target:
+            shutil.copyfileobj(source, target, length=1024*1024)
+        if '/' in name:
+            captures.media_type(name.rsplit('/', 1)[-1], path.read_bytes())
+        with path.open('rb') as source:
+            checksum = hashlib.file_digest(source, 'sha256').hexdigest()
+        reference = store.objects.put_file(path)
+        store.objects.verify(reference, before['size'])
     with store.connect() as conn:
         conn.begin_write()
         current = store.artifacts.info(name, conn)
         if current != before:
             return False
         conn.execute('''INSERT INTO artifact_objects(name,reference,size,sha256,created_at)
-            VALUES(?,?,?,?,?)''', (name, reference, len(raw), hashlib.sha256(raw).hexdigest(),
+            VALUES(?,?,?,?,?)''', (name, reference, before['size'], checksum,
                                   datetime.now(timezone.utc).isoformat()))
     return True
 
@@ -231,6 +237,27 @@ def migrate(store, *, limit: int = 100, clear_attachment_blobs: bool = False) ->
         result['attachment_bytes_cleared'] += cleared
     remaining = limit - len(ids)
     with store.connect() as conn:
+        has_parts = table_exists(conn, 'artifact_parts')
+    result['artifact_parts_published'] = 0
+    if has_parts:
+        pending_parts = store.rows("SELECT run_id,upload_id,part FROM artifact_parts WHERE reference='' ORDER BY run_id,upload_id,part LIMIT ?", (remaining,))
+        for item in pending_parts:
+            keys = tuple(item[key] for key in ('run_id', 'upload_id', 'part'))
+            rows = store.rows('SELECT * FROM artifact_parts WHERE run_id=? AND upload_id=? AND part=?', keys)
+            if not rows:
+                continue
+            row = rows[0]
+            raw = bytes(row['data'])
+            if len(raw) != row['size'] or hashlib.sha256(raw).hexdigest() != row['sha256']:
+                raise MaintenanceError('Artifact part failed verification; original bytes preserved.')
+            reference = verified_payload(store.objects, raw)
+            with store.connect() as conn:
+                conn.begin_write()
+                conn.execute("UPDATE artifact_parts SET reference=?,data=? WHERE run_id=? AND upload_id=? AND part=? AND reference='' AND sha256=?",
+                             (reference, b'', *keys, row['sha256']))
+            result['artifact_parts_published'] += 1
+            remaining -= 1
+    with store.connect() as conn:
         names = list(acknowledged_files(directory, conn))
     for name, bound in names:
         if remaining == 0:
@@ -252,14 +279,18 @@ def verify(store) -> dict:
         raise MaintenanceError('Configure private object storage before verification.')
     with store.connect() as conn:
         before = plan_connection(store.path.parent, conn)
-    if (before['attachments']['pending'] or before['legacy_artifacts']['pending']
+    if (before['attachments']['pending'] or before['legacy_artifacts']['pending'] or before['artifact_parts']['pending']
             or before['local_inventory']['unmanifested'] or before['local_inventory']['symlinks']):
         raise MaintenanceError('Shared file verification requires no pending payloads, unmanifested local files or symlinks. Inspect the plan on the original disk.')
     checked = 0
     # Metadata only; no database transaction is held during object downloads.
     attachments = store.rows('SELECT id,data_ref,preview_ref,size,sha256,preview_size FROM attachments ORDER BY id')
     artifacts = store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')
-    for row in attachments + artifacts:
+    with store.connect() as conn:
+        has_parts = table_exists(conn, 'artifact_parts')
+    parts_sql = 'SELECT run_id,upload_id,part,reference,size,sha256 FROM artifact_parts ORDER BY run_id,upload_id,part'
+    parts = store.rows(parts_sql) if has_parts else []
+    for row in attachments + artifacts + parts:
         reference = row.get('data_ref', row.get('reference'))
         if not reference or reference.rsplit(':', 1)[-1] != row['sha256']:
             raise MaintenanceError('Published file metadata does not match its object checksum.')
@@ -270,7 +301,8 @@ def verify(store) -> dict:
             checked += 1
     # A migration receipt is only meaningful for unchanged references/inventory.
     if (attachments != store.rows('SELECT id,data_ref,preview_ref,size,sha256,preview_size FROM attachments ORDER BY id')
-            or artifacts != store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')):
+            or artifacts != store.rows('SELECT name,reference,size,sha256 FROM artifact_objects ORDER BY name')
+            or (has_parts and parts != store.rows(parts_sql))):
         raise MaintenanceError('File inventory changed during verification. Retry after draining file writers.')
     with store.connect() as conn:
         if before != plan_connection(store.path.parent, conn):

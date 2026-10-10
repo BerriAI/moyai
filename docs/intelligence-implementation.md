@@ -42,7 +42,7 @@ Composer controls and APIs accept longer messages; the shared contenteditable
 editor recognizes an absent maximum. Steering text is neutral rather than labeling
 every input a correction.
 
-This requires schema revision 7 and API protocol revision 2. Follow the coordinated
+This requires schema revision 8 and API protocol revision 2. Follow the coordinated
 migration procedure; the change is not an API-only mixed-version deployment.
 
 Validation so far:
@@ -245,3 +245,43 @@ can select it); the initial invocation lacked the matching default browser, then
 passed against the installed binary. This is local protocol/behavior verification,
 not deployed browser or model/media qualification. Capture/checkpoint storage
 quotas and explicit durable artifact publication remain open in WP6/WP2.
+
+
+## Durable artifacts and complete recovery files (WP6; not deployed)
+
+Explicit publication now streams complete workspace files in transport parts. The
+server verifies the full size and SHA-256 before atomically publishing an immutable
+revision and Files-refresh event. Upload/part identities survive acknowledgment
+loss. Capability, turn and requester changes reject stale publication. Original
+revisions remain readable after later edits; current/direct-child reads support
+byte ranges and verified local fetch. Authenticated downloads stream independently
+of the recovery ZIP. Text previews continue across UTF-8 boundaries with Load more.
+
+Recovery collection removes file, total-byte, file-count, directory-count and
+repository-count omission caps. Files and child readers retain complete catalogs,
+range/binary access and full child answers. Archives use streamed server reads and
+sandbox-to-local transfer; dependencies, hidden files and symlinks remain excluded.
+Child handoffs freeze published revision manifests alongside legacy archive versions.
+Storage maintenance inventories, migrates and verifies published chunk references.
+Unfinished upload parts retain the same session/database retention as other saved
+source data; no separate garbage collector deletes potentially recoverable uploads.
+
+Validation: 177 artifact, child, storage, workspace and provider regressions pass.
+Fourteen initial publication contracts pass on PostgreSQL; all 20 revision 8
+migration checks pass. Eight Files Node checks and three browser cases pass at
+1440/768/320, including a session without a ZIP and complete preview continuation;
+the mobile screenshot was inspected. The 31 final artifact/Files checks also pass, including HTTP/catalog, revision
+discovery, chunk migration and raster previews. All 17 publication contracts pass
+on PostgreSQL after those additions; the UI bundle builds. Provider transfer limits and image-decoder safety bounds still apply;
+there is no local total-file retention limit on explicitly published outputs.
+
+## Response latency acceptance clarification
+
+The October 10 Slack example asks why an informational question takes so long.
+The user clarified this concerns mandatory computer startup, **not adding LiteLLM
+key-creation MCP tools**. WP8/S26 must exercise the actual selected agent answering
+and using eligible connector tools before a computer is acquired, then continuing
+through the same durable turn when a shell/browser/repository tool requires one.
+Measure input receipt → first inference → first useful response/action, with cold
+computer provisioning held. No separate greeter, canned acknowledgment or changed
+model counts as passing this scenario. This runtime change has not landed yet.

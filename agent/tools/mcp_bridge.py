@@ -19,6 +19,7 @@ if __package__ in {None, ''}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from agent.tools import github_tools
+from agent.tools import artifact_tools
 from sandbox import computer
 from agent.tools import credential_tools
 from agent.repository_guidance import TOOL as GUIDANCE_TOOL, resolve as repository_guidance
@@ -86,6 +87,7 @@ BROWSER_TOOLS += [
 # share a page, and skills/memory searches select model context. Those and all
 # unknown/new tools stay on the ordered lane, regardless of readOnlyHint.
 CONCURRENT_READS = frozenset({
+    'artifacts_list', 'artifact_read',
     'github_repositories', 'github_repository', 'github_rulesets', 'github_ruleset',
     'github_pull_request', 'github_pull_request_comments',
     'linear_my_issues', 'linear_teams', 'linear_search', 'linear_issue',
@@ -100,6 +102,11 @@ def call_tool(params, tools):
     try:
         if name == 'repository_guidance':
             data = repository_guidance(workspace=os.environ.get('MOYAI_WORKSPACE', '/workspace'), **{'paths': [], **args})
+        elif name in {'artifact_publish', 'artifact_fetch'}:
+            available = broker('/tools')
+            if name not in {tool['name'] for tool in available}:
+                raise ValueError('Artifact transfer is unavailable for this execution.')
+            data = artifact_tools.call(name, args, broker, os.environ.get('MOYAI_WORKSPACE', '/workspace'))
         elif name == 'credentials_run':
             available = broker('/tools')
             if name not in {tool['name'] for tool in available}:
@@ -122,7 +129,7 @@ def call_tool(params, tools):
             if path.is_relative_to(computer.CAPTURES.resolve()) and path.suffix == '.png':
                 content.append({'type': 'image', 'mimeType': 'image/png', 'data': base64.b64encode(path.read_bytes()).decode()})
         return {"content": content, "isError": bool(isinstance(data, dict) and data.get("error"))}
-    except github_tools.GitHubToolError as exc:
+    except (github_tools.GitHubToolError, artifact_tools.ArtifactError) as exc:
         return {"content": [{"type": "text", "text": str(exc)}], "isError": True}
     except HTTPError as exc:
         message = f'Tool failed (HTTP {exc.code}). The action was not confirmed.'

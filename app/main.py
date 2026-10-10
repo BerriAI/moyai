@@ -408,7 +408,11 @@ def _create_app(settings, store):
     app.state.media_shares = media_shares
     app.include_router(media_shares.routes())
     app.include_router(store.attachments.routes(security, settings))
-    app.include_router(artifact_file_routes(settings, store, security))
+    from .published_artifacts import PublishedArtifacts, TOOLS as ARTIFACT_TOOLS, SPECS as ARTIFACT_SPECS
+    published_artifacts = PublishedArtifacts(store)
+    app.state.published_artifacts = published_artifacts
+    app.include_router(published_artifacts.routes(security))
+    app.include_router(artifact_file_routes(settings, store, security, published_artifacts))
     computer = Computer(settings, store, security, manager, credentials.same_requester)
     manager.computer = computer
     app.state.computer = computer
@@ -479,7 +483,7 @@ def _create_app(settings, store):
         if request.url.path.startswith('/api/credentials'):
             return JSONResponse({'detail':'Invalid credential form. Choose who can use it and when it can be reused, then check the required fields.'},status_code=422)
         if request.url.path.startswith('/api/skills'):
-            return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and Markdown instructions up to 32,000 characters.'},status_code=422)
+            return JSONResponse({'detail':'Invalid skill. Choose Personal or Organization, use a lowercase-hyphenated name, a description up to 320 characters, and valid Markdown instructions.'},status_code=422)
         return await request_validation_exception_handler(request,exc)
 
     @app.get("/health")
@@ -774,7 +778,7 @@ def _create_app(settings, store):
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
                 "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
-                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
+                "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": bool(store.rows("SELECT 1 FROM published_artifacts WHERE run_id=? LIMIT 1", (run_id,))), "slack_source": store.slack_source(run_id)}
 
     @app.get("/api/runs/{run_id}")
     async def get_run(run_id: str, request: Request, activity: Literal['full', 'summary'] = 'full'):
@@ -1092,12 +1096,22 @@ def _create_app(settings, store):
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
     def tool_list(run_id: str, request: Request):
         return workspace_catalog(require_run(run_id, request))
+
+    @app.post('/broker/{run_id}/artifacts/transfer')
+    async def artifact_transfer(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        try:
+            result = await asyncio.to_thread(published_artifacts.transfer, run, await broker_body(request, '/artifacts/transfer'))
+        except ValidationError:
+            raise HTTPException(422, 'Invalid artifact transfer arguments.') from None
+        await checkpoints.flush()
+        return result
 
     @app.post("/broker/{run_id}/tools/call")
     async def tool_call(run_id: str, request: Request):
@@ -1106,6 +1120,12 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name in ARTIFACT_SPECS:
+            try:
+                return await asyncio.to_thread(published_artifacts.call, run, body.name, body.arguments)
+            except (ValidationError, HTTPException) as exc:
+                return {'error': 'Invalid artifact arguments.' if isinstance(exc, ValidationError) else exc.detail,
+                        'outcome': 'rejected', 'dispatched': False}
         if body.name in {'slack_context', 'slack_participation'}:
             try:
                 operation = slack.sources.read if body.name == 'slack_context' else slack.sources.participation

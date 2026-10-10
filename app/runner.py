@@ -618,14 +618,12 @@ class RunManager:
         if getattr(self, 'computer', None):
             await self.computer.save_captures(sandbox, run_id, releasing=False)
         try:
-            info = await sandbox.filesystem.stat.aio("/artifacts/result.zip")
-            if info.size > 20 * 1024 * 1024:
-                self.store.event(run_id, "error", "Artifact archive exceeds the 20 MB limit and was not downloaded.")
-                return
-            data = await sandbox.filesystem.read_bytes.aio("/artifacts/result.zip")
-            if len(data) > 20 * 1024 * 1024:
-                return
-            await asyncio.to_thread(self.store.artifacts.save, f"{run_id}.zip", data)
+            import tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory(prefix='moyai-recovery-') as directory:
+                path = Path(directory) / 'result.zip'
+                await sandbox.filesystem.copy_to_local.aio('/artifacts/result.zip', str(path))
+                await asyncio.to_thread(self.store.artifacts.save_file, f"{run_id}.zip", path)
             self.store.event(run_id, "artifact", "Result archive saved", {"download": f"/api/runs/{run_id}/artifact"})
         except Exception:
             self.store.event(run_id, "error", "No result archive was recovered from this run.")

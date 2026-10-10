@@ -148,7 +148,7 @@ class BrokerRelay:
                     (r'info/refs\?service=git-upload-pack' if self.command == 'GET' else
                      r'git-upload-pack' if self.command == 'POST' else r'(?!)'), self.path))
                 tool_read = git_route
-                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize'}}
+                allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize', '/artifacts/transfer'}}
                 if not git_route and not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:

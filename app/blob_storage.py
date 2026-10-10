@@ -1,10 +1,12 @@
 """Private payload storage; the database owns references, never remote credentials."""
 import base64
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import shutil
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -91,7 +93,10 @@ class ObjectStorage:
     def verify(self, reference: str, expected_size: int) -> None:
         self._consume(reference, expected_size, collect=False, expected_size=expected_size)
 
-    def _consume(self, reference: str, limit: int, *, collect: bool, expected_size: int | None = None) -> bytes:
+    def copy_to(self, reference: str, expected_size: int, stream) -> None:
+        self._consume(reference, expected_size, collect=False, expected_size=expected_size, destination=stream)
+
+    def _consume(self, reference: str, limit: int, *, collect: bool, expected_size: int | None = None, destination=None) -> bytes:
         match = re.fullmatch(r's3:([0-9a-f]{32}):([0-9a-f]{64})', reference)
         if not self.enabled or not match or match[1] != self.identity:
             raise HTTPException(503, 'This file requires its original private storage configuration.')
@@ -109,6 +114,8 @@ class ObjectStorage:
                     sha.update(chunk)
                     if collect:
                         chunks.append(chunk)
+                    if destination is not None:
+                        destination.write(chunk)
             finally:
                 stream.close()
             if size != result['ContentLength'] or sha.hexdigest() != match[2]:
@@ -275,6 +282,37 @@ class ArtifactStore:
             raise HTTPException(409, 'The saved archive changed. Refresh the file list.')
         return raw
 
+    def save_file(self, name: str, source: Path) -> None:
+        """Publish a completed recovery file without holding its bytes in memory."""
+        self.validate_name(name)
+        with source.open('rb') as stream:
+            size = os.fstat(stream.fileno()).st_size
+            checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+        reference = self.store.objects.put_file(source) if self.store.objects.enabled else ''
+        with self.store.connect() as conn:
+            conn.begin_write()
+            current = self.info(name, conn)
+            if not reference and current and current['reference']:
+                raise HTTPException(503, 'Restore private file storage before replacing this saved file.')
+            if reference:
+                conn.execute('''INSERT INTO artifact_objects(name,reference,size,sha256,created_at) VALUES(?,?,?,?,?)
+                    ON CONFLICT(name) DO UPDATE SET reference=excluded.reference,size=excluded.size,
+                        sha256=excluded.sha256,created_at=excluded.created_at''',
+                    (name, reference, size, checksum, datetime.now(timezone.utc).isoformat()))
+            else:
+                target = self.path(name)
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                descriptor, staging = tempfile.mkstemp(prefix='.upload-', dir=target.parent)
+                try:
+                    with os.fdopen(descriptor, 'wb') as output, source.open('rb') as stream:
+                        shutil.copyfileobj(stream, output, length=1024 * 1024)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    os.replace(staging, target)
+                finally:
+                    Path(staging).unlink(missing_ok=True)
+                self.store.generation += 1
+
     def snapshot_in(self, conn: Connection, source: str, destination: str) -> None:
         self.validate_name(destination)
         if self.info(destination, conn) is not None:
@@ -290,6 +328,29 @@ class ArtifactStore:
             if not target.exists():
                 target.hardlink_to(original)
 
+    @contextmanager
+    def open(self, name: str, *, revision: str | None = None):
+        """Seekable, verified archive access without a whole-file memory buffer."""
+        info = self.info(name)
+        if info is None:
+            raise FileNotFoundError(name)
+        if revision is not None and info['revision'] != revision:
+            raise HTTPException(409, 'The saved archive changed. Refresh the file list.')
+        if info['reference']:
+            with tempfile.TemporaryFile() as stream:
+                self.store.objects.copy_to(info['reference'], info['size'], stream)
+                stream.seek(0)
+                yield stream
+        else:
+            with os.fdopen(os.open(self.path(name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as stream:
+                actual = os.fstat(stream.fileno())
+                current = hashlib.sha256(f'{actual.st_mtime_ns}:{actual.st_size}'.encode()).hexdigest()[:24]
+                if not stat.S_ISREG(actual.st_mode):
+                    raise FileNotFoundError(name)
+                if current != info['revision']:
+                    raise HTTPException(409, 'The saved archive changed. Refresh the file list.')
+                yield stream
+
     def download(self, name: str, filename: str) -> FileResponse:
         # FileResponse preserves conditional and multipart range semantics. Its
         # bounded temporary copy uses ephemeral storage, never DATA_DIR.
@@ -298,13 +359,12 @@ class ArtifactStore:
         info = self.info(name)
         if info is None:
             raise FileNotFoundError(name)
-        raw = self.read(name, 20 * 1024 * 1024, revision=info['revision'])
         modified = datetime.fromisoformat(info['created_at']).timestamp() if info['reference'] else info['modified']
         headers = {'ETag': '"' + info['revision'] + '"', 'Last-Modified': formatdate(modified, usegmt=True)}
         handle, temporary = tempfile.mkstemp(prefix='moyai-download-', suffix='.zip')
         try:
-            with os.fdopen(handle, 'wb') as stream:
-                stream.write(raw)
+            with os.fdopen(handle, 'wb') as stream, self.open(name, revision=info['revision']) as source:
+                shutil.copyfileobj(source, stream, length=1024 * 1024)
             return TemporaryDownload(temporary, media_type='application/zip', filename=filename, headers=headers)
         except BaseException:
             os.unlink(temporary)
