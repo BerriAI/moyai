@@ -78,14 +78,20 @@ provider operations were not tested in this visual change.
 
 ## Conversation workspace
 
-The same deterministic field quietly frames conversations as a static backdrop.
-A compact toolbar shows the actual repository or session reference alongside
-Files and Activity. Aligned request rows, tighter transcript spacing, rectangular
-code panels, and visible tool-action counts prioritize the work. The composer
-and shared navigation use restrained borders and compact controls; identity and
-model metadata use Geist Mono. Assistant identity, feedback, and semantic error
-colors remain readable. The canvas stays mounted during transcript updates and
-is released on navigation or when a cached conversation loses access.
+Conversation components follow the Codex app's chat layout, with the Lens navy
+and ice-blue palette applied to those shapes. User messages are compact,
+right-aligned bubbles with sender identity; assistant replies are plain prose.
+Completed work is an unboxed disclosure above the answer. Copy and feedback sit
+together below it, and code blocks use a quiet header and rounded container.
+The rounded composer places attachment, skill, and model controls at the left,
+with microphone and circular send controls at the right. Files and Activity
+remain in the existing top bar. Sidebar actions are quiet rows with a muted
+selected surface.
+
+The deterministic constellation is a static backdrop behind the conversation,
+with a dark veil keeping text legible. Error labels and semantic error colors
+remain visible. The canvas stays mounted during transcript updates and is
+released on navigation or when a cached conversation loses access.
 
 Use `/?fixture=conversation-space#run=11111111111111111111111111111111`
 on the fixture preview for the four-message synthetic conversation below. These

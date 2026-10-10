@@ -184,16 +184,17 @@ aside.rail { border-right: 1px solid var(--line); padding: 10px; }
 .rail-tools { display: flex; gap: 2px; }
 #close-sidebar { display: grid; }
 .new-task, .nav-button { display: flex; align-items: center; gap: 10px; width: 100%; border: 0; background: transparent; padding: 7px 8px; border-radius: 6px; color: var(--text); font-size: 14px; font-weight: 400; text-align: left; }
-.rail .new-task { min-height: 34px; margin-top: 2px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font-size: 13px; font-weight: 500; }
-.rail .new-task:hover { background: var(--soft); border-color: var(--muted); }
-.rail > .nav-button, .rail .rail-links .nav-button { min-height: 34px; padding: 6px 10px; font-size: 13px; }
-.rail #command-menu { margin-top: 6px; font-size: 12px; }
+.rail .new-task { min-height: 34px; margin-top: 2px; padding: 6px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text); font-size: 14px; font-weight: 400; }
+.rail .new-task .nav-icon { color: var(--muted); }
+.rail .new-task:hover { background: var(--soft); }
+.rail > .nav-button, .rail .rail-links .nav-button { min-height: 34px; padding: 6px 10px; border-radius: 8px; font-size: 13px; }
+.rail #command-menu { margin-top: 6px; font-size: 13px; }
 .new-task:hover, .nav-button:hover { background: var(--soft); }
 .nav-button.active { background: var(--soft); color: var(--text); }
 .nav-icon { color: var(--text); display: grid; place-items: center; width: 18px; }
-.rail .new-task kbd { margin-left: auto; font: 12px var(--mono); color: var(--muted); opacity: 1; }
-.new-task:hover kbd, .new-task:focus-visible kbd { opacity: 1; }
-.session-search { display: flex; flex-shrink: 0; margin: 2px 6px 8px; padding: 8px; gap: 10px; border-radius: 6px; color: var(--text); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
+.rail .new-task kbd { margin-left: auto; font: 12px var(--mono); color: var(--muted); opacity: 0; }
+.rail .new-task:hover kbd, .rail .new-task:focus-visible kbd { opacity: 1; }
+.session-search { display: flex; flex-shrink: 0; margin: 2px 6px 8px; padding: 8px; gap: 10px; border-radius: 8px; color: var(--text); background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
 .session-search[hidden] { display: none; }
 .session-search input { font-size: 14px; padding: 0; border-radius: 0; }
 .session-search-snippet { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
@@ -201,16 +202,16 @@ aside.rail { border-right: 1px solid var(--line); padding: 10px; }
 .session-search:focus-within input { box-shadow: none; }
 .rail .rail-links { padding: 0 0 10px; border-bottom: 1px solid var(--line); margin: 4px 0 0; }
 .rail .sessions-label { display: flex; align-items: center; padding: 14px 4px 8px; gap: 8px; font-size: 14px; font-weight: 500; color: var(--text); }
-.rail .sessions-label [data-styled] [data-slot="select-trigger"] { border-radius: 6px; }
+.rail .sessions-label [data-styled] [data-slot="select-trigger"] { border-radius: 8px; }
 .sessions-label #task-count { margin-left: 0; color: var(--muted); font-size: 12px; }
 .sessions-label .folder-add { margin-left: auto; color: var(--muted); }
 .session-list { padding-bottom: 8px; scrollbar-color: var(--border) transparent; }
 /* Reserve the action column at every depth so status indicators share one edge. */
-.rail .parent-session { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: start; border-radius: 6px; }
+.rail .parent-session { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: start; border-radius: 8px; }
 .parent-session:hover { background: var(--soft); }
-.rail .parent-session:has(.selected), .rail .parent-session:has(.selected):hover { background: var(--soft); box-shadow: inset 2px 0 var(--accent); }
+.rail .parent-session:has(.selected), .rail .parent-session:has(.selected):hover { background: var(--brand-selected); }
 .session-link, .session-link:hover, .session-link.selected { background: transparent; }
-.rail .session-link { min-height: 44px; padding-block: 4px; border-radius: 6px; }
+.rail .session-link { min-height: 44px; padding-block: 4px; border-radius: 8px; }
 .rail .session-link-title { font-size: 13px; color: var(--text); line-height: 20px; }
 .rail .session-link small, .rail .session-link-meta { font-size: 12px; color: var(--muted); margin-top: 1px; line-height: 16px; }
 .rail .session-link-context { font-size: 12px; }
@@ -227,10 +228,10 @@ aside.rail { border-right: 1px solid var(--line); padding: 10px; }
 .session-move { display: grid; place-items: center; margin-top: 4px; width: 24px; min-width: 24px; height: 24px; color: var(--muted); }
 .rail .agent-disclosure, .rail .agent-disclosure-space, .rail .session-move { margin-top: 2px; }
 .child-sessions { margin-left: 24px; border-left-color: var(--line); }
-.rail .folder-toggle { font-size: 12px; color: var(--muted); }
+.rail .folder-toggle { border-radius: 8px; font-size: 13px; color: var(--muted); }
 .rail .folder-count { font: 12px var(--mono); }
-.rail .unfiled-heading { font-size: 12px; color: var(--muted); margin: 8px 8px 4px; }
-.rail .session-section-heading { min-height: 32px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+.rail .unfiled-heading { font-size: 13px; color: var(--muted); margin: 8px 8px 4px; }
+.rail .session-section-heading { min-height: 32px; border-radius: 8px; font-size: 13px; font-weight: 400; }
 .rail .session-personal-section + .session-personal-section { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
 .rail .rail-foot { padding: 10px 4px 0; }
 .rail .rail-foot .rail-identity { font-size: 12px; }

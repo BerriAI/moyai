@@ -1484,9 +1484,9 @@ for (const width of [1440, 320]) test(`conversation space retains the composer t
     };
     return openRun('1'.repeat(32));
   });
-  const toolbar = page.locator('.conversation-toolbar');
-  const activity = toolbar.locator('#toggle-details');
-  const files = toolbar.locator('#files-button');
+  const header = page.locator('#header-actions');
+  const activity = header.locator('#toggle-details');
+  const files = header.locator('#files-button');
   const panel = page.locator('#workspace-panel');
   assert.equal(await activity.getAttribute('aria-controls'), 'workspace-panel');
   assert.equal(await activity.getAttribute('aria-expanded'), 'false');
@@ -1500,7 +1500,7 @@ for (const width of [1440, 320]) test(`conversation space retains the composer t
   await panel.waitFor({ state: 'hidden' });
   assert.equal(await activity.getAttribute('aria-expanded'), 'false');
   await page.evaluate(() => updateChat({ ...state.chatRun, has_artifact: true }));
-  await toolbar.getByRole('button', { name: 'Files · 2', exact: true }).waitFor();
+  await header.getByRole('button', { name: 'Files · 2', exact: true }).waitFor();
   await files.focus();
   await files.press('Enter');
   await panel.getByRole('searchbox', { name: 'Find a saved file', exact: true }).waitFor();
