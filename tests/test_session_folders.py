@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import sqlite3
 
 import pytest
 from fastapi import FastAPI, Request
@@ -130,12 +131,19 @@ def test_folders_survive_restart_and_database_checkpoint(users_app, tmp_path):
     checkpoints.settings = app.state.settings.model_copy(update={'checkpoint_dir': tmp_path/'checkpoint'})
     commits = []
     async def commit():
-        commits.append(True)
+        # Background writers may checkpoint too. Inspect what each completed
+        # snapshot contains instead of counting all application-wide flushes.
+        with sqlite3.connect(checkpoints.settings.checkpoint_dir / 'workspace.db') as snapshot:
+            commits.append(tuple(snapshot.execute(f'SELECT count(*) FROM {table} WHERE owner_id=?',
+                (identity,)).fetchone()[0] for table in
+                ('session_folders', 'session_folder_memberships', 'session_pins')))
     checkpoints.commit = commit
     item, saved = run(app), folder(client, 'Persistent')
+    assert (1, 0, 0) in commits
     assert client.put('/api/runs/'+item['id']+'/folder', json={'folder_id': saved['id']}).status_code == 200
+    assert (1, 1, 0) in commits
     assert client.put('/api/runs/'+item['id']+'/pin', json={'pinned': True}).status_code == 200
-    assert len(commits) == 3
+    assert (1, 1, 1) in commits
     restored_settings = checkpoints.settings.model_copy(update={'data_dir': tmp_path/'restored'})
     restore_checkpoint(restored_settings)
     reopened = Store(restored_settings.data_dir)
