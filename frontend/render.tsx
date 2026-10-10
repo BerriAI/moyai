@@ -62,6 +62,17 @@ function Disclosure({ node }: { node: Element }) {
   </Collapsible>
 }
 
+// Tooltip state changes compose a fresh click callback. Keep React's DOM click
+// prop stable so rerenders do not replace a controller's imperative onclick.
+const ControllerButton = React.forwardRef<HTMLButtonElement, React.ComponentProps<typeof Button>>(
+  function ControllerButton({ onClick, ...props }, ref) {
+    const callback = React.useRef(onClick)
+    callback.current = onClick
+    const click = React.useCallback<React.MouseEventHandler<HTMLButtonElement>>(
+      event => callback.current?.(event), [])
+    return <Button {...props} ref={ref} onClick={click} />
+  })
+
 const options: HTMLReactParserOptions = {
   replace(node) {
     if (!(node instanceof Element)) return
@@ -88,7 +99,7 @@ const options: HTMLReactParserOptions = {
         const title = node.attribs.title
         // Templates own geometry, including content-sized cards and narrow action
         // rows. Keep explicit template sizing after these low-priority defaults.
-        const button = <Button {...props} className={`h-auto whitespace-normal shrink ${props.className || ""}`} title={undefined} variant={variant}>{children()}</Button>
+        const button = <ControllerButton {...props} className={`h-auto whitespace-normal shrink ${props.className || ""}`} title={undefined} variant={variant}>{children()}</ControllerButton>
         return title ? <Tooltip><TooltipTrigger asChild>{button}</TooltipTrigger><TooltipContent sideOffset={6}>{title}</TooltipContent></Tooltip> : button
       }
       case "input": {
