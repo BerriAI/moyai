@@ -37,6 +37,10 @@ def snapshot(connection, schema):
             JOIN runs r ON r.id=d.run_id WHERE r.deleted_at='' AND
             (COALESCE(d.state::jsonb->>'phase','idle') != ALL(%s) OR r.status='stopping')''',
             (list(SAFE_PHASES),)).fetchone()[0],
+        'executing_sessions': connection.execute('''SELECT count(*) FROM durable_sessions d
+            JOIN runs r ON r.id=d.run_id WHERE r.deleted_at='' AND
+            COALESCE(d.state::jsonb->>'phase','idle') != ALL(%s)''',
+            (list(SAFE_PHASES),)).fetchone()[0],
         'legacy_active_sessions': connection.execute('''SELECT count(*) FROM runs r
             WHERE r.deleted_at='' AND r.status NOT IN ('queued','idle','completed','failed','cancelled','interrupted')
             AND NOT EXISTS(SELECT 1 FROM durable_sessions d WHERE d.run_id=r.id)''').fetchone()[0],
