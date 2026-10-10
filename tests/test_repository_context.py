@@ -3,6 +3,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import threading
 import time
 
 import httpx
@@ -280,3 +281,22 @@ def test_unused_context_does_no_database_work(repository, monkeypatch):
     assert index.context({**run, 'plugins': []}) == ''
     app.state.settings.repository_context_enabled = False
     assert index.context(run) == ''
+
+
+def test_cold_cache_does_not_wait_for_a_database_writer(repository):
+    app, _, run, _ = repository
+    done, result = threading.Event(), []
+    def read():
+        try:
+            result.append(app.state.repository_context.context(run))
+        finally:
+            done.set()
+    reader = threading.Thread(target=read)
+    try:
+        with app.state.store.connect() as conn:
+            conn.begin_write()
+            reader.start()
+            assert done.wait(1), 'An absent guide waited for the database writer'
+            assert result == ['']
+    finally:
+        reader.join(2)

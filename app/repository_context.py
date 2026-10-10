@@ -138,6 +138,11 @@ class RepositoryContext:
                 pin = conn.execute('''SELECT commit_sha FROM repository_context_turns
                     WHERE run_id=? AND message_id=? AND version=? AND repository_id=?''',
                     (run['id'], current['active_message_id'], version, target)).fetchone()
+                if not pin:
+                    head = conn.execute('SELECT commit_sha FROM repository_context_heads WHERE version=? AND repository_id=?',
+                        (version, target)).fetchone()
+                    if not head or not head['commit_sha']:
+                        return None  # A cold cache must not acquire a writer lock.
                 if not pin and current['active_message_id'] is not None:
                     conn.execute('''INSERT INTO repository_context_turns(run_id,message_id,version,repository_id,commit_sha)
                         SELECT ?,?,?,?,commit_sha FROM repository_context_heads
@@ -148,8 +153,7 @@ class RepositoryContext:
                         WHERE run_id=? AND message_id=? AND version=? AND repository_id=?''',
                         (run['id'], current['active_message_id'], version, target)).fetchone()
                 if not pin:
-                    pin = conn.execute('SELECT commit_sha FROM repository_context_heads WHERE version=? AND repository_id=?',
-                        (version, target)).fetchone()
+                    pin = head
             commit = pin['commit_sha'] if pin else ''
         columns = '*' if body else 'version,repository_id,commit_sha,repository,branch,indexed_at,guide'
         rows = self.store.rows(f'''SELECT {columns} FROM repository_context_snapshots
@@ -264,10 +268,11 @@ class RepositoryContext:
         commit = repo['base_sha']
         if not re.fullmatch(SHA, commit):
             raise ConnectorError('GitHub returned an invalid repository commit.', dispatched=False)
-        old = await database(self.store.rows, '''SELECT s.commit_sha,s.guide FROM repository_context_heads h
+        old = await database(self.store.rows, '''SELECT s.commit_sha,s.guide,s.repository,s.branch FROM repository_context_heads h
             JOIN repository_context_snapshots s ON s.version=h.version AND s.repository_id=h.repository_id
             AND s.commit_sha=h.commit_sha WHERE h.version=? AND h.repository_id=?''', (version, target))
-        if (old and old[0]['commit_sha'] == commit
+        if (old and old[0]['commit_sha'] == commit and old[0]['repository'] == repo['repository']
+                and old[0]['branch'] == repo['default_branch']
                 and not json.loads(self.security.decrypt(old[0]['guide']))['coverage']['failed_documents']):
             return
         tree = await self.github.request('GET', f'/repositories/{target}/git/trees/{commit}',
@@ -280,6 +285,7 @@ class RepositoryContext:
         # A small parallel batch bounds provider traffic and memory. One failed
         # source does not discard useful paths; coverage explicitly reports it.
         for offset in range(0, len(candidates), 4):
+            await database(self.github.ensure_read_allowed, version, target)
             batch = candidates[offset:offset + 4]
             results = await asyncio.gather(*(self.blob(target, token, item) for item in batch), return_exceptions=True)
             for item, result in zip(batch, results):
@@ -315,6 +321,7 @@ class RepositoryContext:
             conn.execute('''INSERT INTO repository_context_snapshots
                 (version,repository_id,commit_sha,repository,branch,indexed_at,guide,catalog,documents)
                 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(version,repository_id,commit_sha) DO UPDATE SET
+                repository=excluded.repository,branch=excluded.branch,
                 guide=excluded.guide,catalog=excluded.catalog,documents=excluded.documents,indexed_at=excluded.indexed_at''',
                 (version, target, repo['base_sha'], repo['repository'], repo['default_branch'], now(), *encrypted))
             conn.execute('''INSERT INTO repository_context_heads(version,repository_id,commit_sha,checked_at) VALUES(?,?,?,?)
