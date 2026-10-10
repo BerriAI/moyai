@@ -15,6 +15,7 @@ import hmac
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -289,7 +290,10 @@ def probe(url, temporal_address, output, all_roles=False):
             wait_for(lambda: store.rows('SELECT status FROM model_requests')[0]['status'] == 'completed')
             if all_roles:
                 broker_process.wait(timeout=15)
-                assert broker_process.returncode == 0
+                # Uvicorn restores and re-raises SIGTERM after its graceful
+                # shutdown. The completed stream/receipt above proves draining;
+                # SIGKILL or any other failure status remains a hard failure.
+                assert broker_process.returncode in {0, -signal.SIGTERM}, broker_process.returncode
                 response = new_broker_http.post(route, headers=auth, json=body)
                 assert response.status_code == 200 and 'response.completed' in response.text
                 assert len(calls) == 2
