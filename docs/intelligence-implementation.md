@@ -201,3 +201,26 @@ imports at 1440/768/320; screenshots were inspected. The editors scroll long
 bodies within the dialog. The UI build and 22 focused Node checks pass. Retrieval uses keyword
 ranking with complete discovery/read access, not embeddings. Oversized initial
 repository guidance and adapter qualification remain in WP2.
+
+## Connector coverage and action errors (WP6, partial; not deployed)
+
+Slack search, channel roots and thread replies; Linear teams, requester issues,
+title search and comments; and Notion search and nested block reads now expose
+complete provider pagination through `next_arguments`. Full provider bodies are
+retained. Coverage distinguishes a final page from missing/repeated cursors and
+labels the live, potentially changing source. Notion child collections can be
+traversed explicitly. Provider permissions, indexing and retention still apply.
+
+Argument failures return repairable field receipts without echoing private input.
+Connector failures distinguish rejection, response loss, retry delays and unknown
+write outcomes. No failed write is automatically replayed. Linear bodies are no
+longer cut by local schema quotas. Slack and Notion send complete text in parts
+at actual provider payload boundaries; partial failures expose acknowledged parts
+and offsets, and stop on execution/connection changes. Legacy GitHub failures
+without dispatch evidence remain conservatively unknown for writes.
+
+Validation: 186 connector, Slack sender, workspace and automation regressions pass,
+including multi-page and nested research, long Unicode append, complete threaded
+Slack send, argument privacy, response loss and cancellation between write batches.
+These tests use simulated provider HTTP responses through the real broker. Browser,
+GitHub workflow/binary support, durable artifacts and broader recovery remain open.

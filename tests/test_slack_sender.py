@@ -112,7 +112,8 @@ def test_agent_cannot_supply_a_sender_override(sender):
     _, client, run_id, headers, requests = sender
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'slack_send', 'arguments': {'channel': 'C12345678', 'text': 'Hello', 'sender': 'Tin'}})
-    assert response.status_code == 422 and not requests
+    assert response.status_code == 200 and response.json()['code'] == 'invalid_arguments' and not requests
+    assert response.json()['dispatched'] is False
 
 
 def test_sender_name_is_one_line_and_cannot_create_slack_mentions(sender):
@@ -477,7 +478,8 @@ def test_agent_cannot_override_self_recipient(linked_sender, name):
         arguments.update(channel='me', text='Private issue')
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': name, 'arguments': arguments})
-    assert response.status_code == 422 and not requests
+    assert response.status_code == 200 and response.json()['code'] == 'invalid_arguments' and not requests
+    assert response.json()['dispatched'] is False
 
 
 @pytest.mark.parametrize('problem', ['profile_scope', 'linking_disabled', 'read_only', 'disabled'])

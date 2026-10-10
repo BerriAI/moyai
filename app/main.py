@@ -1240,34 +1240,41 @@ def _create_app(settings, store):
         provider, write, schema, _ = TOOLS[body.name]
         try:
             arguments = schema.model_validate(body.arguments).model_dump()
-        except ValidationError:
-            raise HTTPException(422, "Invalid tool arguments.")
+        except ValidationError as exc:
+            return {'error': 'Invalid tool arguments. Inspect the tool schema and correct these fields.',
+                    'code': 'invalid_arguments', 'outcome': 'rejected', 'dispatched': False,
+                    'outcome_uncertain': False, 'retryable': False,
+                    'fields': [{'path': list(error['loc']), 'code': error['type']}
+                               for error in exc.errors(include_input=False, include_context=False)]}
         if not connectors.allowed(body.name):
-            raise HTTPException(403, "This operation is disabled by the organization's connection policy.")
+            return ConnectorError("This operation is disabled by the organization's connection policy.",
+                                  code='access_denied', dispatched=False).receipt(write=write)
         if provider == 'github':
             try:
                 await connectors.github.ensure_connection()
             except ConnectorError as exc:
-                return {'error': str(exc)}
+                return ConnectorError(str(exc), code=exc.code, dispatched=False).receipt(write=write)
             run = {**store.run(run_id), 'github_connection_version': connectors.github.connection_version()}
         # Enabled tools, including newly registered writes, execute directly.
         # Connection policies and the live session capability still apply.
         require_run(run_id, request)
         if not connectors.allowed(body.name):
-            return {"error": "The organization connection changed. No action was sent."}
+            return ConnectorError('The organization connection changed. No action was sent.',
+                                  code='access_changed', dispatched=False).receipt(write=write)
         try:
             result = (await connectors.github.call(run, body.name, arguments) if provider == 'github'
-                      else await connectors.my_linear_issues(run) if body.name == 'linear_my_issues'
-                      else await connectors.call(body.name, arguments, run=run) if body.name in {'slack_send', 'slack_me'}
-                      else await connectors.call(body.name, arguments))
-            store.event(run_id, "tool", f"{body.name} completed")
+                      else await connectors.my_linear_issues(run, arguments) if body.name == 'linear_my_issues'
+                      else await connectors.call(body.name, arguments, run=run))
+            failed = isinstance(result, dict) and bool(result.get('error'))
+            store.event(run_id, 'error' if failed else 'tool', f"{body.name} {'failed; inspect its receipt' if failed else 'completed'}")
             if body.name == 'github_request_pull_request_write_access':
                 await checkpoints.flush()
             return result
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
             store.event(run_id, "error", f"{body.name}: {message}")
-            return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
+            error = exc if isinstance(exc, ConnectorError) else ConnectorError(message)
+            return error.receipt(write=write)
 
     @app.post('/broker/{run_id}/credentials/materialize')
     async def credential_materialize(run_id: str, request: Request):
