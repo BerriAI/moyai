@@ -48,8 +48,8 @@ async def measure(history, occupied):
         store.rows = counted
         started = time.perf_counter()
         # The same lock/entry point used by actual new sessions.
-        async with manager.admission_lock:
-            admitted = await manager.make_capacity('new-fixture')
+        async with manager.admission('new-fixture') as admitted:
+            pass
         elapsed = time.perf_counter() - started
         return {'history': history, 'occupied': occupied, 'limit': 100,
                 'admitted': admitted, 'elapsed_ms': round(elapsed * 1000, 3),

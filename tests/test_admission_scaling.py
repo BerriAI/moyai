@@ -70,8 +70,8 @@ async def test_admission_work_does_not_grow_with_retained_history(durable, occup
         manager.store.rows = indexed_rows
     else:
         manager.store.connect = bounded_connection
-    async with manager.admission_lock:
-        assert await manager.make_capacity(run_id) is (occupied < 100)
+    async with manager.admission(run_id) as available:
+        assert available is (occupied < 100)
     assert len(manager.locks) <= 100
 
 

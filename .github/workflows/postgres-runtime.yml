@@ -1,10 +1,10 @@
 name: PostgreSQL runtime
 on:
   pull_request:
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/temporal_queue_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/temporal_queue_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
 jobs:
@@ -114,15 +114,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Verify shared admission, execution fencing and real Temporal workers
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py tests/test_runtime_performance.py
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py tests/test_runtime_performance.py tests/test_admission_cleanup.py
       - name: Verify authenticated capacity observations on both backends
         run: |
           uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py
       - name: Verify 3000 synthetic reservations across four worker processes
         run: uv run --frozen --python 3.13 python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4
-      - name: Verify agent handoffs and admission on PostgreSQL
-        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py
+      - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py tests/test_idle_window.py
+      - name: Measure admission while another sandbox termination is slow
+        run: uv run --frozen --python 3.13 python scripts/admission_cleanup_probe.py
       - name: Measure wake delivery and admission under database contention
         run: uv run --frozen --python 3.13 python scripts/runtime_startup_probe.py
       - name: Measure real local Temporal queueing at bounded activity capacity

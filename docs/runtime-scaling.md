@@ -200,8 +200,8 @@ reserved exactly 3,000 sessions, queued 20, and rejected pending overflow:
 These single-run samples overlapped some local regression work. They provide no
 evidence that a larger pool speeds this workload. Admission retains a global
 lease; adding workers helps available execution slots, not that serial decision.
-Provider cleanup during warm eviction also still holds admission. Increasing
-sandbox CPU does not remove either queue.
+These admission probes did not include provider cleanup. Increasing sandbox CPU
+does not remove the shared database admission queue.
 
 Reproduce locally with a disposable PostgreSQL URL and Python 3.13:
 
@@ -293,3 +293,40 @@ Use existing `session_turn_claimed` queue wait, `session_wake_batch` delivery,
 separate the delays. Compare cold `provision` and `install` phases with warm
 reuse before changing sandbox CPU. No current production trace sample or quota
 verification is included in these local results.
+
+## Admission during slow sandbox cleanup
+
+Warm-sandbox eviction releases global admission while waiting for provider
+termination. The victim remains protected by its session execution lease. Global admission is held for the final capacity
+check and the new reservation, so an unrelated session can reclaim another idle
+sandbox or claim a slot freed elsewhere. The initiating admission still waits
+for its own cleanup; this does not speed up the provider's termination call.
+
+The `warm_cleanup` journal stays occupied until termination succeeds. After
+cleanup, admission checks capacity again under the global lock before reserving
+anything: another worker may have taken the freed slot. Busy sessions and idle
+sessions with queued follow-ups remain protected. Cancellation, a lost response,
+or a worker crash retains the cleanup journal for retry under a new session lease.
+The same admission guard covers new turns, computer wakes, environment readiness,
+checkpointed steering, credential resumes and child-agent handoffs.
+
+A local PostgreSQL probe with two worker stores and a simulated five-second
+termination measured unrelated admission at **5,064.86 ms before / 20.00 ms after**.
+The second admission finished before the slow cleanup; both slots remained
+accounted for, and an extra session stayed queued. These stores share a process;
+separate tests kill an OS worker during cleanup and recover after lease expiry.
+Tests also cover SQLite, standalone PostgreSQL, separate worker connections,
+cancellation and a competing session taking the reclaimed slot. Provider calls
+are simulated, so this is not production sandbox-startup or throughput evidence.
+
+```sh
+# Use the disposable MOYAI_TEST_POSTGRES_URL described above.
+uv run --frozen --python 3.13 python scripts/admission_cleanup_probe.py
+uv run --frozen --python 3.13 pytest -q tests/test_admission_cleanup.py
+```
+
+There are no new capacity settings, database tables or Temporal workflow commands.
+Deploy through the existing coordinated process and preserve configured limits.
+Global reservation decisions still serialize, and full queues retain the existing
+five-second retry. Worker replicas, provider quotas and model throughput remain
+separate sizing decisions.

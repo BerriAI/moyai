@@ -115,8 +115,8 @@ async def test_nonwaiting_eviction_skips_owner_write_and_reclaims_another_sessio
     assert not manager.has_capacity()
 
     async def evict():
-        async with manager.admission_lock:
-            assert await manager.make_capacity('incoming-session')
+        async with manager.admission('incoming-session') as available:
+            assert available
 
     async with lease(coordinator.database, 'session:' + busy):
         with coordinator.connect(write_scope=busy) as conn:

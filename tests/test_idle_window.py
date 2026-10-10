@@ -1,7 +1,7 @@
 """Saved top-level chats reuse machines; cleanup and attribution remain durable."""
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 import json
 import sqlite3
 from threading import Event
@@ -783,16 +783,17 @@ async def test_computer_admission_rechecks_writes_committed_during_capacity_wait
     other_store = Store(manager.settings.data_dir)
     lifecycle = SessionLifecycle(other_store, None, manager, None)
     before = manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,))
-    capacity = manager.make_capacity
+    admission = manager.admission
+    @asynccontextmanager
     async def competing_write(identity):
-        available = await capacity(identity)
-        with ThreadPoolExecutor(1) as pool:
-            if other_action == 'delete':
-                pool.submit(lifecycle.delete, identity, '', True).result(timeout=5)
-            else:
-                pool.submit(other_store.enqueue_message, identity, 'Real follow-up', 'admission-race').result(timeout=5)
-        return available
-    monkeypatch.setattr(manager, 'make_capacity', competing_write)
+        async with admission(identity) as available:
+            with ThreadPoolExecutor(1) as pool:
+                if other_action == 'delete':
+                    pool.submit(lifecycle.delete, identity, '', True).result(timeout=5)
+                else:
+                    pool.submit(other_store.enqueue_message, identity, 'Real follow-up', 'admission-race').result(timeout=5)
+            yield available
+    monkeypatch.setattr(manager, 'admission', competing_write)
     with pytest.raises(HTTPException) as rejected:
         await manager.wake_computer(run_id)
     assert rejected.value.status_code in {404, 409}
@@ -811,9 +812,16 @@ async def test_computer_admission_holds_writer_lock_until_intent_and_wake_commit
     def write():
         try:
             with other_store.connect() as conn:
-                conn.execute('PRAGMA busy_timeout=0')
-                with pytest.raises(sqlite3.OperationalError, match='locked'):
-                    conn.execute('BEGIN IMMEDIATE')
+                if other_store.database:
+                    from psycopg.errors import LockNotAvailable
+                    conn.raw.execute("SET LOCAL lock_timeout='100ms'")
+                    with pytest.raises(LockNotAvailable):
+                        conn.begin_write()
+                    conn.raw.rollback()
+                else:
+                    conn.execute('PRAGMA busy_timeout=0')
+                    with pytest.raises(sqlite3.OperationalError, match='locked'):
+                        conn.execute('BEGIN IMMEDIATE')
         finally:
             started.set()
         if other_action == 'delete':
@@ -843,10 +851,11 @@ async def test_computer_admission_rolls_back_intent_and_dispatch_together(durabl
     before = manager.store.rows('SELECT state,revision FROM durable_sessions WHERE run_id=?', (run_id,))
     connect, failed = manager.store.connect, []
     @contextmanager
-    def fail_before_commit():
-        with connect() as conn:
+    def fail_before_commit(**kwargs):
+        with connect(**kwargs) as conn:
             yield conn
-            if conn.in_transaction and not failed:
+            writing = conn.changed if manager.store.database else conn.in_transaction
+            if writing and not failed:
                 state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
                 if state and json.loads(state['state']).get('computer_only'):
                     failed.append(True)

@@ -96,12 +96,15 @@ async def test_checkpointed_steering_waits_for_capacity_without_acknowledging_or
     original = await checkpoint_wait(durable, 'waiting_children')
     target, _ = manager.store.enqueue_message(run_id, 'Status?', 'waiting-capacity')
     manager.message_queue.change(run_id, target['id'], '', False, 0, 'steer')
-    manager.make_capacity = AsyncMock(return_value=False)
+    manager.settings.max_concurrent_runs = 1
+    other = manager.store.create_run('Other occupied session', '', 'demo', [])
+    manager.submit(other)
+    manager.save(other['id'], {'phase': 'monitor'})
     assert await manager.advance(run_id) == 'capacity'
     assert manager.state(run_id)['phase'] == 'waiting_children'
     assert [m['status'] for m in manager.store.messages(run_id)] == ['running', 'queued']
     assert len(cloud.launches) == 1
-    manager.make_capacity = AsyncMock(return_value=True)
+    manager.save(other['id'], {'phase': 'idle'})
     await manager.advance(run_id)
     assert manager.state(run_id)['message_id'] == original
     assert manager.state(run_id)['phase'] == 'provision'

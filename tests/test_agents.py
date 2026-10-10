@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import asynccontextmanager
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -460,10 +461,13 @@ async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, 
     await pause_parent(manager, root, result['group_id'])
     child = coordinator.children(result['group_id'])[0]['id']
     await drive(manager, child)
-    async def admit(_):
-        coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
-        return True
-    monkeypatch.setattr(manager, 'make_capacity', admit)
+    admission = manager.admission
+    @asynccontextmanager
+    async def admit(run_id):
+        async with admission(run_id) as available:
+            coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
+            yield available
+    monkeypatch.setattr(manager, 'admission', admit)
     assert await manager.advance(root) == 'children'
     assert manager.state(root)['phase'] == 'waiting_children'
     assert coordinator.group(root, result['group_id'])['result_snapshot'] == ''

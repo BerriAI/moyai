@@ -176,8 +176,8 @@ class DurableRunner(RunManager):
                     return
                 except LostExecution:
                     await self.release_warm(run_id, self.state(run_id), 'machine no longer available')
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id) as available:
+                if not available:
                     raise HTTPException(409, 'All workspaces are busy. Try waking this computer again shortly.')
                 # Delete and enqueue use the same write transaction boundary.
                 # Persist admission and its dispatch together before effects.
@@ -266,8 +266,8 @@ class DurableRunner(RunManager):
                 if not await database(self.store.has_queued_messages, run_id) and not await database(self.store.rows,
                         "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
                     return False
-                async with self.admission_lock:
-                    if not await self.make_capacity(run_id):
+                async with self.admission(run_id) as available:
+                    if not available:
                         return 'capacity'
                     if not await database(self.begin_turn, run_id, await database(self.store.run, run_id)):
                         return True
@@ -387,9 +387,26 @@ class DurableRunner(RunManager):
             return True
         return True
 
+    @asynccontextmanager
+    async def admission(self, run_id):
+        # Hold global admission only for the capacity check and the caller's
+        # persisted reservation. Provider cleanup keeps its session lease and
+        # occupied slot, but cannot prevent other sessions from claiming space.
+        while True:
+            async with self.admission_lock:
+                if await database(self.has_capacity):
+                    yield True
+                    return
+            if not await self.make_capacity(run_id):
+                yield False
+                return
+            # Reclamation is not a reservation: another worker may have claimed
+            # the freed slot. Check again under global admission before yielding.
+
     async def make_capacity(self, run_id):
-        # Caller holds admission_lock until its own slot is persisted. Skip
-        # busy per-session locks rather than deadlocking competing admissions.
+        # Best-effort reclamation outside global admission. The caller must use
+        # admission() to reserve the space. Skip owned sessions to avoid cycles
+        # between admissions that each already hold their own session lease.
         if await database(self.has_capacity):
             return True
         candidates = [(r['run_id'], json.loads(r['state'])) for r in await database(self.store.rows, f"""
@@ -402,6 +419,8 @@ class DurableRunner(RunManager):
             async with self.session_guard(other, wait=False) as acquired:
                 if not acquired:
                     continue
+                if await database(self.has_capacity):
+                    return True
                 state = await database(self.state, other)
                 if state.get('phase') not in {'warm', 'warm_cleanup'}:
                     continue
@@ -455,8 +474,8 @@ class DurableRunner(RunManager):
         if stop_requested(self.store.run(run_id)):
             return True
         if state['phase'] == 'waiting_environment':
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id) as available:
+                if not available:
                     return 'capacity'
                 if stop_requested(self.store.run(run_id)):
                     return True
@@ -578,8 +597,8 @@ class DurableRunner(RunManager):
                 self.save(run_id, state)
                 return True
             if control.get('input'):
-                async with self.admission_lock:
-                    if not await self.make_capacity(run_id):
+                async with self.admission(run_id) as available:
+                    if not available:
                         return 'capacity'
                     if stop_requested(self.store.run(run_id)):
                         return True
@@ -860,8 +879,8 @@ class DurableRunner(RunManager):
         elif phase == 'waiting_credential':
             if not self.credentials or self.credentials.resolution(run_id,state['wait_credential'])['status']=='pending':
                 return False  # Temporal waits on a durable wake, without a sandbox or polling.
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id) as available:
+                if not available:
                     return 'capacity'
                 state.update(phase='provision',resume_credential=state['wait_credential'])
                 self.save(run_id,state)
@@ -870,8 +889,8 @@ class DurableRunner(RunManager):
         elif phase == 'waiting_children':
             if not self.coordinator or not self.coordinator.settled(run_id, state['wait_group']):
                 return 'children'
-            async with self.admission_lock:
-                if not await self.make_capacity(run_id):
+            async with self.admission(run_id) as available:
+                if not available:
                     return 'capacity'
                 # Admission may await releasing another machine. A web user can
                 # queue a worker follow-up during that wait; recheck atomically.
