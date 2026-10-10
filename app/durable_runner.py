@@ -703,10 +703,16 @@ class DurableRunner(RunManager):
 
             # Independent provider I/O and database reads overlap. Neither can
             # launch the agent; both must finish before writing the launch spec.
-            async with asyncio.TaskGroup() as group:
-                group.create_task(prepare_files())
-                spec_task = group.create_task(database(prepare_spec))
-            spec = spec_task.result()
+            preparation = [asyncio.create_task(prepare_files()), asyncio.create_task(database(prepare_spec))]
+            try:
+                _, spec = await asyncio.gather(*preparation)
+            finally:
+                # Keep the original exception type for advance's permanent-error
+                # handling, and finish cancellation before releasing ownership.
+                for task in preparation:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*preparation, return_exceptions=True)
             state.pop('prepared_build', None)
             spec['rotation_seconds'] = self.settings.temporal_checkpoint_seconds
             if run.get('sandbox_provider') == 'lambda':

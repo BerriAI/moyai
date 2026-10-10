@@ -222,3 +222,15 @@ async def test_install_overlaps_runtime_upload_and_spec_reads(durable, monkeypat
     monkeypatch.setattr(manager, 'spec', spec)
     await manager.advance(run_id)
     assert manager.state(run_id)['phase'] == 'launch'
+
+
+async def test_invalid_install_spec_still_finishes_instead_of_retrying_forever(durable, monkeypatch):
+    manager, _, run_id = durable
+    await drive(manager, run_id, phase='install')
+
+    def invalid(run):
+        raise ValueError('invalid model')
+
+    monkeypatch.setattr(manager, 'spec', invalid)
+    await drive(manager, run_id)
+    assert manager.store.messages(run_id)[0]['status'] == 'failed'

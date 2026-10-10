@@ -23,6 +23,16 @@ addEventListener('DOMContentLoaded', () => {
     panel.innerHTML = `<strong>Local startup verification</strong><br>Real UI + local APIs; simulated execution.<br>Injected delays: create 3s · detail 2s · sidebar 8s.<hr>Message visible: <b>${time(visible)}</b><br>Create acknowledged: ${time(acknowledged)}<br>Conversation ready: <b>${time(ready)}</b><br>Sidebar refreshed: ${time(sidebar)}`;
   }
   paint();
+  const fetchRequest = window.fetch;
+  window.fetch = async (path, options = {}) => {
+    const response = await fetchRequest(path, options);
+    if (start && /^\/api\/runs(?:\?|$)/.test(path)) {
+      if (options.method === 'POST') acknowledged = performance.now() - start;
+      else if (acknowledged !== null && sidebar === null) sidebar = performance.now() - start;
+      paint();
+    }
+    return response;
+  };
   document.addEventListener('submit', event => {
     if (event.target.id !== 'task-form') return;
     start = performance.now(); visible = ready = acknowledged = sidebar = null; paint();
@@ -31,9 +41,7 @@ addEventListener('DOMContentLoaded', () => {
     if (!start) return;
     const elapsed = performance.now() - start;
     if (visible === null && document.querySelector('.chat-message.user')) visible = elapsed;
-    if (acknowledged === null && location.hash.startsWith('#run=')) acknowledged = elapsed;
     if (ready === null && document.querySelector('#followup')) ready = elapsed;
-    if (sidebar === null && acknowledged !== null && document.querySelector('#session-list [data-run="'+location.hash.slice(5)+'"]')) sidebar = elapsed;
     paint();
   };
   // Observe the actual conversation only, so painting diagnostics cannot loop.
@@ -43,9 +51,14 @@ addEventListener('DOMContentLoaded', () => {
 '''
 
 
-def build(directory, port):
+def build(directory, port, frontend_root=None):
     app = demo(directory, port)
     submitted = False
+    frontend_root = frontend_root or Path(__file__).resolve().parents[1] / 'app/static'
+    from starlette.staticfiles import StaticFiles
+    for route in app.routes:
+        if getattr(route, 'path', '') == '/static':
+            route.app = StaticFiles(directory=frontend_root)
 
     @app.get('/demo/startup-login')
     async def login():
@@ -56,7 +69,7 @@ def build(directory, port):
 
     @app.get('/demo/startup')
     async def workspace():
-        html = (Path(__file__).resolve().parents[1] / 'app/static/index.html').read_text()
+        html = (frontend_root / 'index.html').read_text()
         return HTMLResponse(html.replace('<head>', '<head><script src="/demo/startup.js"></script>'))
 
     @app.get('/demo/startup.js')
@@ -82,6 +95,7 @@ def build(directory, port):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=8892)
+    parser.add_argument('--frontend-root', type=Path, help='Optional baseline app/static directory')
     args = parser.parse_args()
     with TemporaryDirectory(prefix='startup-ui-') as directory:
-        uvicorn.run(build(directory, args.port), host='127.0.0.1', port=args.port)
+        uvicorn.run(build(directory, args.port, args.frontend_root), host='127.0.0.1', port=args.port)
