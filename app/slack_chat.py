@@ -138,7 +138,7 @@ class SlackChat:
                 # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, human_control=True, restore_archived=not metadata_request)
             if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()

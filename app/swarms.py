@@ -13,8 +13,11 @@ from .db import database, now
 
 # Agent behavior is shared with SDK consumers; this module owns persistence.
 from agent.swarm.planning import (
-    INITIAL_TEAM_SIZE, MAX_ROUNDS, ROUND_DELAY_SECONDS,
+    INITIAL_TEAM_SIZE, ROUND_DELAY_SECONDS,
     Runtime, continuation_message, coordinator_prompt, plan_swarm,
+)
+from agent.swarm.timing import (
+    is_swarm_hold_command, parse_swarm_time_intent, SwarmTimeIntentKind, validate_swarm_budget,
 )
 from .swarm_collaboration import create_team_in
 
@@ -46,15 +49,102 @@ def execution_policy(store, run_id, *, connection=None):
 
 
 def remaining_seconds(mission):
+    if mission['budget_seconds'] == 0:
+        return float('inf')
     return datetime.fromisoformat(mission['ends_at']).timestamp() - time.time()
 
 
 def create_in(conn, run_id, budget_seconds, stamp):
-    if type(budget_seconds) is not int or not 60 <= budget_seconds <= 86400:
-        raise ValueError('Swarm time budget must be between 1 minute and 24 hours.')
-    ends_at = (datetime.fromisoformat(stamp) + timedelta(seconds=budget_seconds)).isoformat()
+    validate_swarm_budget(budget_seconds)
+    ends_at = (datetime.fromisoformat(stamp) + timedelta(seconds=budget_seconds)).isoformat() if budget_seconds else ''
     conn.execute('INSERT INTO swarm_missions(run_id,budget_seconds,ends_at,created_at,updated_at) VALUES(?,?,?,?,?)',
                  (run_id, budget_seconds, ends_at, stamp, stamp))
+
+
+def _require_saved_in(conn, run_id):
+    """Human recovery starts a new turn only after every old owner has saved."""
+    rows = conn.execute('''WITH RECURSIVE members(id) AS (
+        SELECT id FROM runs WHERE id=? UNION
+        SELECT r.id FROM runs r JOIN members m ON r.parent_run_id=m.id
+    ) SELECT r.status,d.state FROM runs r JOIN members m ON m.id=r.id
+        LEFT JOIN durable_sessions d ON d.run_id=r.id''', (run_id,)).fetchall()
+    for row in rows:
+        phase = json.loads(row['state'] or '{}').get('phase', 'idle')
+        if row['status'] not in {'idle', 'completed', 'failed', 'cancelled', 'interrupted'} or phase not in {'idle', 'warm'}:
+            raise ValueError('Wait for the current work to stop and save before resuming.')
+
+
+def _update_time_in(conn, run_id, *, budget_seconds=None, extra_seconds=None, resume=False):
+    """Root owner control; caller holds the root lease and write transaction."""
+    mission = conn.execute('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,)).fetchone()
+    run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
+    if not mission or not run or run['parent_run_id'] or run['deleted_at'] or run['deletion_requested_at']:
+        raise ValueError('Swarm not found.')
+    mission = dict(mission)
+    inactive = mission['status'] != 'active' or run['status'] in {'failed', 'cancelled', 'interrupted'}
+    if inactive:
+        _require_saved_in(conn, run_id)
+    if run['status'] == 'stopping':
+        raise ValueError('Wait for the current work to stop and save before resuming.')
+    if not inactive and budget_seconds is None and extra_seconds is None and remaining_seconds(mission) > 0:
+        return  # Repeating Resume on an active mission does not reset progress.
+    stamp = now()
+    current = datetime.fromisoformat(stamp)
+    if extra_seconds is not None:
+        validate_swarm_budget(extra_seconds)
+        # Adding time to an unlimited mission explicitly selects a finite
+        # window. A past deadline extends from now, never from an expired date.
+        base = max(current, datetime.fromisoformat(mission['ends_at'])) if mission['ends_at'] else current
+        ends_at = (base + timedelta(seconds=extra_seconds)).isoformat()
+        budget = max(60, int((datetime.fromisoformat(ends_at) - current).total_seconds()))
+        validate_swarm_budget(budget)
+    elif budget_seconds is not None:
+        validate_swarm_budget(budget_seconds)
+        budget = budget_seconds
+        ends_at = (current + timedelta(seconds=budget)).isoformat() if budget else ''
+    elif (inactive or resume) and remaining_seconds(mission) <= 0:
+        budget = mission['budget_seconds']
+        ends_at = (current + timedelta(seconds=budget)).isoformat() if budget else ''
+    else:
+        budget, ends_at = mission['budget_seconds'], mission['ends_at']
+    original = conn.execute("""SELECT id FROM events WHERE run_id=?
+        AND json_text(data,'phase')='swarm_initial_time' LIMIT 1""", (run_id,)).fetchone()
+    if not original:
+        # Creation retries compare the submitted window with this immutable
+        # value, not a duration that the user legitimately edited later.
+        conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,?,?)",
+                     (run_id, 'Original swarm time saved.',
+                      json.dumps({'phase': 'swarm_initial_time', 'budget_seconds': mission['budget_seconds']}), stamp))
+    conn.execute("""UPDATE swarm_missions SET status='active',reason='',budget_seconds=?,ends_at=?,
+        no_progress=0,next_at=0,updated_at=? WHERE run_id=?""", (budget, ends_at, stamp, run_id))
+    if inactive:
+        conn.execute("UPDATE runs SET status='idle',error='',updated_at=? WHERE id=?", (stamp, run_id))
+    message = ('Swarm will keep working until you pause or stop it.' if not ends_at else
+               'Swarm time updated. You can change it again or continue this conversation later.')
+    conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'status',?,?,?)",
+                 (run_id, message, json.dumps({'phase': 'swarm', 'swarm_status': 'active',
+                                               'budget_seconds': budget, 'ends_at': ends_at}), stamp))
+
+
+def prepare_human_message_in(conn, run_id, content):
+    """Apply authenticated root-user intent before admitting its chat message.
+
+    The web handler holds the root session guard. The Store calls this only
+    after message deduplication, in the same transaction as the message; peer
+    posts, child messages and generated continuation never enter this path.
+    """
+    mission = conn.execute('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,)).fetchone()
+    if not mission:
+        return
+    if (mission['status'] != 'active' or remaining_seconds(mission) <= 0) and is_swarm_hold_command(content):
+        raise ValueError('The swarm is still on hold. Use Resume or send a new direction when you want it to continue.')
+    intent = parse_swarm_time_intent(content)
+    if intent and intent.kind == SwarmTimeIntentKind.EXTEND:
+        _update_time_in(conn, run_id, extra_seconds=intent.seconds, resume=True)
+    elif intent and intent.kind in {SwarmTimeIntentKind.SET, SwarmTimeIntentKind.UNLIMITED}:
+        _update_time_in(conn, run_id, budget_seconds=intent.seconds or 0, resume=True)
+    elif mission['status'] != 'active' or remaining_seconds(mission) <= 0:
+        _update_time_in(conn, run_id, resume=True)
 
 
 class SwarmMissions:
@@ -95,7 +185,7 @@ class SwarmMissions:
 
     def initial_plan(self, task, model):
         if self.manager.settings.max_parallel_agents < INITIAL_TEAM_SIZE:
-            raise ValueError('Swarm mode needs a worker-group limit of at least 10. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
+            raise ValueError(f'Swarm mode needs a worker-group limit of at least {INITIAL_TEAM_SIZE}. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
         return plan_swarm(task, runtimes=self.runtime_catalog(model, for_dispatch=True))
 
     def bootstrap_in(self, conn, run_id, message_id, stamp):
@@ -118,14 +208,14 @@ class SwarmMissions:
         runtimes = [{'id': uuid4().hex, 'harness': task.harness, 'model': task.model} for task in plan]
         pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
         if pending + INITIAL_TEAM_SIZE > self.manager.settings.max_pending_runs:
-            raise ValueError('The session queue needs room for all 10 swarm workers. Wait for a task to finish.')
+            raise ValueError(f'The session queue needs room for all {INITIAL_TEAM_SIZE} swarm workers. Wait for a task to finish.')
         uploads = conn.execute('SELECT * FROM attachments WHERE message_id=?', (message_id,)).fetchall()
         if uploads:
             cutoff = (datetime.fromisoformat(stamp) - timedelta(days=1)).isoformat()
             used = conn.execute("SELECT COALESCE(SUM(size + CASE WHEN preview_ref!='' THEN preview_size ELSE length(preview) END),0) FROM attachments WHERE message_id IS NOT NULL OR created_at>=?", (cutoff,)).fetchone()[0]
             copies = INITIAL_TEAM_SIZE * sum(upload['size'] + (upload['preview_size'] if upload['preview_ref'] else len(upload['preview'])) for upload in uploads)
             if used + copies > self.manager.settings.attachment_storage_limit_mb * 1024 * 1024:
-                raise ValueError('Attachment storage needs room for the 10 swarm workers. Use smaller files or raise the workspace storage limit.')
+                raise ValueError(f'Attachment storage needs room for the {INITIAL_TEAM_SIZE} swarm workers. Use smaller files or raise the workspace storage limit.')
         group_id = uuid4().hex
         conn.execute('''INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at,runtime_assignments)
             VALUES(?,?,?,?,?,'running',?,?)''',
@@ -158,7 +248,7 @@ class SwarmMissions:
                              tuple(copy[column] for column in columns))
             self.manager.submit_in(conn, {'id': child_id})
         conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'agents',?,?,?)",
-                     (run_id, 'Queued 10 agents across configured harnesses. Workers start as capacity becomes available.',
+                     (run_id, f'Queued {INITIAL_TEAM_SIZE} agents across configured harnesses. Workers start as capacity becomes available.',
                       json.dumps({'group_id': group_id, 'phase': 'swarm_team_queued', 'workers': INITIAL_TEAM_SIZE}), stamp))
         return group_id
 
@@ -189,15 +279,27 @@ class SwarmMissions:
         mission = await database(execution_policy, self.store, run_id)
         if not mission:
             return None
+        if mission['run_id'] != run_id:
+            # A worker owns its own session lease, while time belongs to the
+            # root. Serialize its policy read and cancellation with root-user
+            # extensions. Cancellation never acquires a child session lease.
+            async with self.manager.session_guard(mission['run_id']):
+                return await self._enforce_current(run_id)
+        # Root advance already holds this lease, including launch/monitor.
+        return await self._enforce_current(run_id)
+
+    async def _enforce_current(self, run_id):
+        mission = await database(execution_policy, self.store, run_id)
         root = await database(self.store.run, mission['run_id'])
         if mission['status'] == 'active' and root and root['status'] in {'interrupted', 'failed', 'cancelled'}:
             await database(self.change_status, mission['run_id'], 'blocked', 'The previous execution ended without a confirmed continuation. Review its saved work before resuming.')
             mission = await database(self.get, mission['run_id'])
-        if mission['status'] in {'active', 'paused'} and remaining_seconds(mission) <= 0:
-            await database(self.change_status, mission['run_id'], 'expired', 'The swarm time budget ended. Completed work is preserved.', allowed=('active', 'paused'))
+        if mission['status'] == 'active' and remaining_seconds(mission) <= 0:
+            await database(self.change_status, mission['run_id'], 'paused',
+                           'The selected time is complete. Send a message or add more time to continue from the saved work.')
             mission = await database(self.get, mission['run_id'])
         if mission['status'] != 'active':
-            # Do not replace paused/expired/blocked intent with a Stop marker.
+            # Do not replace recoverable pause/blocked intent with a Stop marker.
             await self.manager.cancel(run_id, swarm_stop=False)
         return mission
 
@@ -226,11 +328,9 @@ class SwarmMissions:
                 if state['outcome'] not in {'completed', 'steered'}:
                     status, reason = 'blocked', 'The last response could not be confirmed. Review its saved work before resuming.'
                 elif remaining_seconds(mission) <= 0:
-                    status, reason = 'expired', 'The swarm time budget ended. Completed work is preserved.'
+                    status, reason = 'paused', 'The selected time is complete. Send a message or add more time to continue from the saved work.'
                 elif state['outcome'] == 'completed' and repeats >= 2:
                     status, reason = 'blocked', 'The team repeated its answer without progress. Review the result and give a new direction.'
-                elif mission['round'] >= MAX_ROUNDS:
-                    status, reason = 'paused', 'The swarm reached its 25-round limit. Start a new mission to continue.'
             conn.execute('''UPDATE swarm_missions SET status=?,reason=?,settled_message_id=?,answer_digest=?,
                 no_progress=?,next_at=?,updated_at=? WHERE run_id=?''',
                 (status, reason, state['message_id'], digest, repeats, time.time() + ROUND_DELAY_SECONDS, now(), run_id))
@@ -254,8 +354,6 @@ class SwarmMissions:
             delay = mission['next_at'] - time.time()
             if delay > 0:
                 return {'retry_seconds': max(0.01, min(delay, remaining))}
-            if mission['round'] >= MAX_ROUNDS:
-                return None
             number = mission['round'] + 1
             direction = conn.execute("""SELECT content FROM messages WHERE run_id=? AND role='user'
                 AND status!='deleted' AND COALESCE(client_id,'') NOT LIKE 'swarm:%'
@@ -277,30 +375,26 @@ class SwarmMissions:
         return None
 
     async def pause(self, run_id):
-        mission = self.get(run_id)
-        if not mission:
-            raise ValueError('This session is not a swarm.')
-        if mission['status'] == 'active':
-            await database(self.change_status, run_id, 'paused', 'Swarm paused. Resume explicitly when ready.')
-            await self.manager.cancel(run_id, swarm_stop=False)
+        async with self.manager.session_guard(run_id):
+            mission = self.get(run_id)
+            if not mission:
+                raise ValueError('This session is not a swarm.')
+            if mission['status'] == 'active':
+                await database(self.change_status, run_id, 'paused', 'Swarm paused. Send a message or resume when ready.')
+                await self.manager.cancel(run_id, swarm_stop=False)
+
+    async def set_time(self, run_id, budget_seconds):
+        validate_swarm_budget(budget_seconds)
+        async with self.manager.session_guard(run_id):
+            with self.store.connect(write_scope=run_id) as conn:
+                conn.begin_write()
+                _update_time_in(conn, run_id, budget_seconds=budget_seconds, resume=True)
+                self.manager.submit_in(conn, {'id': run_id})
+        return public_mission(self.get(run_id))
 
     async def resume(self, run_id):
         async with self.manager.session_guard(run_id):
             with self.store.connect(write_scope=run_id) as conn:
                 conn.begin_write()
-                mission = conn.execute('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,)).fetchone()
-                run = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
-                journal = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,)).fetchone()
-                if not mission or not run or run['deleted_at'] or run['deletion_requested_at']:
-                    raise ValueError('Swarm not found.')
-                if mission['status'] == 'active':
-                    return
-                if mission['status'] not in {'paused', 'blocked'} or remaining_seconds(mission) <= 0 or mission['round'] >= MAX_ROUNDS:
-                    raise ValueError('This swarm has ended. Start a new mission with a new time budget.')
-                if run['status'] == 'stopping' or (journal and json.loads(journal['state']).get('phase', 'idle') != 'idle'):
-                    raise ValueError('Wait for the current work to stop and save before resuming.')
-                if conn.execute("SELECT 1 FROM runs WHERE parent_run_id=? AND status NOT IN ('idle','completed','failed','cancelled','interrupted')", (run_id,)).fetchone():
-                    raise ValueError('Wait for the delegated agents to stop before resuming.')
-                conn.execute("UPDATE swarm_missions SET status='active',reason='',no_progress=0,next_at=0,updated_at=? WHERE run_id=?", (now(), run_id))
-                conn.execute("UPDATE runs SET status='idle',error='' WHERE id=?", (run_id,))
+                _update_time_in(conn, run_id, resume=True)
                 self.manager.submit_in(conn, {'id': run_id})

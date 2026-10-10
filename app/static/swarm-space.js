@@ -5,8 +5,29 @@
   const identifier=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
   const working=new Set(['running','provisioning','saving','reconnecting','queued','waiting_children']);
   const attention=new Set(['failed','interrupted','awaiting_approval','waiting_credential']);
+  const saved=new Set(['idle','completed','failed','interrupted','cancelled']);
   const labels={idle:'Ready',completed:'Completed',running:'Working',provisioning:'Starting',queued:'Queued',saving:'Saving',reconnecting:'Reconnecting',waiting_children:'Agents working',awaiting_approval:'Needs approval',waiting_credential:'Needs access',failed:'Failed',interrupted:'Interrupted',cancelled:'Stopped',stopping:'Stopping',deleting:'Deleting'};
-  const duration=seconds=>{const value=Math.max(0,Math.ceil(Number(seconds)||0));return value>=3600?`${Math.floor(value/3600)}h ${Math.floor(value%3600/60)}m`:value>=60?`${Math.floor(value/60)}m ${value%60}s`:`${value}s`;};
+  const duration=seconds=>{const value=Math.max(0,Math.ceil(Number(seconds)||0));return value>=86400?`${Math.floor(value/86400)}d ${Math.floor(value%86400/3600)}h`:value>=3600?`${Math.floor(value/3600)}h ${Math.floor(value%3600/60)}m`:value>=60?`${Math.floor(value/60)}m ${value%60}s`:`${value}s`;};
+  const budgets=[[0,'Until stopped'],[3600,'1 hour'],[14400,'4 hours'],[86400,'1 day'],[604800,'1 week']];
+  function budgetSeconds(choice,count,unit){
+    const raw=choice==='custom'?Number(count)*Number(unit):Number(choice),rounded=Math.round(raw);
+    // Decimal display units can introduce floating-point noise when converted back.
+    const seconds=Math.abs(raw-rounded)<1e-7?rounded:raw;
+    if(!Number.isSafeInteger(seconds)||(seconds!==0&&(seconds<60||seconds>2592000))||(choice==='custom'&&(![60,3600,86400].includes(Number(unit))||Number(count)<=0)))throw new Error('Choose a duration from 1 minute to 30 days, or Until stopped.');
+    return seconds;
+  }
+  function budgetFields(id,seconds=0){
+    const custom=!budgets.some(([value])=>value===seconds),unit=seconds>0&&seconds%86400===0?86400:seconds>0&&seconds%3600===0?3600:60;
+    return `<div class="swarm-duration-fields"><label for="${id}">Run for</label><select id="${id}" aria-label="Swarm duration">${budgets.map(([value,label])=>`<option value="${value}" ${value===seconds?'selected':''}>${label}</option>`).join('')}<option value="custom" ${custom?'selected':''}>Custom…</option></select><div class="swarm-duration-custom" data-budget-custom ${custom?'':'hidden'}><label class="sr-only" for="${id}-count">Duration amount</label><input id="${id}-count" type="number" min="0.01" max="43200" step="any" value="${custom?seconds/unit:2}" aria-label="Duration amount"><label class="sr-only" for="${id}-unit">Duration unit</label><select id="${id}-unit" aria-label="Duration unit"><option value="60" ${custom&&unit===60?'selected':''}>minutes</option><option value="3600" ${!custom||unit===3600?'selected':''}>hours</option><option value="86400" ${custom&&unit===86400?'selected':''}>days</option></select></div></div>`;
+  }
+  function budgetValue(host,id){
+    return budgetSeconds(host.querySelector('#'+id).value,host.querySelector('#'+id+'-count')?.value,host.querySelector('#'+id+'-unit')?.value);
+  }
+  function bindBudget(host,id,onChange=()=>{}){
+    const select=host.querySelector('#'+id),fields=select.closest('.swarm-duration-fields'),custom=fields.querySelector('[data-budget-custom]');
+    const sync=()=>{custom.hidden=select.value!=='custom';custom.querySelectorAll('input,select').forEach(input=>input.disabled=custom.hidden);onChange();};
+    fields.addEventListener('change',sync);fields.addEventListener('input',onChange);sync();
+  }
   function members(run){
     if(!identifier(run?.id))return [];
     const nodes=new Map([[run.id,{...run,label:'Coordinator',parentId:null,depth:0}]]);
@@ -42,22 +63,20 @@
     const remaining=Number.isFinite(deadline)?Math.max(0,Math.ceil((deadline-now)/1000)):null;
     const status=String(swarm.status||'');
     const ended=attention.has(run.status)&&status==='active';
-    const label=ended?'Needs attention':({active:remaining===0?'Wrapping up':'Working together',paused:'Paused',stopped:'Stopped',expired:'Time limit reached',blocked:'Needs attention'})[status]||'Swarm';
-    const timing=status==='active'&&!ended&&remaining!==null?`Up to ${duration(remaining)} left`:Number(swarm.budget_seconds)>0?`${duration(swarm.budget_seconds)} maximum`:'';
+    const label=ended?'Needs attention':({active:remaining===0?'Saving progress':'Working together',paused:'Paused',stopped:'Stopped',expired:'Paused',blocked:'Needs attention'})[status]||'Swarm';
+    const timing=Number(swarm.budget_seconds)===0?'Until stopped':status==='active'&&!ended&&remaining!==null?`${duration(remaining)} left`:`${duration(swarm.budget_seconds)} at a time`;
     return {status:ended?'blocked':status,label,timing,remaining,round:Number.isInteger(swarm.round)&&swarm.round>0?swarm.round:null,reason:swarm.reason||''};
   }
-  function canResume(run,now=Date.now()){
-    const swarm=run?.swarm,deadline=Date.parse(swarm?.ends_at||'');
-    return !!swarm&&['paused','blocked'].includes(swarm.status)&&Number.isFinite(deadline)&&deadline>now&&Number(swarm.round||0)<25;
+  function canResume(run){
+    return !!run?.swarm&&['paused','blocked','expired','stopped'].includes(run.swarm.status)&&saved.has(run.status)&&!run.active;
   }
-  function canSend(run,now=Date.now()){
+  function canSend(run){
     if(!run?.swarm)return true;
-    const deadline=Date.parse(run.swarm.ends_at||'');
-    return run.swarm.status==='active'&&(!Number.isFinite(deadline)||deadline>now);
+    return run.swarm.status==='active'?!['stopping','deleting'].includes(run.status):canResume(run);
   }
-  function composerNote(run,now=Date.now()){
-    if(canSend(run,now))return '';
-    return canResume(run,now)?'Resume this swarm before sending. Your draft stays here.':'This swarm has ended. Start a new session to continue; your draft stays here.';
+  function composerNote(run){
+    if(!canSend(run))return 'Saving current work… Your draft stays here; you can continue when saving finishes.';
+    return canResume(run)?'Send a message to continue this swarm. You can ask for more hours or days.':'';
   }
   function receipt(run){
     const event=(run.events||[]).findLast(item=>['agents','tool','artifact'].includes(item.kind)&&typeof item.message==='string'&&item.message.trim()&&item.data?.phase!=='processing');
@@ -223,6 +242,6 @@
     setView(view);update(run);
     return {update,setView,tick,dispose(){disposed=true;responses?.dispose();if(responses)document.removeEventListener('visibilitychange',visibility);clearInterval(timer);observer.disconnect();canvasCleanup?.();host.removeEventListener('click',click);container.classList.remove('swarm-space-active');}};
   }
-  const api={members,layout,clock,canResume,canSend,composerNote,receipt,latestResponse,responseCache,responseHTML,sharedResponses,busHTML,nodeHTML,create};root.MoyaiSwarm=api;
+  const api={members,layout,clock,canResume,canSend,composerNote,budgetSeconds,budgetFields,budgetValue,bindBudget,receipt,latestResponse,responseCache,responseHTML,sharedResponses,busHTML,nodeHTML,create};root.MoyaiSwarm=api;
   if(typeof module!=='undefined')module.exports=api;
 })(typeof globalThis!=='undefined'?globalThis:window);

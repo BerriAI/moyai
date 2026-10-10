@@ -23,12 +23,12 @@ test('bounded graph prioritizes attention and active work; overflow stays in the
 test('only a valid server deadline produces a countdown and pause never extends it',()=>{
  const now=Date.parse('2026-10-10T12:00:00Z'),ends_at='2026-10-10T12:30:00Z';
  const active=run({swarm:{status:'active',budget_seconds:1800,ends_at,round:2}});
- assert.equal(swarm.clock(active,now).timing,'Up to 30m 0s left');
+ assert.equal(swarm.clock(active,now).timing,'30m 0s left');
  const paused={...active,swarm:{...active.swarm,status:'paused'}};
  assert.equal(swarm.clock(paused,now).label,'Paused');assert.equal(swarm.clock(paused,now+600000).remaining,1200);
  assert.equal(swarm.clock({...active,swarm:{...active.swarm,ends_at:null}},now).remaining,null);
- assert.equal(swarm.clock({...active,swarm:{...active.swarm,ends_at:'invalid'}},now).timing,'30m 0s maximum');
- assert.equal(swarm.clock(active,now+1900000).label,'Wrapping up');
+ assert.equal(swarm.clock({...active,swarm:{...active.swarm,ends_at:'invalid'}},now).timing,'30m 0s at a time');
+ assert.equal(swarm.clock(active,now+1900000).label,'Saving progress');
  assert.equal(swarm.clock({...active,status:'failed'},now).label,'Needs attention');
  assert.equal(swarm.clock(run()),null);
 });
@@ -61,28 +61,50 @@ test('view switching retains the composer and disposes its canvas, timer, and ob
 test('new-session payload preserves normal chat and includes only the selected swarm budget',async()=>{
  const source=fs.readFileSync('app/static/app.js','utf8');
  const submission=source.slice(source.indexOf('async function submitTask('),source.indexOf('\nasync function openRun('));
- for(const mode of ['chat','swarm']){
-  const fields=Object.fromEntries(Object.entries({'#prompt':'Build a prototype','#repo':'','#project-environment':'auto','#mode':'modal','#new-model':'openai/model','#new-harness':'codex','#swarm-budget':'3600'}).map(([key,value])=>[key,{value}]));let payload;
-  const c={stopStream(){},setView(){},sessionTitle:()=>'New session',renderSessionSubmission(){},showError(){},state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>[],lock(){},clear(){}},newDraft:{session_mode:mode}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'request-id'},api:async(path,options)=>{payload=JSON.parse(options.body);return {id:id(1)};},refreshRuns:async()=>{},openRun:async()=>{},toast(message){throw Error(message);}};
+ for(const [mode,budget] of [['chat','3600'],['swarm','0'],['swarm','3600'],['swarm','172800']]){
+  const fields=Object.fromEntries(Object.entries({'#prompt':'Build a prototype','#repo':'','#project-environment':'auto','#mode':'modal','#new-model':'openai/model','#new-harness':'codex','#swarm-budget':budget}).map(([key,value])=>[key,{value}]));let payload;
+  const c={stopStream(){},setView(){},sessionTitle:()=>'New session',renderSessionSubmission(){},showError(){},state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>[],lock(){},clear(){}},newDraft:{session_mode:mode}},$:id=>fields[id],document:{querySelectorAll:()=>[],querySelector:id=>fields[id]},MoyaiSwarm:swarm,crypto:{randomUUID:()=> 'request-id'},api:async(path,options)=>{payload=JSON.parse(options.body);return {id:id(1)};},refreshRuns:async()=>{},openRun:async()=>{},toast(message){throw Error(message);}};
   vm.createContext(c);vm.runInContext(submission,c);await c.submitTask({preventDefault(){}});
   assert.equal(payload.client_id,'request-id');assert.equal(payload.harness,'codex');assert.equal(payload.mode,'modal');
-  if(mode==='swarm')assert.deepEqual(payload.swarm,{budget_seconds:3600});else assert.equal(Object.hasOwn(payload,'swarm'),false);
+  if(mode==='swarm')assert.deepEqual(payload.swarm,{budget_seconds:Number(budget)});else assert.equal(Object.hasOwn(payload,'swarm'),false);
  }
 });
-test('only active missions accept follow-ups; paused and blocked resume inside original deadline and round limit',()=>{
+test('saved swarms accept messages and resume beyond their original time or round limit',()=>{
  const now=Date.parse('2026-10-10T12:00:00Z'),base=run({swarm:{status:'active',ends_at:'2026-10-10T12:30:00Z',round:2}});
  assert.equal(swarm.canSend(base,now),true);assert.equal(swarm.canResume(base,now),false);
  for(const status of ['paused','blocked','stopped','expired']){
-  const item={...base,swarm:{...base.swarm,status}};
-  assert.equal(swarm.canSend(item,now),false);
-  assert.equal(swarm.canResume(item,now),['paused','blocked'].includes(status));
-  assert.match(swarm.composerNote(item,now),/draft stays here/);
-  assert.equal(swarm.canResume(item,now+1900000),false);
-  assert.match(swarm.composerNote(item,now+1900000),/Start a new session/);
+  const item={...base,status:'cancelled',swarm:{...base.swarm,status,round:100}};
+  assert.equal(swarm.canSend(item,now),true);
+  assert.equal(swarm.canResume(item,now),true);
+  assert.match(swarm.composerNote(item,now),/Send a message to continue/);
+  assert.equal(swarm.canResume(item,now+1900000),true);
  }
- assert.equal(swarm.canResume({...base,swarm:{...base.swarm,status:'paused',round:25}},now),false);
- assert.equal(swarm.canSend(base,now+1900000),false);
+ for(const status of ['stopping','deleting','saving','waiting_children','running']){
+  const item={...base,status,swarm:{...base.swarm,status:'paused'}};assert.equal(swarm.canSend(item),false);assert.equal(swarm.canResume(item),false);
+  assert.match(swarm.composerNote(item),/draft stays here/);
+ }
+ assert.equal(swarm.canSend({...base,status:'idle',active:true,swarm:{...base.swarm,status:'paused'}}),false);
+ assert.equal(swarm.canSend(base,now+1900000),true);
  assert.equal(swarm.canSend(run(),now),true);
+});
+test('durations preserve continuous zero and custom hours or days within the server limit',()=>{
+ assert.equal(swarm.budgetSeconds('0'),0);
+ assert.equal(swarm.budgetSeconds('custom','2','86400'),172800);
+ assert.equal(swarm.budgetSeconds('custom','1.5','3600'),5400);
+ assert.equal(swarm.budgetSeconds('custom','1.1','3600'),3960);
+ assert.equal(swarm.budgetSeconds('custom','30','86400'),2592000);
+ for(const args of [['custom','31','86400'],['custom','','3600'],['custom','0','3600'],['custom','Infinity','3600'],['custom','1','5'],['custom','.0001','3600'],['custom','1.001','60'],['-1']])assert.throws(()=>swarm.budgetSeconds(...args),/1 minute to 30 days/);
+ const continuous=run({swarm:{status:'active',budget_seconds:0,ends_at:null}});
+ assert.equal(swarm.clock(continuous).timing,'Until stopped');assert.equal(swarm.clock(continuous).remaining,null);
+ assert.equal(swarm.clock({...continuous,swarm:{status:'active',budget_seconds:172800,ends_at:'2026-10-12T12:00:00Z'}},Date.parse('2026-10-10T12:00:00Z')).timing,'2d 0h left');
+});
+test('saved durations round-trip through displayed custom units without losing whole seconds',()=>{
+ for(const seconds of [123,11099]){
+  const html=swarm.budgetFields('duration',seconds);
+  const count=html.match(/<input id="duration-count"[^>]*value="([^"]+)"/)[1];
+  const unit=html.match(/<option value="(60|3600|86400)" selected>/)[1];
+  assert.equal(swarm.budgetSeconds('custom',count,unit),seconds);
+ }
 });
 test('swarm controls merge compact API responses, refresh details, and ignore responses after navigation',async()=>{
  const source=fs.readFileSync('app/static/app.js','utf8');

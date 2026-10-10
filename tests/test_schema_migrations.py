@@ -375,3 +375,26 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
         assert app.state.store.run(run['id'])['prompt'] == 'Saved before API split'
     finally:
         app.state.store.close()
+
+
+def test_revision_nine_upgrade_adds_chat_projection_without_rewriting_saved_messages(split_settings):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        run = api.state.store.create_run('Saved conversation before the delivery projection.', '', 'modal', [])
+        messages = api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],))
+    finally:
+        api.state.store.close()
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE swarm_chat_entries')
+        conn.execute('UPDATE schema_state SET revision=9')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+    ready(split_settings)
+    assert execute(settings, 'SELECT * FROM swarm_chat_entries') == []
+    api = main.create_app(settings)
+    try:
+        assert api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],)) == messages
+    finally:
+        api.state.store.close()

@@ -11,13 +11,16 @@ import json
 from .database import RUNTIME_SETTINGS
 from .schema_migrations import SCHEMA_REVISION
 
-API_PROTOCOL_REVISION = 5
+# Unlimited swarms persist budget_seconds=0 and ends_at=''. Older roles parse
+# every deadline as a timestamp and cannot safely read or execute these rows.
+# Automation startup now references the broker's complete automation_history tool.
+API_PROTOCOL_REVISION = 6
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 5
-BROKER_PROTOCOL_REVISION = 5
-COORDINATOR_PROTOCOL_REVISION = 5
+WORKER_PROTOCOL_REVISION = 6
+BROKER_PROTOCOL_REVISION = 6
+COORDINATOR_PROTOCOL_REVISION = 6
 
 
 def api_fingerprint(settings):

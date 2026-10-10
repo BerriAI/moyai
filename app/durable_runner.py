@@ -27,6 +27,14 @@ class LostExecution(Exception):
     pass
 
 
+def swarm_wake_seconds(mission):
+    """Keep Temporal timers finite for swarms that run until explicitly stopped."""
+    from .swarms import remaining_seconds
+    if mission['status'] == 'paused':
+        return 60.0
+    return min(60.0, max(0.01, remaining_seconds(mission)))
+
+
 # Use one predicate for the partial index and its readers. Historical sessions
 # and durable waits that released their machine must not add admission work.
 from .database_schema import SQLITE_OCCUPIED_SESSION as OCCUPIED_SESSION, POSTGRES_OCCUPIED_SESSION
@@ -278,8 +286,7 @@ class DurableRunner(RunManager):
                 reuse = await self.warm(run_id, state)
                 if reuse is not True:
                     if reuse is False and mission and mission['run_id'] == run_id and mission['status'] == 'paused':
-                        from .swarms import remaining_seconds
-                        return {'retry_seconds': max(0.01, remaining_seconds(mission))}
+                        return {'retry_seconds': swarm_wake_seconds(mission)}
                     return reuse
                 row = await database(self.store.run, run_id)
                 state = await database(self.state, run_id)
@@ -303,14 +310,12 @@ class DurableRunner(RunManager):
                     if row['status'] == 'stopping':
                         await database(self.store.update_run, run_id, status='cancelled')
                     if mission and mission['run_id'] == run_id and mission['status'] == 'paused':
-                        from .swarms import remaining_seconds
-                        return {'retry_seconds': max(0.01, remaining_seconds(mission))}
+                        return {'retry_seconds': swarm_wake_seconds(mission)}
                     return False
                 if not await database(self.store.has_queued_messages, run_id) and not await database(self.store.rows,
                         "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
                     if mission and mission['run_id'] == run_id and mission['status'] == 'paused':
-                        from .swarms import remaining_seconds
-                        return {'retry_seconds': max(0.01, remaining_seconds(mission))}
+                        return {'retry_seconds': swarm_wake_seconds(mission)}
                     return False
                 async with self.admission(run_id, prepared=True, agent_only=self.agent_runtime.supports(row)) as available:
                     if not available:
@@ -330,8 +335,7 @@ class DurableRunner(RunManager):
                 result = await self.step(run_id, state)
                 mission = await database(self.swarms.get, run_id)
                 if mission and mission['status'] in {'active', 'paused'}:
-                    from .swarms import remaining_seconds
-                    remaining = max(0.01, remaining_seconds(mission))
+                    remaining = swarm_wake_seconds(mission)
                     if mission['status'] == 'active' and state.get('phase') in {'idle', 'warm'} and mission['next_at']:
                         remaining = min(remaining, max(0.01, mission['next_at'] - time.time()))
                     if result is False:
@@ -901,9 +905,10 @@ class DurableRunner(RunManager):
                 if mission['status'] != 'active' or remaining <= 0:
                     await self.swarms.enforce(run_id)
                     return True
-                spec['timeout'] = min(spec.get('timeout') or remaining, remaining)
-                from datetime import datetime
-                spec['deadline_at'] = datetime.fromisoformat(mission['ends_at']).timestamp()
+                # Mission timing is mutable and enforced by the durable host.
+                # Baking it into the native process would kill live agents at
+                # their old deadline even after a human extended the swarm.
+                # Administrator-configured per-response limits still apply.
                 spec['prompt'] += self.swarms.prompt(run_id)
             # Each piece gets its own immutable input and launch marker.
             spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
