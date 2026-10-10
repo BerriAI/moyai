@@ -421,7 +421,9 @@ async function openRun(id,hash='#run='+id,submission=null){
   const cachedTitle=sessionRows(state.runs).find(run=>run.id===id);
   setView('chat',cachedTitle?sessionTitle(cachedTitle):'Loading conversation');
   const path=`/api/runs/${id}?activity=summary`;
-  const cached=(!state.configReady||state.configLoaded)&&!state.configError?state.navigationCache?.get(path,60000):null;
+  // A recent same-tab snapshot can paint immediately while the mandatory read
+  // checks for new messages. Keep the preview bounded independently of reuse.
+  const cached=(!state.configReady||state.configLoaded)&&!state.configError?state.navigationCache?.get(path,5*60*1000):null;
   const preview=!!cached?.chat_enabled;
   if(preview){
     if(cachedTitle)cached.display_title=cachedTitle.display_title;
@@ -703,7 +705,6 @@ function updateChat(run,initial=false){
     }).join('');
     box.messageTemplates=templates;
     MoyaiRegions.sync(box, `<div class="conversation-inner" data-region-key="transcript">${messages}<div id="credential-requests" data-region-key="credentials" data-region-preserve></div></div>`);
-    MoyaiActivity.sync(box,run,{markdown:renderMarkdown,copy:copyText,loadActivity});
     box.querySelectorAll('[data-attachment]').forEach(button=>button.onclick=()=>showAttachment(run.messages.flatMap(message=>message.attachments||[]).find(file=>file.id===button.dataset.attachment)));
     box.querySelectorAll('.copy-message').forEach(b=>b.onclick=()=>copyText(run.messages.find(m=>String(m.id)===b.dataset.message).content,b));
     box.querySelectorAll('.feedback-message:not([data-feedback-bound])').forEach(button=>{

@@ -193,6 +193,28 @@ class ArtifactStore:
             'SELECT name FROM artifact_objects WHERE substr(name,1,?)=?', (len(prefix), prefix)))
         return [info for name in sorted(names) if (info := self.info(name, conn)) is not None]
 
+    def available_names(self, names: list[str], conn=None) -> set[str]:
+        """Check a batch without fetching objects or opening one query per file."""
+        for name in names:
+            self.validate_name(name)
+        if not names:
+            return set()
+        if conn is None:
+            with self.store.connect() as current:
+                return self.available_names(names, current)
+        available = set()
+        for offset in range(0, len(names), 400):
+            batch = names[offset:offset + 400]
+            available.update(row['name'] for row in conn.execute(
+                'SELECT name FROM artifact_objects WHERE name IN (' + ','.join('?' for _ in batch) + ')', batch))
+        for name in set(names) - available:
+            try:
+                if stat.S_ISREG(self.path(name).stat(follow_symlinks=False).st_mode):
+                    available.add(name)
+            except FileNotFoundError:
+                pass
+        return available
+
     def save(self, name: str, raw: bytes, *, immutable: bool = False,
              budget: tuple[str, int] | None = None) -> bool:
         self.validate_name(name)
