@@ -761,6 +761,7 @@ async def test_stop_during_prepare_is_not_overwritten_and_rollback_refuses_activ
         started.set()
         await release.wait()
     manager.prepare_context = prepare
+    await drive(manager, run_id, phase='provision')
     task = asyncio.create_task(manager.advance(run_id))
     await started.wait()
     with pytest.raises(RuntimeError, match='Drain Temporal'):
@@ -770,7 +771,9 @@ async def test_stop_during_prepare_is_not_overwritten_and_rollback_refuses_activ
     await task
     await drive(manager, run_id)
     assert manager.store.run(run_id)['status'] == 'cancelled'
-    assert not cloud.machines
+    # Cold source reads now overlap acquisition. Stop must settle any acquired
+    # machine without ever launching the agent or overwriting cancellation.
+    assert not cloud.launches and all(not machine.alive for machine in cloud.machines)
 
 
 def test_supervisor_launch_marker_prevents_second_execution_after_finished_or_abandoned(tmp_path):
