@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     moyai_database_url: str = Field(default='', repr=False)
     moyai_database_initialize: bool = False
     moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
+    moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
+    moyai_runtime_role: Literal['standalone', 'coordinator', 'worker'] = 'standalone'
+    temporal_worker_activities: int = Field(default=120, ge=1, le=10000)
+    temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000)
+    temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000)
+    temporal_dispatch_batch_size: int = Field(default=200, ge=1, le=10000)
 
     @model_validator(mode='after')
     def database_backend(self):
@@ -39,6 +45,11 @@ class Settings(BaseSettings):
                 raise ValueError('MOYAI_DATABASE_URL must be a Postgres connection URL.')
             if self.checkpoint_dir:
                 raise ValueError('SQLite CHECKPOINT_DIR cannot be used with Postgres; use database backups and retain durable file storage.')
+        if self.moyai_runtime_role != 'standalone':
+            if not self.moyai_database_url or not self.temporal_enabled:
+                raise ValueError('Distributed roles require PostgreSQL and Temporal.')
+            if not self.object_storage_bucket or not self.session_secret or not self.encryption_key:
+                raise ValueError('Distributed roles require shared object storage and explicit SESSION_SECRET and ENCRYPTION_KEY.')
         return self
 
     attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
@@ -187,11 +198,11 @@ class Settings(BaseSettings):
 
     auto_prepare_repositories: bool = True
     hermes_revision: str = "7968c72a3cb80beaae51948378944dd6e3423b96"
-    max_concurrent_runs: int = Field(default=100, ge=1, le=100)
-    max_pending_runs: int = Field(default=1000, ge=100, le=5000)
+    max_concurrent_runs: int = Field(default=100, ge=1)
+    max_pending_runs: int = Field(default=1000, ge=100)
     max_parallel_agents: int = Field(default=100, ge=1, le=100)
     # Bound response buffers on the web worker independently of sandbox count.
-    max_concurrent_model_requests: int = Field(default=8, ge=1, le=100)
+    max_concurrent_model_requests: int = Field(default=8, ge=1)
     # Zero means no overall response deadline or iteration cap.
     run_timeout_seconds: int = Field(default=0, ge=0, le=82800)
     snapshot_timeout_seconds: int = Field(default=180, ge=10, le=900)

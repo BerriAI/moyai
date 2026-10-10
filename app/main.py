@@ -162,8 +162,14 @@ def create_app(settings: Settings | None = None):
     store = Store(settings.data_dir, default_model=settings.resolve_model(), auto_link_identities=settings.slack_identity_linking_enabled,
                   max_pending_runs=settings.max_pending_runs, object_storage=ObjectStorage(settings),
                   database_url=settings.moyai_database_url, database_schema=settings.moyai_database_schema,
-                  database_initialize=settings.moyai_database_initialize, application_instance=True)
+                  database_initialize=settings.moyai_database_initialize, application_instance=True,
+                  database_pool_size=settings.moyai_database_pool_size, runtime_role=settings.moyai_runtime_role)
     try:
+        if settings.moyai_runtime_role != 'standalone':
+            from .runtime_coordination import require_shared_artifacts
+            require_shared_artifacts(store)
+        if store.database:
+            store.database.configure_runtime(settings)
         return _create_app(settings, store)
     except BaseException:
         store.close()
@@ -230,6 +236,19 @@ def _create_app(settings, store):
     @asynccontextmanager
     async def lifespan(app):
         try:
+            if settings.moyai_runtime_role == 'worker':
+                # Workers consume Temporal work only. They must not interrupt
+                # gateway streams or take over singleton background recovery.
+                await manager.recover()
+                try:
+                    yield
+                finally:
+                    await manager.shutdown()
+                    await manager.modal_clients.close()
+                    await session_pull_requests.close()
+                    await computer.close()
+                    await tracing.close()
+                return
             # Close the previous process's attempts before session recovery can
             # dispatch fresh inference; accounting recovery preserves this outcome.
             store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
@@ -278,6 +297,9 @@ def _create_app(settings, store):
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
     app = FastAPI(title="Moyai", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None,
                   dependencies=[Depends(session_lifecycle.require_live_api)])
+    if settings.moyai_runtime_role == 'worker':
+        from .runtime_coordination import WorkerRoleMiddleware
+        app.add_middleware(WorkerRoleMiddleware)
     app.state.session_lifecycle = session_lifecycle
     app.state.session_pull_requests = session_pull_requests
     app.include_router(session_lifecycle.routes())
@@ -302,6 +324,7 @@ def _create_app(settings, store):
     app.include_router(memory.routes())
     app.state.memory = memory
     app.state.memory_review = memory_review
+    app.state.model_slots = model_slots
     session_folders = SessionFolders(store, security, checkpoints)
     app.state.session_folders = session_folders
     app.include_router(session_folders.routes())
@@ -385,10 +408,13 @@ def _create_app(settings, store):
 
     @app.get("/health")
     async def health():
+        if settings.moyai_runtime_role == 'worker' and not manager.ready.is_set():
+            raise HTTPException(503, 'Worker is connecting to Temporal.')
         if store.database:
             from .database import DatabaseError
             try:
-                store.rows('SELECT 1')
+                from .db import database
+                await database(store.rows, 'SELECT 1')
             except DatabaseError:
                 raise HTTPException(503, 'Database is unavailable.') from None
         return {"status": "ok"}
@@ -491,6 +517,13 @@ def _create_app(settings, store):
         security.require(request, admin=True)
         from .pr_analytics import report
         return report(session_pull_requests, start, end)
+
+    @app.get('/api/admin/capacity')
+    async def capacity(request: Request):
+        security.require(request, admin=True)
+        from .capacity import snapshot
+        from .db import database
+        return {**await database(snapshot, store, settings), 'model': model_slots.snapshot()}
 
     @app.get("/api/organization")
     async def organization(request: Request):
@@ -1148,6 +1181,7 @@ def _create_app(settings, store):
         # would retain large request bodies and could expire sealed envelopes.
         # The sandbox retries only this explicit, unbilled admission response.
         if model_slots.locked():
+            model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
         prepared = await prepare_model(run_id, request)

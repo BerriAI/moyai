@@ -1,5 +1,6 @@
 """One model concurrency limit, with reclaimable tool-free maintenance slots."""
 import asyncio
+import time
 from collections.abc import Coroutine
 from typing import TypeVar
 
@@ -9,6 +10,9 @@ Result = TypeVar('Result')
 
 class ModelSlots:
     def __init__(self, capacity: int):
+        self.capacity = capacity
+        self.active = self.waiting = self.queue_responses = 0
+        self.max_wait_ms = 0.0
         self._slots = asyncio.Semaphore(capacity)
         self._maintenance: set[asyncio.Task] = set()
         self._holders: dict[asyncio.Task, int] = {}
@@ -39,12 +43,20 @@ class ModelSlots:
                         raise
                 except Exception:
                     pass  # The maintenance owner receives its own failure.
-        await self._slots.acquire()
+        started = time.monotonic()
+        self.waiting += 1
+        try:
+            await self._slots.acquire()
+        finally:
+            self.waiting -= 1
+        self.active += 1
+        self.max_wait_ms = max(self.max_wait_ms, (time.monotonic() - started) * 1000)
         if current in self._maintenance:
             self._holders[current] = self._holders.get(current, 0) + 1
         return True
 
     def release(self) -> None:
+        self.active -= 1
         current = asyncio.current_task() if self._holders else None
         if current in self._holders:
             remaining = self._holders[current] - 1
@@ -53,6 +65,13 @@ class ModelSlots:
             else:
                 del self._holders[current]
         self._slots.release()
+
+    def record_queue(self) -> None:
+        self.queue_responses += 1
+
+    def snapshot(self) -> dict:
+        return {'capacity': self.capacity, 'active': self.active, 'waiting': self.waiting,
+                'queue_responses': self.queue_responses, 'max_wait_ms': round(self.max_wait_ms, 2)}
 
     async def __aenter__(self) -> None:
         await self.acquire()

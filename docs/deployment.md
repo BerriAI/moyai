@@ -4,9 +4,11 @@
 
 For a new installation, follow [Install Moyai and run your first real task](getting-started.md). Use this reference to operate the service or choose another host. The dated reports below record checks on earlier deployments.
 
-For the opt-in, single-instance PostgreSQL backend and its separate cutover procedure,
+For the opt-in PostgreSQL backend and its separate standalone cutover procedure,
 see [Postgres runtime](postgres-runtime.md). The existing SQLite deployment recipes
 below remain the defaults; keep the attached disk and one instance in this phase.
+After cutover, [execution worker scaling](runtime-scaling.md) describes the
+optional coordinator/worker deployment and shared-file prerequisites.
 
 ## Enable cloud runs
 

@@ -1,11 +1,13 @@
-# PostgreSQL runtime (single instance)
+# PostgreSQL runtime
 
 [Deployment](deployment.md) · [Migration rehearsal](postgres-migration.md)
 
 Moyai can read and write its application database in PostgreSQL 17. SQLite remains
-the default. This is the storage prerequisite for deployment continuity: **keep one
-application instance and the existing persistent file storage.** This change does
-not enable rolling deployments or switch an existing installation automatically.
+the default. For the initial cutover, **keep one application instance and the existing
+persistent file storage.** The default standalone mode does not enable rolling
+deployments or switch an existing installation automatically. After cutover and
+shared file migration, see [execution worker scaling](runtime-scaling.md) for the
+opt-in coordinator/worker topology.
 
 ## Configuration
 
@@ -34,20 +36,22 @@ SQL, parameter values, and credentials.
 ## Transaction and process ownership
 
 Explicit write transactions acquire a schema-scoped PostgreSQL advisory lock
-before reading decisions or changing rows. Individual writes acquire the same
-lock. This preserves SQLite's serialized queue claiming, submission deduplication,
+before reading decisions or changing rows. Other writes acquire that lock unless explicitly scoped to a session; scoped
+writes share the schema lock and exclusively lock that session. This preserves SQLite's serialized queue claiming, submission deduplication,
 revision checks, and permission changes. Writes are never automatically replayed.
 Read projections use repeatable-read transactions so history and its event cursor
 share one snapshot while other requests can continue writing.
 
-Each application instance also holds a separate session advisory lock **before
+In default standalone mode, each application instance also holds a separate
+session advisory lock **before
 schema setup and startup recovery**. A second app cannot start against that schema.
 If the ownership connection dies, further app transactions are refused; `/health`
 returns 503. The process must restart to recover ownership. Standalone `Store`
 objects used by tests and explicit maintenance do not own an application lease;
 they still serialize writes. Do not use them to run another recovery loop or worker.
 
-The pool is limited to eight connections, with a ten-second acquisition/lock
+The pool defaults to eight connections (`MOYAI_DATABASE_POOL_SIZE`, range 1–256),
+with a ten-second acquisition/lock
 budget and a thirty-second statement timeout. There is one additional connection
 for process ownership. Use a direct PostgreSQL connection or a session-preserving
 proxy; transaction-mode poolers cannot preserve the application ownership lock.
@@ -101,5 +105,6 @@ database was created. Test schemas and server processes are cleaned up afterward
 This proves database-backed runtime persistence, not uninterrupted model streams
 or cloud-provider behavior during deployment.
 
-Shared file storage, coordinated background ownership, independently deployable
-services, and overlapping deployment/draining tests remain the next phases.
+The optional [coordinator/worker topology](runtime-scaling.md) provides independent
+execution replicas after shared file migration. Multiple API replicas and
+uninterrupted coordinator deployments remain future work.

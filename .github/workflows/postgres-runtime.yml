@@ -1,10 +1,10 @@
 name: PostgreSQL runtime
 on:
   pull_request:
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
 jobs:
@@ -66,3 +66,32 @@ jobs:
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_scheduling_diagnostics.py tests/test_temporal_integration.py tests/test_active_steering.py tests/test_steering_latency.py tests/test_automation_environments.py tests/test_automation_parity.py tests/test_automation_temporal.py
       - name: Demonstrate responsive scheduling during Postgres writer and pool waits
         run: uv run --frozen --python 3.13 python scripts/scheduling_stall_demo.py
+
+  distributed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: local-runtime-test
+          POSTGRES_DB: moyai_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      MOYAI_TEST_POSTGRES_URL: postgresql://postgres:local-runtime-test@127.0.0.1:5432/moyai_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Verify shared admission, execution fencing and real Temporal workers
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py
+      - name: Verify authenticated capacity observations on both backends
+        run: |
+          uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py
+      - name: Verify 3000 synthetic reservations across four worker processes
+        run: uv run --frozen --python 3.13 python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4

@@ -1,9 +1,10 @@
-"""Temporal client, durable wake outbox, and co-located Python worker."""
+"""Temporal wake delivery and optional independently replicated execution workers."""
 import asyncio
 from datetime import timedelta
 import json
 import logging
 import time
+from uuid import uuid4
 
 from temporalio import activity
 from temporalio.client import Client
@@ -27,6 +28,7 @@ class TemporalRunManager(DurableRunner):
         self.dispatch_task = None
         self.diagnostics_task = None
         self.ready = asyncio.Event()
+        self.identity = 'moyai-' + settings.moyai_runtime_role + '-' + uuid4().hex[:12]
 
     async def cancel(self, run_id):
         state = self.state(run_id)
@@ -46,6 +48,10 @@ class TemporalRunManager(DurableRunner):
     async def recover(self):
         if not (self.settings.encryption_key or self.settings.session_secret):
             raise RuntimeError('Configure a stable ENCRYPTION_KEY before enabling Temporal')
+        if self.settings.moyai_runtime_role == 'worker':
+            self.dispatch_task = asyncio.create_task(self.serve())
+            self.diagnostics_task = asyncio.create_task(watch_event_loop())
+            return
         # A legacy in-flight process has no launch journal to reconnect to.
         # Refuse an unsafe live cutover rather than guessing and replaying it.
         legacy = self.store.rows("""SELECT id FROM runs WHERE
@@ -72,33 +78,39 @@ class TemporalRunManager(DurableRunner):
         return await Client.connect(
             self.settings.temporal_address, namespace=self.settings.temporal_namespace,
             api_key=self.settings.temporal_api_key or None, tls=self.settings.temporal_tls,
-            identity='moyai-render',
+            identity=self.identity,
         )
 
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
                       workflows=[SessionWorkflow, AutomationWorkflow], activities=[self.advance_session, self.launch_automation, self.automation_finished],
-                      max_concurrent_activities=self.settings.max_concurrent_runs + 20,
-                      max_cached_workflows=200,
+                      max_concurrent_activities=self.settings.temporal_worker_activities,
+                      max_cached_workflows=self.settings.temporal_workflow_cache_size,
                       graceful_shutdown_timeout=timedelta(seconds=1))
 
     async def serve(self):
         while not self.closing:
             try:
+                await database(self.store.rows, 'SELECT 1')
                 self.temporal = await self.connect_temporal()
-                self.worker = self.make_worker(self.temporal)
-                self.worker_task = asyncio.create_task(self.worker.run())
+                if self.settings.moyai_runtime_role != 'coordinator':
+                    self.worker = self.make_worker(self.temporal)
+                    self.worker_task = asyncio.create_task(self.worker.run())
                 self.ready.set()
                 while not self.closing:
-                    if self.worker_task.done():
+                    if self.worker_task and self.worker_task.done():
                         await self.worker_task
                         raise RuntimeError('Temporal worker stopped')
-                    try:
-                        await self.dispatch()
-                    except Exception as exc:
-                        # One failed wake must not tear down the healthy worker
-                        # and cancel observations for every running sandbox.
-                        log.warning('Temporal wake delivery will retry (%s)', type(exc).__name__)
+                    # A lost database fence must stop activities, including
+                    # when the task queue currently has no work to deliver.
+                    await database(self.store.rows, 'SELECT 1')
+                    if self.settings.moyai_runtime_role != 'worker':
+                        try:
+                            await self.dispatch()
+                        except Exception as exc:
+                            # One failed wake must not tear down a healthy
+                            # worker and detach all sandbox observations.
+                            log.warning('Temporal wake delivery will retry (%s)', type(exc).__name__)
                     await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
@@ -115,7 +127,7 @@ class TemporalRunManager(DurableRunner):
 
     async def dispatch(self):
         started = time.monotonic()
-        slots = asyncio.Semaphore(10)
+        slots = asyncio.Semaphore(self.settings.temporal_dispatch_concurrency)
         async def deliver(row):
             async with slots:
                 delivery_started = time.monotonic()
@@ -126,11 +138,12 @@ class TemporalRunManager(DurableRunner):
                 )
                 await database(self.store.execute,
                     'UPDATE durable_sessions SET delivered=greatest(delivered,?) WHERE run_id=?',
-                    (row['revision'], row['run_id']))
+                    (row['revision'], row['run_id']), write_scope=row['run_id'])
                 record('session_wake_delivered', run_id=row['run_id'], revision=row['revision'],
                        duration_ms=elapsed_ms(delivery_started))
         rows = await database(self.store.rows,
-            'SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY run_id LIMIT 200')
+            'SELECT run_id,revision FROM durable_sessions WHERE revision>delivered ORDER BY run_id LIMIT ?',
+            (self.settings.temporal_dispatch_batch_size,))
         results = await asyncio.gather(*(deliver(row) for row in rows), return_exceptions=True)
         if rows:
             record('session_wake_batch', count=len(rows), failed=sum(isinstance(r, BaseException) for r in results),
@@ -196,6 +209,7 @@ class TemporalRunManager(DurableRunner):
 
     async def shutdown(self):
         self.closing = True
+        self.ready.clear()
         if self.diagnostics_task:
             self.diagnostics_task.cancel()
             await asyncio.gather(self.diagnostics_task, return_exceptions=True)

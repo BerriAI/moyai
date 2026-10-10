@@ -1,9 +1,10 @@
 """Idempotent session steps. The database owns data; Temporal owns scheduling/retries.
 
-Supported topology is one Render instance/one worker on the same disk. Moving
-workers to another service requires shared storage first, not a second SQLite.
+Standalone mode retains one application process. Distributed mode uses one
+coordinator and replicated workers with PostgreSQL leases and shared objects.
 """
 import asyncio
+from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
@@ -33,7 +34,9 @@ class DurableRunner(RunManager):
     def __init__(self, store, settings):
         super().__init__(store, settings)
         self.locks = {}
-        self.admission_lock = asyncio.Lock()
+        from .runtime_coordination import AdmissionLock
+        self.coordinated_database = store.database if settings.moyai_runtime_role != 'standalone' else None
+        self.admission_lock = AdmissionLock(self.coordinated_database)
         self.occupied_session = POSTGRES_OCCUPIED_SESSION if store.database else OCCUPIED_SESSION
         store.execute("""CREATE TABLE IF NOT EXISTS durable_sessions (
             run_id TEXT PRIMARY KEY REFERENCES runs(id), state TEXT NOT NULL DEFAULT '{}',
@@ -46,7 +49,21 @@ class DurableRunner(RunManager):
         return json.loads(rows[0]['state']) if rows else {}
 
     def save(self, run_id, state):
-        self.store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id))
+        self.store.execute('UPDATE durable_sessions SET state=? WHERE run_id=?', (json.dumps(state), run_id), write_scope=run_id)
+
+    @asynccontextmanager
+    async def session_guard(self, run_id, *, wait=True):
+        lock = self.locks.setdefault(run_id, asyncio.Lock())
+        if not wait and lock.locked():
+            yield False
+            return
+        async with lock:
+            if self.coordinated_database:
+                from .runtime_coordination import lease
+                async with lease(self.coordinated_database, 'session:' + run_id, wait=wait) as acquired:
+                    yield acquired
+            else:
+                yield True
 
     def submit_in(self, conn, run):
         if not run.get('deleted_at'):
@@ -62,7 +79,7 @@ class DurableRunner(RunManager):
         # Temporal owns active turns, answers and warm/computer cleanup. Only
         # an idle journal has no owner left to settle orphaned input rows.
         while True:
-            async with self.locks.setdefault(run_id, asyncio.Lock()):
+            async with self.session_guard(run_id):
                 if self.state(run_id).get('phase', 'idle') == 'idle':
                     await super().cleanup(self.store.run(run_id), run_id)
                     return
@@ -76,8 +93,11 @@ class DurableRunner(RunManager):
         fields = {'status': status}
         if token_hash is not None:
             fields['token_hash'] = token_hash
-        self.store.update_run(run_id, **fields)
-        return True
+        from .db import now
+        fields['updated_at'] = now()
+        return bool(self.store.execute('UPDATE runs SET ' + ','.join(key + '=?' for key in fields) +
+            " WHERE id=? AND status!='stopping' AND deletion_requested_at='' AND deleted_at=''",
+            (*fields.values(), run_id), write_scope=run_id))
 
     def is_active(self, run_id):
         row = self.store.run(run_id)
@@ -141,7 +161,7 @@ class DurableRunner(RunManager):
                 json.loads(state['state']) if state else {}, bool(pending))
 
     async def wake_computer(self, run_id):
-        async with self.locks.setdefault(run_id, asyncio.Lock()):
+        async with self.session_guard(run_id):
             policy = self.computer_state(run_id)
             if policy['waking']:
                 return  # A retry observes the already persisted wake operation.
@@ -206,7 +226,7 @@ class DurableRunner(RunManager):
             return True
 
     async def advance(self, run_id):
-        async with self.locks.setdefault(run_id, asyncio.Lock()):
+        async with self.session_guard(run_id):
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 self.credentials.reconcile_resolutions(run_id)
             row = self.store.run(run_id)
@@ -376,7 +396,12 @@ class DurableRunner(RunManager):
             lock = self.locks.setdefault(other, asyncio.Lock())
             if other == run_id or lock.locked() or state.get('phase') not in {'warm', 'warm_cleanup'}:
                 continue
-            async with lock:
+            async with self.session_guard(other, wait=False) as acquired:
+                if not acquired:
+                    continue
+                state = self.state(other)
+                if state.get('phase') not in {'warm', 'warm_cleanup'}:
+                    continue
                 if self.store.has_queued_messages(other):
                     continue
                 await self.release_warm(other, state, 'capacity needed by another session')

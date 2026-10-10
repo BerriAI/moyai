@@ -23,7 +23,8 @@ def review_app(tmp_path):
     app = create_app(Settings(_env_file=None, **values))
     for user in ('alice', 'bob'):
         app.state.store.identity({'method': 'google', 'identity': {'sub': user, 'email': user+'@berri.ai'}})
-    return app
+    yield app
+    app.state.store.close()
 
 
 def turn(app, text='For benchmark reports, I prefer p95 latency and error rate.', *, actor='google:alice',
@@ -84,12 +85,16 @@ async def test_finished_turn_is_captured_without_agent_save_and_recalled_after_r
     billed = app.state.store.rows('SELECT * FROM model_requests')[0]
     assert (billed['message_id'], billed['user_id'], billed['status'], billed['total_tokens']) == (message_id, 'google:alice', 'completed', 130)
     assert billed['cost'] == '0.001'
+    app.state.store.close()  # A restart releases the previous process fence.
     restarted = create_app(app.state.settings)
-    new = restarted.state.store.create_run('Prepare benchmark report', '', 'modal', [], chat_enabled=True, user_id='google:alice')
-    restarted.state.store.claim_message(new['id'])
-    new = restarted.state.store.run(new['id'])
-    assert restarted.state.memory.search(new, 'google:alice', 'benchmark')['loaded'] == 1
-    assert 'p95' in restarted.state.memory.context(new)
+    try:
+        new = restarted.state.store.create_run('Prepare benchmark report', '', 'modal', [], chat_enabled=True, user_id='google:alice')
+        restarted.state.store.claim_message(new['id'])
+        new = restarted.state.store.run(new['id'])
+        assert restarted.state.memory.search(new, 'google:alice', 'benchmark')['loaded'] == 1
+        assert 'p95' in restarted.state.memory.context(new)
+    finally:
+        restarted.state.store.close()
 
 
 async def test_bounded_backfill_merges_corrections_without_duplicate_notes(review_app):

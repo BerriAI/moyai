@@ -71,7 +71,7 @@ class Store:
                              'created_at', 'updated_at', 'active_message_id',
                              'deletion_requested_at', 'deleted_at', 'pending_result')
 
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False):
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone'):
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
@@ -80,7 +80,8 @@ class Store:
         self.memory_review = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
-        self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize, application_instance=application_instance) if database_url else None
+        self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
+            application_instance=application_instance, pool_size=database_pool_size, runtime_role=runtime_role) if database_url else None
         try:
             self._initialize(directory, default_model, object_storage)
         except BaseException:
@@ -306,11 +307,11 @@ class Store:
         self.slack_mentions = SlackMentions(self)
 
     @contextmanager
-    def connect(self):
+    def connect(self, *, write_scope=None):
         started = time.monotonic()
         try:
             if self.database:
-                with self.database.connect() as conn:
+                with self.database.connect(write_scope=write_scope) as conn:
                     yield conn
                 if conn.changed:
                     self.generation += 1
@@ -342,8 +343,8 @@ class Store:
         with self.connect() as conn:
             return conn.table_names()
 
-    def execute(self, sql, params=()):
-        with self.connect() as conn:
+    def execute(self, sql, params=(), *, write_scope=None):
+        with self.connect(write_scope=write_scope) as conn:
             return conn.execute(sql, params).rowcount
 
     def rows(self, sql, params=(), *, connection=None):
@@ -853,7 +854,7 @@ class Store:
             raise ValueError("Unsupported run update")
         fields["updated_at"] = now()
         keys = ",".join(f"{key}=?" for key in fields)
-        self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id))
+        self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id), write_scope=run_id)
 
     def event(self, run_id: str, kind: str, message: str, data=None):
         data = dict(data) if isinstance(data, dict) else {}
@@ -892,6 +893,7 @@ class Store:
         self.execute(
             "INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,?,?,?,?)",
             (run_id, kind, message[:32000], json.dumps(data or {}), now()),
+            write_scope=run_id,
         )
 
     def events(self, run_id: str, after: int = 0, limit: int = 200, *, connection=None):

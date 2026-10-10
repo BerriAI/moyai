@@ -197,6 +197,7 @@ class HarnessGateway:
         # Internal private work already has a bounded snapshot. Let it queue
         # behind the foreground request that scheduled it, including capacity 1.
         if self.model_slots.locked() and not private:
+            self.model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
         slot_acquired = False

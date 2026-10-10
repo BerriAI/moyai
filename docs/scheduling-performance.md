@@ -13,9 +13,10 @@ polls without pending input do not acquire the backend's writer lock. A positive
 read hint is rechecked in the existing transaction before input is locked.
 An input that arrives after a negative hint is picked up on the next poll.
 
-The PostgreSQL runtime deliberately serializes write decisions with a
-schema-scoped advisory lock. This change preserves that lock and the separate
-application-ownership fence. It uses the existing bounded pool, with each
+The PostgreSQL runtime serializes cross-session write decisions with a
+schema-scoped advisory lock. Explicitly scoped session writes can overlap, as
+described in [execution worker scaling](runtime-scaling.md). The broker changes
+preserve the applicable write locks and process-ownership fence. It uses the existing bounded pool, with each
 database operation opening and closing its connection in the same thread.
 The dispatch queries use the portable `greatest` function and explicit run IDs.
 
@@ -91,7 +92,8 @@ workflow-task scheduled/started/timed-out history, activity scheduling delays,
 event-loop lag and slow database call sites. Use those observations to choose
 the next hot path to move or optimize.
 
-This change does not raise concurrency limits or provision additional CPUs.
+These scheduling fixes do not provision additional CPUs. See [runtime scaling](runtime-scaling.md)
+for configurable capacity budgets and execution replicas.
 Other synchronous database/processing paths still share the event loop. The
 earlier production workflow-task timeout is evidence of a scheduling stall,
 but this local reproduction does not prove the control endpoint caused that

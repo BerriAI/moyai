@@ -1,12 +1,13 @@
 """Database operations whose transaction or schema semantics differ by backend.
 
 Queries use portable SQL and qmark bindings. PostgreSQL never retries a write or
-falls back to a local database. The writer lock preserves today's single-writer
-transactions until job ownership is made safe for multiple application instances.
+falls back to a local database. Cross-session decisions retain the exclusive
+writer lock; explicitly scoped session writes share it and lock only their run.
 """
 from contextlib import contextmanager
 from decimal import Decimal
 from functools import lru_cache
+import hashlib
 import json
 import re
 import sqlite3
@@ -123,16 +124,32 @@ def row_factory(cursor):
 
 
 class PostgresConnection:
-    def __init__(self, raw, schema, owner_pid):
+    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy=''):
         self.raw, self.schema, self.owner_pid = raw, schema, owner_pid
+        self.write_scope, self.policy = write_scope, policy
         self.changed = False
         self.write_locked = False
         self.owner_checked = False
 
     def begin_write(self):
         if not self.write_locked:
-            self.raw.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (self.schema,))
+            if self.write_scope is None:
+                self.raw.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (self.schema,))
+            else:
+                # Independent session writes can proceed together. Legacy or
+                # cross-session transactions retain an exclusive schema lock.
+                self.raw.execute('SELECT pg_advisory_xact_lock_shared(726941, %s::regnamespace::oid::int)', (self.schema,))
+                key = int.from_bytes(hashlib.sha256((self.schema + ':' + self.write_scope).encode()).digest()[:8], 'big', signed=True)
+                self.raw.execute('SELECT pg_advisory_xact_lock(%s::bigint)', (key,))
             self.check_owner()
+            from .runtime_coordination import held_leases
+            for lease in held_leases.get():
+                if lease.schema != self.schema:
+                    raise DatabaseError('Execution ownership belongs to a different database.')
+                if not self.raw.execute('''SELECT 1 FROM runtime_leases
+                    WHERE name=%s AND token=%s AND expires_at>clock_timestamp() FOR SHARE''',
+                    (lease.name, lease.token)).fetchone():
+                    raise DatabaseError('Execution ownership expired. The transaction was not acknowledged.')
             self.write_locked = True
 
     def check_owner(self):
@@ -143,7 +160,9 @@ class PostgresConnection:
             AND pid=%s AND classid=726940 AND objid=%s::regnamespace::oid
             AND objsubid=2 AND granted''', (self.owner_pid, self.schema)).fetchone()
         if not owned:
-            raise DatabaseError('Postgres ownership was lost. Restart the single application instance.')
+            raise DatabaseError('Postgres ownership was lost. Restart this application process.')
+        if self.policy and not self.raw.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=%s', (self.policy,)).fetchone():
+            raise DatabaseError('Runtime configuration changed. Restart workers with the coordinator configuration.')
         self.owner_checked = True
 
     def begin_read(self):
@@ -207,12 +226,13 @@ class PostgresConnection:
 
 
 class PostgresDatabase:
-    def __init__(self, url, schema, *, initialize=False, application_instance=False):
+    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone'):
         import psycopg
         from psycopg_pool import ConnectionPool
 
         identifier(schema)
         self.schema = schema
+        self.runtime_role, self.policy = runtime_role, ''
         self.pool = None
         try:
             # A session lock prevents a second process from running global
@@ -227,12 +247,20 @@ class PostgresDatabase:
             if (not tables and not initialize) or (tables and 'runs' not in tables):
                 raise DatabaseError('Postgres schema is not an initialized Moyai database. Import a verified copy; empty initialization requires MOYAI_DATABASE_INITIALIZE=true.')
             if application_instance:
-                locked = self.owner.execute('SELECT pg_try_advisory_lock(726940, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]
+                function = 'pg_try_advisory_lock' if runtime_role == 'standalone' else 'pg_try_advisory_lock_shared'
+                locked = self.owner.execute(f'SELECT {function}(726940, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]
                 if not locked:
                     raise DatabaseError('Another Moyai instance owns this Postgres schema. Keep a single application instance.')
+                if runtime_role == 'coordinator' and not self.owner.execute(
+                        'SELECT pg_try_advisory_lock(726943, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]:
+                    raise DatabaseError('Another coordinator owns this Postgres schema.')
             with self.owner.transaction():
                 self.owner.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (schema,))
                 self.owner.execute(f'SET LOCAL search_path TO {identifier(schema)}, pg_catalog')
+                self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_leases (
+                    name TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)''')
+                self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_policy (
+                    id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL)''')
                 self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
                     LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
                 self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
@@ -252,7 +280,7 @@ class PostgresDatabase:
                 conn.execute("SET statement_timeout = '30s'")
                 conn.commit()
 
-            self.pool = ConnectionPool(url, min_size=1, max_size=8, timeout=10,
+            self.pool = ConnectionPool(url, min_size=1, max_size=pool_size, timeout=10,
                                        kwargs={'connect_timeout': 10, 'cursor_factory': psycopg.ClientCursor,
                                                'row_factory': row_factory},
                                        configure=configure, open=False)
@@ -264,20 +292,54 @@ class PostgresDatabase:
             raise DatabaseError('Postgres initialization failed. Check database availability and configuration.') from None
 
     @contextmanager
-    def connect(self):
+    def connect(self, *, write_scope=None):
         import psycopg
 
         try:
             # Failure of the ownership session fences all further application
             # operations; never reconnect it behind a running recovery loop.
             if self.owner_pid is not None and (self.owner.closed or self.owner.broken):
-                raise DatabaseError('Postgres ownership connection was lost. Restart the single application instance.')
+                raise DatabaseError('Postgres ownership connection was lost. Restart this application process.')
             with self.pool.connection() as raw:
-                yield PostgresConnection(raw, self.schema, self.owner_pid)
+                yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy)
         except psycopg.IntegrityError:
             raise IntegrityError('Database constraint rejected the change.') from None
         except psycopg.Error:
             raise DatabaseError('Postgres operation failed; the transaction was not acknowledged.') from None
+
+    def configure_runtime(self, settings):
+        if self.runtime_role == 'standalone':
+            return
+        # Store only a fingerprint. Different signing keys, storage destinations,
+        # task queues or workspace limits must never silently form one cluster.
+        names = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
+                 'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
+                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha')
+        policy = hashlib.sha256(json.dumps({name: getattr(settings, name) for name in names}, sort_keys=True).encode()).hexdigest()
+        with self.connect() as conn:
+            if self.runtime_role == 'coordinator':
+                conn.execute('INSERT INTO runtime_policy VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint', (policy,))
+            elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
+                raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
+        self.policy = policy
+
+    def acquire_lease(self, name, token, ttl):
+        with self.connect() as conn:
+            conn.check_owner()
+            return bool(conn.raw.execute('''INSERT INTO runtime_leases VALUES(%s,%s,clock_timestamp()+%s*interval '1 second')
+                ON CONFLICT(name) DO UPDATE SET token=excluded.token,expires_at=clock_timestamp()+%s*interval '1 second'
+                WHERE runtime_leases.expires_at<=clock_timestamp() RETURNING token''', (name, token, ttl, ttl)).fetchone())
+
+    def renew_lease(self, name, token, ttl):
+        with self.connect() as conn:
+            conn.check_owner()
+            return bool(conn.raw.execute('''UPDATE runtime_leases SET expires_at=clock_timestamp()+%s*interval '1 second'
+                WHERE name=%s AND token=%s AND expires_at>clock_timestamp() RETURNING token''', (ttl, name, token)).fetchone())
+
+    def release_lease(self, name, token):
+        with self.connect() as conn:
+            conn.check_owner()
+            conn.raw.execute('DELETE FROM runtime_leases WHERE name=%s AND token=%s', (name, token))
 
     def close(self):
         if self.pool is not None:
