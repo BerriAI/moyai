@@ -410,6 +410,10 @@ async function inspectMenus(page, width) {
       return [...range.getClientRects()].some(rect => rect.width && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1));
     }));
     assert.equal(overflow, false, 'Long option text wraps within the menu');
+    // A visible portal can precede Radix's initial focus effect. Send End only
+    // after an option owns focus, so keyboard navigation starts in the menu.
+    await page.waitForFunction(el => el.contains(document.activeElement) &&
+      document.activeElement?.getAttribute('role') === 'option', await menu.elementHandle());
     await page.keyboard.press('End');
     const last = menu.locator('[role=option]:not([aria-disabled=true])').last();
     await page.waitForFunction(el => el === document.activeElement, await last.elementHandle());
