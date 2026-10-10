@@ -592,6 +592,7 @@ class SlackChat:
         row = await self.claim_delivery(media=media)
         if row is None:
             return
+        delivered = None
         try:
             # Persist before external side effects. Ambiguous sends are
             # marked uncertain and never replayed automatically.
@@ -614,7 +615,6 @@ class SlackChat:
                 source = await database(self.owner.channel.source_for_run, row['run_id'], {**data, 'kind': row['kind']})
                 if data.get('credential_request_id'):
                     sent_ts, delivered = await self.owner.channel.credential_card(source, row['id'])
-                    await database(self.store.execute, "UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
                 elif data.get('captures'):
                     sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
                 else:
@@ -626,30 +626,44 @@ class SlackChat:
                     else:
                         response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
                     sent_ts = response.metadata['slack_ts']
-            if not json.loads(row['metadata']).get('credential_request_id'):
-                await database(self.store.execute, "UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
-            if row['kind'] != 'reaction':
-                await database(self.activity.posted, row['run_id'])
-            if row['kind'] in {'ack', 'reaction'}:
-                await database(self.store.execute, "UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
         except (Exception, asyncio.CancelledError) as exc:
-            await database(self.store.execute, "UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
-            if row['kind'] in {'ack', 'reaction'}:
-                await database(self.store.execute, "UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
-            await database(self.store.event, row['run_id'], 'status',
-                'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
-                if row['kind'] == 'reaction' else
-                'Slack access card update could not be confirmed. It will be retried in the same message.'
-                if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
-                'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
+            await database(self.record_uncertain_delivery, row)
             if isinstance(exc, asyncio.CancelledError):
                 raise
+        else:
+            # A confirmed send stays confirmed if cancellation arrives while
+            # database() drains its receipt. Keep this outside the send handler
+            # and drain all related bookkeeping in the same operation.
+            await database(self.record_delivery, row, sent_ts, delivered)
         finally:
             try:
                 self.last_post[row['channel']] = time.monotonic()
                 await self.owner.checkpoints.flush()
             finally:
                 self.delivering.discard(row['id'])
+
+    def record_delivery(self, row, sent_ts, delivered):
+        if json.loads(row['metadata']).get('credential_request_id'):
+            self.store.execute("UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
+        else:
+            self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
+        if row['kind'] != 'reaction':
+            self.activity.posted(row['run_id'])
+        if row['kind'] in {'ack', 'reaction'}:
+            self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
+
+    def record_uncertain_delivery(self, row):
+        # One drained operation also preserves the acknowledgment and user
+        # notice when shutdown interrupts recording an ambiguous send.
+        self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
+        if row['kind'] in {'ack', 'reaction'}:
+            self.store.execute("UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
+        self.store.event(row['run_id'], 'status',
+            'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
+            if row['kind'] == 'reaction' else
+            'Slack access card update could not be confirmed. It will be retried in the same message.'
+            if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
+            'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
 
     def skip_stale_progress(self, row):
         if row['kind'] != 'progress':

@@ -271,6 +271,8 @@ def test_list_paginates_without_exposing_saved_prompts(workspace):
 
 async def test_committed_mutation_recovers_after_lost_checkpoint_ack(workspace, monkeypatch):
     app, client = workspace
+    # Keep unrelated Slack flushes from consuming the injected failure.
+    client.portal.call(app.state.slack.chat.shutdown)
     sign_in(app, client)
     run = active(app)
     args = {'turn_id': run['active_message_id'], 'request_key': 'lost-response', 'definition': definition()}

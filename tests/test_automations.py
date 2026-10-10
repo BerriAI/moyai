@@ -133,6 +133,8 @@ async def test_stale_schedule_and_downtime_do_not_launch_old_work(workspace, mon
 
 async def test_retry_flushes_receipt_after_checkpoint_failure(workspace,monkeypatch):
     app,client=workspace
+    # Keep unrelated Slack flushes from consuming the injected failure.
+    client.portal.call(app.state.slack.chat.shutdown)
     a=create(client)
     service=app.state.automations
     from app.temporal_runtime import TemporalRunManager

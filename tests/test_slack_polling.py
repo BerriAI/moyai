@@ -1,5 +1,6 @@
 """Real Slack polling contention and ownership at the new thread boundaries."""
 import asyncio
+import json
 import threading
 
 import pytest
@@ -85,6 +86,84 @@ def test_shutdown_drains_collection_before_returning(slack_app, monkeypatch, fai
 
     client.portal.call(scenario)
     assert sum(item.get('text', '').startswith('One durable answer.') for item in slack_app[3]) == 1
+
+
+@pytest.mark.parametrize('kind', ['answer', 'ack', 'reaction', 'credential', 'updated_credential'])
+@pytest.mark.parametrize('outcome', ['sent', 'uncertain'])
+def test_cancellation_drains_delivery_receipts_without_changing_outcome(slack_app, monkeypatch, kind, outcome):
+    app, client, run_id = pending_answer(slack_app)
+    chat, store = app.state.slack.chat, app.state.store
+    metadata = {'credential_request_id': 'local-test'} if 'credential' in kind else {}
+    with store.connect() as conn:
+        chat.queue(conn, run_id, 'cancellation-receipt', 'answer' if metadata else kind,
+                   '1790719000.123456' if kind == 'reaction' else 'One durable answer.', metadata)
+    row = store.rows("SELECT * FROM slack_outbox WHERE dedupe_key='cancellation-receipt'")[0]
+    store.execute('INSERT INTO slack_activity(run_id,status,refreshed_at,retry_at) VALUES(?,?,123,456)',
+                  (run_id, 'is working…'))
+    attempts = []
+    original_request = app.state.connectors.request
+
+    async def request(*args, **kwargs):
+        attempts.append(1)
+        if outcome == 'uncertain':
+            raise ConnectionError('Slack response lost')
+        return await original_request(*args, **kwargs)
+
+    async def credential_card(source, outbox_id):
+        attempts.append(1)
+        if outcome == 'uncertain':
+            raise ConnectionError('Slack response lost')
+        if kind == 'updated_credential':
+            await database(store.execute, 'UPDATE slack_outbox SET metadata=? WHERE id=?',
+                           (json.dumps({**metadata, 'revision': 2}), outbox_id))
+        return '1790719999.123456', row['metadata']
+
+    monkeypatch.setattr(app.state.connectors, 'request', request)
+    monkeypatch.setattr(app.state.slack.channel, 'credential_card', credential_card)
+    entered, release = threading.Event(), threading.Event()
+    execute = store.execute
+
+    def blocked_receipt(sql, *args, **kwargs):
+        result = execute(sql, *args, **kwargs)
+        if (sql.startswith('UPDATE slack_outbox SET status=') and 'WHERE id=?' in sql and f"'{outcome}'" in sql
+                and not entered.is_set()):
+            entered.set()
+            assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(store, 'execute', blocked_receipt)
+
+    async def scenario():
+        sender = asyncio.create_task(chat.deliver_one())
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            sender.cancel()
+            await asyncio.sleep(.05)
+            assert not sender.done() and row['id'] in chat.delivering
+        finally:
+            release.set()
+            results = await asyncio.gather(sender, return_exceptions=True)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert not chat.delivering
+        saved = (await database(store.rows, 'SELECT status,slack_ts FROM slack_outbox WHERE id=?', (row['id'],)))[0]
+        expected = 'pending' if outcome == 'sent' and kind == 'updated_credential' else outcome
+        assert saved['status'] == expected
+        if outcome == 'sent':
+            assert saved['slack_ts']
+        if kind in {'ack', 'reaction'}:
+            assert await database(store.rows, 'SELECT reply_status FROM slack_events WHERE run_id=?', (run_id,)) == [
+                {'reply_status': outcome}]
+        notices = await database(store.rows, "SELECT message FROM events WHERE run_id=? AND message LIKE '%could not be confirmed%'", (run_id,))
+        assert len(notices) == (1 if outcome == 'uncertain' else 0)
+        if outcome == 'sent' and kind != 'reaction':
+            assert await database(store.rows, 'SELECT refreshed_at,retry_at FROM slack_activity WHERE run_id=?', (run_id,)) == [
+                {'refreshed_at': 0, 'retry_at': 0}]
+        if expected != 'pending':
+            chat.last_post.clear()
+            await chat.deliver_one()
+            assert len(attempts) == 1  # A later poll cannot replay this delivery.
+
+    client.portal.call(scenario)
 
 
 @pytest.mark.parametrize('cancel', [False, True])

@@ -134,7 +134,8 @@ async def test_missing_idle_machine_replaced_only_before_launch(durable, missing
     assert len(answers(manager, run_id)) == 1
 
 
-async def test_capacity_reclaims_warm_oldest_first_without_overbooking(durable, monkeypatch):
+@pytest.mark.parametrize('concurrent', [False, True])
+async def test_capacity_reclaims_warm_oldest_first_without_overbooking(durable, monkeypatch, concurrent):
     manager, cloud, first = durable
     manager.settings.sandbox_idle_seconds = 300
     manager.settings.max_concurrent_runs = 2
@@ -145,9 +146,14 @@ async def test_capacity_reclaims_warm_oldest_first_without_overbooking(durable, 
     second = new_chat(manager)
     await drive(manager, second, phase='warm')
     third, fourth, fifth = [new_chat(manager, str(i)) for i in range(3)]
-    results = await asyncio.gather(*(manager.advance(i) for i in [third, fourth, fifth]))
+    if not concurrent:
+        await manager.advance(third)
+        assert cloud.terminations == ['sb-0']  # One admission selects the oldest.
+    results = await asyncio.gather(*(manager.advance(i) for i in ([third, fourth, fifth] if concurrent else [fourth, fifth])))
     assert results.count('capacity') == 1
-    assert cloud.terminations == ['sb-0', 'sb-1']
+    # Concurrent cleanup retains each reservation until termination completes;
+    # provider call order depends on which session lease is acquired first.
+    assert sorted(cloud.terminations) == ['sb-0', 'sb-1']
     assert not manager.has_capacity()
     assert len(answers(manager, first)) == len(answers(manager, second)) == 1
 
