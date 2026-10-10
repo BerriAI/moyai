@@ -222,6 +222,8 @@ class SessionLifecycle:
                 for member in family:
                     pending = conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('queued','running','injected') LIMIT 1", (member['id'],)).fetchone()
                     sending = conn.execute("SELECT 1 FROM slack_outbox WHERE run_id=? AND status='sending' LIMIT 1", (member['id'],)).fetchone()
+                    if not sending and 'slack_notifications' in conn.table_names():
+                        sending = conn.execute("SELECT 1 FROM slack_notifications WHERE run_id=? AND status='sending' LIMIT 1", (member['id'],)).fetchone()
                     state = conn.execute('SELECT state FROM durable_sessions WHERE run_id=?', (member['id'],)).fetchone() if durable else None
                     if (member['status'] not in TERMINAL or pending or sending or self.manager.is_active(member['id'])
                             or (state and json.loads(state['state']).get('phase', 'idle') != 'idle')):
@@ -232,6 +234,8 @@ class SessionLifecycle:
                 conn.execute("DELETE FROM native_sessions WHERE run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
                 conn.execute("DELETE FROM browser_sessions WHERE run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
                 conn.execute("UPDATE slack_outbox SET status='skipped' WHERE status IN ('pending','waiting') AND run_id IN (SELECT id FROM runs WHERE id IN (SELECT run_id FROM run_ancestry WHERE ancestor_id=?))", (run_id,))
+                if 'slack_notifications' in conn.table_names():
+                    conn.execute("UPDATE slack_notifications SET status='skipped' WHERE status IN ('pending','preparing') AND run_id=?", (run_id,))
         return {'id': run_id, 'deleted': True}
 
     def routes(self):

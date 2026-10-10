@@ -22,7 +22,8 @@ function applyUserSession(session) {
   state.role = session.role || 'member'; state.identity = session.identity; state.csrf = session.csrf;
   state.authenticated = session.authenticated; state.userId = session.user_id;
   state.preferences = {send_immediately: session.preferences?.send_immediately === true,
-    omit_private_tool_payloads: session.preferences?.omit_private_tool_payloads === true};
+    omit_private_tool_payloads: session.preferences?.omit_private_tool_payloads === true,
+    slack_notifications: session.preferences?.slack_notifications === true};
   restoreSessionScope();
   if(changed){state.navigationCache?.clear();state.navigationCache?.put('/api/session',session);if(typeof commandPalette!=='undefined')commandPalette?.close();++state.runsRefresh;state.runs=[];state.folders=[];renderSidebar();}
   if (session.identity) $('.rail-foot small').title = state.role === 'admin' ? 'Organization admin' : 'Internal user';

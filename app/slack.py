@@ -13,6 +13,7 @@ from .connectors import ConnectorError
 from .agentchat_slack import connect_agentchat
 from .db import now
 from .slack_chat import SlackChat, USER_MENTION
+from .slack_notifications import SlackNotifications
 from .slack_files import SlackFiles, file_ids as slack_file_ids
 from .slack_credentials import SlackCredentials
 from .slack_feedback import SlackFeedback
@@ -50,6 +51,7 @@ class SlackSessions:
         self.session_titles = None
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
+        self.notifications = SlackNotifications(self)
         self.access = SlackCredentials(self)
         self.feedback = SlackFeedback(self, lens_feedback)
         self.agentchat, self.channel = connect_agentchat(self)
@@ -362,8 +364,10 @@ class SlackSessions:
         for row in self.store.rows("SELECT run_id FROM slack_events WHERE reply_status='pending' AND run_id NOT IN (SELECT run_id FROM slack_threads)"):
             self.submit_reply(row["run_id"])
         self.chat.recover()
+        self.notifications.recover()
 
     async def shutdown(self):
+        await self.notifications.shutdown()
         await self.chat.shutdown()
         jobs = list(self.jobs)
         for job in jobs:

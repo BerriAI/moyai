@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from .db import Store, now
+from .db import Store, database, now
 from .connector_errors import ConnectorError
 from .github import GitHub, TOOLS as GITHUB_TOOLS
 
@@ -196,7 +196,7 @@ class Connectors:
 
     async def slack_bot_token(self):
         async with self.locks["slack"]:
-            rows = self.store.rows("SELECT * FROM connections WHERE provider='slack'")
+            rows = await database(self.store.rows, "SELECT * FROM connections WHERE provider='slack'")
             credentials = json.loads(self.security.decrypt(rows[0]["encrypted"])) if rows else {}
             bot = credentials.get("bot", {})
             if not bot.get("access_token"):
@@ -206,7 +206,7 @@ class Connectors:
                     raise ConnectorError("The Slack bot connection expired. Reconnect Slack.")
                 fresh = await self.exchange("slack", refresh_token=bot["refresh_token"])
                 credentials["bot"] = bot = {**bot, **fresh}
-                self.save("slack", credentials, rows[0]["label"])
+                await database(self.save, "slack", credentials, rows[0]["label"])
             return bot["access_token"]
 
     async def request(self, method, url, *, allowed_errors=(), **kwargs):

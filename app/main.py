@@ -235,6 +235,7 @@ def _create_app(settings, store):
     if store.schema_updates:
         store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings, lens_feedback=lens_feedback)
+    user_preferences.notifications = slack.notifications
     from .session_titles import SessionTitles
     session_titles = SessionTitles(store, settings, checkpoints)
     slack.session_titles = session_titles

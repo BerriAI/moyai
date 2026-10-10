@@ -1,17 +1,21 @@
 """Account preferences, resolved from the verified session or active turn author."""
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
+
+from .db import database, now
 
 
 class ChatPreferences(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     send_immediately: bool = False
     omit_private_tool_payloads: bool = False
+    slack_notifications: bool = False
 
 
 class UserPreferences:
     def __init__(self, store, security, checkpoints):
         self.store, self.security, self.checkpoints = store, security, checkpoints
+        self.notifications = None
         if store.schema_updates:
             initialize_schema(store)
 
@@ -43,17 +47,30 @@ class UserPreferences:
             user_id = self.store.identity(self.security.session_info(request))
             changes = body.model_dump(exclude_unset=True)
             if changes:
-                # Only validated field names enter SQL. Updating just supplied fields
-                # keeps independent switches from overwriting each other.
-                columns = ','.join(changes)
-                updates = ','.join(f'{key}=excluded.{key}' for key in changes)
-                self.store.execute(f'''INSERT INTO user_preferences(user_id,{columns})
-                    VALUES(?,{','.join('?' for _ in changes)})
-                    ON CONFLICT(user_id) DO UPDATE SET {updates}''', (user_id, *changes.values()))
+                await database(self.save, user_id, changes)
             await self.checkpoints.flush()
             return self.get(user_id)
 
         return router
+
+    def save(self, user_id, changes):
+        with self.store.connect() as conn:
+            conn.begin_write()
+            user = conn.execute('SELECT kind FROM users WHERE id=?', (user_id,)).fetchone()
+            if changes.get('slack_notifications') and (not user or user['kind'] not in {'google', 'cloudflare', 'slack'}):
+                raise HTTPException(400, 'Sign in with your work account to receive personal Slack notifications.')
+            previous = conn.execute('SELECT slack_notifications FROM user_preferences WHERE user_id=?', (user_id,)).fetchone()
+            # Only validated fields enter SQL; independent switches retain each other's values.
+            columns = ','.join(changes)
+            updates = ','.join(f'{key}=excluded.{key}' for key in changes)
+            conn.execute(f'''INSERT INTO user_preferences(user_id,{columns})
+                VALUES(?,{','.join('?' for _ in changes)})
+                ON CONFLICT(user_id) DO UPDATE SET {updates}''', (user_id, *changes.values()))
+            if changes.get('slack_notifications') and not (previous and previous['slack_notifications']):
+                conn.execute('UPDATE user_preferences SET slack_notifications_since=? WHERE user_id=?', (now(), user_id))
+            if (self.notifications and 'slack_notifications' in changes
+                    and bool(previous and previous['slack_notifications']) != changes['slack_notifications']):
+                self.notifications.preferences_changed_in(conn, user_id, changes['slack_notifications'])
 
 
 def initialize_schema(store):
@@ -65,3 +82,8 @@ def initialize_schema(store):
         if 'omit_private_tool_payloads' not in conn.column_names('user_preferences'):
             conn.execute('''ALTER TABLE user_preferences ADD COLUMN omit_private_tool_payloads
                 INTEGER NOT NULL DEFAULT 0 CHECK(omit_private_tool_payloads IN (0,1))''')
+        if 'slack_notifications' not in conn.column_names('user_preferences'):
+            conn.execute('''ALTER TABLE user_preferences ADD COLUMN slack_notifications
+                INTEGER NOT NULL DEFAULT 0 CHECK(slack_notifications IN (0,1))''')
+        if 'slack_notifications_since' not in conn.column_names('user_preferences'):
+            conn.execute("ALTER TABLE user_preferences ADD COLUMN slack_notifications_since TEXT NOT NULL DEFAULT ''")

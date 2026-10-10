@@ -5,6 +5,37 @@
 > This guide retains the detailed reference material from the original README.
 > Dated acceptance reports describe past checks, not a current deployment or test result.
 
+## Personal session notifications
+
+In **Settings → Preferences**, turn on **Slack session notifications** to receive
+DMs about sessions you own, including sessions started on the web. It is off by
+default and is saved separately for each person. Turning it on applies to future
+responses and requests; it does not replay existing completed sessions.
+
+Alerts show the session title and an **Open session** button when a reply is
+ready, approval or access is needed, or execution fails or is interrupted.
+Ordinary questions from the agent are finished replies and use **Response ready**;
+Moyai does not infer a separate “waiting for your answer” state from prose.
+Child-agent approval/access requests alert the root session owner and open the
+child's session. Child-agent completions do not generate separate DMs.
+
+The recipient is the verified **session owner**, even when somebody else sends
+a follow-up. Web owners use the existing verified work-email-to-Slack resolution;
+shared-password/local accounts cannot opt into personal notifications. The bot
+needs its existing `chat:write`, `im:write`, `users:read` and `users:read.email`
+permissions, identity linking for web owners, and the owner must be included in
+`SLACK_SESSION_USERS`. No app scopes or live Slack settings are changed by this
+feature. Existing thread replies continue as before.
+
+Pausing a thread, disabling Slack/DMs, making the connection read-only, opting
+out, deleting the session, or resolving the request suppresses unsent alerts.
+Each event is durably deduplicated. Preparation failures retry up to three times;
+if a message send has an uncertain outcome, it is not replayed on restart. The
+answer remains available in Moyai. Notification failures never stop agent work.
+
+PostgreSQL deployments using explicit migrations must run the offline schema
+migration before starting this release (schema revision 7).
+
 ## Chat with Moyai in Slack
 
 For “DM me,” the agent uses `slack_send` with `channel="me"`. Moyai resolves the authenticated requester from their Google sign-in and verified Slack account in the installed bot workspace. Scheduled runs resolve their automation owner, and shared-chat follow-ups resolve the current participant. `slack_me` returns this identity when the agent needs the recipient ID explicitly. Neither operation uses the shared Slack connection owner's identity.
@@ -31,7 +62,7 @@ In an already connected Slack thread or DM, the application also delivers at mos
 
 Markdown file links in replies, such as `[dry-run details](/workspace/nightly-preflight/cutover-status.md)`, become Slack-native links to that session's saved file viewer. Inline filenames such as `report.md` also become links; fenced code examples stay unchanged. The viewer opens the latest saved file with a Markdown preview and Download button, and Google sign-in preserves the file destination. Missing or ambiguous references show an explanation and the available files. These links require normal Moyai access and do not upload the document to Slack or change old messages. Run `uv run python scripts/slack_file_links_demo.py` for a local demonstration at `http://127.0.0.1:8798/demo` using synthetic data and no live Slack writes.
 
-Native media uploads require the bot's `files:write` grant. Older Slack installations need a one-time reinstall/reconnect after that scope is approved; cards use the existing `chat:write` grant. This code change does not alter live app permissions. Uploaded copies become visible to the connected Slack conversation's participants, while Moyai originals retain their authenticated access. Web sessions without a Slack binding gain no Slack destination.
+Native media uploads require the bot's `files:write` grant. Older Slack installations need a one-time reinstall/reconnect after that scope is approved; cards use the existing `chat:write` grant. This code change does not alter live app permissions. Uploaded copies become visible to the connected Slack conversation's participants, while Moyai originals retain their authenticated access. Web sessions without a Slack binding do not get a thread or media destination. Personal notification DMs are enabled separately in Settings.
 
 Moyai uses [BerriAI AgentChat](https://github.com/BerriAI/agentchat), pinned to `6018987c22dd8424e4db0b780a2342239d800a61`, for normalized messages, conversation locks, handler dispatch, rich replies, and file uploads. The media capability is introduced in [AgentChat PR #11](https://github.com/BerriAI/agentchat/pull/11). Its stock Slack adapter uses Socket Mode; Moyai keeps its signed HTTP event endpoint. Our public Channel/State adapter preserves the existing signed HTTP webhook, rotating OAuth credentials, SQLite receipts, saved sessions, and durable reply outbox. No Socket Mode app token is required. AgentChat does not grant Slack permissions; an administrator still installs the scopes and event subscriptions below.
 
