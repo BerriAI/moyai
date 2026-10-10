@@ -84,7 +84,7 @@ ask for an extra administrator approval to create it. To continue an existing Mo
 out its current head with github_checkout using its repository_id, number and a fresh directory, then use
 github_update_pull_request for follow-up fixes; use github_comment_pull_request for requested review-bot
 commands and github_pull_request_comments to read feedback. Use a stable request_key for the same publication,
-even across follow-up turns. Never retry an uncertain write automatically. For an external PR without a
+even across follow-up turns. Never retry an uncertain write automatically, except github_create_pull_request: its retry with the same request_key is idempotent; retry it once before reporting a blocker. For an external PR without a
 confirmed workspace publication, use github_request_pull_request_write_access. Only explicit approval by the
 active requester in this chat permits repeated edits/comments to that exact PR. Never use the browser,
 scripts, or app routes to approve your own request. If pending, finish your response and wait for the

@@ -32,6 +32,7 @@ def checkout(tmp_path, monkeypatch, request):
     destination = upstream / git_path.lstrip('/')
     destination.parent.mkdir(parents=True, exist_ok=True)
     git(upstream, 'clone', '--bare', str(source), str(destination))
+    git(destination, 'config', 'http.receivepack', 'true')
     root = tmp_path / 'workspace'
     root.mkdir()
     monkeypatch.setattr(local, 'ROOT', root)
@@ -124,6 +125,73 @@ def test_unsafe_working_tree_changes_never_leave_sandbox(checkout, kind):
         local.collect(str(repo), 'Test PR', 'Body', 'request-123')
 
 
+def test_create_pull_request_pushes_local_commit_without_touching_checkout(checkout):
+    repo, initial, requests, _, server = checkout
+    remote = f'http://127.0.0.1:{server.server_port}'
+    upstream = repo.parent.parent / 'upstream/github/repositories/101.git'
+    base = initial['base_sha']
+    (repo / 'edit.py').write_text('committed = 2\n')
+    git(repo, 'add', 'edit.py'); git(repo, 'commit', '-m', 'Work in progress')
+    (repo / 'delete.py').unlink()
+    (repo / 'new.py').write_text('print("new")\n')
+    (repo / 'new.py').chmod(0o755)
+    (repo / 'blob.bin').write_bytes(b'\x00\xff\x01binary')
+    (repo / 'ignored.txt').write_text('excluded')
+    head = git(repo, 'rev-parse', 'HEAD')
+    status = git(repo, 'status', '--porcelain')
+    branch = 'moyai/abcdefghijk1/0123456789abcdef'
+    calls = []
+
+    def broker(path, body):
+        assert path == '/tools/call' and body['name'] == 'github_create_pull_request'
+        calls.append(body)
+        args = body['arguments']
+        assert 'files' not in args and args['base_sha'] == base
+        if len(calls) == 1:
+            return {'push_required': True, 'branch': branch}
+        pushed = git(upstream, 'rev-parse', 'refs/heads/' + branch)
+        assert pushed == args['commit']
+        return {'repository_id': 101, 'repository': 'BerriAI/litellm', 'number': 100,
+                'commit': pushed, 'branch': branch, 'url': 'https://github.com/BerriAI/litellm/pull/100'}
+
+    result = local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Test PR',
+        'body': 'Verified locally', 'request_key': 'push-test-123'}, broker, remote, 'current-capability')
+    assert len(calls) == 2 and result['number'] == 100 and 'checkout_warning' not in result
+    commit = result['commit']
+    assert git(upstream, 'rev-parse', 'refs/heads/' + branch) == commit
+    assert git(upstream, 'rev-parse', commit + '^') == base
+    assert 'Moyai <moyai@users.noreply.github.com>' in git(upstream, 'log', '-1', '--format=%an <%ae>%n%cn <%ce>', commit)
+    tree = dict(line.split('\t', 1)[::-1] for line in git(upstream, 'ls-tree', '-r', commit).splitlines())
+    assert '100755' in tree['new.py'] and '100644' in tree['edit.py'] and '100644' in tree['blob.bin']
+    assert 'delete.py' not in tree and 'ignored.txt' not in tree
+    assert git(upstream, 'show', commit + ':edit.py') == 'committed = 2'
+    assert local.metadata(repo)['base_sha'] == commit
+    # The user's branch, HEAD, index and working tree are untouched.
+    assert git(repo, 'rev-parse', 'HEAD') == head and git(repo, 'diff', '--cached', '--name-only') == ''
+    assert git(repo, 'status', '--porcelain') == status
+    assert any(p.endswith('/git-receive-pack') for p, _ in requests)
+
+
+@pytest.mark.parametrize('kind', ['workflow', 'symlink'])
+def test_protected_local_changes_are_refused_before_any_push(checkout, kind):
+    repo, _, requests, _, server = checkout
+    calls = []
+
+    def broker(path, body):
+        calls.append(body)
+        return {}
+
+    if kind == 'workflow':
+        (repo / '.github/workflows').mkdir(parents=True)
+        (repo / '.github/workflows/test.yml').write_text('on: push')
+    else:
+        (repo / 'link').symlink_to('edit.py')
+    with pytest.raises(local.GitHubToolError):
+        local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Unsafe change',
+            'body': 'Body', 'request_key': 'unsafe-test-1'}, broker, f'http://127.0.0.1:{server.server_port}', 'current-capability')
+    assert not calls
+
+
 def test_escape_and_existing_nonrepo_refused(checkout):
     repo, _, _, broker, server = checkout
     with pytest.raises(local.GitHubToolError, match='inside'):
@@ -157,6 +225,8 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
     source = repo.parent.parent / 'source'
     upstream = repo.parent.parent / 'upstream/github/repositories/101.git'
     calls = []
+    branch = 'moyai/fixture123/0123456789abcdef'
+    pushed = []
 
     def broker(path, body):
         assert path == '/tools/call'
@@ -165,6 +235,18 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
             return {**initial, 'base_sha': git(source, 'rev-parse', 'HEAD'), 'number': 100,
                     'checkout_ref': 'refs/pull/100/head', 'git_path': '/github/repositories/101.git'}
         calls.append(body)
+        if body['name'] == 'github_create_pull_request':
+            if not pushed:
+                pushed.append(args['commit'])
+                return {'push_required': True, 'branch': branch}
+            commit = git(upstream, 'rev-parse', 'refs/heads/' + branch)
+            assert commit == args['commit'] == pushed[0]
+            git(upstream, 'update-ref', 'refs/pull/100/head', commit)
+            return {'repository_id': 101, 'repository': 'BerriAI/litellm', 'number': 100, 'commit': commit, 'branch': branch,
+                    'url': 'https://github.com/BerriAI/litellm/pull/100'}
+        # Server-side follow-up: apply the files on top of the published commit.
+        git(source, 'fetch', str(upstream), 'refs/heads/' + branch)
+        git(source, 'checkout', '-f', '-B', 'publication', 'FETCH_HEAD')
         for change in args['files']:
             target = source / change['path']
             if change['content'] is None:
@@ -174,8 +256,8 @@ def test_publish_then_revise_real_checkout_without_republishing_unchanged_files(
         git(source, 'add', '.')
         git(source, 'commit', '-m', args['title'])
         commit = git(source, 'rev-parse', 'HEAD')
-        git(source, 'push', str(upstream), 'HEAD:refs/heads/moyai/test', 'HEAD:refs/pull/100/head')
-        return {'repository_id': 101, 'repository': 'BerriAI/litellm', 'number': 100, 'commit': commit, 'branch': 'moyai/test',
+        git(source, 'push', '--force', str(upstream), 'HEAD:refs/heads/' + branch, 'HEAD:refs/pull/100/head')
+        return {'repository_id': 101, 'repository': 'BerriAI/litellm', 'number': 100, 'commit': commit, 'branch': branch,
                 'url': 'https://github.com/BerriAI/litellm/pull/100'}
 
     remote = f'http://127.0.0.1:{server.server_port}'

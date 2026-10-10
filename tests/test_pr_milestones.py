@@ -60,14 +60,17 @@ def test_later_turn_confirmation_announces_in_recovering_turn_once(workspace, mo
     provider = GitHubAPI(github, monkeypatch)
     args = Publish.model_validate(PAYLOAD)
     if source == 'provider_readback':
-        provider.lose = 'pr'
+        monkeypatch.setattr('app.github.RETRY_DELAYS', (0, 0, 0))
 
-        async def unavailable_readback(method, path, **kwargs):
+        async def unavailable_creation(method, path, **kwargs):
             if method == 'GET' and path.endswith('/pulls') and provider.pr:
                 return []
-            return await provider.request(method, path, **kwargs)
+            result = await provider.request(method, path, **kwargs)
+            if method == 'POST' and path.endswith('/pulls'):
+                raise ConnectorError('Lost response')
+            return result
 
-        monkeypatch.setattr(github, 'request', unavailable_readback)
+        monkeypatch.setattr(github, 'request', unavailable_creation)
         with pytest.raises(ConnectorError, match='Publication unconfirmed'):
             asyncio.run(github.publish(store.run(run['id']), args))
         monkeypatch.setattr(github, 'request', provider.request)
@@ -102,4 +105,5 @@ def test_later_turn_confirmation_announces_in_recovering_turn_once(workspace, mo
     store.update_run(run['id'], status='running')
     assert asyncio.run(github.publish(store.run(run['id']), args)) == receipt
     assert [event for event in store.events(run['id']) if event['data'].get('phase') == 'pr_created'] == [milestone]
-    assert len([call for call in provider.calls if call[0] == 'POST' and call[1].endswith('/pulls')]) == 1
+    posts = [call for call in provider.calls if call[0] == 'POST' and call[1].endswith('/pulls')]
+    assert len(posts) == (4 if source == 'provider_readback' else 1)

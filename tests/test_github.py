@@ -61,6 +61,9 @@ class GitHubAPI:
         self.lose = ''
         self.status = 'ahead'
         self.on_call = None
+        self.parents = [{'sha': BASE}]
+        self.compare_files = []
+        self.deleted = False
         monkeypatch.setattr(github, 'request', self.request)
         async def token(*args, **kwargs):
             self.token_repository = github.target(kwargs.get('repository', ''))
@@ -90,9 +93,14 @@ class GitHubAPI:
         if path == prefix + '/git/ref/heads/main':
             return {'object': {'sha': CURRENT}}
         if '/compare/' in path:
-            return {'status': self.status}
+            return {'status': self.status, 'files': self.compare_files}
         if path == prefix + '/git/commits/' + BASE:
             return {'tree': {'sha': TREE}}
+        if method == 'GET' and path == prefix + '/git/commits/' + COMMIT:
+            return {'parents': self.parents}
+        if method == 'DELETE' and '/git/refs/heads/' in path:
+            self.deleted = True
+            return {}
         if method == 'GET' and '/git/trees/' in path:
             return {'tree': self.tree}
         if method == 'POST' and path.endswith('/git/blobs'):
@@ -398,22 +406,28 @@ def test_git_read_only_stream_and_no_header_or_redirect_leak(workspace, monkeypa
         if redirect[0]:
             return httpx.Response(302, headers={'Location': 'https://evil.example'})
         kind = 'advertisement' if request.method == 'GET' else 'result'
-        return httpx.Response(200, headers={'Content-Type': 'application/x-git-upload-pack-' + kind,
+        service = 'receive' if 'receive' in str(request.url) or 'receive' in request.headers.get('content-type', '') else 'upload'
+        return httpx.Response(200, headers={'Content-Type': f'application/x-git-{service}-pack-' + kind,
                                            'X-Upstream-Secret': 'do-not-forward'}, stream=Stream())
     original = httpx.AsyncClient
     monkeypatch.setattr('app.github_git.httpx.AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(upstream), **kwargs))
     base = f'/broker/{run_id}/github.git/'
-    for method, route in [('GET', 'info/refs?service=git-receive-pack'), ('POST', 'git-receive-pack'),
-                          ('POST', 'git-upload-pack?url=evil'), ('GET', 'config'), ('GET', 'info/refs?service=git-upload-pack&x=1')]:
+    for method, route in [('POST', 'git-upload-pack?url=evil'), ('GET', 'config'), ('GET', 'info/refs?service=git-upload-pack&x=1')]:
         assert client.request(method, base + route, headers=headers).status_code == 403
+    # A receive-pack push with no pending publication command is rejected before upstream.
+    assert client.post(base + 'git-receive-pack', headers={**headers, 'Content-Type': 'application/x-git-receive-pack-request'},
+                       content=b'0000').status_code == 403
+    assert client.post(base + 'git-receive-pack', headers={**headers, 'Content-Type': 'application/x-git-upload-pack-request'},
+                       content=b'0000').status_code == 415
     assert not captured
     read = client.get(base + 'info/refs?service=git-upload-pack', headers={**headers, 'X-Arbitrary': 'secret'})
     assert read.content == b'firstsecond'
     assert 'x-upstream-secret' not in read.headers
+    assert client.get(base + 'info/refs?service=git-receive-pack', headers=headers).content == b'firstsecond'
     assert client.post(base + 'git-upload-pack', headers={**headers, 'Content-Type': 'application/x-git-upload-pack-request'}, content=b'0000').content == b'firstsecond'
     redirect[0] = True
     assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).status_code == 502
-    assert len(captured) == 3  # No request to the redirect target.
+    assert len(captured) == 4  # No request to the redirect target.
     client.delete('/api/connections/github')
     assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).status_code == 403
     app.state.store.update_run(run_id, token_hash=digest('rotated'))
@@ -508,27 +522,93 @@ def test_specific_git_route_cannot_change_repo_or_allow_push(workspace, monkeypa
         return repository_data(next(n for n,i in REPO_IDS.items() if path == '/repositories/' + str(i)))
     monkeypatch.setattr(github, 'request', metadata)
     async def token(*args, **kwargs):
-        assert not kwargs.get('write')
-        tokens.append(kwargs['repository'])
+        tokens.append((kwargs['repository'], kwargs.get('write')))
         return 'server-only'
     monkeypatch.setattr(github, 'installation_token', token)
     def upstream(request):
         paths.append(request.url.path)
         kind = 'advertisement' if request.method == 'GET' else 'result'
-        return httpx.Response(200, content=b'0000', headers={'Content-Type': 'application/x-git-upload-pack-' + kind})
+        service = 'receive' if 'receive' in str(request.url) else 'upload'
+        return httpx.Response(200, content=b'0000', headers={'Content-Type': f'application/x-git-{service}-pack-' + kind})
     original = httpx.AsyncClient
     monkeypatch.setattr('app.github_git.httpx.AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(upstream), **kwargs))
     for repo in ['BerriAI/litellm', 'BerriAI/moyai']:
         base = f'/broker/{run_id}/github/{repo}.git/'
         assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).content == b'0000'
-        assert paths[-1] == '/' + repo + '.git/info/refs' and tokens[-1] == REPO_IDS[repo]
-        for suffix in ['info/refs?service=git-receive-pack', 'info/refs?service=git-upload-pack&repository=other', 'config']:
+        assert paths[-1] == '/' + repo + '.git/info/refs' and tokens[-1] == (REPO_IDS[repo], False)
+        assert client.get(base + 'info/refs?service=git-receive-pack', headers=headers).content == b'0000'
+        assert tokens[-1] == (REPO_IDS[repo], True)
+        for suffix in ['info/refs?service=git-upload-pack&repository=other', 'config']:
             assert client.get(base + suffix, headers=headers).status_code == 403
-        assert client.post(base + 'git-receive-pack', headers=headers).status_code == 403
-    assert len(paths) == 2
+        # A push without a pending publication command never reaches upstream.
+        assert client.post(base + 'git-receive-pack', headers={**headers, 'Content-Type': 'application/x-git-receive-pack-request'},
+                           content=b'0000').status_code == 403
+    assert len(paths) == 4
     select(app, (101,))
     assert client.get(f'/broker/{run_id}/github/BerriAI/moyai.git/info/refs?service=git-upload-pack', headers=headers).status_code == 403
-    assert len(paths) == 2
+    assert len(paths) == 4
+
+
+def pkt(line):
+    return f'{len(line) + 4:04x}'.encode() + line
+
+
+def push_body(old, new, ref):
+    return pkt(old + b' ' + new + b' ' + ref + b'\0report-status') + b'0000' + b'PACKDATA'
+
+
+def publication_row(store, run_id, branch, commit, result=''):
+    store.execute("""INSERT INTO github_publications
+        (id,run_id,message_id,arguments_hash,branch,commit_sha,result,connection_version,created_at)
+        VALUES(?,?,0,'hash',?,?,?,'version','now')""",
+        (f'pub-{run_id}-{branch.split("/")[-1]}-{bool(result)}', run_id, branch, commit, result))
+
+
+@pytest.mark.parametrize('case', ['pending', 'other_branch', 'other_run', 'delete', 'confirmed', 'mismatched_sha'])
+def test_receive_pack_only_forwards_this_runs_pending_publication(workspace, monkeypatch, case):
+    app, client = workspace
+    run_id, headers = connected(app)
+    github = app.state.connectors.github
+    async def metadata(method, path, **kwargs):
+        return repository_data('BerriAI/litellm')
+    monkeypatch.setattr(github, 'request', metadata)
+    writes = []
+    async def token(*args, **kwargs):
+        writes.append(kwargs.get('write'))
+        return 'server-only'
+    monkeypatch.setattr(github, 'installation_token', token)
+    upstream_calls = []
+    def upstream(request):
+        upstream_calls.append(request)
+        kind = 'advertisement' if request.method == 'GET' else 'result'
+        return httpx.Response(200, content=b'000eunpack ok', headers={'Content-Type': 'application/x-git-receive-pack-' + kind})
+    original = httpx.AsyncClient
+    monkeypatch.setattr('app.github_git.httpx.AsyncClient', lambda **kwargs: original(transport=httpx.MockTransport(upstream), **kwargs))
+    store = app.state.store
+    branch = f'moyai/{run_id[:12]}/0123456789abcdef'
+    pending = b'e' * 40
+    publication_row(store, run_id, branch, pending.decode())
+    publication_row(store, run_id, 'moyai/' + run_id[:12] + '/fedcba9876543210', pending.decode(), result='{"number":1}')
+    publication_row(store, 'another-run', 'moyai/otherrun000/0123456789abcdef', pending.decode())
+    old, new = b'b' * 40, pending
+    ref = b'refs/heads/' + branch.encode()
+    if case == 'other_branch':
+        ref = b'refs/heads/feature'
+    elif case == 'other_run':
+        ref = b'refs/heads/moyai/otherrun000/0123456789abcdef'
+    elif case == 'delete':
+        new = b'0' * 40
+    elif case == 'confirmed':
+        ref = b'refs/heads/moyai/' + run_id[:12].encode() + b'/fedcba9876543210'
+    elif case == 'mismatched_sha':
+        new = b'f' * 40
+    base = f'/broker/{run_id}/github/repositories/101.git/'
+    response = client.post(base + 'git-receive-pack', content=push_body(old, new, ref),
+                           headers={**headers, 'Content-Type': 'application/x-git-receive-pack-request'})
+    if case == 'pending':
+        assert response.status_code == 200 and upstream_calls
+    else:
+        assert response.status_code == 403 and not upstream_calls
 
 
 @pytest.mark.parametrize('invalid', ['', 'owner', 'type', 'permission', 'id', 'signature'])

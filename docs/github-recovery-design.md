@@ -46,3 +46,21 @@ Observability: return original failure plus readback failure and deterministic d
 Tests: positive controls plus mutation against baseline, broker-level 502/timeout/invalid shapes, repeated unresolved retry, revocation and regression suites
 
 No load-bearing query redesign: exact publication primary-key lookup and bounded head/base GitHub lookup unchanged. No performance claim needs a synthetic EXPLAIN benchmark.
+
+## Push-based publication
+
+The create-PR flow no longer ships file contents to the server. The sandbox builds
+a commit on top of the checkout base in a temporary index (never touching the
+user's branch, index or working tree), calls github_create_pull_request with the
+commit SHA, then pushes that commit through the broker Git route to the
+Moyai-owned branch when the server replies push_required. The broker allows
+git-receive-pack only for refs/heads/ rows matching a pending github_publications
+record for the same run and commit, so the push channel can never create
+arbitrary branches or contents.
+
+Retries are safe by construction: GitHub permits exactly one open PR per head/base
+pair and the server re-runs the deterministic branch lookup before every POST, so
+a retry with the same request_key can only ever return the one possible PR.
+Creation attempts loop with backoff (RETRY_DELAYS) until a receipt is confirmed
+or a definite provider rejection (4xx) is returned; only non-definite failures
+remain outcome_uncertain, and those explicitly instruct a same-key retry.

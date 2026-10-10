@@ -139,19 +139,21 @@ class BrokerRelay:
                     authorized = authorized or hmac.compare_digest(self.headers.get('x-api-key',''),token)
                 if not authorized:
                     return self.error(401, 'Invalid cloud session capability.')
-                # MCP Git reads use this relay just like other tool calls. The
-                # destination and repository authorization stay at the broker;
-                # no push, arbitrary URL, path traversal or extra query is allowed.
+                # MCP Git fetch and scoped publication pushes use this relay just
+                # like other tool calls. The destination, repository and pushed
+                # branch authorization stay at the broker; no arbitrary URL, path
+                # traversal or extra query is allowed.
                 git_route = bool(re.fullmatch(r'/github/repositories/[1-9][0-9]*\.git/' +
-                    (r'info/refs\?service=git-upload-pack' if self.command == 'GET' else
-                     r'git-upload-pack' if self.command == 'POST' else r'(?!)'), self.path))
-                tool_read = git_route
+                    (r'info/refs\?service=git-(?:upload|receive)-pack' if self.command == 'GET' else
+                     r'git-(?:upload|receive)-pack' if self.command == 'POST' else r'(?!)'), self.path))
+                git_push = git_route and self.command == 'POST' and self.path.endswith('git-receive-pack')
+                tool_read = git_route and not git_push
                 allowed = {'GET': {'/v1/models', '/tools'}, 'POST': {'/v1/chat/completions', '/v1/messages', '/v1/responses', '/tools/call', '/credentials/materialize'}}
                 if not git_route and not credential_route and self.path not in allowed.get(self.command, set()):
                     return self.error(404, 'Unknown broker route.')
                 try:
                     size = int(self.headers.get('Content-Length', '0'))
-                    limit = 1024 * 1024 if git_route else body_limit(self.path)
+                    limit = (100 * 1024 * 1024 if git_push else 1024 * 1024) if git_route else body_limit(self.path)
                     if size < 0 or size > limit:
                         if (size > body_limit(self.path) and relay.context_recovery
                                 and self.path in {'/v1/chat/completions', '/v1/messages', '/v1/responses'}):
@@ -163,10 +165,11 @@ class BrokerRelay:
                     if git_route:
                         if (self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) > 1
                                 or (self.command == 'GET' and size)
-                                or (self.command == 'POST' and self.headers.get('Content-Type') != 'application/x-git-upload-pack-request')
+                                or (self.command == 'POST' and self.headers.get('Content-Type')
+                                    != 'application/x-git-' + ('receive' if git_push else 'upload') + '-pack-request')
                                 or self.headers.get('Content-Encoding', 'identity') not in {'identity', 'gzip'}
                                 or self.headers.get('Git-Protocol', '') not in {'', 'version=2'}):
-                            return self.error(400, 'Invalid Git read request.')
+                            return self.error(400, 'Invalid Git request.')
                     raw = self.rfile.read(size) if self.command == 'POST' else b''
                     route,method = self.path,self.command
                     if route in MODEL_ROUTES:
@@ -272,7 +275,7 @@ class BrokerRelay:
                             request_id = uuid4().hex
                             request_started = time.monotonic()
                             request = urllib.request.Request(remote.rstrip('/') + route, data=data,
-                                headers={**broker_headers(remote, token), 'Content-Type': 'application/x-git-upload-pack-request' if git_route else CONTENT_TYPE,
+                                headers={**broker_headers(remote, token), 'Content-Type': 'application/x-git-' + ('receive' if git_push else 'upload') + '-pack-request' if git_route else CONTENT_TYPE,
                                          'X-Moyai-Request-ID': request_id,
                                          **({k: self.headers[k] for k in ('Git-Protocol', 'Content-Encoding') if k in self.headers} if git_route else {}),
                                          **{k: self.headers[k] for k in ('anthropic-version', 'anthropic-beta') if k in self.headers}}, method=method)

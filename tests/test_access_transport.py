@@ -219,6 +219,9 @@ def test_real_mcp_git_checkout_and_publication_through_access(
     bare = upstream / 'github/repositories/101.git'
     bare.parent.mkdir(parents=True)
     git(upstream, 'clone', '--bare', str(source), str(bare))
+    git(bare, 'config', 'http.receivepack', 'true')
+    branch = 'moyai/fixture123/0123456789abcdef'
+    pending_push = []
     metadata = {'repository_id': 101, 'repository': 'BerriAI/moyai', 'default_branch': 'main',
                 'base_sha': git(source, 'rev-parse', 'HEAD'), 'git_path': '/github/repositories/101.git'}
     publications = []
@@ -252,16 +255,27 @@ def test_real_mcp_git_checkout_and_publication_through_access(
                     # Simulate server-side publication to a local provider. The
                     # MCP subprocess still performs a real authenticated fetch.
                     assert request['name'] in {'github_create_pull_request', 'github_update_pull_request'}
-                    changes = request['arguments']['files']
-                    publications.append(changes)
-                    for change in changes:
-                        (source / change['path']).write_text(change['content'])
-                    git(source, 'add', '.')
-                    git(source, 'commit', '-m', request['arguments']['title'])
-                    git(source, 'push', str(bare), 'HEAD:refs/heads/moyai/test')
-                    value = {'repository_id': 101, 'repository': 'BerriAI/moyai', 'number': 100,
-                             'branch': 'moyai/test', 'commit': git(source, 'rev-parse', 'HEAD'),
-                             'url': 'https://github.com/BerriAI/moyai/pull/100'}
+                    if request['name'] == 'github_create_pull_request':
+                        if not pending_push:
+                            pending_push.append(request['arguments']['commit'])
+                            value = {'push_required': True, 'branch': branch}
+                        else:
+                            commit = git(bare, 'rev-parse', 'refs/heads/' + branch)
+                            assert commit == request['arguments']['commit'] == pending_push[0]
+                            value = {'repository_id': 101, 'repository': 'BerriAI/moyai', 'number': 100,
+                                     'branch': branch, 'commit': commit,
+                                     'url': 'https://github.com/BerriAI/moyai/pull/100'}
+                    else:
+                        changes = request['arguments']['files']
+                        publications.append(changes)
+                        for change in changes:
+                            (source / change['path']).write_text(change['content'])
+                        git(source, 'add', '.')
+                        git(source, 'commit', '-m', request['arguments']['title'])
+                        git(source, 'push', '--force', str(bare), 'HEAD:refs/heads/' + branch)
+                        value = {'repository_id': 101, 'repository': 'BerriAI/moyai', 'number': 100,
+                                 'branch': branch, 'commit': git(source, 'rev-parse', 'HEAD'),
+                                 'url': 'https://github.com/BerriAI/moyai/pull/100'}
             body = json.dumps(value).encode()
             handler.send_response(200)
             handler.send_header('Content-Type', 'application/json')
@@ -302,7 +316,8 @@ def test_real_mcp_git_checkout_and_publication_through_access(
             result = invoke(name, args)
             assert 'checkout_warning' not in result
             assert json.loads((repo / '.git/moyai.json').read_text())['base_sha'] == result['commit']
-        assert len(publications) == 2 and all(len(files) == 1 for files in publications)
+        assert publications == [[{'path': 'change.txt', 'content': 'after 2\n', 'executable': False}]]
+        git(bare, 'cat-file', '-e', pending_push[0])  # The pushed publication commit lives upstream.
         print('PASS publication and revision: authenticated fetch updates local checkout base')
         config_text = (repo / '.git/config').read_text()
         assert 'test-run' not in config_text and 'test-edge-secret' not in config_text
@@ -320,8 +335,10 @@ def test_real_mcp_git_checkout_and_publication_through_access(
 
 @pytest.mark.parametrize(('method', 'path', 'headers', 'content', 'status'), [
     ('GET', '/github/repositories/101.git/info/refs?service=git-upload-pack', {'Authorization': ''}, b'', 401),
-    ('GET', '/github/repositories/101.git/info/refs?service=git-receive-pack', {}, b'', 404),
-    ('POST', '/github/repositories/101.git/git-receive-pack', {}, b'', 404),
+    ('GET', '/github/repositories/101.git/info/refs?service=git-receive-pack', {}, b'', None),
+    ('POST', '/github/repositories/101.git/git-receive-pack', {}, b'x', 400),
+    ('POST', '/github/repositories/101.git/git-receive-pack', {'Content-Type': 'application/x-git-receive-pack-request'}, b'x', None),
+    ('POST', '/github/repositories/101.git/git-receive-pack', {'Content-Type': 'application/x-git-receive-pack-request'}, None, 413),
     ('GET', '/github/repositories/101.git/config', {}, b'', 404),
     ('GET', '/github/repositories/101.git/info/refs?service=git-upload-pack&extra=1', {}, b'', 404),
     ('GET', '/github/repositories/101.git/info/refs?service=git-upload-pack&service=git-upload-pack', {}, b'', 404),
@@ -335,12 +352,18 @@ def test_real_mcp_git_checkout_and_publication_through_access(
 ])
 def test_git_relay_only_allows_authenticated_read_protocol(access_origin, method, path, headers, content, status):
     remote, calls = access_origin
+    if content is None:
+        content = b'x' * (100 * 1024 * 1024 + 1)
     relay = BrokerRelay(remote, 'test-run').start()
     try:
         response = httpx.request(method, relay.url + path, content=content,
             headers={'Authorization': 'Bearer test-run', 'Content-Type': 'application/x-git-upload-pack-request', **headers})
-        assert response.status_code == status
-        assert not calls
+        if status is None:
+            # Allowed shapes reach the cloud broker, which owns all Git policy.
+            assert response.status_code == 200 and calls
+        else:
+            assert response.status_code == status
+            assert not calls
         assert not relay.uncertain_tool
     finally:
         relay.close()

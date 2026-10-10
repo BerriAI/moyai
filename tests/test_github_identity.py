@@ -211,7 +211,8 @@ def test_numeric_git_route_refreshes_upstream_name_and_is_read_only(identity, mo
     base = f'/broker/{run}/github/repositories/202.git/'
     assert client.get(base + 'info/refs?service=git-upload-pack', headers=headers).content == b'0000'
     assert paths == ['https://github.com/BerriAI/renamed.git/info/refs?service=git-upload-pack']
-    assert client.post(base + 'git-receive-pack', headers=headers).status_code == 403
+    assert client.post(base + 'git-receive-pack', headers=headers).status_code == 415
+    assert paths == ['https://github.com/BerriAI/renamed.git/info/refs?service=git-upload-pack']
     assert client.get(f'/broker/{run}/github/repositories/999.git/info/refs?service=git-upload-pack', headers=headers).status_code == 403
 
 

@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import tempfile
 
 ROOT = Path('/workspace')
 from agent.tools.github_limits import MAX_FILE, MAX_TOTAL
@@ -118,6 +119,56 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
                            + ' Git push is unavailable.'}
 
 
+def protected_path(name):
+    parts = name.split('/')
+    lower = name.lower()
+    return (any(p in {'', '.', '..'} or p.lower() in {'.git', '.ssh', 'codeowners'} or p.lower().startswith('.env') for p in parts)
+            or '\\' in name or any(ord(c) < 32 or ord(c) == 127 for c in name)
+            or lower in {'.github', '.github/workflows', '.github/actions'}
+            or lower.startswith(('.github/workflows/', '.github/actions/')) or lower.endswith(('.pem', '.key')))
+
+
+def publish_commit(directory, title):
+    """Commit working-tree changes on top of the checkout base without touching
+    the user's branch, index or working tree."""
+    target = directory_path(directory)
+    data = metadata(target)
+    handle, index = tempfile.mkstemp(prefix='moyai-index-', dir=target / '.git')
+    os.close(handle)
+    Path(index).unlink()  # read-tree creates it; an empty file is not a valid index.
+    env = {**os.environ, 'GIT_INDEX_FILE': index,
+           'GIT_AUTHOR_NAME': 'Moyai', 'GIT_AUTHOR_EMAIL': 'moyai@users.noreply.github.com',
+           'GIT_COMMITTER_NAME': 'Moyai', 'GIT_COMMITTER_EMAIL': 'moyai@users.noreply.github.com'}
+    try:
+        git(target, 'read-tree', data['base_sha'], env=env)
+        git(target, 'add', '-A', env=env)
+        tree = git(target, 'write-tree', env=env).decode().strip()
+        base_tree = git(target, 'rev-parse', data['base_sha'] + '^{tree}').decode().strip()
+        if tree == base_tree:
+            raise GitHubToolError('There are no changed files to publish.')
+        commit = git(target, 'commit-tree', tree, '-p', data['base_sha'], '-m', title, env=env).decode().strip()
+    finally:
+        Path(index).unlink(missing_ok=True)
+    raw = git(target, 'diff', '--no-ext-diff', '--no-renames', '--raw', '-z', data['base_sha'], commit, '--')
+    entries = raw.split(b'\0')
+    names = []
+    for i in range(0, len(entries) - 1, 2):
+        try:
+            new_mode = entries[i].decode().split()[1]
+            name = entries[i + 1].decode('utf-8')
+        except (IndexError, UnicodeDecodeError):
+            raise GitHubToolError('Only UTF-8 file names can be published.') from None
+        if new_mode in {'120000', '160000'}:
+            raise GitHubToolError('Symlinks and submodules cannot be published.')
+        names.append(name)
+    if len(names) > 300:
+        raise GitHubToolError('A publication must contain at most 300 changed files.')
+    for name in names:
+        if protected_path(name):
+            raise GitHubToolError('Remove credential, workflow or access-control files from the change before publishing.')
+    return data, commit
+
+
 def collect(directory, title, body, request_key):
     target = directory_path(directory)
     data = metadata(target)
@@ -140,12 +191,7 @@ def collect(directory, title, body, request_key):
         raise GitHubToolError('A PR must contain between 1 and 100 changed text files. Split larger changes.')
     files, total = [], 0
     for name in paths:
-        parts = name.split('/')
-        lower = name.lower()
-        if (any(p in {'', '.', '..'} or p.lower() in {'.git', '.ssh', 'codeowners'} or p.lower().startswith('.env') for p in parts)
-                or '\\' in name or any(ord(c) < 32 or ord(c) == 127 for c in name)
-                or lower in {'.github', '.github/workflows', '.github/actions'}
-                or lower.startswith(('.github/workflows/', '.github/actions/')) or lower.endswith(('.pem', '.key'))):
+        if protected_path(name):
             raise GitHubToolError('Remove credential, workflow or access-control files from the change before publishing.')
         path = target / name
         for ancestor in [path, *path.parents]:
@@ -196,7 +242,9 @@ def advertised_tools(tools):
                     'title': {'type': 'string', 'minLength': 3, 'maxLength': 250},
                     'body': {'type': 'string', 'minLength': 1, 'maxLength': 20000},
                     'request_key': {'type': 'string', 'pattern': '^[A-Za-z0-9_-]{8,80}$',
-                                    'description': 'Unique name for this publication. Keep unchanged to recover an uncertain result; never retry writes automatically.'}})
+                                    'description': ('Unique name for this publication. Keep unchanged to resume or retry this same publication; retrying is safe.'
+                                                    if tool['name'] == 'github_create_pull_request' else
+                                                    'Unique name for this publication. Keep unchanged to recover an uncertain result; never retry writes automatically.')}})
                 required = ['title', 'body', 'request_key']
                 if tool['name'] == 'github_update_pull_request':
                     properties.pop('body')
@@ -212,11 +260,35 @@ def call(name, args, broker, remote, token):
         if set(args) - {'directory', 'repository', 'repository_id', 'number'}:
             raise GitHubToolError('Checkout accepts only a directory, repository and optional PR number.')
         return checkout(broker, remote, token, **args)
-    if name in {'github_create_pull_request', 'github_update_pull_request'}:
+    if name == 'github_create_pull_request':
+        target = directory_path(args.get('directory', ''))
+        data, commit = publish_commit(target, args['title'])
+        payload = {**({'repository_id': data['repository_id']} if data.get('repository_id') else {'repository': data['repository']}),
+                   'base_sha': data['base_sha'], 'request_key': args['request_key'],
+                   'title': args['title'], 'body': args.get('body', ''), 'commit': commit}
+        result = broker('/tools/call', {'name': name, 'arguments': payload})
+        if result.get('push_required') and not result.get('error'):
+            branch = result.get('branch', '')
+            if not re.fullmatch(r'moyai/[A-Za-z0-9]{1,12}/[0-9a-f]{16}', branch):
+                raise GitHubToolError('The broker returned an invalid publication branch.')
+            env = git_environment(remote, token)
+            try:
+                git(target, '-c', 'http.postBuffer=524288000', 'push',
+                    remote.rstrip('/') + f"/github/repositories/{data['repository_id']}.git",
+                    commit + ':refs/heads/' + branch, env=env)
+            except GitHubToolError:
+                raise GitHubToolError('Pushing the publication commit to the Moyai branch failed. The same request_key can be retried.') from None
+            result = broker('/tools/call', {'name': name, 'arguments': payload})
+        if result.get('commit') and not result.get('error'):
+            try:
+                sync_publication(target, result, remote, token)
+            except (GitHubToolError, OSError):
+                result = {**result, 'checkout_warning': 'Publication succeeded, but local base synchronization failed. Recover with github_checkout using this PR number in a fresh directory before further edits.'}
+        return result
+    if name == 'github_update_pull_request':
         payload = collect(directory=args.get('directory', ''), title=args['title'], body=args.get('body', ''), request_key=args['request_key'])
-        if name == 'github_update_pull_request':
-            payload.pop('body')
-            payload['number'] = args['number']
+        payload.pop('body')
+        payload['number'] = args['number']
         result = broker('/tools/call', {'name': name, 'arguments': payload})
         if result.get('commit') and not result.get('error'):
             target = directory_path(args.get('directory', ''))

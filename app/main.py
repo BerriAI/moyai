@@ -1277,6 +1277,9 @@ def _create_app(settings, store):
         except Exception as exc:
             message = str(exc) if isinstance(exc, ConnectorError) else f"App operation could not be confirmed ({type(exc).__name__})."
             store.event(run_id, "error", f"{body.name}: {message}")
+            if getattr(exc, 'definite', False):
+                return {"error": message, "outcome_uncertain": False,
+                        "instruction": "GitHub rejected this request; nothing was created. Fix the cause before retrying."}
             return {"error": message, "outcome_uncertain": write, "instruction": "Verify the destination before retrying a write."}
 
     @app.post('/broker/{run_id}/credentials/materialize')

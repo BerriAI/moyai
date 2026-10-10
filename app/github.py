@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from agent.tools.github_limits import MAX_FILE, MAX_TOTAL
 
-from .connector_errors import ConnectorError
+from .connector_errors import ConnectorError, DefiniteConnectorError
 from .db import now
 from .github_repositories import GitHubRepositories
 from .github_write_access import GitHubWriteAccess
@@ -29,12 +29,21 @@ PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'
 MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'read'}
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
+RETRY_DELAYS = (1, 2, 4)
 
 
 class GitHubError(ConnectorError):
-    def __init__(self, message, status_code):
+    def __init__(self, message, status_code, *, rate_limited=False):
         super().__init__(message)
         self.status_code = status_code
+        self.rate_limited = rate_limited
+
+    @property
+    def definite(self):
+        """4xx confirmations mean nothing was created; rate limits can race."""
+        if not 400 <= self.status_code < 500 or self.status_code in {408, 409, 429}:
+            return False
+        return not (self.status_code == 403 and self.rate_limited)
 
 
 def supports_permissions(actual, required=PERMISSIONS):
@@ -174,11 +183,21 @@ class Publish(Repository):
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
     title: str = Field(min_length=3, max_length=250)
     body: str = Field(min_length=1, max_length=20000)
-    files: list[Change] = Field(min_length=1, max_length=100)
+    files: list[Change] | None = Field(default=None, min_length=1, max_length=100)
+    commit: str | None = Field(default=None, pattern='^' + SHA + '$',
+                               description='Local commit built on top of base_sha; the sandbox pushes it to the Moyai branch on request.')
 
     @model_validator(mode='after')
     def bounded_changes(self):
-        return Changes.bounded_changes(self)
+        if self.commit is None:
+            if self.files is None:
+                raise ValueError('Publish files or a commit.')
+            return Changes.bounded_changes(self)
+        if self.files is not None:
+            raise ValueError('Publish either files or a commit, not both.')
+        if not self.repository and self.repository_id is None:
+            raise ValueError('Choose a repository ID before publishing changes.')
+        return self
 
 
 class Update(Changes):
@@ -199,7 +218,7 @@ TOOLS = {
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
     'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, PullRequest, 'Read a pull request and its changed files in the connected repository. Cannot approve, review, merge or enable auto-merge.'),
-    'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_create_pull_request': ('github', True, Publish, 'Publish local changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR, and no file contents are sent to the server: the sandbox pushes its own commit through the authorized Git route. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Retrying with the same request_key and unchanged arguments is safe and idempotent.'),
     'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
     'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
@@ -253,7 +272,27 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 if missing and response.status_code == 404:
                     return None
                 if not 200 <= response.status_code < 300:
-                    raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). Check the installation, repository access and destination before retrying a write.', response.status_code)
+                    detail = ''
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+                    if isinstance(payload, dict):
+                        parts = [payload['message']] if isinstance(payload.get('message'), str) else []
+                        for item in payload.get('errors') or []:
+                            if isinstance(item, dict):
+                                text = item.get('message') or item.get('code') or item.get('field')
+                            else:
+                                text = item
+                            if isinstance(text, str):
+                                parts.append(text)
+                        detail = ' '.join(parts[:4])[:500]
+                    rate_limited = (response.headers.get('x-ratelimit-remaining') == '0'
+                                    or 'rate limit' in detail.lower() or 'secondary rate' in detail.lower())
+                    raise GitHubError(f'GitHub did not confirm the operation ({response.status_code}). '
+                                      + (detail + ' ' if detail else '')
+                                      + 'Check the installation, repository access and destination before retrying a write.',
+                                      response.status_code, rate_limited=rate_limited)
                 return response.json()
         except (httpx.HTTPError, ValueError):
             raise ConnectorError('The GitHub response was not received. Check the destination before retrying a write.') from None
@@ -477,6 +516,14 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             raise ConnectorError('The ruleset update could not be verified exactly. Read its current state before making another change; no automatic retry was sent.')
         return {**self.ruleset_result(target, after), 'changed': True}
 
+    @staticmethod
+    def safe_filename(path):
+        try:
+            Change(path=path)
+        except ValueError:
+            return False
+        return True
+
     def arguments_hash(self, args, target):
         value = args.model_dump()
         value.pop('repository', None)
@@ -582,14 +629,35 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 comparison = await self.request('GET', prefix + '/compare/' + args.base_sha + '...' + repo['base_sha'], token=token, params={'per_page': 1})
                 if comparison.get('status') not in {'ahead', 'identical'}:
                     raise ConnectorError('The checkout base is not on the current default branch. Rebase and prepare a new publication with a new request_key.')
-            commit = await self.create_change_commit(run, args, token, target, version, 'github_create_pull_request')
+            if args.commit is not None:
+                commit = args.commit
+            else:
+                commit = await self.create_change_commit(run, args, token, target, version, 'github_create_pull_request')
             self.store.execute('UPDATE github_publications SET commit_sha=? WHERE id=?', (commit, identity))
-        existing = await self.request('GET', prefix + '/git/ref/heads/' + branch, token=token, missing=True)
-        if existing and existing['object']['sha'] != commit:
-            raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
-        if not existing:
-            self.ensure_publish_allowed(run, version)
-            await self.request('POST', prefix + '/git/refs', token=token, json={'ref': 'refs/heads/' + branch, 'sha': commit})
+        if args.commit is not None:
+            # The sandbox commits locally and pushes the exact object; the server
+            # only validates it before keying the PR on the Moyai branch.
+            created = await self.request('GET', prefix + '/git/commits/' + commit, token=token)
+            if created.get('parents') != [{'sha': args.base_sha}] and [p.get('sha') for p in created.get('parents', [])] != [args.base_sha]:
+                raise DefiniteConnectorError('Publish one commit on top of the checkout base.')
+            existing = await self.request('GET', prefix + '/git/ref/heads/' + branch, token=token, missing=True)
+            if not existing:
+                return {'push_required': True, 'branch': branch}
+            if existing['object']['sha'] != commit:
+                raise DefiniteConnectorError('The Moyai branch has a different commit; use a new request_key.')
+            comparison = await self.request('GET', prefix + '/compare/' + args.base_sha + '...' + commit, token=token)
+            unsafe = next((f['filename'] for f in comparison.get('files', []) if not self.safe_filename(f['filename'])), None)
+            if len(comparison.get('files', [])) > 300 or unsafe:
+                await self.request('DELETE', prefix + '/git/refs/heads/' + branch, token=token, missing=True)
+                raise DefiniteConnectorError('The change touches a protected path and cannot be published.'
+                                             if not unsafe else f'The change touches protected path {unsafe} and cannot be published.')
+        else:
+            existing = await self.request('GET', prefix + '/git/ref/heads/' + branch, token=token, missing=True)
+            if existing and existing['object']['sha'] != commit:
+                raise ConnectorError('The Moyai branch changed externally. It will not be overwritten.')
+            if not existing:
+                self.ensure_publish_allowed(run, version)
+                await self.request('POST', prefix + '/git/refs', token=token, json={'ref': 'refs/heads/' + branch, 'sha': commit})
         def receipt(pr):
             if not isinstance(pr, dict):
                 raise ConnectorError('The PR response is not an object.')
@@ -618,32 +686,36 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 raise ConnectorError('Readback did not return a unique PR list.')
             return receipt(pulls[0]) if pulls else None
 
-        try:
-            result = await lookup()
+        error = ConnectorError('Readback has not confirmed the PR.')
+        for attempt in range(4):
+            # GitHub permits one open PR per head/base pair and lookup runs
+            # before every POST, so retrying this loop cannot duplicate.
+            result = None
+            try:
+                result = await lookup()
+            except ConnectorError as lookup_error:
+                error = lookup_error
             if result is None:
-                if row['attempted']:
-                    raise ConnectorError('Creation was already attempted; readback has not confirmed the PR.')
-                self.ensure_publish_allowed(run, version)
-                self.store.execute('UPDATE github_publications SET attempted=1 WHERE id=?', (identity,))
                 try:
+                    self.ensure_publish_allowed(run, version)
+                    self.store.execute('UPDATE github_publications SET attempted=1 WHERE id=?', (identity,))
                     pr = await self.request('POST', prefix + '/pulls', token=token,
                                             json={'title': args.title, 'body': args.body, 'head': branch, 'base': repo['default_branch'],
                                                   'draft': False, 'maintainer_can_modify': True})
                     result = receipt(pr)
                 except ConnectorError as creation_error:
-                    try:
-                        result = await lookup()
-                        if result is None:
-                            raise ConnectorError('Readback has not confirmed the PR.')
-                    except ConnectorError as read_error:
-                        raise ConnectorError(f'{creation_error} Read-only recovery: {read_error}') from None
-            self.ensure_publish_allowed(run, version)
-        except ConnectorError as error:
-            raise ConnectorError(f'Publication unconfirmed for {target}, branch {branch}: {error} '
-                                 'No creation retry was sent. Inspect this destination; use the same request_key '
-                                 'and unchanged arguments for read-only recovery after an attempted creation.') from None
-        self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
-        return result
+                    error = creation_error
+                    if (getattr(creation_error, 'definite', False)
+                            and not (getattr(creation_error, 'status_code', None) == 422 and 'already exists' in str(creation_error))):
+                        raise DefiniteConnectorError(f'Publication rejected for {target}, branch {branch}: {creation_error}') from None
+            if result is not None:
+                self.ensure_publish_allowed(run, version)
+                self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
+                return result
+            if attempt < 3:
+                await asyncio.sleep(RETRY_DELAYS[attempt])
+        raise ConnectorError(f'Publication unconfirmed for {target}, branch {branch}: {error} '
+                             'Retrying with the same request_key is safe.')
 
     def record_publication(self, identity, result, *, turn_id):
         # Receipt and announcement commit together. Only this trusted publication
