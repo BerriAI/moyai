@@ -1,0 +1,8 @@
+const assert=require('node:assert/strict');
+const {test,before,after}=require('node:test');
+const {spawn}=require('node:child_process');
+const {chromium}=require('playwright');
+let server,browser,base;
+before(async()=>{server=spawn(process.execPath,['scripts/settings_ui_preview.cjs','--port','0'],{stdio:['ignore','pipe','inherit']});base=await new Promise((resolve,reject)=>{server.once('error',reject);server.stdout.on('data',s=>{const m=s.toString().match(/http:\/\/127\.0\.0\.1:\d+/);if(m)resolve(m[0]);});});browser=await chromium.launch({headless:true,args:['--no-sandbox']});});
+after(async()=>{await browser?.close();server?.kill();});
+for(const width of [1440,768,320])test(`connection retry clears the previous error at ${width}`,async t=>{const p=await browser.newPage({viewport:{width,height:900},recordVideo:process.env.CAPTURE?{dir:'/workspace/moyai-captures/connection-cycle'}:undefined});t.after(()=>p.close());await p.goto(base+'/#connections');await p.locator('[data-manage="linear"]').click();let calls=0;await p.route('**/api/connections/linear/check',r=>r.fulfill(++calls===1?{status:503,json:{detail:'Synthetic connection failure'}}:{json:{ok:true}}));await p.locator('#connection-check').click();await p.locator('#connection-error').filter({hasText:'Synthetic connection failure'}).waitFor();await p.locator('#connection-check').click();await p.getByText('Linear connection verified.',{exact:true}).waitFor();assert.equal(await p.locator('#connection-error').innerText(),'');if(process.env.CAPTURE)await p.screenshot({path:`/workspace/moyai-captures/connection-cycle-${width}.png`});});
