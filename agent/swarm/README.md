@@ -76,14 +76,14 @@ async def delegate_known_jobs(agentswarm):
 | --- | --- |
 | `types.py`, `mission.py`: participant types, shared goal, internal deduplication, member protocol | `app/swarm_collaboration.py`: durable board, leadership, assignments and wakes |
 | `contracts.py`, `client.py`: validation, explicit partitions, receipts and results | `app/agents.py`, `app/swarm_backend.py`: owner scope, admission, snapshots and saved results |
-| `planning.py`: balanced runtime selection and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic ten-member bootstrap, inherited deadline and scheduling |
+| `planning.py`: balanced runtime selection and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic twenty-member bootstrap, inherited time policy and scheduling |
 
-Product Swarm mode uses `plan_swarm()` to choose ten neutral members across approved harness/model pairs, without preset roles. It commits the pinned roster, shared goal, scoped uploads and dispatch wakes atomically. `plan_team()` remains an explicit role-based planner for advanced callers.
+Product Swarm mode uses `plan_swarm()` to choose twenty neutral members across approved harness/model pairs, without preset roles. It commits the pinned roster, shared goal, scoped uploads and dispatch wakes atomically. Execution capacity controls how many can run at once; the rest wait in the durable queue. Existing swarms retain their saved roster. `plan_team()` remains an explicit role-based planner for advanced callers.
 
 A new host implements `SwarmBackend.call(name, arguments)` for `swarm_start`, `agents_fanout`, `agents_results`, `agents_wait`, `agents_send`, `agents_cancel` and `agents_retry`, plus the collaboration tools exposed to members. It must authenticate ownership, enforce budgets, persist deduplication and implement checkpoint/resume. The client interface alone does not provide durability.
 
-The space UI displays public worker replies and harnesses; board posts also appear in the persisted activity trace. No hidden reasoning is exposed. Tests cover restart recovery, atomic leader claims, peer delivery, coalescing, scope, deadlines and saved result handoffs using the real persistence/workflow code with test sandboxes.
+The space UI displays public worker replies and harnesses. The shared chat combines human directions, public replies, and durable board posts with actual author and harness identities; the activity trace remains available. No hidden reasoning is exposed. Tests cover restart recovery, atomic leader claims, peer delivery, coalescing, scope, deadlines and saved result handoffs using the real persistence/workflow code with test sandboxes.
 
 The source defaults to 100 workers per group through `MAX_PARALLEL_AGENTS`; operators can choose any positive value. Admission still enforces configured runtime capacity and inherited time budgets. Prompts, mission text, board posts, item lists and returned child answers have no fixed character or list-length ceilings. Large tool arguments use authenticated multipart transport across the HTTP envelope boundary.
 
-This behavior is in source and has not been deployed. It requires schema revision 9 and role protocol revision 4. Older workers treat agent messages as human input, so use the coordinated release path in [rolling deployments](../../docs/rolling-deploy.md); do not mix these protocols.
+This behavior requires schema revision 10 and role protocol revision 5. Older workers treat agent messages as human input and impose fixed swarm deadlines, so use the coordinated release path in [rolling deployments](../../docs/rolling-deploy.md); do not mix these protocols.

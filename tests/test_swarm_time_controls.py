@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from agent.swarm.timing import MAX_DURATION_SECONDS
+from agent.swarm.planning import INITIAL_TEAM_SIZE
 from app.attachments import inspect_file
 from app.config import Settings
 from app.main import create_app
@@ -76,7 +77,7 @@ def test_api_creates_unlimited_or_month_long_swarms_without_losing_the_roster(sw
     budget = options.get('budget_seconds', 0)
     assert run['swarm']['budget_seconds'] == budget
     assert run['swarm']['status'] == 'active'
-    assert len(roster(app, run['id'])) == 10
+    assert len(roster(app, run['id'])) == INITIAL_TEAM_SIZE
     if budget == 0:
         assert run['swarm']['ends_at'] == ''
     else:
@@ -289,7 +290,7 @@ def test_original_creation_retry_survives_later_time_edits_without_new_agents(sw
     assert retry.json()['id'] == root
     assert mission(app, root) == updated
     assert roster(app, root) == children
-    assert len(app.state.store.rows('SELECT id FROM runs')) == 11
+    assert len(app.state.store.rows('SELECT id FROM runs')) == INITIAL_TEAM_SIZE + 1
     assert len(app.state.store.messages(root)) == 1
     conflict = client.post('/api/runs', json={**body, 'swarm': {'budget_seconds': 600}})
     assert conflict.status_code == 409, conflict.text

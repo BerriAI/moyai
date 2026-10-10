@@ -26,8 +26,9 @@ def test_shared_swarm_picks_balanced_runtimes_without_assigning_roles():
     goal = 'x' * 16000
     runtimes = [Runtime('hermes', 'alpha'), Runtime('codex', 'beta'), Runtime('codex', 'gamma')]
     planned = plan_swarm(goal, runtimes=runtimes, rng=random.Random(42))
-    assert [member.label for member in planned] == [f'Agent {i}' for i in range(1, 11)]
-    assert Counter(member.harness for member in planned) == {'hermes': 5, 'codex': 5}
+    assert len(planned) == INITIAL_TEAM_SIZE == 20
+    assert [member.label for member in planned] == [f'Agent {i}' for i in range(1, INITIAL_TEAM_SIZE + 1)]
+    assert Counter(member.harness for member in planned) == {'hermes': 10, 'codex': 10}
     assert all(member.prompt.endswith(goal) and 'swarm_claim_lead' in member.prompt for member in planned)
     assert all('Your perspective:' not in member.prompt for member in planned)
 
@@ -56,7 +57,7 @@ def test_reproducible_plan_ignores_duplicate_runtime_pairs_and_does_not_mutate_i
 
     assert first == repeated
     assert tuple(runtimes) == original
-    assert len(first) == INITIAL_TEAM_SIZE == len(DEFAULT_ROLES)
+    assert len(first) == len(DEFAULT_ROLES)
     with pytest.raises(FrozenInstanceError):
         first[0].harness = 'unconfigured'
 

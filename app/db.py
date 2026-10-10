@@ -107,6 +107,8 @@ class Store:
             self._initialize_schema(default_model)
             from .swarms import initialize_schema
             initialize_schema(self)
+            from .swarm_chat import initialize_schema as initialize_swarm_chat
+            initialize_swarm_chat(self)
         if not self.database:
             self.path.chmod(0o600)
         self.objects = object_storage if object_storage is not None else ObjectStorage()
