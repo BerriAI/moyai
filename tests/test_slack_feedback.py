@@ -96,10 +96,17 @@ def test_slack_feedback_interactions_open_submit_and_preserve_credentials(slack_
     else:
         app.state.store.execute('INSERT INTO trace_contexts VALUES(?,?,?,?,?,?,?)', (
             run_id, source['id'], 'ab' * 16, 'cd' * 8, None, run_id, 'moyai'))
-    message_ts = app.state.store.rows(
-        "SELECT slack_ts FROM slack_outbox WHERE run_id=? AND kind='answer' ORDER BY id DESC LIMIT 1",
-        (run_id,),
-    )[0]['slack_ts']
+    def feedback_receipt():
+        return app.state.store.rows(
+            """SELECT slack_ts FROM slack_outbox
+               WHERE run_id=? AND kind='answer' AND status='sent' AND slack_ts<>''
+                 AND json_number(metadata,'feedback_message_id')=?""",
+            (run_id, assistant['id']),
+        )
+
+    # The mock transport sees the button before the delivery receipt is saved.
+    wait_for(feedback_receipt)
+    message_ts = feedback_receipt()[0]['slack_ts']
     thread_ts = '1790719000.123456'
     action_payload = {
         'type': 'block_actions',
