@@ -26,6 +26,7 @@ try:
     from .native_session import native_storage
     from .transport_recovery import recovery_marker, validate_recovery
     from .tool_guidance import tool_guidance
+    from .durable_process import DeadlineExpired, execution_timeout
 except ImportError:
     from broker_relay import BrokerRelay
     from artifacts import collect_archive
@@ -43,6 +44,7 @@ except ImportError:
     from native_session import native_storage
     from transport_recovery import recovery_marker, validate_recovery
     from tool_guidance import tool_guidance
+    from durable_process import DeadlineExpired, execution_timeout
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -66,6 +68,11 @@ def conversation_prompt(spec, *, has_history=False):
 def run(spec):
     global ACTIVITY_INPUT_ID
     ACTIVITY_INPUT_ID = spec.get('activity_input_id')
+    try:
+        spec = {**spec, 'timeout': execution_timeout(spec)}
+    except DeadlineExpired as exc:
+        emit('final', str(exc), completed=False)
+        return 124
     relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting,
         report_error=lambda failure: emit('error', 'Cloud request failed; transport diagnostics saved.',
             {'activity_version': 1, 'phase': 'broker_failure', **failure})).start()
@@ -89,6 +96,9 @@ def run(spec):
     except ContextUnavailable as exc:
         emit('final', str(exc), completed=False)
         return 1
+    except DeadlineExpired as exc:
+        emit('final', str(exc), completed=False)
+        return 124
     finally:
         try:
             if getattr(relay, 'codex_runtime', None):
@@ -227,6 +237,7 @@ def _run_agent(spec, relay):
             if context_store is not None:
                 context_store.close()
             raise
+    spec['timeout'] = execution_timeout(spec)
     agent = create_agent(harness, spec={**spec, 'history_reference_dir': str(history_path.parent)},
                          relay=relay, config=config, activity=harness_activity, step=step,
                          cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))

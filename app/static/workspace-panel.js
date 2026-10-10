@@ -340,12 +340,15 @@
         syncControls();stop.hidden=link.hidden=true;
       }
       function drawChat(data){
+        if(!t.model&&data.model)model.value=data.model;
+        if(data.parent_run_id){t.element.querySelector('.side-chat-note span').textContent='Agent conversation · Results return to the coordinator';form.querySelector('small').textContent='Messages go directly to this agent. Results already returned to the coordinator stay saved.';input.placeholder='Message this agent directly…';}
+
         if(data.status==='deleting')deletionError=data.deletion_error||deletionError;
         deleting=deleting||data.status==='deleting';if(deleting)data={...data,status:'deleting'};
         syncTitles([data]);const transcript=MoyaiQueue.presentation(data).transcript,next=JSON.stringify([transcript,transcript.map(m=>MoyaiActivity.failureDetails(data,m))]);const bottom=log.scrollHeight-log.scrollTop-log.clientHeight<100;
         if(signature!==next){
           signature=next;const slots=new Map([...log.querySelectorAll('[data-activity-slot]')].map(slot=>[slot.dataset.activitySlot,slot]));
-          MoyaiUI.render(log, transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?'You':'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):markdown(m.content)}</div>${MoyaiActivity.failureDetails(data,m)}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join(''), { preserve: slots.values() });
+          MoyaiUI.render(log, transcript.map(m=>`<article class="side-message ${m.role==='user'?'from-user':''}"><div>${m.role==='user'?(m.source==='swarm'||String(m.client_id||'').startsWith('swarm:')?'Swarm continuation':'You'):'Moyai'}</div><div class="${m.role==='user'?'plain-text':'markdown'}">${m.role==='user'?MoyaiSkillText.message(m):markdown(m.content)}</div>${MoyaiActivity.failureDetails(data,m)}</article>${m.role==='user'?`<div data-activity-slot="${m.id}"></div>`:''}`).join(''), { preserve: slots.values() });
           log.querySelectorAll('[data-activity-slot]').forEach(slot=>{const previous=slots.get(slot.dataset.activitySlot);if(previous)slot.replaceWith(previous);});
         }
         MoyaiActivity.sync(log,data,{markdown,copy:async(text)=>{try{await navigator.clipboard.writeText(text);}catch{toast('Select the text to copy.');}}});MoyaiActivity.tick(log);if(bottom)log.scrollTop=log.scrollHeight;

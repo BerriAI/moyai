@@ -43,6 +43,8 @@ class DurableRunner(RunManager):
             initialize_schema(store)
         from .prepared_sandboxes import PreparedSandboxes
         self.prepared = PreparedSandboxes(self)
+        from .swarms import SwarmMissions
+        self.swarms = SwarmMissions(store, self)
 
     def state(self, run_id):
         rows = self.store.rows('SELECT state FROM durable_sessions WHERE run_id=?', (run_id,))
@@ -233,6 +235,16 @@ class DurableRunner(RunManager):
             if not row or row['deleted_at']:
                 return False
             state = await database(self.state, run_id)
+            mission = await self.swarms.enforce(run_id)
+            row = await database(self.store.run, run_id)
+            if mission and mission['run_id'] == run_id and mission['status'] == 'active' and state.get('phase', 'idle') in {'idle', 'warm'}:
+                wait = await database(self.swarms.tick, run_id)
+                if wait:
+                    if state.get('phase') == 'warm':
+                        warm_result = await self.warm(run_id, state)
+                        if isinstance(warm_result, dict):
+                            wait['retry_seconds'] = min(wait['retry_seconds'], warm_result.get('idle_seconds', wait['retry_seconds']))
+                    return wait
             # Stop only at boundaries before a process is launched. Active
             # execution, checkpoint saving and cleanup keep running. The saved
             # state and inbox are resumed by the replacement worker.
@@ -247,6 +259,9 @@ class DurableRunner(RunManager):
             if state.get('phase') in {'warm', 'warm_cleanup'}:
                 reuse = await self.warm(run_id, state)
                 if reuse is not True:
+                    if reuse is False and mission and mission['run_id'] == run_id and mission['status'] == 'paused':
+                        from .swarms import remaining_seconds
+                        return {'retry_seconds': max(0.01, remaining_seconds(mission))}
                     return reuse
                 row = await database(self.store.run, run_id)
                 state = await database(self.state, run_id)
@@ -269,9 +284,15 @@ class DurableRunner(RunManager):
                 if stop_requested(row) or row['status'] in {'cancelled', 'interrupted'}:
                     if row['status'] == 'stopping':
                         await database(self.store.update_run, run_id, status='cancelled')
+                    if mission and mission['run_id'] == run_id and mission['status'] == 'paused':
+                        from .swarms import remaining_seconds
+                        return {'retry_seconds': max(0.01, remaining_seconds(mission))}
                     return False
                 if not await database(self.store.has_queued_messages, run_id) and not await database(self.store.rows,
                         "SELECT id FROM messages WHERE run_id=? AND status='running'", (run_id,)):
+                    if mission and mission['run_id'] == run_id and mission['status'] == 'paused':
+                        from .swarms import remaining_seconds
+                        return {'retry_seconds': max(0.01, remaining_seconds(mission))}
                     return False
                 async with self.admission(run_id, prepared=True) as available:
                     if not available:
@@ -288,7 +309,19 @@ class DurableRunner(RunManager):
             if stop_requested(await database(self.store.run, run_id)) and state['phase'] not in {'cleanup', 'finish'}:
                 await database(self.fail, run_id, state, 'The response was stopped. The last saved workspace is preserved.', 'cancelled')
             try:
-                return await self.step(run_id, state)
+                result = await self.step(run_id, state)
+                mission = await database(self.swarms.get, run_id)
+                if mission and mission['status'] in {'active', 'paused'}:
+                    from .swarms import remaining_seconds
+                    remaining = max(0.01, remaining_seconds(mission))
+                    if mission['status'] == 'active' and state.get('phase') in {'idle', 'warm'} and mission['next_at']:
+                        remaining = min(remaining, max(0.01, mission['next_at'] - time.time()))
+                    if result is False:
+                        return {'retry_seconds': remaining}
+                    if isinstance(result, dict):
+                        key = 'idle_seconds' if 'idle_seconds' in result else 'retry_seconds'
+                        return {**result, key: min(result.get(key, remaining), remaining)}
+                return result
             except EnvironmentPending as pending:
                 if state.get('environment_build') != pending.build_id:
                     await database(self.store.event, run_id, 'status', str(pending), {'activity_version': 1, 'phase': 'environment'})
@@ -767,6 +800,17 @@ class DurableRunner(RunManager):
                     await database(self.fail, run_id, state, 'This response reached its configured time limit.')
                     return True
                 spec['timeout'] = remaining
+            from .swarms import execution_policy, remaining_seconds
+            mission = await database(execution_policy, self.store, run_id)
+            if mission:
+                remaining = remaining_seconds(mission)
+                if mission['status'] != 'active' or remaining <= 0:
+                    await self.swarms.enforce(run_id)
+                    return True
+                spec['timeout'] = min(spec.get('timeout') or remaining, remaining)
+                from datetime import datetime
+                spec['deadline_at'] = datetime.fromisoformat(mission['ends_at']).timestamp()
+                spec['prompt'] += self.swarms.prompt(run_id)
             # Each piece gets its own immutable input and launch marker.
             spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
             await sandbox.filesystem.write_text.aio(json.dumps(spec), spec_path)
@@ -775,6 +819,7 @@ class DurableRunner(RunManager):
             await database(self.save, run_id, state)
         elif phase == 'launch':
             sandbox = await self.sandbox(state)
+            await self.swarms.enforce(run_id)
             if not (await database(self.running_status, run_id, 'running', digest(self.token(run_id, state['message_id'])))):
                 return True
             spec_path = '/tmp/moyai-' + self.directory(state).rsplit('/', 1)[-1] + '.json'
@@ -786,6 +831,7 @@ class DurableRunner(RunManager):
             # One Activity may poll multiple times, keeping workflow history
             # small. Heartbeats are delivered independently by the worker.
             for _ in range(10):
+                await self.swarms.enforce(run_id)
                 if stop_requested((await database(self.store.run, run_id))):
                     return True
                 output = await self.command(sandbox, 'read', self.directory(state), str(state['cursor']))
@@ -999,6 +1045,7 @@ class DurableRunner(RunManager):
                     await database(self.save, run_id, state)
                     return True
             await database(self.store.finish_message, run_id, state['message_id'], state['response'], state['outcome'])
+            await database(self.swarms.settle, run_id, state)
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 self.credentials.reconcile_resolutions(run_id)
             status = 'idle' if state['outcome'] in {'completed', 'steered'} else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])
