@@ -307,10 +307,10 @@ organization totals. Only the parent session mirrors its final answer to Slack.
 The Render process still hosts one shared Temporal worker and SQLite disk.
 `max_concurrent_activities` scales with the sandbox ceiling, but this does not
 horizontally autoscale Render workers. Running multiple control-plane replicas
-requires a shared database and artifact store first. Model response buffering is
-separately bounded by `MAX_CONCURRENT_MODEL_REQUESTS=32` on the deployed 1 CPU /
-2 GB Render instance (the local default remains 8); other agents can continue running sandbox commands while model calls
-queue. The worker pool size and Modal sandbox count are separate concepts.
+requires a shared database and artifact store first. Model calls are not
+queued by default (`MAX_CONCURRENT_MODEL_REQUESTS=0`). Set a positive value to
+bound response buffering on a small instance; other agents can continue running
+sandbox commands while model calls queue. The worker pool size and Modal sandbox count are separate concepts.
 Queued model calls retry in the sandbox only after an explicit unbilled
 admission response; each attempt refreshes its short-lived transport envelope.
 Gateway errors and uncertain network failures are not retried by this queue.

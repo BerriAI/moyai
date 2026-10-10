@@ -664,12 +664,16 @@ def test_broker_hides_delegation_without_temporal_and_keeps_run_scope(workspace)
     assert client.get(f"/broker/{other['id']}/tools", headers=headers).status_code == 401
 
 
-@pytest.mark.parametrize('name', ['max_concurrent_runs', 'max_concurrent_model_requests'])
-def test_capacity_configuration_supports_explicit_scale_but_requires_positive_budgets(name):
+@pytest.mark.parametrize('name,invalid', [('max_concurrent_runs', (0, -1)), ('max_concurrent_model_requests', (-1,))])
+def test_capacity_configuration_supports_explicit_scale_but_rejects_invalid_budgets(name, invalid):
     assert getattr(Settings(_env_file=None, **{name: 3000}), name) == 3000
-    for invalid in (0, -1):
+    for value in invalid:
         with pytest.raises(ValidationError):
-            Settings(_env_file=None, **{name: invalid})
+            Settings(_env_file=None, **{name: value})
+
+
+def test_model_request_capacity_is_unlimited_by_default():
+    assert Settings(_env_file=None).max_concurrent_model_requests == 0
 
 
 async def test_direct_child_chat_joins_pending_work_and_keeps_sender_and_model(durable):

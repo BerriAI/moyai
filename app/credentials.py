@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_val
 from .database import Connection, DatabaseRow
 from .db import now
 from .identities import PROFILE_MAX_AGE_SECONDS
+from .model_slots import ModelSlots
 
 
 # Inference keys retain fixed origins/routes and never enter the sandbox.
@@ -273,7 +274,7 @@ class Credentials:
     def __init__(self, store, security, settings, manager, checkpoints):
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
-        self.slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
+        self.slots = ModelSlots(settings.max_concurrent_model_requests)
         if store.schema_updates:
             initialize_schema(store)
 
