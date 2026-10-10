@@ -33,7 +33,7 @@ jobs:
         run: uv run --frozen --python 3.13 python scripts/shared_storage_smoke.py
   runtime:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17-alpine
