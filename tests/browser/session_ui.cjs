@@ -224,14 +224,17 @@ test('rename persists after reload, preserves messages and drafts, and rejects s
   };
   const id=await page.evaluate(()=>state.selected);
   const detail=new RegExp('/api/runs/'+id+'(?:\\?.*)?$');
-  await page.route('**/api/runs?*',stale);
-  await page.route(detail,stale);
-  await page.evaluate(()=>{refreshRuns();refreshChat(state.selected);});await ready;
+  // Hold one response from each read. Background polling must not satisfy both
+  // arrivals or acquire another stale handler while these reads are released.
+  await page.route('**/api/runs?*',stale,{times:1});
+  await page.route(detail,stale,{times:1});
+  const refreshed=page.evaluate(()=>Promise.all([refreshRuns(),refreshChat(state.selected)]));
+  await ready;
   const dialog=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Navigation follow-up');
   await dialog.getByRole('button',{name:'Save',exact:true}).click();
   await page.locator('#toast').filter({hasText:'Session renamed.'}).waitFor();
-  release();await page.unrouteAll({behavior:'wait'});
+  release();await refreshed;
   assert.equal(await page.locator('#page-title').textContent(),'Navigation follow-up');
   assert.equal(await page.title(),'Navigation follow-up · Moyai');
   assert.equal(await page.locator(`[data-run="${id}"] .session-link-title`).textContent(),'Navigation follow-up');
@@ -242,12 +245,12 @@ test('rename persists after reload, preserves messages and drafts, and rejects s
   let resume,loaded;
   const opening=new Promise(resolve=>loaded=resolve),hold=new Promise(resolve=>resume=resolve);
   t.after(()=>resume());
-  await page.route(detail,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});});
-  await page.evaluate(id=>{openRun(id);},id);await opening;
+  await page.route(detail,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});},{times:1});
+  const reopened=page.evaluate(id=>openRun(id),id);await opening;
   const duringOpen=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Renamed while opening');
   await duringOpen.getByRole('button',{name:'Save',exact:true}).click();
-  await duringOpen.waitFor({state:'hidden'});resume();await page.unrouteAll({behavior:'wait'});
+  await duringOpen.waitFor({state:'hidden'});resume();await reopened;
   await page.waitForFunction(()=>state.chatRun?.display_title==='Renamed while opening');
   assert.equal(await page.locator('#page-title').textContent(),'Renamed while opening');
   await page.locator(`[data-session-actions="${id}"]`).click();
