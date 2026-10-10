@@ -50,7 +50,9 @@ class TemporalRunManager(DurableRunner):
     async def recover(self):
         if not (self.settings.encryption_key or self.settings.session_secret):
             raise RuntimeError('Configure a stable ENCRYPTION_KEY before enabling Temporal')
-        if self.settings.moyai_runtime_role == 'worker':
+        if self.settings.moyai_runtime_role in {'worker', 'broker'}:
+            # Brokers need a client for run-scoped automation tools, but never
+            # consume execution activities, dispatch wakes or recover sessions.
             self.dispatch_task = asyncio.create_task(self.serve())
             self.diagnostics_task = asyncio.create_task(watch_event_loop())
             return
@@ -72,7 +74,8 @@ class TemporalRunManager(DurableRunner):
                 self.submit(self.store.run(row['run_id']))
         # An external write interrupted during Render shutdown is ambiguous;
         # preserve it for review instead of treating it as an unexecuted action.
-        self.store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
+        if not self.settings.moyai_separate_broker:
+            self.store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
         self.dispatch_task = asyncio.create_task(self.serve())
         self.diagnostics_task = asyncio.create_task(watch_event_loop())
 
@@ -95,7 +98,7 @@ class TemporalRunManager(DurableRunner):
             try:
                 await database(self.store.rows, 'SELECT 1')
                 self.temporal = await self.connect_temporal()
-                if self.settings.moyai_runtime_role != 'coordinator':
+                if self.settings.moyai_runtime_role in {'standalone', 'worker'}:
                     self.worker = self.make_worker(self.temporal)
                     self.worker_task = asyncio.create_task(self.worker.run())
                 self.ready.set()
@@ -107,7 +110,7 @@ class TemporalRunManager(DurableRunner):
                     # when the task queue currently has no work to deliver.
                     await database(self.store.rows, 'SELECT 1')
                     backlog = False
-                    if self.settings.moyai_runtime_role != 'worker':
+                    if self.settings.moyai_runtime_role in {'standalone', 'coordinator'}:
                         try:
                             backlog = await self.dispatch()
                         except Exception as exc:

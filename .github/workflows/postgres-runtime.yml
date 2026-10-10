@@ -1,10 +1,10 @@
 name: PostgreSQL runtime
 on:
   pull_request:
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
 jobs:
@@ -114,7 +114,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Verify shared admission, execution fencing and real Temporal workers
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py tests/test_runtime_performance.py tests/test_admission_cleanup.py
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_runtime_scaling.py tests/test_runtime_performance.py tests/test_admission_cleanup.py tests/test_separate_broker.py
+      - name: Verify native inference survives a separate API process restart
+        run: uv run --frozen --python 3.13 python -m scripts.broker_restart_probe
       - name: Verify authenticated capacity observations on both backends
         run: |
           uv run --frozen --python 3.13 pytest -q tests/test_capacity.py tests/test_memory_review.py

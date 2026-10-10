@@ -54,6 +54,30 @@ class WorkerRoleMiddleware:
         await self.app(scope, receive, send)
 
 
+class BrokerRoleMiddleware:
+    """Keep broker traffic off the API process, without proxying or redirects."""
+    def __init__(self, app, *, broker_only: bool):
+        self.app, self.broker_only = app, broker_only
+
+    async def __call__(self, scope, receive, send):
+        if scope['type'] not in {'http', 'websocket'}:
+            return await self.app(scope, receive, send)
+        path = scope['path']
+        broker_path = path == '/broker' or path.startswith('/broker/')
+        allowed = ((path == '/health' or broker_path) and scope['type'] == 'http'
+                   if self.broker_only else not broker_path)
+        if allowed:
+            return await self.app(scope, receive, send)
+        if scope['type'] == 'websocket':
+            await send({'type': 'websocket.close', 'code': 1008})
+            return
+        from starlette.responses import JSONResponse
+        detail = ('Inference brokers do not serve workspace traffic.' if self.broker_only
+                  else 'Route broker requests directly to the inference broker.')
+        await JSONResponse({'detail': detail}, status_code=404 if self.broker_only else 503,
+                           headers={'Cache-Control': 'no-store'})(scope, receive, send)
+
+
 @asynccontextmanager
 async def lease(database, name: str, *, wait: bool = True, ttl: float = 30):
     owner = asyncio.current_task()

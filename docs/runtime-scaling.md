@@ -41,6 +41,12 @@ This is not support for arbitrary API replicas or uninterrupted coordinator
 deployments. The single API/model broker remains a capacity and availability
 boundary that must be measured before a 3,000-live-session production commitment.
 
+The opt-in [separate broker topology](separate-broker.md) moves sandbox inference
+and tools into one `broker` process. Set `MOYAI_SEPARATE_BROKER=true` on every role
+and route `/broker/*` directly to it at the edge. It preserves model connections
+across same-build coordinator restarts; it still requires coordinated build
+updates and does not enable multiple coordinators.
+
 All roles must use the same PostgreSQL schema, encryption/session keys, shared
 object destination, public URL, Temporal target/namespace/task queue, global
 budgets and application build. A stored fingerprint rejects mismatches. Set the

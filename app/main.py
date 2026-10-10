@@ -241,6 +241,8 @@ def _create_app(settings, store):
     manager.automations = automations
     slack.automation_events = automations.events
     login_attempts = []
+    owns_inference = settings.moyai_runtime_role == 'broker' or (
+        settings.moyai_runtime_role in {'standalone', 'coordinator'} and not settings.moyai_separate_broker)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -258,10 +260,33 @@ def _create_app(settings, store):
                     await computer.close()
                     await tracing.close()
                 return
-            # Close the previous process's attempts before session recovery can
-            # dispatch fresh inference; accounting recovery preserves this outcome.
-            store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
-            harness_gateway.maintenance.recover()
+            # Only the process holding the inference fence may recover model
+            # attempts or compaction. An API restart must leave live calls alone.
+            if owns_inference:
+                store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
+                harness_gateway.maintenance.recover()
+            if settings.moyai_runtime_role == 'broker':
+                try:
+                    # External tool writes also live on /broker/*; an API restart
+                    # must not mark an in-flight broker action ambiguous.
+                    store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
+                    await manager.recover()
+                    spend.recovery.start()
+                    memory_review.start()
+                    yield
+                finally:
+                    await memory_review.close()
+                    await spend.recovery.close()
+                    await harness_gateway.maintenance.close()
+                    await harness_gateway.live_context.close()
+                    await manager.shutdown()
+                    await manager.modal_clients.close()
+                    await environments.close()
+                    await session_lifecycle.close()
+                    await computer.close()
+                    await session_pull_requests.close()
+                    await tracing.close()
+                return
             await manager.recover()
             session_lifecycle.start()
             await checkpoints.flush()
@@ -269,13 +294,14 @@ def _create_app(settings, store):
             identities.start()
             environments.start()
             automations.start()
-            spend.recovery.start()
+            if owns_inference:
+                spend.recovery.start()
+                memory_review.start()
             watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
             tracing.start()
             lens_feedback.start()
             infrastructure.start()
             session_titles.start()
-            memory_review.start()
             try:
                 yield
             finally:
@@ -311,6 +337,9 @@ def _create_app(settings, store):
     if settings.moyai_runtime_role == 'worker':
         from .runtime_coordination import WorkerRoleMiddleware
         app.add_middleware(WorkerRoleMiddleware)
+    elif settings.moyai_separate_broker:
+        from .runtime_coordination import BrokerRoleMiddleware
+        app.add_middleware(BrokerRoleMiddleware, broker_only=settings.moyai_runtime_role == 'broker')
     app.state.session_lifecycle = session_lifecycle
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
@@ -420,8 +449,8 @@ def _create_app(settings, store):
 
     @app.get("/health")
     async def health():
-        if settings.moyai_runtime_role == 'worker' and not manager.ready.is_set():
-            raise HTTPException(503, 'Worker is connecting to Temporal.')
+        if settings.moyai_runtime_role in {'worker', 'broker'} and not manager.ready.is_set():
+            raise HTTPException(503, 'Runtime is connecting to Temporal.')
         if store.database:
             from .database import DatabaseError
             try:
@@ -535,7 +564,12 @@ def _create_app(settings, store):
         security.require(request, admin=True)
         from .capacity import snapshot
         from .db import database
-        return {**await database(snapshot, store, settings), 'model': model_slots.snapshot()}
+        model = model_slots.snapshot()
+        if settings.moyai_separate_broker:
+            # A local zero would falsely report the other process as idle.
+            model = {key: value if key == 'capacity' else None for key, value in model.items()}
+            model['source'] = 'separate_broker'
+        return {**await database(snapshot, store, settings), 'model': model}
 
     @app.get("/api/organization")
     async def organization(request: Request):

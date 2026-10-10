@@ -233,6 +233,7 @@ class PostgresDatabase:
         identifier(schema)
         self.schema = schema
         self.runtime_role, self.policy = runtime_role, ''
+        self.broker_owner = False
         self.pool = None
         try:
             # A session lock prevents a second process from running global
@@ -310,11 +311,21 @@ class PostgresDatabase:
     def configure_runtime(self, settings):
         if self.runtime_role == 'standalone':
             return
+        # Exactly one process owns live inference and its startup recovery.
+        # The coordinator retains this ownership in the original topology.
+        owns_broker = self.runtime_role == 'broker' or (
+            self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
+        if owns_broker and self.owner_pid is not None and not self.broker_owner:
+            if not self.owner.execute('SELECT pg_try_advisory_lock(726944, %s::regnamespace::oid::int)',
+                                      (self.schema,)).fetchone()[0]:
+                raise DatabaseError('Another inference broker owns this Postgres schema.')
+            self.broker_owner = True
         # Store only a fingerprint. Different signing keys, storage destinations,
         # task queues or workspace limits must never silently form one cluster.
         names = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
                  'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
-                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha')
+                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
+                 'moyai_separate_broker')
         policy = hashlib.sha256(json.dumps({name: getattr(settings, name) for name in names}, sort_keys=True).encode()).hexdigest()
         with self.connect() as conn:
             if self.runtime_role == 'coordinator':

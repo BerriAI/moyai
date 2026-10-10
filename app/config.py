@@ -34,7 +34,8 @@ class Settings(BaseSettings):
     moyai_database_initialize: bool = False
     moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
     moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
-    moyai_runtime_role: Literal['standalone', 'coordinator', 'worker'] = 'standalone'
+    moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker'] = 'standalone'
+    moyai_separate_broker: bool = False
     temporal_worker_activities: int = Field(default=120, ge=1, le=10000)
     temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000)
     temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000)
@@ -52,6 +53,10 @@ class Settings(BaseSettings):
                 raise ValueError('Distributed roles require PostgreSQL and Temporal.')
             if not self.object_storage_bucket or not self.session_secret or not self.encryption_key:
                 raise ValueError('Distributed roles require shared object storage and explicit SESSION_SECRET and ENCRYPTION_KEY.')
+        if self.moyai_runtime_role == 'broker' and not self.moyai_separate_broker:
+            raise ValueError('The broker role requires MOYAI_SEPARATE_BROKER=true on every cluster process.')
+        if self.moyai_separate_broker and self.moyai_runtime_role == 'standalone':
+            raise ValueError('A separate broker requires coordinator and worker roles.')
         return self
 
     attachment_storage_limit_mb: int = Field(default=256, ge=50, le=100000)
