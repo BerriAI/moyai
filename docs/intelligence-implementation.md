@@ -527,3 +527,30 @@ the returned patches are not proof of a complete local diff.
 The schema remains 11; all role protocols are 8 so mixed brokers do not disagree
 about paged read and source-revision arguments. Publication file/binary limits
 remain the next GitHub implementation step.
+
+## Complete text and binary publication (WP6; not deployed)
+
+The existing scoped GitHub publisher accepts regular text and binary files,
+complete PR descriptions and comments, and arbitrary changed-file counts.
+Removed the 100-file, 10 MiB per-file and 20 MiB total publication ceilings.
+Binary content uses canonical base64 Git blobs; existing text payloads retain
+their exact receipt serialization so old uncertain writes still reconcile.
+Large requests use the existing authenticated multipart transport. Each envelope
+has a framing limit, without imposing a total-content limit. GitHub's own API
+constraints and protected-path, exact-base, ownership and non-forced-write
+checks still apply.
+
+Validation: 234 broader GitHub and transport cases passed; the remaining test
+was updated to exercise multipart across the real loopback relay and passes.
+Nineteen payload/package cases and nineteen final binary/checkout/relay cases
+passed, including complete bytes after a fresh Git checkout, more than 100 files,
+and one publication after a lost acknowledgment. Ten publication/payload cases
+passed against PostgreSQL. Integration with main's atomic startup-index fix
+passed 65 migration/admission/runtime cases; the ownership test now waits for
+PostgreSQL to complete backend termination before asserting its fence.
+The import check also passed with the optional migration dependency, for 66
+passing integration cases. The integration guide was rendered at desktop/mobile widths and
+inspected. All provider responses in these checks are synthetic.
+
+Current source requires schema 12 (main's startup fix) and role protocols 9.
+No deployment was performed.
