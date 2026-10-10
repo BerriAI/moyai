@@ -110,8 +110,7 @@ def test_uncertain_working_status_does_not_replay_the_agent(slack_app, monkeypat
 
 
 def test_user_and_bot_token_refresh_preserve_the_other_identity(slack_app, monkeypatch):
-    import asyncio
-    app, _, _, _ = slack_app
+    app, client, _, _ = slack_app
     creds = {"access_token": "expired-user", "refresh_token": "user-refresh", "kind": "oauth", "expires_at": 1,
              "bot": {"access_token": "expired-bot", "refresh_token": "bot-refresh", "expires_at": 1,
                      "team": {"id": "T12345678"}, "bot_user_id": "U99999999"}}
@@ -127,11 +126,10 @@ def test_user_and_bot_token_refresh_preserve_the_other_identity(slack_app, monke
         user = await app.state.connectors.credentials("slack")
         assert user["access_token"] == "new-user-refresh"
         assert user["bot"]["team"]["id"] == "T12345678"
-    asyncio.run(check())
+    client.portal.call(check)
 
 
 def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypatch):
-    import asyncio
     from sandbox.agent import conversation_prompt
     app, client, runs, _ = slack_app
     root, mention = '1790718000.654321', '1790719000.123456'
@@ -156,7 +154,7 @@ def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypat
         ]}
     monkeypatch.setattr(app.state.connectors, 'request', read)
     run_id = runs[0]['id']
-    asyncio.run(app.state.slack.prepare(run_id))
+    client.portal.call(app.state.slack.prepare, run_id)
     source = app.state.store.slack_source(run_id)
     assert source['context_status'] == 'ready' and source['kind'] == 'thread'
     assert [m['text'] for m in source['messages']] == ['Support agent fails CI.', 'Need a staging environment.', 'Read the MCP issue; no writes.']
@@ -164,7 +162,7 @@ def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypat
     assert calls[0][1]['ts'] == root and calls[0][1]['latest'] == mention
     assert calls[1][1]['cursor'] == 'page2'
     # Repeated processing cannot mutate captured context or execute another read.
-    asyncio.run(app.state.slack.prepare(run_id))
+    client.portal.call(app.state.slack.prepare, run_id)
     assert len(calls) == 3
     assert app.state.store.messages(run_id)[0]['content'] == runs[0]['prompt']
     prompt = conversation_prompt({'prompt': runs[0]['prompt'], 'slack_source': source})
@@ -175,7 +173,6 @@ def test_thread_context_is_frozen_and_uses_user_credentials(slack_app, monkeypat
 
 
 def test_thread_context_bounds_and_reports_truncation(slack_app, monkeypatch):
-    import asyncio
     app, client, runs, _ = slack_app
     root = '1790718000.123456'
     client.post('/hooks/slack/events', **signed(event(thread_ts=root)))
@@ -187,7 +184,7 @@ def test_thread_context_bounds_and_reports_truncation(slack_app, monkeypatch):
         return {'messages': [{'ts': f'179071{8000+i}.123456', 'thread_ts':root, 'user':'U12345678', 'text':str(i)+'x'*5000,
                               'files':[{'name':'reference.pdf'}]} for i in range(30)], 'has_more': True}
     monkeypatch.setattr(app.state.connectors, 'request', read)
-    asyncio.run(app.state.slack.prepare(runs[0]['id']))
+    client.portal.call(app.state.slack.prepare, runs[0]['id'])
     source = app.state.store.slack_source(runs[0]['id'])
     assert source['context_status'] == 'ready' and source['kind'] == 'thread'
     assert source['truncated'] and 'Attached files' in source['warning']
@@ -197,7 +194,6 @@ def test_thread_context_bounds_and_reports_truncation(slack_app, monkeypatch):
 
 
 def test_new_channel_threads_never_share_context_or_agentchat_history(slack_app, monkeypatch):
-    import asyncio
     from sandbox.agent import conversation_prompt
     app, client, runs, _ = slack_app
     ryan, mateo = '1790718000.123456', '1790719000.123456'
@@ -218,13 +214,13 @@ def test_new_channel_threads_never_share_context_or_agentchat_history(slack_app,
     monkeypatch.setattr(app.state.connectors, 'request', read)
     for event_id, ts, text in [('RyanTask', ryan, old_task), ('MateoTask', mateo, new_task)]:
         client.post('/hooks/slack/events', **signed(event(event_id, ts=ts, text='<@U99999999> ' + text)))
-        asyncio.run(app.state.slack.prepare(runs[-1]['id']))
+        client.portal.call(app.state.slack.prepare, runs[-1]['id'])
     assert len(runs) == 2 and runs[0]['id'] != runs[1]['id']
     for run, ts, text in zip(runs, (ryan, mateo), (old_task, new_task)):
         source = app.state.store.slack_source(run['id'])
         assert source['kind'] == 'thread' and source['context_status'] == 'ready'
         assert [m['text'] for m in source['messages']] == [text]
-        history = asyncio.run(app.state.slack.agentchat.state.history('slack:T12345678:C12345678:' + ts))
+        history = client.portal.call(app.state.slack.agentchat.state.history, 'slack:T12345678:C12345678:' + ts)
         assert [m.text for m in history] == [text]
     assert all(url.endswith('conversations.replies') for url, _ in reads)
     assert [params['ts'] for _, params in reads] == [ryan, mateo]
@@ -252,13 +248,12 @@ def test_old_channel_context_is_scoped_before_display_or_prompt(slack_app):
 
 
 def test_context_failure_and_paused_access_are_visible(slack_app, monkeypatch):
-    import asyncio
     app, client, runs, _ = slack_app
     client.post('/hooks/slack/events', **signed(event()))
     async def failed(*args, **kwargs):
         raise ConnectorError('provider-user-secret must never appear')
     monkeypatch.setattr(app.state.connectors, 'request', failed)
-    asyncio.run(app.state.slack.prepare(runs[0]['id']))
+    client.portal.call(app.state.slack.prepare, runs[0]['id'])
     source = app.state.store.slack_source(runs[0]['id'])
     assert source['context_status'] == 'unavailable' and source['messages'] == []
     assert 'do not guess' in source['warning'] and 'secret' not in json.dumps(source)
@@ -267,7 +262,7 @@ def test_context_failure_and_paused_access_are_visible(slack_app, monkeypatch):
     async def prohibited(*args, **kwargs):
         pytest.fail('Paused Slack connection must not be called')
     monkeypatch.setattr(app.state.connectors, 'request', prohibited)
-    asyncio.run(app.state.slack.prepare(runs[0]['id']))
+    client.portal.call(app.state.slack.prepare, runs[0]['id'])
     assert app.state.store.slack_source(runs[0]['id'])['context_status'] == 'unavailable'
 
 
@@ -326,7 +321,7 @@ def test_cancel_during_context_fetch_never_starts_agent(slack_app, monkeypatch):
     client.post('/hooks/slack/events',**signed(event()))
     wait_for(started.is_set)
     run_id=app.state.store.rows('SELECT id FROM runs')[0]['id']
-    asyncio.run(app.state.manager.cancel(run_id))
+    client.portal.call(app.state.manager.cancel, run_id)
     release.set()
     wait_for(lambda: run_id not in app.state.manager.jobs)
     assert app.state.store.run(run_id)['status']=='cancelled'
@@ -350,7 +345,6 @@ def forwarded_attachment(body):
 
 @pytest.mark.parametrize('shape', ['text', 'blocks', 'fallback'])
 def test_forwarded_body_reaches_context_and_model_prompt(slack_app, monkeypatch, shape):
-    import asyncio
     from sandbox.agent import conversation_prompt
     app, client, runs, _ = slack_app
     body = 'Is `/get/ui_settings` listing settings without auth intentional?'
@@ -370,7 +364,7 @@ def test_forwarded_body_reaches_context_and_model_prompt(slack_app, monkeypatch,
         return {'messages': [payload['event']]}
     monkeypatch.setattr(app.state.connectors, 'request', read)
     run_id = runs[0]['id']
-    asyncio.run(app.state.slack.prepare(run_id))
+    client.portal.call(app.state.slack.prepare, run_id)
     source = app.state.store.slack_source(run_id)
     assert source['context_status'] == 'ready'
     assert source['messages'][0]['text'].count(body) == 1
@@ -407,7 +401,6 @@ def test_attachment_reference_is_bounded_and_mentions_stay_inert():
 
 
 def test_forwarded_context_still_obeys_shared_text_budget(slack_app, monkeypatch):
-    import asyncio
     app, client, runs, _ = slack_app
     root = '1790718000.123456'
     client.post('/hooks/slack/events', **signed(event(thread_ts=root)))
@@ -418,7 +411,7 @@ def test_forwarded_context_still_obeys_shared_text_budget(slack_app, monkeypatch
                               'user': 'U12345678', 'text': '',
                               'attachments': [{'text': 'x' * 5000}]} for i in range(30)]}
     monkeypatch.setattr(app.state.connectors, 'request', read)
-    asyncio.run(app.state.slack.prepare(runs[0]['id']))
+    client.portal.call(app.state.slack.prepare, runs[0]['id'])
     source = app.state.store.slack_source(runs[0]['id'])
     assert source['context_status'] == 'ready' and source['truncated']
     assert all(len(m['text']) <= 3000 for m in source['messages'])
