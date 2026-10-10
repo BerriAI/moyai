@@ -25,8 +25,9 @@ addEventListener('DOMContentLoaded', () => {
   paint();
   const fetchRequest = window.fetch;
   window.fetch = async (path, options = {}) => {
+    const submittedAt = start;
     const response = await fetchRequest(path, options);
-    if (start && /^\/api\/runs(?:\?|$)/.test(path)) {
+    if (submittedAt && submittedAt === start && /^\/api\/runs(?:\?|$)/.test(path)) {
       if (options.method === 'POST') acknowledged = performance.now() - start;
       else if (acknowledged !== null && sidebar === null) sidebar = performance.now() - start;
       paint();
