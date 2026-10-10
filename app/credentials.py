@@ -273,7 +273,8 @@ class Credentials:
     def __init__(self, store, security, settings, manager, checkpoints):
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
-        self.slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
+        from .model_slots import ModelSlots
+        self.slots = ModelSlots(settings.max_concurrent_model_requests)
         if store.schema_updates:
             initialize_schema(store)
 
@@ -904,7 +905,7 @@ class Credentials:
             raise HTTPException(422, 'Only supported inference and model-list routes are allowed.')
         if args.body.get('stream') or args.body.get('background'):
             raise HTTPException(422, 'Use non-streaming, foreground requests through the credential proxy.')
-        if self.slots.locked():
+        if await self.slots.is_full():
             raise HTTPException(429, 'Provider request capacity is busy. No provider call was made.')
         async with self.slots:
             self.acknowledge(run['id'], run['active_message_id'], request['id'], request['generation'])

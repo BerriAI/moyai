@@ -21,6 +21,7 @@ COMPONENTS = (
     'session_titles', 'automations', 'automation_events', 'automation_tools',
     'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup', 'swarms', 'swarm_collaboration',
     'coordinator_handoff',
+    'broker_ownership',
 )
 
 

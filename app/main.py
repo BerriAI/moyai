@@ -222,11 +222,21 @@ def _create_app(settings, store):
     connectors.github_requester_match = credentials.same_requester
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
-    from .model_slots import ModelSlots
-    model_slots = ModelSlots(settings.max_concurrent_model_requests)
+    from .model_slots import ModelSlots, PostgresModelSlots
+    overlap_broker = settings.moyai_runtime_role == 'broker' and not store.schema_updates
+    broker_work = None
+    if overlap_broker:
+        from .broker_ownership import BrokerWork
+        broker_work = store.broker_work = BrokerWork(store)
+    model_slots = (PostgresModelSlots(settings.max_concurrent_model_requests, store.database)
+                   if overlap_broker else ModelSlots(settings.max_concurrent_model_requests))
     from .memory_review import MemoryReview
     memory_review = MemoryReview(memory, settings, spend, model_slots)
     memory.reviewer = store.memory_review = memory_review
+    broker_requests = None
+    if overlap_broker:
+        from .broker_ownership import BrokerMaintenance, BrokerRequests
+        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery))
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     lens_feedback = LensFeedback(store, settings)
@@ -359,20 +369,26 @@ def _create_app(settings, store):
                 return
             # Only the process holding the inference fence may recover model
             # attempts or compaction. An API restart must leave live calls alone.
-            if owns_inference:
+            if owns_inference and not overlap_broker:
                 store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
                 harness_gateway.maintenance.recover()
             if settings.moyai_runtime_role == 'broker':
                 try:
                     # External tool writes also live on /broker/*; an API restart
                     # must not mark an in-flight broker action ambiguous.
-                    store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
+                    if not overlap_broker:
+                        store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
                     await manager.recover()
                     await manager.wait_ready()
-                    spend.recovery.start()
-                    memory_review.start()
+                    if broker_requests:
+                        await broker_requests.start()
+                    else:
+                        spend.recovery.start()
+                        memory_review.start()
                     yield
                 finally:
+                    if broker_requests:
+                        await broker_requests.close()
                     await memory_review.close()
                     await spend.recovery.close()
                     await harness_gateway.maintenance.close()
@@ -396,6 +412,8 @@ def _create_app(settings, store):
             async with background_lifespan():
                 yield
         finally:
+            if overlap_broker:
+                await asyncio.to_thread(model_slots.close)
             await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
@@ -415,6 +433,10 @@ def _create_app(settings, store):
         app.add_middleware(CoordinatorIngressMiddleware, ownership=handoff)
     app.state.coordinator_handoff = handoff
     app.state.hook_inbox = hook_inbox
+    if broker_requests:
+        from .broker_ownership import BrokerOwnershipMiddleware
+        app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
+    app.state.broker_requests = broker_requests
     app.state.session_lifecycle = session_lifecycle
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
@@ -536,6 +558,10 @@ def _create_app(settings, store):
             headers['X-Moyai-API-Release'] = '1'
         if handoff:
             headers['X-Moyai-Coordinator-State'] = handoff.status
+        if broker_requests:
+            headers['X-Moyai-Broker-Draining'] = str(broker_requests.draining).lower()
+            if broker_requests.draining:
+                raise HTTPException(503, 'Broker ownership is unavailable.', headers=headers)
         if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
             raise HTTPException(503, 'Runtime is connecting to Temporal.', headers=headers)
         if store.database:
@@ -1405,7 +1431,7 @@ def _create_app(settings, store):
         # Reject before reading/charging an inference. Waiting on this server
         # would retain large request bodies and could expire sealed envelopes.
         # The sandbox retries only this explicit, unbilled admission response.
-        if model_slots.locked():
+        if await model_slots.is_full():
             model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})

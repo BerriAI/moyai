@@ -27,6 +27,9 @@ class ModelSlots:
         # Foreground requests can reclaim a slot after its holder cleans up.
         return self._background_holder() is None or asyncio.current_task() in self._maintenance
 
+    async def is_full(self) -> bool:
+        return self.locked()
+
     async def acquire(self) -> bool:
         current = asyncio.current_task()
         assert current is not None
@@ -55,7 +58,7 @@ class ModelSlots:
             self._holders[current] = self._holders.get(current, 0) + 1
         return True
 
-    def release(self) -> None:
+    def release(self, permit=None) -> None:
         self.active -= 1
         current = asyncio.current_task() if self._holders else None
         if current in self._holders:
@@ -65,6 +68,9 @@ class ModelSlots:
             else:
                 del self._holders[current]
         self._slots.release()
+
+    async def release_async(self, permit=None) -> None:
+        self.release(permit)
 
     def record_queue(self) -> None:
         self.queue_responses += 1
@@ -77,7 +83,7 @@ class ModelSlots:
         await self.acquire()
 
     async def __aexit__(self, *exc: object) -> None:
-        self.release()
+        await self.release_async()
 
     def run_maintenance(self, coroutine: Coroutine[object, object, Result]) -> asyncio.Task[Result]:
         """Schedule and return an awaitable task; never retry a cancelled call."""
@@ -109,3 +115,172 @@ class ModelSlots:
 
         task.add_done_callback(close_unstarted)
         return task
+
+
+class PostgresModelSlots(ModelSlots):
+    """One cluster-wide limit, held on one extra connection per broker.
+
+    Locks have no expiry: a slow live call never frees somebody else's slot.
+    This session is distinct from the runtime ownership session so losing that
+    owner can cancel and drain local calls before releasing their capacity.
+    """
+    def __init__(self, capacity, database):
+        import hashlib
+        import threading
+        from contextvars import ContextVar
+
+        super().__init__(capacity)
+        self.database = database
+        self._guard = threading.RLock()
+        self._connection = None
+        self._closed = False
+        self._keys = tuple(int.from_bytes(hashlib.sha256(
+            f'moyai:model-slot:{database.schema}:{index}'.encode()).digest()[:4], 'big', signed=True)
+            for index in range(capacity))
+        self._unsigned_keys = tuple(key & 0xffffffff for key in self._keys)
+        self._permits = {}
+        self._entered = ContextVar('moyai_model_permits', default=())
+
+    def check(self):
+        from .database import DatabaseError
+        import psycopg
+
+        try:
+            with self._guard:
+                if self._closed:
+                    raise DatabaseError('Shared model capacity ownership was lost.')
+                if self._connection is None:
+                    self._connection = psycopg.connect(self.database.pool.conninfo, autocommit=True, connect_timeout=10)
+                    self._connection.execute("SET statement_timeout = '2s'")
+                held = [value[0] & 0xffffffff for value in self._permits.values()]
+                count = self._connection.execute("""SELECT count(*) FROM pg_locks
+                    WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=726947
+                    AND objsubid=2 AND objid=ANY(%s::oid[]) AND granted""", (held,)).fetchone()[0]
+                if count != len(held):
+                    raise DatabaseError('Shared model capacity ownership was lost.')
+        except psycopg.Error:
+            raise DatabaseError('Shared model capacity ownership was lost.') from None
+
+    def _shared_count(self):
+        with self._guard:
+            self.check()
+            return self._connection.execute('''SELECT count(*) FROM pg_locks
+                WHERE locktype='advisory' AND classid=726947 AND objsubid=2
+                AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+                AND objid=ANY(%s::oid[]) AND granted''', (list(self._unsigned_keys),)).fetchone()[0]
+
+    def locked(self):
+        if self._shared_count() < self.capacity:
+            return False
+        return self._background_holder() is None or asyncio.current_task() in self._maintenance
+
+    async def is_full(self):
+        from .db import database
+
+        if await database(self._shared_count) < self.capacity:
+            return False
+        return self._background_holder() is None or asyncio.current_task() in self._maintenance
+
+    def _claim(self, current):
+        from uuid import uuid4
+
+        with self.database.connect() as conn:
+            conn.check_owner()
+        with self._guard:
+            self.check()
+            held = {value[0] for value in self._permits.values()}
+            candidates = [key for key in self._keys if key not in held]
+            if not candidates:
+                return None
+            # Filter local holders: PG session locks are reentrant, whereas a
+            # permit must belong to exactly one admitted request.
+            row = self._connection.execute('''SELECT key FROM unnest(%s::int[]) AS slots(key)
+                WHERE pg_try_advisory_lock(726947,key) LIMIT 1''', (candidates,)).fetchone()
+            if not row:
+                return None
+            token = uuid4().hex
+            self._permits[token] = row[0], current
+            return token
+
+    async def _claim_async(self, current):
+        from .db import database
+
+        operation = asyncio.create_task(asyncio.to_thread(self._claim, current))
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            # A cancellation may arrive after PostgreSQL granted the lock but
+            # before this task received its token. Drain then release that token.
+            permit = await operation
+            if permit:
+                await database(self.release, permit, counted=False)
+            raise
+
+    async def acquire(self):
+        current = asyncio.current_task()
+        assert current is not None
+        started = time.monotonic()
+        self.waiting += 1
+        try:
+            while (token := await self._claim_async(current)) is None:
+                if current not in self._maintenance and (holder := self._background_holder()) is not None:
+                    if not holder.cancelling():
+                        holder.cancel()
+                    try:
+                        await asyncio.shield(holder)
+                    except asyncio.CancelledError:
+                        if current.cancelling():
+                            raise
+                    except Exception:
+                        pass
+                else:
+                    await asyncio.sleep(.025)
+        finally:
+            self.waiting -= 1
+        self.active += 1
+        self.max_wait_ms = max(self.max_wait_ms, (time.monotonic() - started) * 1000)
+        if current in self._maintenance:
+            self._holders[current] = self._holders.get(current, 0) + 1
+        return token
+
+    def release(self, permit=None, *, counted=True):
+        from .database import DatabaseError
+
+        with self._guard:
+            if permit not in self._permits:
+                raise DatabaseError('Shared model capacity permit is missing or already released.')
+            key, holder = self._permits.pop(permit)
+            if counted:
+                self.active -= 1
+            if holder in self._holders:
+                remaining = self._holders[holder] - 1
+                if remaining:
+                    self._holders[holder] = remaining
+                else:
+                    del self._holders[holder]
+            # Once the provider is closed a lost slot session is already free.
+            if not self._connection.closed and not self._connection.broken:
+                self._connection.execute('SELECT pg_advisory_unlock(726947,%s)', (key,))
+
+    async def release_async(self, permit=None):
+        from .db import database
+
+        await database(self.release, permit)
+
+    async def __aenter__(self):
+        permit = await self.acquire()
+        self._entered.set((*self._entered.get(), permit))
+
+    async def __aexit__(self, *exc):
+        entered = self._entered.get()
+        self._entered.set(entered[:-1])
+        await self.release_async(entered[-1])
+
+    def snapshot(self):
+        return {**super().snapshot(), 'active': self._shared_count(), 'local_active': self.active}
+
+    def close(self):
+        with self._guard:
+            self._closed = True
+            if self._connection is not None:
+                self._connection.close()

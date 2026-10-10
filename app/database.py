@@ -432,7 +432,11 @@ class PostgresDatabase:
         owns_broker = self.runtime_role == 'broker' or (
             self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
         if owns_broker and self.owner_pid is not None and not self.broker_owner:
-            if not self.owner.execute('SELECT pg_try_advisory_lock(726944, %s::regnamespace::oid::int)',
+            # Verified broker releases use per-work ownership and shared
+            # capacity; legacy schema startup still requires one broker.
+            function = ('pg_try_advisory_lock_shared' if self.runtime_role == 'broker' and not self.schema_updates
+                        else 'pg_try_advisory_lock')
+            if not self.owner.execute(f'SELECT {function}(726944, %s::regnamespace::oid::int)',
                                       (self.schema,)).fetchone()[0]:
                 raise DatabaseError('Another inference broker owns this Postgres schema.')
             self.broker_owner = True
