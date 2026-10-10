@@ -138,9 +138,8 @@ class ArtifactStore:
         self.store = store
         self.root = directory / 'artifacts'
         if initialize:
-            store.execute('''CREATE TABLE IF NOT EXISTS artifact_objects (
-                name TEXT PRIMARY KEY, reference TEXT NOT NULL, size INTEGER NOT NULL,
-                sha256 TEXT NOT NULL, created_at TEXT NOT NULL)''')
+            if store.schema_updates:
+                initialize_schema(store)
 
     @staticmethod
     def validate_name(name: str) -> tuple[str, ...]:
@@ -310,3 +309,9 @@ class ArtifactStore:
         except BaseException:
             os.unlink(temporary)
             raise
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS artifact_objects (
+        name TEXT PRIMARY KEY, reference TEXT NOT NULL, size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL, created_at TEXT NOT NULL)''')

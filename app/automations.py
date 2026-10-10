@@ -185,31 +185,9 @@ class Automations:
         self.next_sync = 0
         self.task = None
         self.sync_lock = asyncio.Lock()
-        store.execute('''CREATE TABLE IF NOT EXISTS automations (
-            id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), definition TEXT NOT NULL,
-            revision INTEGER NOT NULL DEFAULT 1, synced_revision INTEGER NOT NULL DEFAULT 0,
-            paused INTEGER NOT NULL DEFAULT 1, sync_error TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-        store.execute('''CREATE TABLE IF NOT EXISTS automation_runs (
-            occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
-            revision INTEGER NOT NULL, run_id TEXT UNIQUE REFERENCES runs(id),
-            outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)''')
-        store.execute('CREATE INDEX IF NOT EXISTS automation_runs_history ON automation_runs(automation_id,created_at)')
-        store.execute('''CREATE TABLE IF NOT EXISTS automation_items (
-            automation_id TEXT NOT NULL REFERENCES automations(id), item_key TEXT NOT NULL,
-            run_id TEXT NOT NULL REFERENCES runs(id), created_at TEXT NOT NULL,
-            PRIMARY KEY(automation_id,item_key))''')
+        if store.schema_updates:
+            initialize_schema(store)
         self.events = AutomationEvents(self)
-        store.execute('''CREATE TABLE IF NOT EXISTS automation_schedules (
-            automation_id TEXT NOT NULL REFERENCES automations(id), schedule_id TEXT PRIMARY KEY)''')
-        with store.connect() as conn:
-            conn.begin_write()
-            if 'synced_schedule_version' not in conn.column_names('automations'):
-                conn.execute('ALTER TABLE automations ADD COLUMN synced_schedule_version INTEGER NOT NULL DEFAULT 0')
-        # Remember already-synced single-trigger schedules for later removal.
-        for row in store.rows('SELECT * FROM automations WHERE synced_revision>0'):
-            if 'triggers' not in json.loads(row['definition']) and not json.loads(row['definition']).get('event'):
-                store.execute('INSERT INTO automation_schedules VALUES(?,?) ON CONFLICT DO NOTHING', (row['id'], 'moyai-automation-' + row['id']))
 
     def start(self):
         if self.settings.temporal_enabled:
@@ -597,3 +575,30 @@ class Automations:
             return await self.launch(automation_id, body.revision, 'manual:' + automation_id + ':' + body.client_id, manual=True)
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS automations (
+        id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id), definition TEXT NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 1, synced_revision INTEGER NOT NULL DEFAULT 0,
+        paused INTEGER NOT NULL DEFAULT 1, sync_error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_runs (
+        occurrence TEXT PRIMARY KEY, automation_id TEXT NOT NULL REFERENCES automations(id),
+        revision INTEGER NOT NULL, run_id TEXT UNIQUE REFERENCES runs(id),
+        outcome TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)''')
+    store.execute('CREATE INDEX IF NOT EXISTS automation_runs_history ON automation_runs(automation_id,created_at)')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_items (
+        automation_id TEXT NOT NULL REFERENCES automations(id), item_key TEXT NOT NULL,
+        run_id TEXT NOT NULL REFERENCES runs(id), created_at TEXT NOT NULL,
+        PRIMARY KEY(automation_id,item_key))''')
+    store.execute('''CREATE TABLE IF NOT EXISTS automation_schedules (
+        automation_id TEXT NOT NULL REFERENCES automations(id), schedule_id TEXT PRIMARY KEY)''')
+    with store.connect() as conn:
+        conn.begin_write()
+        if 'synced_schedule_version' not in conn.column_names('automations'):
+            conn.execute('ALTER TABLE automations ADD COLUMN synced_schedule_version INTEGER NOT NULL DEFAULT 0')
+    # Remember already-synced single-trigger schedules for later removal.
+    for row in store.rows('SELECT * FROM automations WHERE synced_revision>0'):
+        if 'triggers' not in json.loads(row['definition']) and not json.loads(row['definition']).get('event'):
+            store.execute('INSERT INTO automation_schedules VALUES(?,?) ON CONFLICT DO NOTHING', (row['id'], 'moyai-automation-' + row['id']))

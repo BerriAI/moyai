@@ -29,9 +29,8 @@ TOOL_NAMES = set(SPECS)
 class ModelTools:
     def __init__(self, store, settings):
         self.store, self.settings = store, settings
-        store.execute('''CREATE TABLE IF NOT EXISTS model_switch_operations (
-            run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, request_key TEXT NOT NULL,
-            model TEXT NOT NULL, PRIMARY KEY(run_id,turn_id,request_key))''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def current(self, conn, run, turn_id=None):
         fresh = conn.execute('SELECT * FROM runs WHERE id=?', (run['id'],)).fetchone()
@@ -92,3 +91,9 @@ class ModelTools:
             return {**self.state(updated), 'status': 'selected', 'selected_model': selected, 'replayed': False,
                     'effective': 'next_model_request', 'default_updated': not bool(queued),
                     'instruction': 'Continue the user’s remaining task. The next inference uses the selected model with the existing conversation and workspace. Already queued messages keep their assigned models.'}
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS model_switch_operations (
+        run_id TEXT NOT NULL, turn_id INTEGER NOT NULL, request_key TEXT NOT NULL,
+        model TEXT NOT NULL, PRIMARY KEY(run_id,turn_id,request_key))''')

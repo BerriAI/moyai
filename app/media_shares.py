@@ -130,15 +130,8 @@ def validated_mime(raw):
 class MediaShares:
     def __init__(self, store, settings, security):
         self.store, self.settings, self.security = store, settings, security
-        with store.connect() as conn:
-            conn.executescript('''CREATE TABLE IF NOT EXISTS media_shares (
-                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
-                request_key TEXT NOT NULL, source TEXT NOT NULL, revision TEXT NOT NULL,
-                token_hash TEXT NOT NULL, token_ciphertext TEXT NOT NULL, origin TEXT NOT NULL,
-                reference TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
-                mime TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
-                UNIQUE(run_id, request_key));
-                CREATE INDEX IF NOT EXISTS idx_media_shares_run ON media_shares(run_id);''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def tools(self):
         return [{'name': name, 'description': spec[1], 'inputSchema': spec[0].model_json_schema(),
@@ -303,3 +296,15 @@ class MediaShares:
             return response
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''CREATE TABLE IF NOT EXISTS media_shares (
+            id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+            request_key TEXT NOT NULL, source TEXT NOT NULL, revision TEXT NOT NULL,
+            token_hash TEXT NOT NULL, token_ciphertext TEXT NOT NULL, origin TEXT NOT NULL,
+            reference TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+            mime TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
+            UNIQUE(run_id, request_key));
+            CREATE INDEX IF NOT EXISTS idx_media_shares_run ON media_shares(run_id);''')

@@ -167,44 +167,8 @@ class Spend:
         self.store, self.settings, self.security, self.checkpoints = store, settings, security, checkpoints
         from .infrastructure_costs import InfrastructureCosts
         self.infrastructure = InfrastructureCosts(store, settings, security, checkpoints)
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS model_requests (
-                    id TEXT PRIMARY KEY, key_hash TEXT NOT NULL, gateway_id TEXT NOT NULL DEFAULT '',
-                    run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER,
-                    user_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL, created_at TEXT NOT NULL,
-                    finished_at TEXT, status TEXT NOT NULL DEFAULT 'pending', cost TEXT,
-                    prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER
-                );
-                CREATE INDEX IF NOT EXISTS idx_model_requests_gateway ON model_requests(key_hash,gateway_id);
-                CREATE INDEX IF NOT EXISTS idx_model_requests_time ON model_requests(key_hash,created_at);
-                CREATE INDEX IF NOT EXISTS idx_model_requests_run ON model_requests(key_hash,run_id);
-                CREATE INDEX IF NOT EXISTS idx_model_requests_org_time ON model_requests(created_at);
-                CREATE INDEX IF NOT EXISTS idx_model_requests_org_run ON model_requests(run_id);
-                CREATE INDEX IF NOT EXISTS idx_model_requests_user_time ON model_requests(user_id,created_at);
-            ''')
-            columns = conn.column_names('model_requests')
-            if 'cost_source' not in columns:
-                conn.execute("ALTER TABLE model_requests ADD COLUMN cost_source TEXT NOT NULL DEFAULT ''")
-            for name in ('cache_read_input_tokens', 'cache_creation_input_tokens'):
-                if name not in columns:
-                    conn.execute(f'ALTER TABLE model_requests ADD COLUMN {name} INTEGER')
-            for name, definition in (
-                ('gateway_scope', "TEXT NOT NULL DEFAULT ''"),
-                ('cost_receipt_id', "TEXT NOT NULL DEFAULT ''"),
-                ('cost_next_attempt_at', "TEXT NOT NULL DEFAULT ''"),
-                ('cost_recovery_attempts', 'INTEGER NOT NULL DEFAULT 0'),
-                ('cost_recovery_error', "TEXT NOT NULL DEFAULT ''"),
-            ):
-                if name not in columns:
-                    conn.execute(f'ALTER TABLE model_requests ADD COLUMN {name} {definition}')
-            conn.executescript('''
-                CREATE INDEX IF NOT EXISTS idx_model_requests_recovery
-                ON model_requests(key_hash,gateway_scope,cost_next_attempt_at,id)
-                WHERE cost IS NULL AND status!='pending';
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_model_requests_receipt
-                ON model_requests(gateway_scope,key_hash,cost_receipt_id) WHERE cost_receipt_id!='';
-            ''')
+        if store.schema_updates:
+            initialize_schema(store)
         from .spend_recovery import SpendRecovery
         self.recovery = SpendRecovery(self)
 
@@ -385,3 +349,44 @@ class Spend:
             return {'ok': True}
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS model_requests (
+                id TEXT PRIMARY KEY, key_hash TEXT NOT NULL, gateway_id TEXT NOT NULL DEFAULT '',
+                run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER,
+                user_id TEXT NOT NULL DEFAULT '', model TEXT NOT NULL, created_at TEXT NOT NULL,
+                finished_at TEXT, status TEXT NOT NULL DEFAULT 'pending', cost TEXT,
+                prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_model_requests_gateway ON model_requests(key_hash,gateway_id);
+            CREATE INDEX IF NOT EXISTS idx_model_requests_time ON model_requests(key_hash,created_at);
+            CREATE INDEX IF NOT EXISTS idx_model_requests_run ON model_requests(key_hash,run_id);
+            CREATE INDEX IF NOT EXISTS idx_model_requests_org_time ON model_requests(created_at);
+            CREATE INDEX IF NOT EXISTS idx_model_requests_org_run ON model_requests(run_id);
+            CREATE INDEX IF NOT EXISTS idx_model_requests_user_time ON model_requests(user_id,created_at);
+        ''')
+        columns = conn.column_names('model_requests')
+        if 'cost_source' not in columns:
+            conn.execute("ALTER TABLE model_requests ADD COLUMN cost_source TEXT NOT NULL DEFAULT ''")
+        for name in ('cache_read_input_tokens', 'cache_creation_input_tokens'):
+            if name not in columns:
+                conn.execute(f'ALTER TABLE model_requests ADD COLUMN {name} INTEGER')
+        for name, definition in (
+            ('gateway_scope', "TEXT NOT NULL DEFAULT ''"),
+            ('cost_receipt_id', "TEXT NOT NULL DEFAULT ''"),
+            ('cost_next_attempt_at', "TEXT NOT NULL DEFAULT ''"),
+            ('cost_recovery_attempts', 'INTEGER NOT NULL DEFAULT 0'),
+            ('cost_recovery_error', "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in columns:
+                conn.execute(f'ALTER TABLE model_requests ADD COLUMN {name} {definition}')
+        conn.executescript('''
+            CREATE INDEX IF NOT EXISTS idx_model_requests_recovery
+            ON model_requests(key_hash,gateway_scope,cost_next_attempt_at,id)
+            WHERE cost IS NULL AND status!='pending';
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_model_requests_receipt
+            ON model_requests(gateway_scope,key_hash,cost_receipt_id) WHERE cost_receipt_id!='';
+        ''')

@@ -45,20 +45,8 @@ class PinSession(BaseModel):
 class SessionFolders:
     def __init__(self, store, security, checkpoints):
         self.store, self.security, self.checkpoints = store, security, checkpoints
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS session_folders (
-                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
-                    name TEXT NOT NULL, name_key TEXT NOT NULL, revision INTEGER NOT NULL,
-                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    UNIQUE(owner_id, id), UNIQUE(owner_id, name_key));
-                CREATE TABLE IF NOT EXISTS session_folder_memberships (
-                    owner_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-                    folder_id TEXT NOT NULL, PRIMARY KEY(owner_id, run_id),
-                    FOREIGN KEY(owner_id, folder_id) REFERENCES session_folders(owner_id, id) ON DELETE CASCADE);
-                CREATE INDEX IF NOT EXISTS idx_session_folder_members
-                    ON session_folder_memberships(owner_id, folder_id);
-            ''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def actor(self, request, mutation=False):
         self.security.require(request, mutation=mutation)
@@ -187,3 +175,20 @@ class SessionFolders:
             return result
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS session_folders (
+                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id),
+                name TEXT NOT NULL, name_key TEXT NOT NULL, revision INTEGER NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(owner_id, id), UNIQUE(owner_id, name_key));
+            CREATE TABLE IF NOT EXISTS session_folder_memberships (
+                owner_id TEXT NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                folder_id TEXT NOT NULL, PRIMARY KEY(owner_id, run_id),
+                FOREIGN KEY(owner_id, folder_id) REFERENCES session_folders(owner_id, id) ON DELETE CASCADE);
+            CREATE INDEX IF NOT EXISTS idx_session_folder_members
+                ON session_folder_memberships(owner_id, folder_id);
+        ''')

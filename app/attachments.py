@@ -97,29 +97,8 @@ class Attachments:
         self.store = store
         # Keep the legacy slack_audio_inputs name so pending audio survives the
         # upgrade; the durable queue now accepts all Slack file attachments.
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS attachments (
-                    id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, message_id INTEGER REFERENCES messages(id),
-                    name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
-                    media_type TEXT NOT NULL, preview_text TEXT NOT NULL, created_at TEXT NOT NULL,
-                    data BLOB NOT NULL, preview BLOB NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS slack_audio_inputs (
-                    message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-                    files_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending'
-                );
-                CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
-                CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(owner_id);
-            ''')
-            columns = conn.column_names('attachments')
-            for name, definition in [('data_ref', "TEXT NOT NULL DEFAULT ''"),
-                                     ('preview_ref', "TEXT NOT NULL DEFAULT ''"),
-                                     ('preview_size', 'INTEGER NOT NULL DEFAULT 0')]:
-                if name not in columns:
-                    conn.execute(f'ALTER TABLE attachments ADD COLUMN {name} {definition}')
-            if 'preview_size' not in columns:
-                conn.execute('UPDATE attachments SET preview_size=length(preview)')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def payload(self, row, field='data'):
         """Read an already-authorized row; a remote reference never falls back to a BLOB."""
@@ -350,3 +329,29 @@ class Attachments:
             return {'deleted': True}
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS attachments (
+                id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, message_id INTEGER REFERENCES messages(id),
+                name TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                media_type TEXT NOT NULL, preview_text TEXT NOT NULL, created_at TEXT NOT NULL,
+                data BLOB NOT NULL, preview BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS slack_audio_inputs (
+                message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+                files_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending'
+            );
+            CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id);
+            CREATE INDEX IF NOT EXISTS idx_attachments_owner ON attachments(owner_id);
+        ''')
+        columns = conn.column_names('attachments')
+        for name, definition in [('data_ref', "TEXT NOT NULL DEFAULT ''"),
+                                 ('preview_ref', "TEXT NOT NULL DEFAULT ''"),
+                                 ('preview_size', 'INTEGER NOT NULL DEFAULT 0')]:
+            if name not in columns:
+                conn.execute(f'ALTER TABLE attachments ADD COLUMN {name} {definition}')
+        if 'preview_size' not in columns:
+            conn.execute('UPDATE attachments SET preview_size=length(preview)')

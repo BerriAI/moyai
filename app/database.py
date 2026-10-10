@@ -132,12 +132,13 @@ def row_factory(cursor):
 
 
 class PostgresConnection:
-    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy=''):
+    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy='', schema_updates=True):
         self.raw, self.schema, self.owner_pid = raw, schema, owner_pid
         self.write_scope, self.policy = write_scope, policy
         self.changed = False
         self.write_locked = False
         self.owner_checked = False
+        self.schema_updates = schema_updates
 
     def begin_write(self):
         if not self.write_locked:
@@ -181,6 +182,8 @@ class PostgresConnection:
     def execute(self, statement, params=()):
         # Ignore literals/comments when classifying CTEs or leading comments.
         unquoted = ' '.join(SQL_PARTS.split(statement)[::2])
+        if not self.schema_updates and re.search(r'\b(CREATE|ALTER|DROP|TRUNCATE|REINDEX)\b', unquoted, re.I):
+            raise DatabaseError('Schema changes require the offline migration command.')
         if re.search(r'\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b', unquoted, re.I):
             self.begin_write()
             self.changed = True
@@ -223,6 +226,8 @@ class PostgresConnection:
         return {row[0] for row in self.raw.execute('SELECT tablename FROM pg_tables WHERE schemaname=%s', (self.schema,))}
 
     def create_view(self, name, query):
+        if not self.schema_updates:
+            raise DatabaseError('Schema changes require the offline migration command.')
         self.begin_write()
         if not self.raw.execute('SELECT 1 FROM pg_views WHERE schemaname=%s AND viewname=%s', (self.schema, name)).fetchone():
             self.raw.execute(f'CREATE VIEW {identifier(name)} AS {query}')
@@ -234,7 +239,7 @@ class PostgresConnection:
 
 
 class PostgresDatabase:
-    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone', runtime_settings=None):
+    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto'):
         import psycopg
         from psycopg_pool import ConnectionPool
 
@@ -244,6 +249,11 @@ class PostgresDatabase:
         self.broker_owner = False
         self.startup_exclusive = False
         self.pool = None
+        if schema_mode not in {'auto', 'verify', 'migrate'}:
+            raise ValueError('Unknown schema mode.')
+        if schema_mode == 'migrate' and (not application_instance or runtime_role != 'standalone'):
+            raise ValueError('Schema migration requires exclusive application ownership.')
+        self.schema_updates = schema_mode != 'verify'
         if application_instance and runtime_role != 'standalone' and runtime_settings is None:
             raise DatabaseError('Distributed application startup requires its runtime configuration before schema setup.')
         try:
@@ -256,7 +266,7 @@ class PostgresDatabase:
             if not self.owner.execute('SELECT 1 FROM pg_namespace WHERE nspname=%s', (schema,)).fetchone():
                 raise DatabaseError('Postgres schema does not exist. Import a verified copy or create an empty schema explicitly.')
             tables = {r[0] for r in self.owner.execute('SELECT tablename FROM pg_tables WHERE schemaname=%s', (schema,))}
-            if (not tables and not initialize) or (tables and 'runs' not in tables):
+            if (not tables and not initialize) or (tables and 'runs' not in tables and not (schema_mode == 'migrate' and 'schema_state' in tables)):
                 raise DatabaseError('Postgres schema is not an initialized Moyai database. Import a verified copy; empty initialization requires MOYAI_DATABASE_INITIALIZE=true.')
             if application_instance:
                 function = 'pg_try_advisory_lock' if runtime_role == 'standalone' else 'pg_try_advisory_lock_shared'
@@ -270,24 +280,10 @@ class PostgresDatabase:
                     # Reject incompatible builds/keys and duplicate brokers before
                     # even CREATE IF NOT EXISTS or legacy data backfills can run.
                     self.admit_runtime(runtime_settings)
-            with self.owner.transaction():
-                self.owner.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (schema,))
-                self.owner.execute(f'SET LOCAL search_path TO {identifier(schema)}, pg_catalog')
-                self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_leases (
-                    name TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)''')
-                self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_policy (
-                    id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL)''')
-                self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
-                    LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
-                self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
-                    LANGUAGE sql IMMUTABLE STRICT AS $fn$
-                    SELECT CASE WHEN jsonb_typeof($1::jsonb -> $2)='string' THEN $1::jsonb ->> $2 END $fn$''')
-                self.owner.execute('''CREATE OR REPLACE FUNCTION json_number(text,text) RETURNS numeric
-                    LANGUAGE sql IMMUTABLE STRICT AS $fn$
-                    SELECT CASE jsonb_typeof($1::jsonb -> $2)
-                        WHEN 'number' THEN ($1::jsonb ->> $2)::numeric
-                        WHEN 'boolean' THEN CASE WHEN ($1::jsonb ->> $2)::boolean THEN 1 ELSE 0 END
-                        ELSE NULL END $fn$''')
+            from .schema_migrations import prepare_schema
+            prepare_schema(self.owner, schema, schema_mode)
+            if self.schema_updates:
+                self._initialize_schema()
 
             def configure(conn):
                 conn.execute(f'SET search_path TO {identifier(schema)}, pg_catalog')
@@ -307,6 +303,27 @@ class PostgresDatabase:
                 raise
             raise DatabaseError('Postgres initialization failed. Check database availability and configuration.') from None
 
+    def _initialize_schema(self):
+        schema = self.schema
+        with self.owner.transaction():
+            self.owner.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (schema,))
+            self.owner.execute(f'SET LOCAL search_path TO {identifier(schema)}, pg_catalog')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_leases (
+                name TEXT PRIMARY KEY, token TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL)''')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_policy (
+                id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL)''')
+            self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
+                LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
+            self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
+                LANGUAGE sql IMMUTABLE STRICT AS $fn$
+                SELECT CASE WHEN jsonb_typeof($1::jsonb -> $2)='string' THEN $1::jsonb ->> $2 END $fn$''')
+            self.owner.execute('''CREATE OR REPLACE FUNCTION json_number(text,text) RETURNS numeric
+                LANGUAGE sql IMMUTABLE STRICT AS $fn$
+                SELECT CASE jsonb_typeof($1::jsonb -> $2)
+                    WHEN 'number' THEN ($1::jsonb ->> $2)::numeric
+                    WHEN 'boolean' THEN CASE WHEN ($1::jsonb ->> $2)::boolean THEN 1 ELSE 0 END
+                    ELSE NULL END $fn$''')
+
     @contextmanager
     def connect(self, *, write_scope=None):
         import psycopg
@@ -317,7 +334,8 @@ class PostgresDatabase:
             if self.owner_pid is not None and (self.owner.closed or self.owner.broken):
                 raise DatabaseError('Postgres ownership connection was lost. Restart this application process.')
             with self.pool.connection() as raw:
-                yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy)
+                yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy,
+                                         schema_updates=self.schema_updates)
         except psycopg.IntegrityError:
             raise IntegrityError('Database constraint rejected the change.') from None
         except psycopg.Error:

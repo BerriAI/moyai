@@ -65,25 +65,8 @@ class Environments:
         self.manager, self.connectors, self.checkpoints = manager, connectors, checkpoints
         self.task = None
         self.last_sync = 0
-        store.execute('''CREATE TABLE IF NOT EXISTS environments (
-            id TEXT PRIMARY KEY, recipe TEXT NOT NULL, revision INTEGER NOT NULL,
-            active_build TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
-            is_default INTEGER NOT NULL DEFAULT 0, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-        store.execute('''CREATE TABLE IF NOT EXISTS environment_builds (
-            id TEXT PRIMARY KEY, environment_id TEXT NOT NULL REFERENCES environments(id),
-            revision INTEGER NOT NULL, recipe TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'queued',
-            sandbox_id TEXT NOT NULL DEFAULT '', snapshot_id TEXT NOT NULL DEFAULT '',
-            commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
-        with store.connect() as conn:
-            if 'sandbox_provider' not in conn.column_names('environment_builds'):
-                conn.execute("ALTER TABLE environment_builds ADD COLUMN sandbox_provider TEXT NOT NULL DEFAULT 'modal'")
-            columns = conn.column_names('environments')
-            for name in ('refresh_daily', 'activate_on_ready'):
-                if name not in columns:
-                    conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
-            if 'resolved_recipe' not in conn.column_names('environment_builds'):
-                conn.execute("ALTER TABLE environment_builds ADD COLUMN resolved_recipe TEXT NOT NULL DEFAULT ''")
+        if store.schema_updates:
+            initialize_schema(store)
 
     async def sync_repositories(self):
         """Register authorized repos without allocating machines or overriding edits."""
@@ -514,3 +497,25 @@ class Environments:
             return {'ok': True}
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS environments (
+        id TEXT PRIMARY KEY, recipe TEXT NOT NULL, revision INTEGER NOT NULL,
+        active_build TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
+        is_default INTEGER NOT NULL DEFAULT 0, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+    store.execute('''CREATE TABLE IF NOT EXISTS environment_builds (
+        id TEXT PRIMARY KEY, environment_id TEXT NOT NULL REFERENCES environments(id),
+        revision INTEGER NOT NULL, recipe TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'queued',
+        sandbox_id TEXT NOT NULL DEFAULT '', snapshot_id TEXT NOT NULL DEFAULT '',
+        commit_sha TEXT NOT NULL DEFAULT '', log TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, finished_at TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL)''')
+    with store.connect() as conn:
+        if 'sandbox_provider' not in conn.column_names('environment_builds'):
+            conn.execute("ALTER TABLE environment_builds ADD COLUMN sandbox_provider TEXT NOT NULL DEFAULT 'modal'")
+        columns = conn.column_names('environments')
+        for name in ('refresh_daily', 'activate_on_ready'):
+            if name not in columns:
+                conn.execute(f'ALTER TABLE environments ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
+        if 'resolved_recipe' not in conn.column_names('environment_builds'):
+            conn.execute("ALTER TABLE environment_builds ADD COLUMN resolved_recipe TEXT NOT NULL DEFAULT ''")

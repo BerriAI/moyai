@@ -82,49 +82,8 @@ def requested_skills(content, available):
 class Skills:
     def __init__(self, store, security, same_requester):
         self.store, self.security, self.same_requester = store, security, same_requester
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS skill_bundles (
-                    skill_id TEXT NOT NULL, revision INTEGER NOT NULL,
-                    encrypted TEXT NOT NULL, manifest TEXT NOT NULL,
-                    PRIMARY KEY(skill_id,revision)
-                );
-                CREATE TABLE IF NOT EXISTS skill_saves (
-                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, request_id TEXT NOT NULL,
-                    actor_id TEXT NOT NULL, fingerprint TEXT NOT NULL, skill_id TEXT NOT NULL,
-                    result TEXT NOT NULL, created_at TEXT NOT NULL,
-                    PRIMARY KEY(run_id,message_id,request_id)
-                );
-                CREATE TABLE IF NOT EXISTS skill_file_reads (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    skill_id TEXT NOT NULL, path TEXT NOT NULL, "offset" INTEGER NOT NULL, length INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_skill_file_reads_turn ON skill_file_reads(run_id,message_id);
-                CREATE TABLE IF NOT EXISTS skills (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
-                    encrypted TEXT NOT NULL, scope TEXT NOT NULL, owner_id TEXT NOT NULL,
-                    namespace TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
-                    archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                    client_id TEXT NOT NULL, UNIQUE(namespace,name), UNIQUE(owner_id,client_id)
-                );
-                CREATE TABLE IF NOT EXISTS skill_uses (
-                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    skill_id TEXT NOT NULL, revision INTEGER NOT NULL, encrypted TEXT NOT NULL,
-                    created_at TEXT NOT NULL, PRIMARY KEY(run_id,message_id,skill_id)
-                );
-                CREATE TABLE IF NOT EXISTS skill_searches (
-                    run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    skill_id TEXT NOT NULL, position INTEGER NOT NULL,
-                    PRIMARY KEY(run_id,message_id,skill_id)
-                );
-                CREATE TABLE IF NOT EXISTS skill_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL,
-                    actor_id TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
-                );
-            ''')
-            if 'icon' not in conn.column_names('skills'):
-                conn.execute("ALTER TABLE skills ADD COLUMN icon TEXT NOT NULL DEFAULT 'auto'")
+        if store.schema_updates:
+            initialize_schema(store)
 
     def visible(self, row, actor):
         return row['scope'] == 'organization' or self.same_requester(row['owner_id'], actor)
@@ -399,3 +358,49 @@ class Skills:
                 self.audit(conn,skill_id,user,'archived' if body.archived else 'restored')
             return {'archived':body.archived}
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS skill_bundles (
+                skill_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                encrypted TEXT NOT NULL, manifest TEXT NOT NULL,
+                PRIMARY KEY(skill_id,revision)
+            );
+            CREATE TABLE IF NOT EXISTS skill_saves (
+                run_id TEXT NOT NULL, message_id INTEGER NOT NULL, request_id TEXT NOT NULL,
+                actor_id TEXT NOT NULL, fingerprint TEXT NOT NULL, skill_id TEXT NOT NULL,
+                result TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(run_id,message_id,request_id)
+            );
+            CREATE TABLE IF NOT EXISTS skill_file_reads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                skill_id TEXT NOT NULL, path TEXT NOT NULL, "offset" INTEGER NOT NULL, length INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_file_reads_turn ON skill_file_reads(run_id,message_id);
+            CREATE TABLE IF NOT EXISTS skills (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+                encrypted TEXT NOT NULL, scope TEXT NOT NULL, owner_id TEXT NOT NULL,
+                namespace TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+                archived INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                client_id TEXT NOT NULL, UNIQUE(namespace,name), UNIQUE(owner_id,client_id)
+            );
+            CREATE TABLE IF NOT EXISTS skill_uses (
+                run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                skill_id TEXT NOT NULL, revision INTEGER NOT NULL, encrypted TEXT NOT NULL,
+                created_at TEXT NOT NULL, PRIMARY KEY(run_id,message_id,skill_id)
+            );
+            CREATE TABLE IF NOT EXISTS skill_searches (
+                run_id TEXT NOT NULL, message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                skill_id TEXT NOT NULL, position INTEGER NOT NULL,
+                PRIMARY KEY(run_id,message_id,skill_id)
+            );
+            CREATE TABLE IF NOT EXISTS skill_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, skill_id TEXT NOT NULL,
+                actor_id TEXT NOT NULL, action TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+        ''')
+        if 'icon' not in conn.column_names('skills'):
+            conn.execute("ALTER TABLE skills ADD COLUMN icon TEXT NOT NULL DEFAULT 'auto'")

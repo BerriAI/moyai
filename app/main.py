@@ -172,7 +172,7 @@ def create_app(settings: Settings | None = None):
                   database_url=settings.moyai_database_url, database_schema=settings.moyai_database_schema,
                   database_initialize=settings.moyai_database_initialize, application_instance=True,
                   database_pool_size=settings.moyai_database_pool_size, runtime_role=settings.moyai_runtime_role,
-                  runtime_settings=settings)
+                  runtime_settings=settings, schema_mode=settings.moyai_schema_mode)
     try:
         if settings.moyai_runtime_role != 'standalone':
             from .runtime_coordination import require_shared_artifacts
@@ -226,7 +226,8 @@ def _create_app(settings, store):
     lens_feedback = LensFeedback(store, settings)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
-    store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
+    if store.schema_updates:
+        store.execute("INSERT INTO organization(id,name) VALUES(1,?) ON CONFLICT DO NOTHING", (settings.organization_name,))
     slack = SlackSessions(store, connectors, manager, checkpoints, settings, lens_feedback=lens_feedback)
     from .session_titles import SessionTitles
     session_titles = SessionTitles(store, settings, checkpoints)

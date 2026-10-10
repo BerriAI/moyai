@@ -251,51 +251,8 @@ class Credentials:
         self.store, self.security, self.settings = store, security, settings
         self.manager, self.checkpoints = manager, checkpoints
         self.slots = asyncio.Semaphore(settings.max_concurrent_model_requests)
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS provider_secrets (
-                    id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
-                    scope TEXT NOT NULL, owner_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '',
-                    encrypted TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
-                    client_id TEXT NOT NULL, UNIQUE(owner_id,client_id)
-                );
-                CREATE TABLE IF NOT EXISTS credential_requests (
-                    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
-                    message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
-                    provider TEXT NOT NULL, reason TEXT NOT NULL, request_key TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending', secret_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '',
-                    UNIQUE(run_id,message_id,request_key)
-                );
-                CREATE TABLE IF NOT EXISTS credential_audit (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
-                    secret_id TEXT NOT NULL, action TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS credential_source_uses (
-                    run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
-                    secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
-                    PRIMARY KEY(run_id,message_id,secret_id,revision)
-                );
-            ''')
-            for table, fields in {
-                'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
-                    'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
-                    'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
-                    'revision': 'INTEGER NOT NULL DEFAULT 1'},
-                'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
-                    'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
-                    'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
-                    'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
-                    'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
-                    'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
-                    'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
-            }.items():
-                columns = conn.column_names(table)
-                for field, declaration in fields.items():
-                    if field not in columns:
-                        conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
-            conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")
+        if store.schema_updates:
+            initialize_schema(store)
 
     def root(self, run):
         return self.store.root_id(run['id'])
@@ -1051,3 +1008,51 @@ class Credentials:
             return {'saved': True}
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS provider_secrets (
+                id TEXT PRIMARY KEY, provider TEXT NOT NULL, label TEXT NOT NULL,
+                scope TEXT NOT NULL, owner_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '',
+                encrypted TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NOT NULL DEFAULT '',
+                client_id TEXT NOT NULL, UNIQUE(owner_id,client_id)
+            );
+            CREATE TABLE IF NOT EXISTS credential_requests (
+                id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id),
+                message_id INTEGER NOT NULL, actor_id TEXT NOT NULL,
+                provider TEXT NOT NULL, reason TEXT NOT NULL, request_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', secret_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL, resolved_at TEXT NOT NULL DEFAULT '',
+                UNIQUE(run_id,message_id,request_key)
+            );
+            CREATE TABLE IF NOT EXISTS credential_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, actor_id TEXT NOT NULL,
+                secret_id TEXT NOT NULL, action TEXT NOT NULL, run_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS credential_source_uses (
+                run_id TEXT NOT NULL REFERENCES runs(id), message_id INTEGER NOT NULL,
+                secret_id TEXT NOT NULL, revision INTEGER NOT NULL,
+                PRIMARY KEY(run_id,message_id,secret_id,revision)
+            );
+        ''')
+        for table, fields in {
+            'provider_secrets': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                'env_var': "TEXT NOT NULL DEFAULT ''", 'lifetime': "TEXT NOT NULL DEFAULT 'persistent'",
+                'expires_at': "TEXT NOT NULL DEFAULT ''", 'invalid_reason': "TEXT NOT NULL DEFAULT ''",
+                'revision': 'INTEGER NOT NULL DEFAULT 1'},
+            'credential_requests': {'name': "TEXT NOT NULL DEFAULT ''", 'format': "TEXT NOT NULL DEFAULT 'env'",
+                'env_var': "TEXT NOT NULL DEFAULT ''", 'generation': 'INTEGER NOT NULL DEFAULT 0',
+                'failure': "TEXT NOT NULL DEFAULT ''", 'revision': 'INTEGER NOT NULL DEFAULT 1',
+                'secret_revision': 'INTEGER NOT NULL DEFAULT 1', 'setup_url': "TEXT NOT NULL DEFAULT ''",
+                'setup_instructions': "TEXT NOT NULL DEFAULT ''", 'input_fields': "TEXT NOT NULL DEFAULT '[]'",
+                'preferred_scope': "TEXT NOT NULL DEFAULT ''", 'scope_revision': 'INTEGER NOT NULL DEFAULT 0',
+                'resolution_pending': 'INTEGER NOT NULL DEFAULT 0', 'resolution_error': "TEXT NOT NULL DEFAULT ''"},
+        }.items():
+            columns = conn.column_names(table)
+            for field, declaration in fields.items():
+                if field not in columns:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {field} {declaration}')
+        conn.execute("UPDATE provider_secrets SET scope='personal',lifetime='session' WHERE scope='session'")

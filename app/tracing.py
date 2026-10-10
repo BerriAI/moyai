@@ -65,12 +65,8 @@ class AgentTracing:
                                   'deployment.environment': settings.trace_environment,
                                   **({'agent.version': settings.moyai_build_sha} if settings.moyai_build_sha else {})})
         self.processor = processor
-        with store.connect() as conn:
-            conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
-                run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
-                trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
-                session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
-                PRIMARY KEY(run_id,message_id))''')
+        if store.schema_updates:
+            initialize_schema(store)
         self.outboxes = [TraceOutbox(store, *destination) for destination in destinations] if processor is None else []
         raindrop = next((d for d in destinations if d[0] == 'trace_outbox_raindrop'), None)
         self.events = (RaindropEventOutbox(store, raindrop[1].removesuffix('/traces') + '/events/track', raindrop[2])
@@ -422,3 +418,12 @@ class AgentTracing:
         await asyncio.gather(*(outbox.close() for outbox in self.exporters()))
         if self.processor:
             await asyncio.to_thread(self.processor.shutdown)
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
+            run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+            trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,
+            session_id TEXT NOT NULL, agent_name TEXT NOT NULL,
+            PRIMARY KEY(run_id,message_id))''')

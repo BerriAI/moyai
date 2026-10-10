@@ -64,12 +64,8 @@ class MemoryReview:
         self.memory, self.store, self.settings = memory, memory.store, settings
         self.spend, self.slots = spend, slots
         self.worker = self.current = self.client = None
-        self.store.execute('''CREATE TABLE IF NOT EXISTS memory_reviews (
-            message_id INTEGER PRIMARY KEY REFERENCES messages(id), run_id TEXT NOT NULL,
-            actor_id TEXT NOT NULL, owner_id TEXT NOT NULL, preferences_revision INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
-            available_at TEXT NOT NULL, updated_at TEXT NOT NULL, saved_count INTEGER NOT NULL DEFAULT 0)''')
-        self.store.execute('CREATE INDEX IF NOT EXISTS memory_review_queue ON memory_reviews(status,available_at,message_id)')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     @property
     def configured(self):
@@ -320,3 +316,12 @@ class MemoryReview:
         if self.client:
             await self.client.aclose()
             self.client = None
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS memory_reviews (
+        message_id INTEGER PRIMARY KEY REFERENCES messages(id), run_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL, owner_id TEXT NOT NULL, preferences_revision INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+        available_at TEXT NOT NULL, updated_at TEXT NOT NULL, saved_count INTEGER NOT NULL DEFAULT 0)''')
+    store.execute('CREATE INDEX IF NOT EXISTS memory_review_queue ON memory_reviews(status,available_at,message_id)')

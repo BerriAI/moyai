@@ -71,10 +71,8 @@ class SessionPullRequests:
         self.slots = asyncio.Semaphore(4)
         self.closed = False
         self.cursor = 0
-        self.store.execute('''CREATE TABLE IF NOT EXISTS github_pr_snapshots (
-            connection_version TEXT NOT NULL, repository_id INTEGER NOT NULL, number INTEGER NOT NULL,
-            snapshot TEXT NOT NULL, observed_at TEXT NOT NULL,
-            PRIMARY KEY(connection_version,repository_id,number))''')
+        if self.store.schema_updates:
+            initialize_schema(self.store)
 
     def context(self):
         if not self.github.connectors.allowed('github_pull_request'):
@@ -319,3 +317,10 @@ class SessionPullRequests:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.pending.clear()
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS github_pr_snapshots (
+        connection_version TEXT NOT NULL, repository_id INTEGER NOT NULL, number INTEGER NOT NULL,
+        snapshot TEXT NOT NULL, observed_at TEXT NOT NULL,
+        PRIMARY KEY(connection_version,repository_id,number))''')

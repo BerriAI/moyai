@@ -1,10 +1,10 @@
 name: PostgreSQL runtime
 on:
   pull_request:
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
+    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
 jobs:
@@ -164,6 +164,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - name: Verify broker ownership, recovery, isolation and readiness
         run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_separate_broker.py
+      - name: Verify explicit migrations and runtime startup without DDL
+        run: |
+          uv run --frozen --python 3.13 pytest -q --tb=short tests/test_schema_migrations.py
+          uv run --frozen --python 3.13 python -m scripts.schema_migration_probe --output /tmp/moyai-schema-proof
       - name: Verify rejected starts preserve live runtime state before schema writes
         run: uv run --frozen --python 3.13 python -m scripts.runtime_startup_fence_probe --output /tmp/moyai-startup-fences
       - name: Verify native inference survives a separate API process restart

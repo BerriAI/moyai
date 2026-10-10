@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path(".data")
     moyai_database_url: str = Field(default='', repr=False)
     moyai_database_initialize: bool = False
+    moyai_schema_mode: Literal['auto', 'verify'] = 'auto'
     moyai_database_schema: str = Field(default='moyai', pattern=r'^moyai(?:_[a-z][a-z0-9_]{0,49})?$')
     moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
     moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker'] = 'standalone'
@@ -46,6 +47,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode='after')
     def database_backend(self):
+        if self.moyai_schema_mode == 'verify' and not self.moyai_database_url:
+            raise ValueError('MOYAI_SCHEMA_MODE=verify requires PostgreSQL.')
         if self.sandbox_prepared_pool_size:
             if not self.temporal_enabled or self.sandbox_provider != 'modal':
                 raise ValueError('Prepared workspaces require Temporal and the Modal provider.')

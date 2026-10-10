@@ -18,21 +18,8 @@ def profile_name(value, user):
 class SlackMentions:
     def __init__(self, store):
         self.store = store
-        with store.connect() as conn:
-            conn.executescript('''
-                CREATE TABLE IF NOT EXISTS slack_mention_names (
-                    team_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                    name TEXT NOT NULL DEFAULT '', next_check REAL NOT NULL DEFAULT 0,
-                    PRIMARY KEY(team_id,user_id)
-                );
-                CREATE TABLE IF NOT EXISTS slack_message_mentions (
-                    message_id INTEGER NOT NULL REFERENCES messages(id),
-                    team_id TEXT NOT NULL, user_id TEXT NOT NULL,
-                    PRIMARY KEY(message_id,team_id,user_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_slack_mention_due ON slack_mention_names(team_id,next_check);
-                CREATE INDEX IF NOT EXISTS idx_slack_mention_messages ON slack_message_mentions(team_id,user_id);
-            ''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     @staticmethod
     def queue_in(conn, message_id, team, content):
@@ -118,3 +105,21 @@ class SlackMentions:
                 for run in runs:
                     self.store.event(run['run_id'], 'chat', 'Slack mention names updated')
         return bool(rows)
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.executescript('''
+            CREATE TABLE IF NOT EXISTS slack_mention_names (
+                team_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '', next_check REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY(team_id,user_id)
+            );
+            CREATE TABLE IF NOT EXISTS slack_message_mentions (
+                message_id INTEGER NOT NULL REFERENCES messages(id),
+                team_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                PRIMARY KEY(message_id,team_id,user_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_slack_mention_due ON slack_mention_names(team_id,next_check);
+            CREATE INDEX IF NOT EXISTS idx_slack_mention_messages ON slack_message_mentions(team_id,user_id);
+        ''')

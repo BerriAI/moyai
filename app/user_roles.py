@@ -26,13 +26,8 @@ class RoleChange(BaseModel):
 class UserRoles:
     def __init__(self, store, settings):
         self.store, self.settings = store, settings
-        store.execute('''CREATE TABLE IF NOT EXISTS user_roles (
-            email TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('admin','member')),
-            revision INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
-        store.execute('''CREATE TABLE IF NOT EXISTS user_role_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
-            previous_role TEXT NOT NULL, role TEXT NOT NULL,
-            actor TEXT NOT NULL, created_at TEXT NOT NULL)''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def eligible(self, email):
         return bool(email and email.rpartition('@')[2] in self.settings.google_domains())
@@ -128,3 +123,13 @@ class UserRoles:
             return self.change(body, security.session_info(request))
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS user_roles (
+        email TEXT PRIMARY KEY, role TEXT NOT NULL CHECK(role IN ('admin','member')),
+        revision INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+    store.execute('''CREATE TABLE IF NOT EXISTS user_role_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL,
+        previous_role TEXT NOT NULL, role TEXT NOT NULL,
+        actor TEXT NOT NULL, created_at TEXT NOT NULL)''')

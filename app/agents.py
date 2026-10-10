@@ -100,16 +100,8 @@ class AgentCoordinator:
     def __init__(self, store, settings, manager):
         self.store, self.settings, self.manager = store, settings, manager
         self.locks = {}
-        store.execute('''CREATE TABLE IF NOT EXISTS agent_groups (
-            id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES runs(id),
-            message_id INTEGER NOT NULL, request_key TEXT NOT NULL, payload TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'preparing', snapshot_id TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL, UNIQUE(parent_id,message_id,request_key))''')
-        store.execute('''CREATE TABLE IF NOT EXISTS agent_retries (
-            group_id TEXT NOT NULL REFERENCES agent_groups(id), request_key TEXT NOT NULL,
-            payload TEXT NOT NULL, PRIMARY KEY(group_id,request_key))''')
-        if 'result_snapshot' not in store.column_names('agent_groups'):
-            store.execute("ALTER TABLE agent_groups ADD COLUMN result_snapshot TEXT NOT NULL DEFAULT ''")
+        if store.schema_updates:
+            initialize_schema(store)
 
     def available(self, run):
         return self.settings.temporal_enabled and run['chat_enabled'] and not run.get('deleted_at')
@@ -441,3 +433,16 @@ class AgentCoordinator:
                 'spend': str(sum((c['spend'] for c in costs.values()), Decimal(0))) if include_costs else None,
                 'pending_costs': sum(c['pending_costs'] for c in costs.values()),
                 'missing_costs': sum(c['missing_costs'] for c in costs.values())}
+
+
+def initialize_schema(store):
+    store.execute('''CREATE TABLE IF NOT EXISTS agent_groups (
+        id TEXT PRIMARY KEY, parent_id TEXT NOT NULL REFERENCES runs(id),
+        message_id INTEGER NOT NULL, request_key TEXT NOT NULL, payload TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'preparing', snapshot_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL, UNIQUE(parent_id,message_id,request_key))''')
+    store.execute('''CREATE TABLE IF NOT EXISTS agent_retries (
+        group_id TEXT NOT NULL REFERENCES agent_groups(id), request_key TEXT NOT NULL,
+        payload TEXT NOT NULL, PRIMARY KEY(group_id,request_key))''')
+    if 'result_snapshot' not in store.column_names('agent_groups'):
+        store.execute("ALTER TABLE agent_groups ADD COLUMN result_snapshot TEXT NOT NULL DEFAULT ''")

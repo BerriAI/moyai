@@ -34,7 +34,8 @@ class SandboxSettings:
         self.store, self.settings, self.security = store, settings, security
         self.lock = asyncio.Lock()
         self.modal_clients = ModalClients()
-        store.execute('CREATE TABLE IF NOT EXISTS sandbox_settings (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, encrypted TEXT NOT NULL)')
+        if store.schema_updates:
+            initialize_schema(store)
         rows = store.rows('SELECT * FROM sandbox_settings WHERE id=1')
         if rows:
             saved = json.loads(security.decrypt(rows[0]['encrypted']))
@@ -42,6 +43,9 @@ class SandboxSettings:
             for key in saved:
                 setattr(settings, key, getattr(validated, key))
         else:
+            if not store.schema_updates:
+                from .database import DatabaseError
+                raise DatabaseError('Sandbox defaults are missing. Run the offline migration command.')
             if not settings.substrate_signing_key:
                 settings.substrate_signing_key = base64.b64encode(Ed25519PrivateKey.generate().private_bytes_raw()).decode()
             self.save(0)
@@ -127,3 +131,7 @@ class SandboxSettings:
                 return {**self.view(True), 'message': message}
 
         return router
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS sandbox_settings (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, encrypted TEXT NOT NULL)')

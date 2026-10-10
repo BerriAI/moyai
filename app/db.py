@@ -71,7 +71,12 @@ class Store:
                              'created_at', 'updated_at', 'active_message_id',
                              'deletion_requested_at', 'deleted_at', 'pending_result')
 
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone', runtime_settings=None):
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone', runtime_settings=None, schema_mode='auto'):
+        if schema_mode not in {'auto', 'verify', 'migrate'}:
+            raise ValueError('Unknown schema mode.')
+        if schema_mode != 'auto' and not database_url:
+            raise ValueError('Explicit schema modes require PostgreSQL.')
+        self.schema_updates = schema_mode != 'verify'
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
@@ -82,7 +87,7 @@ class Store:
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
             application_instance=application_instance, pool_size=database_pool_size, runtime_role=runtime_role,
-            runtime_settings=runtime_settings) if database_url else None
+            runtime_settings=runtime_settings, schema_mode=schema_mode) if database_url else None
         try:
             self._initialize(directory, default_model, object_storage)
         except BaseException:
@@ -91,6 +96,16 @@ class Store:
             raise
 
     def _initialize(self, directory, default_model, object_storage):
+        if self.schema_updates:
+            self._initialize_schema(default_model)
+        if not self.database:
+            self.path.chmod(0o600)
+        self.objects = object_storage if object_storage is not None else ObjectStorage()
+        self.artifacts = ArtifactStore(self, directory)
+        self.attachments = Attachments(self)
+        self.slack_mentions = SlackMentions(self)
+
+    def _initialize_schema(self, default_model):
         with self.connect() as conn:
             if not self.database:
                 conn.execute('PRAGMA journal_mode=WAL')
@@ -303,12 +318,6 @@ class Store:
             for name, default in (("mention_ts", ""), ("context_status", "legacy"), ("context_json", "{}")):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE slack_events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
-        if not self.database:
-            self.path.chmod(0o600)
-        self.objects = object_storage if object_storage is not None else ObjectStorage()
-        self.artifacts = ArtifactStore(self, directory)
-        self.attachments = Attachments(self)
-        self.slack_mentions = SlackMentions(self)
 
     @contextmanager
     def connect(self, *, write_scope=None):

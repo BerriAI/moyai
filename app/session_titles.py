@@ -73,7 +73,8 @@ class SessionTitles:
         self.client = None
         self.agent = None
         self.running = False
-        self.store.execute('CREATE TABLE IF NOT EXISTS session_title_settings (id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL)')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def model_name(self):
         rows = self.store.rows('SELECT model FROM session_title_settings WHERE id=1')
@@ -192,3 +193,7 @@ class SessionTitles:
             await self.client.close()
             self.client = None
         self.agent = None
+
+
+def initialize_schema(store):
+    store.execute('CREATE TABLE IF NOT EXISTS session_title_settings (id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL)')

@@ -12,14 +12,8 @@ class ChatPreferences(BaseModel):
 class UserPreferences:
     def __init__(self, store, security, checkpoints):
         self.store, self.security, self.checkpoints = store, security, checkpoints
-        with store.connect() as conn:
-            conn.execute('''CREATE TABLE IF NOT EXISTS user_preferences (
-                user_id TEXT PRIMARY KEY REFERENCES users(id),
-                send_immediately INTEGER NOT NULL DEFAULT 0 CHECK(send_immediately IN (0,1))
-            )''')
-            if 'omit_private_tool_payloads' not in conn.column_names('user_preferences'):
-                conn.execute('''ALTER TABLE user_preferences ADD COLUMN omit_private_tool_payloads
-                    INTEGER NOT NULL DEFAULT 0 CHECK(omit_private_tool_payloads IN (0,1))''')
+        if store.schema_updates:
+            initialize_schema(store)
 
     def get(self, user_id):
         rows = self.store.rows('SELECT * FROM user_preferences WHERE user_id=?', (user_id,))
@@ -60,3 +54,14 @@ class UserPreferences:
             return self.get(user_id)
 
         return router
+
+
+def initialize_schema(store):
+    with store.connect() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS user_preferences (
+            user_id TEXT PRIMARY KEY REFERENCES users(id),
+            send_immediately INTEGER NOT NULL DEFAULT 0 CHECK(send_immediately IN (0,1))
+        )''')
+        if 'omit_private_tool_payloads' not in conn.column_names('user_preferences'):
+            conn.execute('''ALTER TABLE user_preferences ADD COLUMN omit_private_tool_payloads
+                INTEGER NOT NULL DEFAULT 0 CHECK(omit_private_tool_payloads IN (0,1))''')
