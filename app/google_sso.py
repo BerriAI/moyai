@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
-from .security import digest
+from .security import Throttle, digest
 from .file_links import valid_file_return_path
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -34,7 +34,7 @@ class GoogleSignIn:
         self.keys_expire = 0
         self.last_key_fetch = 0
         self.key_lock = asyncio.Lock()
-        self.attempts = []
+        self.attempts = Throttle(30)
 
     @property
     def callback(self):
@@ -103,17 +103,19 @@ class GoogleSignIn:
                 return JSONResponse({'url': '/#tasks'})
             if not self.settings.google_enabled():
                 raise HTTPException(409, "Google sign-in is not configured yet.")
-            now = time.monotonic()
-            self.attempts[:] = [stamp for stamp in self.attempts if stamp > now - 60]
-            if len(self.attempts) >= 30:
+            client = self.security.client_key(request)
+            if self.attempts.blocked(client):
                 raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
-            self.attempts.append(now)
+            self.attempts.record(client)
             state, browser, nonce, verifier = (secrets.token_urlsafe(32) for _ in range(4))
             allowed = re.fullmatch(r"/#(?:tasks|connections|runtime|spend|users|run=[a-f0-9]{32}(?:&credential=[a-f0-9]{32}&generation=(?:0|[1-9][0-9]{0,14}))?)", body.return_to)
             return_to = body.return_to if allowed or valid_file_return_path(body.return_to) else "/#tasks"
             self.store.execute("DELETE FROM login_states WHERE expires<?", (time.time(),))
-            self.store.execute("INSERT INTO login_states VALUES(?,?,?,?,?,?)",
-                               (digest(state), digest(browser), nonce, verifier, return_to, time.time() + 600))
+            # Keep each client's newest few unfinished sign-ins, so no client can fill the table for others.
+            self.store.execute("DELETE FROM login_states WHERE client=? AND state_hash NOT IN "
+                               "(SELECT state_hash FROM login_states WHERE client=? ORDER BY expires DESC LIMIT 4)", (client, client))
+            self.store.execute("INSERT INTO login_states(state_hash, browser_hash, nonce, verifier, return_path, expires, client) "
+                               "VALUES(?,?,?,?,?,?,?)", (digest(state), digest(browser), nonce, verifier, return_to, time.time() + 600, client))
             challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
             domains = sorted(self.settings.google_domains())
             params = {"client_id": self.settings.google_client_id, "redirect_uri": self.callback,

@@ -1,6 +1,8 @@
 import hashlib
 import hmac
+import ipaddress
 import secrets
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -15,6 +17,46 @@ from .config import Settings
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def network_key(host: str) -> str:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if address.version == 6 and address.ipv4_mapped:
+        return str(address.ipv4_mapped)
+    # One IPv6 subscriber usually controls a whole /56.
+    return str(ipaddress.ip_network(f"{address}/56", strict=False)) if address.version == 6 else str(address)
+
+
+def is_proxy_peer(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback
+
+
+class Throttle:
+    """Allow `limit` hits per key per minute, tracking at most `max_keys` keys."""
+
+    def __init__(self, limit: int, max_keys: int = 10000):
+        self.limit, self.max_keys, self.hits, self.swept = limit, max_keys, {}, time.monotonic()
+
+    def blocked(self, key: str) -> bool:
+        cutoff = time.monotonic() - 60
+        if self.swept < cutoff:
+            self.hits, self.swept = {k: v for k, v in self.hits.items() if v[-1] > cutoff}, time.monotonic()
+        stamps = [t for t in self.hits.pop(key, []) if t > cutoff]
+        if stamps:
+            self.hits[key] = stamps
+        return len(stamps) >= self.limit
+
+    def record(self, key: str):
+        self.hits.setdefault(key, []).append(time.monotonic())
+        if len(self.hits) > self.max_keys:
+            del self.hits[next(iter(self.hits))]
 
 
 def local_secret(path: Path, generate) -> str:
@@ -129,6 +171,16 @@ class Security:
     def role(self, request: Request) -> str | None:
         info = self.session_info(request)
         return info["role"] if info else None
+
+    def client_key(self, request: Request) -> str:
+        host = request.client.host if request.client else ""
+        hops = self.settings.trusted_proxy_hops
+        if hops and is_proxy_peer(host):
+            # Each trusted proxy appends one hop; anything further left is client-supplied.
+            forwarded = [hop.strip() for line in request.headers.getlist("x-forwarded-for") for hop in line.split(",")]
+            if len(forwarded) >= hops:
+                host = forwarded[-hops]
+        return network_key(host)
 
     def csrf(self, sid: str) -> str:
         return hmac.new(self.secret.encode(), f"csrf:{sid}".encode(), hashlib.sha256).hexdigest()

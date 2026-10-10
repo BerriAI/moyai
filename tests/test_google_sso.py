@@ -232,6 +232,20 @@ def test_cancelled_google_login_preserves_credential_target_for_retry(sso):
     assert client.get('/api/session').json()['authenticated'] is False
 
 
+def test_google_sign_in_limits_are_per_client(sso):
+    app, client, control = sso
+    def start(host):
+        visitor = TestClient(app, base_url=app.state.settings.public_url, client=(host, 50000))
+        return visitor.post('/api/auth/google/start', json={}, headers={'Origin': app.state.settings.public_url})
+    for _ in range(30):
+        assert start('203.0.113.9').status_code == 200
+    assert start('203.0.113.9').status_code == 429
+    assert start('192.0.2.10').status_code == 200
+    # Unfinished sign-ins are capped per client, so one client cannot fill the table for others.
+    counts = {row['client']: row['n'] for row in app.state.store.rows('SELECT client, COUNT(*) AS n FROM login_states GROUP BY client')}
+    assert counts == {'203.0.113.9': 5, '192.0.2.10': 1}
+
+
 @pytest.mark.parametrize('cancelled', [False, True])
 def test_google_login_preserves_markdown_file_target(sso, cancelled):
     from app.file_links import file_link

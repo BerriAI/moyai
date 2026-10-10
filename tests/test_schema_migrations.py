@@ -198,6 +198,51 @@ def test_verify_requires_postgres(tmp_path):
         Store(tmp_path, schema_mode='verify')
 
 
+@pytest.mark.sqlite_only
+def test_sqlite_login_state_upgrade_preserves_pending_login(tmp_path):
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / 'workspace.db') as conn:
+        conn.execute('''CREATE TABLE login_states (
+            state_hash TEXT PRIMARY KEY, browser_hash TEXT NOT NULL,
+            nonce TEXT NOT NULL, verifier TEXT NOT NULL,
+            return_path TEXT NOT NULL, expires REAL NOT NULL)''')
+        conn.execute("INSERT INTO login_states VALUES('state','browser','nonce','verifier','/',123)")
+    for expected_client in ('', 'browser-client'):
+        store = Store(tmp_path)
+        try:
+            assert store.rows('SELECT client,nonce,expires FROM login_states') == [
+                {'client': expected_client, 'nonce': 'nonce', 'expires': 123}]
+            store.execute("UPDATE login_states SET client='browser-client' WHERE state_hash='state'")
+            assert store.rows("SELECT state_hash FROM login_states WHERE client='browser-client' AND expires>0") == [
+                {'state_hash': 'state'}]
+        finally:
+            store.close()
+
+
+def test_postgres_login_state_upgrade_requires_migration_and_preserves_login(split_settings):
+    settings = ready(split_settings)
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP INDEX login_states_client')
+        conn.execute('ALTER TABLE login_states DROP COLUMN client')
+        conn.execute("INSERT INTO login_states VALUES('state','browser','nonce','verifier','/',123)")
+        conn.execute('UPDATE schema_state SET revision=3')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+    ready(split_settings)
+    assert execute(settings, 'SELECT client,nonce,expires FROM login_states') == [('', 'nonce', 123)]
+    assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='login_states_client'") == [
+        ('login_states_client',)]
+    api = main.create_app(settings)
+    try:
+        api.state.store.execute("UPDATE login_states SET client='browser-client' WHERE state_hash='state'")
+        assert api.state.store.rows("SELECT state_hash FROM login_states WHERE client='browser-client' AND expires>0") == [
+            {'state_hash': 'state'}]
+    finally:
+        api.state.store.close()
+
+
 def test_schema_initializers_have_a_versioned_manifest():
     # A schema edit without a new revision must fail CI, including optional
     # components and backend-specific functions/triggers used by the migrator.

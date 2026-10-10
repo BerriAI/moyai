@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
     # Maintenance commands also need the private service's origin; they don't
     # inherit the environment updates performed inside the server process.
     public_url: str = Field(default='http://127.0.0.1:8787',

@@ -58,6 +58,9 @@ class Web:
             "CHECKPOINT_DIR": "/checkpoints",
             "MODAL_VOLUME_NAME": VOLUME_NAME,
             "TRUST_MODAL_PROXY": "true",
+            # Modal's proxy connects from a private address and replaces
+            # X-Forwarded-For with the real client.
+            "TRUSTED_PROXY_HOPS": "1",
         }
         self.process = subprocess.Popen([
             "/opt/workspace/.venv/bin/uvicorn", "app.main:app",
