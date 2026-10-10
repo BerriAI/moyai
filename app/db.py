@@ -83,6 +83,7 @@ class Store:
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
+        self.skill_learning = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
@@ -779,6 +780,8 @@ class Store:
             self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
         if status == 'completed' and self.memory_review:
             self.memory_review.enqueue_in(conn, message_id)
+        if status == 'completed' and self.skill_learning:
+            self.skill_learning.enqueue_in(conn, message_id)
 
     def finish_message(self, run_id, message_id, content, status="completed"):
         with self.connect(write_scope=run_id) as conn:

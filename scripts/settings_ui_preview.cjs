@@ -150,6 +150,7 @@ const server=http.createServer(async(req,res)=>{
   return json(res,200,chatPreferences);
  }
  if(p==='/api/settings/session-titles'){if(req.method==='PUT')titleModel=body.model;return json(res,200,{model:titleModel,enabled:true,gateway_configured:true});}
+ if(p==='/api/skill-learning')return json(res,200,{preferences:{enabled:false,revision:0},configured:true,suggestions:[],limit:20});
  if(p==='/api/skills')return json(res,200,{skills:empty?[]:fixture==='skill-picker'?pickerSkills:skills});
  if(p.startsWith('/api/skills/'))return json(res,200,[...skills,...pickerSkills].find(s=>s.id===p.split('/')[3])||{});
  if(p==='/api/memory/preferences'){preferences={...preferences,...body,revision:preferences.revision+1};return json(res,200,preferences);}
