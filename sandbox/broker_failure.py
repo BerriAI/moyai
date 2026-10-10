@@ -22,6 +22,11 @@ ERROR_CODES = {
     'api_error', 'server_error', 'context_length_exceeded', 'insufficient_quota',
     'max_output_tokens', 'content_filter', 'stream_incomplete', 'cancelled', 'unknown',
 }
+TERMINAL_ERROR_CODES = {
+    'cyber_policy', 'content_policy_violation', 'authentication_error', 'permission_error',
+    'invalid_request_error', 'not_found_error', 'context_length_exceeded', 'insufficient_quota',
+    'max_output_tokens', 'content_filter', 'cancelled',
+}
 ERROR_STAGES = {'validation', 'context_preparation', 'admission', 'upstream', 'stream'}
 CLAUDE_ERRORS = {'authentication_failed', 'billing_error', 'rate_limit', 'invalid_request', 'server_error', 'unknown'}
 
@@ -135,6 +140,7 @@ def http_status(value):
 
 def failure(route, request_id, exc, *, headers=None, status=None, response_started=False, response_bytes=0):
     headers = headers or {}
+    diagnostic = safe_error({'error_code': headers.get('x-moyai-error-code'), 'stage': headers.get('x-moyai-error-stage')})
     upstream = http_status(headers.get('x-moyai-upstream-status'))
     effective_status = upstream or status
     # An unmarked local 429 is a run quota, not a temporary provider throttle.
@@ -152,7 +158,7 @@ def failure(route, request_id, exc, *, headers=None, status=None, response_start
         cause = exc.__cause__
     errno = getattr(cause, 'errno', None) if cause else getattr(exc, 'errno', None)
     return {
-        **safe_error({'error_code': headers.get('x-moyai-error-code'), 'stage': headers.get('x-moyai-error-stage')}),
+        **diagnostic,
         'version': 1, 'route': route if route in BROKER_ROUTES else 'unknown',
         'http_status': status, 'upstream_status': upstream,
         'request_id': request_id, 'request_ids': request_ids(headers),
@@ -161,7 +167,7 @@ def failure(route, request_id, exc, *, headers=None, status=None, response_start
         'cause_type': type(cause).__name__ if cause else '',
         'errno': errno if type(errno) is int else None,
         'response_bytes': response_bytes,
-        'transient': interrupted or (transient and not response_started),
+        'transient': diagnostic.get('error_code') not in TERMINAL_ERROR_CODES and (interrupted or (transient and not response_started)),
         'transport_interrupted': interrupted,
         'uncertain_tool': route in TOOL_ROUTES,
     }

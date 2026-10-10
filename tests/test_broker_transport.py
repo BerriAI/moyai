@@ -152,11 +152,21 @@ def test_failure_preserves_request_ids_without_payloads_and_blocks_sdk_resend(na
         assert not relay.resume_model(current) and relay.model_failed
 
 
-@pytest.mark.parametrize('status,upstream,transient', [(502, 401, False), (502, 403, False),
-    (502, 429, True), (502, 503, True), (429, None, False), (425, None, True),
-    (524, None, True), (502, 524, True), (525, None, False), (400, None, False),
-    (403, None, False), (429, 429, True), (503, 503, True)])
-def test_failure_classification_uses_original_upstream_status(status, upstream, transient):
+@pytest.mark.parametrize('status,upstream,code,transient', [
+    (502, 401, 'unknown', False), (502, 403, 'unknown', False),
+    (502, 429, 'unknown', True), (502, 503, 'unknown', True),
+    (429, None, 'unknown', False), (425, None, 'unknown', True),
+    (524, None, 'unknown', True), (502, 524, 'unknown', True),
+    (525, None, 'unknown', False), (400, None, 'unknown', False),
+    (403, None, 'unknown', False), (429, 429, 'rate_limit_error', True),
+    (503, 503, 'overloaded_error', True),
+    (429, 429, 'insufficient_quota', False), (503, 503, 'cyber_policy', False),
+    (502, 502, 'content_policy_violation', False), (503, 503, 'authentication_error', False),
+    (503, 503, 'permission_error', False), (503, 503, 'invalid_request_error', False),
+    (503, 503, 'not_found_error', False), (503, 503, 'context_length_exceeded', False),
+    (503, 503, 'max_output_tokens', False), (503, 503, 'content_filter', False),
+])
+def test_failure_classification_uses_original_upstream_status(status, upstream, code, transient):
     class Edge(BaseHTTPRequestHandler):
         def log_message(self, *args): pass
         def do_POST(self):
@@ -165,7 +175,7 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
             if upstream:
                 self.send_header('X-Moyai-Upstream-Status', str(upstream))
             self.send_header('X-Moyai-Model-Request-ID', 'ledger-id')
-            self.send_header('X-Moyai-Error-Code', 'rate_limit_error' if upstream == 429 else 'unknown')
+            self.send_header('X-Moyai-Error-Code', code)
             self.send_header('X-Moyai-Error-Stage', 'upstream')
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
@@ -174,7 +184,10 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
         assert client.post('/v1/responses', json={}).status_code == status
         assert relay.last_failure['upstream_status'] == upstream
         assert relay.last_failure['stage'] == 'upstream'
-        assert relay.last_failure['error_code'] == ('rate_limit_error' if upstream == 429 else 'unknown')
+        assert relay.last_failure['error_code'] == code
+        # A persisted pre-fix marker cannot override an explicit terminal code.
+        if code not in {'unknown', 'rate_limit_error', 'overloaded_error'}:
+            assert not retryable_failure({**relay.last_failure, 'transient': True})
         assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
         assert relay.last_failure['transient'] is transient
         assert relay.resume_model(relay.last_failure) is transient
@@ -886,3 +899,9 @@ def test_large_tool_call_crosses_loopback_relay_without_raising_model_limit():
         assert received == [payload]
     finally:
         relay.close(); server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+@pytest.mark.parametrize('code', [None, [], {}])
+def test_malformed_error_code_cannot_authorize_recovery(code):
+    assert not retryable_failure({'version': 1, 'route': '/v1/messages', 'transient': True,
+                                  'response_started': False, 'error_code': code})
