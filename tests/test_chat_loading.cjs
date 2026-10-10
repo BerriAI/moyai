@@ -106,6 +106,28 @@ test('a recent conversation renders before the network settles and refreshes wit
   assert.deepEqual(updates[0].messages,['new']);
 });
 
+test('access denial releases a cached conversation decoration without waiting for animation',async()=>{
+  for(const status of [401,403]){
+    const f=loadingFixture();let cleanups=0;
+    f.state.runs=[{id:runId}];
+    f.state.navigationCache={get:()=>({id:runId,chat_enabled:true})};
+    f.context.renderChat=run=>{
+      f.state.chatRun=run;
+      // Hidden tabs and reduced motion have no pending animation frame to
+      // notice a detached canvas; the controller must dispose this mount.
+      f.state.spaceCleanup=()=>{cleanups++;};
+    };
+    const opening=f.context.openRun(runId);
+    assert.equal(cleanups,0,'the cached decoration remains mounted while revalidating');
+    f.request('/api/runs/'+runId+'?activity=summary').reject(Object.assign(new Error('Access denied'),{status}));
+    await assert.rejects(opening,/Access denied/);
+    assert.equal(cleanups,1);
+    assert.equal(f.state.spaceCleanup,null);
+    assert.equal(f.state.chatRun,null);
+    assert.match(f.node('#content').innerHTML,/Could not load this conversation/);
+  }
+});
+
 test('a cached conversation refresh cannot overwrite a newer stream refresh or route',async()=>{
   for(const supersede of ['stream','route']){
     const f=loadingFixture();f.state.runs=[{id:runId}];

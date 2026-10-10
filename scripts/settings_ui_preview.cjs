@@ -19,6 +19,29 @@ const agentSessions=[
  agentSession(7,'Verify integration tests','failed'),
 ];
 const model='openai/gpt-6-astra';
+function conversationSpace(id){
+ const at=seconds=>new Date(Date.parse(stamp)+seconds*1000).toISOString();
+ const event=(id,kind,message,seconds,data={})=>({id,kind,message,created_at:at(seconds),data});
+ return {
+  id,prompt:'Bring the release across the finish line',status:'idle',chat_enabled:true,feedback_enabled:true,
+  mode:'modal',sandbox_provider:'substrate',harness:'claude-agent-sdk',model,plugins:[],repo_url:'',
+  messages:[
+   {id:1,role:'user',user_id:'user-0',user_name:'Alex Morgan',status:'completed',content:'Review the release and tell me what needs attention.',created_at:at(0)},
+   {id:2,role:'assistant',status:'completed',response_to_id:1,model,content:'**The release is nearly ready.** I found one small gap: a reconnect can replace the composer while someone is writing.\n\nThe saved conversation is intact. I would preserve the draft and update the transcript in place.',created_at:at(48)},
+   {id:3,role:'user',user_id:'user-0',user_name:'Alex Morgan',status:'completed',content:'Make that fix, then check the conversation on mobile too.',created_at:at(60)},
+   {id:4,role:'assistant',status:'completed',response_to_id:3,model,content:'**Your draft now stays with you.** The connection can recover without rebuilding the composer.\n\n```js\nawait refreshConversation(session.id);\nrestoreDraft(session.id);\n```\n\nThe synthetic checks cover reconnecting, saved history, and the narrow-screen layout. The change is ready to review.',created_at:at(95)},
+  ],
+  events:[
+   event(1,'chat','Response started',0,{message_id:1}),
+   event(2,'tool','Inspect conversation loading',1,{turn_id:1,activity_version:1,call_id:'inspect-chat',phase:'completed',category:'read',file:'app/static/app.js',output:'Synthetic review: the composer should remain mounted during reconnect.',duration_ms:47000}),
+   event(3,'chat','Response saved',48,{message_id:1}),
+   event(4,'chat','Response started',60,{message_id:3}),
+   event(5,'tool','Verify reconnect and responsive layout',61,{turn_id:3,activity_version:1,call_id:'verify-chat',phase:'completed',category:'command',command:'npm run test:ui',output:'Synthetic preview result: reconnect, draft retention, and mobile layout checks passed.',duration_ms:34000}),
+   event(6,'chat','Response saved',95,{message_id:3}),
+  ],
+  approvals:[],artifacts:[],updated_at:at(95),created_at:stamp,
+ };
+}
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
 let fixture='populated';
 let accountLinkPolls=0;
@@ -138,7 +161,15 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
  if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
- if(p==='/api/runs')return json(res,200,fixture==='agent-sidebar'?agentSessions:['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
+ if(p==='/api/runs')return json(res,200,fixture==='agent-sidebar'?agentSessions:[fixture==='conversation-space'?'Bring the release across the finish line':'Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
+ if(fixture==='conversation-space'&&/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,conversationSpace(p.split('/').at(-1)));
+ if(fixture==='conversation-space'&&/^\/api\/runs\/[0-9a-f]{32}\/events$/.test(p)){
+  res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache'});
+  res.write(': synthetic completed conversation\n\n');
+  const heartbeat=setInterval(()=>res.write(': keepalive\n\n'),15000);
+  res.on('close',()=>clearInterval(heartbeat));
+  return;
+ }
  if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:['skill-picker','feedback'].includes(fixture),feedback_enabled:fixture==='feedback',mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',messages:fixture==='feedback'?[{id:1,role:'user',status:'completed',content:'Review the latest change.'},{id:2,role:'assistant',status:'completed',content:'The change looks good. I checked the API and its regression tests.'}]:[],events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);

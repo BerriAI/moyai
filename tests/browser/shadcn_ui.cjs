@@ -1466,6 +1466,51 @@ test('retained workspace tabs and toolbar actions survive focus updates and repe
   await page.evaluate(() => navigate('tasks'));
 });
 
+for (const width of [1440, 320]) test(`conversation space retains the composer through updates and releases on navigation at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'conversation-space', width);
+  await page.evaluate(() => {
+    const mount = MoyaiSpace.mount;
+    window.conversationSpaceLifecycle = { mounts: 0, cleanups: 0 };
+    MoyaiSpace.mount = (canvas, options) => {
+      const cleanup = mount(canvas, options);
+      if (canvas?.id !== 'conversation-space-field') return cleanup;
+      window.conversationSpaceLifecycle.mounts++;
+      return () => { window.conversationSpaceLifecycle.cleanups++; cleanup(); };
+    };
+    return openRun('1'.repeat(32));
+  });
+  const input = page.locator('#followup');
+  await input.fill('Keep my unfinished reply');
+  await page.evaluate(() => {
+    window.retainedConversationCanvas = document.querySelector('#conversation-space-field');
+    window.retainedConversationComposer = document.querySelector('#followup');
+    const next = structuredClone(state.chatRun);
+    next.messages.at(-1).content += '\n\nThe transcript was refreshed.';
+    updateChat(next);
+  });
+  await page.locator('#conversation').getByText('The transcript was refreshed.', { exact: true }).waitFor();
+  assert.equal(await input.evaluate(el => el.value), 'Keep my unfinished reply');
+  assert.deepEqual(await page.evaluate(() => ({
+    sameCanvas: document.querySelector('#conversation-space-field') === window.retainedConversationCanvas,
+    sameComposer: document.querySelector('#followup') === window.retainedConversationComposer,
+    focusRetained: document.activeElement === window.retainedConversationComposer,
+    rendered: window.retainedConversationCanvas.width > 0 && window.retainedConversationCanvas.height > 0,
+    hiddenFromAccessibility: window.retainedConversationCanvas.getAttribute('aria-hidden') === 'true',
+    ...window.conversationSpaceLifecycle,
+  })), { sameCanvas: true, sameComposer: true, focusRetained: true, rendered: true, hiddenFromAccessibility: true, mounts: 1, cleanups: 0 });
+  await page.evaluate(() => document.fonts.ready);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'The conversation stays within the viewport');
+  const composer = await page.locator('#message-form').boundingBox();
+  assert.ok(composer.width > 0 && composer.x >= 0 && composer.x + composer.width <= width + 1, 'The full reply composer stays reachable');
+  await page.evaluate(() => navigate('tasks'));
+  await page.locator('#prompt').waitFor();
+  assert.deepEqual(await page.evaluate(() => ({
+    oldCanvasConnected: window.retainedConversationCanvas.isConnected,
+    oldComposerConnected: window.retainedConversationComposer.isConnected,
+    ...window.conversationSpaceLifecycle,
+  })), { oldCanvasConnected: false, oldComposerConnected: false, mounts: 1, cleanups: 1 });
+});
+
 for (const surface of ['main', 'side']) test(`${surface} transcript replacement retains rendered activity and releases removed controls`, async t => {
   const page = await pageFor(t);
   await page.evaluate(surface => {
