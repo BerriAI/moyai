@@ -156,7 +156,10 @@ def test_read_capacity_is_bounded_and_busy_requests_never_run(monkeypatch, capsy
 
 def test_concurrent_allowlist_excludes_local_and_context_side_effects():
     from app.connectors import RETRY_SAFE_READS
-    assert mcp_bridge.CONCURRENT_READS <= RETRY_SAFE_READS
+    from app.published_artifacts import TOOLS
+    artifact_reads = {tool['name'] for tool in TOOLS
+                      if tool['annotations']['readOnlyHint'] and tool['annotations']['idempotentHint']}
+    assert mcp_bridge.CONCURRENT_READS <= RETRY_SAFE_READS | artifact_reads
     assert 'github_checkout' not in mcp_bridge.CONCURRENT_READS
     assert not any(name.startswith(('browser_', 'skills_', 'memory_', 'credentials_'))
                    for name in mcp_bridge.CONCURRENT_READS)
