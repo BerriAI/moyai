@@ -88,7 +88,9 @@ def make_rotation(machine):
     original = machine.exec.aio
     async def execute(*args, **kwargs):
         process = await original(*args, **kwargs)
-        process.stdout = Lines(['WORKSPACE_EVENT {"kind":"final","message":"Work checkpointed; not finished yet.","completed":false,"continuation":true}\n'])
+        # Leave the runtime readiness probe intact; only rotate the agent turn.
+        if args[0] == '/opt/hermes-env/bin/python':
+            process.stdout = Lines(['WORKSPACE_EVENT {"kind":"final","message":"Work checkpointed; not finished yet.","completed":false,"continuation":true}\n'])
         return process
     machine.exec = aio(execute)
 
@@ -120,6 +122,7 @@ async def test_machine_renewal_continues_one_turn_without_publishing_a_partial_a
     answers = [m for m in runner.store.messages(run['id']) if m['role'] == 'assistant']
     assert len(answers) == 2 and all(m['content'] == 'Tests passed' for m in answers)
     assert runner.store.run(run['id'])['status'] == 'idle'
+    assert all(machine.runtime_verified for machine in machines)
     assert all(machine.terminated for machine in machines)
 
 
@@ -127,12 +130,13 @@ async def test_machine_renewal_continues_one_turn_without_publishing_a_partial_a
 async def test_machine_renewal_never_restarts_after_stop_or_failed_snapshot(runner, monkeypatch, stop):
     machine = SessionSandbox(1)
     make_rotation(machine)
-    calls = []
+    calls, snapshots = [], []
     async def create(**kwargs):
         calls.append(1)
         return machine
     run = runner.store.create_run('Long task', '', 'modal', [], chat_enabled=True)
     async def snapshot(**kwargs):
+        snapshots.append(1)
         if stop:
             await runner.cancel(run['id'])
             return SimpleNamespace(object_id='im-saved')
@@ -141,6 +145,7 @@ async def test_machine_renewal_never_restarts_after_stop_or_failed_snapshot(runn
     monkeypatch.setattr('app.runner.modal.Sandbox.create', aio(create))
     runner.submit(run)
     await wait_jobs(runner)
+    assert snapshots == [1]
     assert calls == [1] and machine.terminated
     assert runner.store.run(run['id'])['status'] in {'cancelled', 'failed'}
 
