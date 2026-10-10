@@ -521,18 +521,15 @@ def _create_app(settings, store):
         # The release probe correlates the actual HTTP process with its database
         # owner; an SSH shell may land on either instance during Render overlap.
         headers = {}
+        if store.database and settings.moyai_runtime_role in {'api', 'worker', 'broker', 'coordinator'}:
+            headers = {'X-Moyai-Build': settings.moyai_build_sha,
+                       'X-Moyai-Owner': str(store.database.owner_pid),
+                       'X-Moyai-Role': settings.moyai_runtime_role,
+                       'X-Moyai-Rolling-Release': '1', 'Cache-Control': 'no-store'}
         if settings.moyai_runtime_role == 'api':
-            headers = {'X-Moyai-Build': settings.moyai_build_sha,
-                       'X-Moyai-API-Release': '1',
-                       'X-Moyai-Owner': str(store.database.owner_pid),
-                       'Cache-Control': 'no-store'}
+            headers['X-Moyai-API-Release'] = '1'
         if handoff:
-            headers = {'X-Moyai-Build': settings.moyai_build_sha,
-                       'X-Moyai-Coordinator-State': handoff.status,
-                       'X-Moyai-Role': 'coordinator',
-                       'X-Moyai-Rolling-Release': '1',
-                       'X-Moyai-Owner': str(store.database.owner_pid),
-                       'Cache-Control': 'no-store'}
+            headers['X-Moyai-Coordinator-State'] = handoff.status
         if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
             raise HTTPException(503, 'Runtime is connecting to Temporal.', headers=headers)
         if store.database:

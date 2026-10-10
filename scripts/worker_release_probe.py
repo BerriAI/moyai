@@ -9,6 +9,8 @@ import asyncio
 from contextlib import contextmanager, ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import hashlib
+import hmac
 import os
 from pathlib import Path
 import shutil
@@ -91,7 +93,7 @@ def candidate_sources(root, environment):
     return compatible, rejected
 
 
-def probe(url, temporal_address, output):
+def probe(url, temporal_address, output, all_roles=False):
     started, events = time.monotonic(), []
     report = {'status': 'failed', 'production_changed': False}
 
@@ -155,18 +157,26 @@ def probe(url, temporal_address, output):
                 'LITELLM_API_BASE': f'http://127.0.0.1:{provider.server_port}/v1',
                 'LITELLM_API_KEY': 'synthetic-local-key',
             }
+            if all_roles:
+                environment.update(MOYAI_COORDINATOR_HANDOFF='true',
+                                   SLACK_SIGNING_SECRET='synthetic-rolling-probe')
             candidate, rejected = candidate_sources(root, environment)
             assert candidate['MOYAI_BUILD_SHA'] != environment['MOYAI_BUILD_SHA']
             migrated = subprocess.run([sys.executable, '-m', 'app.schema_migrations', '--apply'],
                 cwd=root, env={**environment, 'MOYAI_RUNTIME_ROLE': 'coordinator'}, capture_output=True, timeout=30)
             assert migrated.returncode == 0, 'Fixture migration failed'
             record('START  Real PostgreSQL, Temporal, coordinator, API, broker and worker processes.')
-            control, _ = lifetime.enter_context(server(environment, 'coordinator', root / 'coordinator'))
+            control, control_http = lifetime.enter_context(server(environment, 'coordinator', root / 'coordinator'))
+            if all_roles:
+                wait_for(lambda: control_http.get('/health').headers.get('x-moyai-coordinator-state') == 'leader')
             api_process, api = lifetime.enter_context(server(environment, 'api', root / 'api'))
             broker_process, broker = lifetime.enter_context(server(environment, 'broker', root / 'broker'))
             store = Store(root / 'observer', database_url=url, database_schema=schema, schema_mode='verify')
             lifetime.callback(store.close)
-            policy = store.rows('SELECT * FROM runtime_policy')
+            policy_tables = ('runtime_policy', 'runtime_api_policy', 'runtime_worker_policy', 'runtime_broker_policy')
+            if all_roles:
+                policy_tables += ('runtime_coordinator_policy',)
+            policies = {table: store.rows('SELECT * FROM ' + table) for table in policy_tables}
             api.headers.update({'Origin': environment['PUBLIC_URL'], 'X-CSRF-Token': api.get('/api/session').json()['csrf']})
 
             def submit(client, prompt):
@@ -256,20 +266,87 @@ def probe(url, temporal_address, output):
             assert not traffic.is_alive() and not failures
             wait_for(lambda: all(answer(run_id) for run_id in submissions), timeout=45)
             assert all(sum(m['role'] == 'assistant' for m in store.messages(run_id)) == 1 for run_id in submissions)
-            assert store.rows('SELECT * FROM runtime_policy') == policy
+            assert {table: store.rows('SELECT * FROM ' + table) for table in policy_tables} == policies
             assert all(process.poll() is None for process in (control, api_process, broker_process, rollback))
+            if all_roles:
+                # Resume continuous submissions for the rest of the release.
+                traffic_stop.clear()
+                traffic = threading.Thread(target=new_messages, daemon=True)
+                traffic.start()
+                new_broker, new_broker_http = lifetime.enter_context(server(candidate, 'broker', root / 'new-broker'))
+                assert new_broker_http.post(route, headers=auth, json=body).status_code == 429
+                assert store.rows('SELECT status FROM model_requests')[0]['status'] == 'pending'
+                broker_process.terminate()
+                time.sleep(.25)
+                assert broker_process.poll() is None, 'Old broker exited before admitted stream drained'
+                record('BROKER Replacement is ready; shared capacity stays at one while the old stream drains.')
             release.set()
             stream.join(timeout=15)
             assert not stream.is_alive() and not failures
             assert [v['delta'] for v in deltas if 'delta' in v] == ['before-worker-upgrade', 'after-worker-rollback']
             assert deltas[-1]['type'] == 'response.completed' and len(calls) == 1
             wait_for(lambda: store.rows('SELECT status FROM model_requests')[0]['status'] == 'completed')
+            if all_roles:
+                broker_process.wait(timeout=15)
+                assert broker_process.returncode == 0
+                response = new_broker_http.post(route, headers=auth, json=body)
+                assert response.status_code == 200 and 'response.completed' in response.text
+                assert len(calls) == 2
+                record('PASS   Old broker exits after its final token; replacement serves the next inference.')
+                new_control, new_control_http = lifetime.enter_context(server(candidate, 'coordinator', root / 'new-coordinator'))
+                assert new_control_http.get('/health').headers['x-moyai-coordinator-state'] == 'standby'
+
+                def hook(client, number):
+                    payload = json.dumps({'type': 'event_callback', 'team_id': 'PROBE',
+                        'event_id': 'EV' + str(number), 'event': {'type': 'synthetic_probe'}}).encode()
+                    timestamp = str(int(time.time()))
+                    signature = hmac.new(b'synthetic-rolling-probe', b'v0:' + timestamp.encode() + b':' + payload,
+                                         hashlib.sha256).hexdigest()
+                    result = client.post('/hooks/slack/events', content=payload, headers={
+                        'X-Slack-Request-Timestamp': timestamp, 'X-Slack-Signature': 'v0=' + signature,
+                        'Content-Type': 'application/json'})
+                    assert result.status_code == 200, result.status_code
+
+                for number in range(10):
+                    hook(new_control_http, number)
+                stop(control)
+                wait_for(lambda: new_control_http.get('/health').headers.get('x-moyai-coordinator-state') == 'leader')
+                for number in range(10, 20):
+                    hook(new_control_http, number)
+                wait_for(lambda: store.rows("SELECT COUNT(*) AS n FROM coordinator_hooks WHERE status='done'")[0]['n'] == 20)
+                record('PASS   Standby accepts signed hooks; old coordinator drains and transfers leadership.')
+                new_api, new_api_http = lifetime.enter_context(server(candidate, 'api', root / 'new-api'))
+                new_api_http.cookies.update(api.cookies)
+                new_api_http.headers.update(api.headers)
+                traffic_stop.set()
+                traffic.join(timeout=12)
+                assert not traffic.is_alive() and not failures
+                # Switch the test client's target once replacement health is
+                # verified, as Render's stable service routing does.
+                api = new_api_http
+                traffic_stop.clear()
+                traffic = threading.Thread(target=new_messages, daemon=True)
+                traffic.start()
+                stop(api_process)
+                final_worker, _ = lifetime.enter_context(worker(candidate, root / 'final-worker'))
+                stop(rollback)
+                final_run = submit(api, 'Final compatible release submission')
+                assert 'Compatible worker fixture' in wait_for(lambda: answer(final_run))
+                traffic_stop.set()
+                traffic.join(timeout=12)
+                assert not traffic.is_alive() and not failures
+                wait_for(lambda: all(answer(run_id) for run_id in submissions), timeout=45)
+                assert all(sum(m['role'] == 'assistant' for m in store.messages(run_id)) == 1 for run_id in submissions)
+                assert {table: store.rows('SELECT * FROM ' + table) for table in policy_tables} == policies
+                assert all(process.poll() is None for process in (new_control, new_api, new_broker, final_worker))
+                record('PASS   API traffic switches after readiness; all four replacements are live on the candidate build.')
             record(f'PASS   {len(submissions)} HTTP submissions, zero errors, one answer each; one uninterrupted provider call.')
             report.update(status='replay_pending', real_postgres=True, real_temporal=True,
                 worker_processes=True, source_change='synthetic_demo_response_text',
                 baseline_build=environment['MOYAI_BUILD_SHA'], candidate_build=candidate['MOYAI_BUILD_SHA'],
                 incompatible_protocol_rejected=True, rollback_resumed_candidate_work=True,
-                api_coordinator_broker_pids_unchanged=True, runtime_policy_unchanged=True,
+                api_coordinator_broker_pids_unchanged=not all_roles, runtime_policy_unchanged=True,
+                all_roles_replaced=all_roles, broker_stream_drained=all_roles, signed_hooks_delivered=20 if all_roles else 0,
                 http_submissions=len(submissions), http_errors=failures, http_max_latency_ms=max(latencies),
                 provider_calls=len(calls), stream_completed=True, one_answer_per_submission=True,
                 sandbox='demo_mode', upstream='local_fixture', workflow_ids=['moyai-session-' + r for r in submissions])
@@ -297,12 +374,13 @@ def probe(url, temporal_address, output):
 async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--all-roles', action='store_true', help='Rehearse broker, coordinator and API replacements after the worker handoff.')
     args = parser.parse_args()
     url = os.environ.get('MOYAI_TEST_POSTGRES_URL')
     if not url:
         parser.error('Set MOYAI_TEST_POSTGRES_URL to a disposable local PostgreSQL database.')
     async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as temporal:
-        report = await asyncio.to_thread(probe, url, temporal.client.service_client.config.target_host, args.output)
+        report = await asyncio.to_thread(probe, url, temporal.client.service_client.config.target_host, args.output, args.all_roles)
         try:
             for identity in report.pop('workflow_ids'):
                 handle = temporal.client.get_workflow_handle(identity)
