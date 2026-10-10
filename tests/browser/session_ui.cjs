@@ -308,3 +308,31 @@ test('session actions and rename remain usable at desktop, tablet and narrow mob
     if(width<850)await page.locator('#close-sidebar').click();
   }
 });
+
+test('submission is visible before save and opening never waits for a held sidebar',async t=>{
+  const page=await setup(t);
+  let save,sidebar;
+  const saveGate=new Promise(resolve=>{save=resolve;});
+  const sidebarGate=new Promise(resolve=>{sidebar=resolve;});
+  t.after(()=>{save();sidebar();});
+  let saved=false,sidebarHeld=false;
+  await page.route('**/api/runs',async route=>{
+    if(route.request().method()==='POST'){
+      await saveGate;saved=true;
+    }
+    await route.continue();
+  });
+  await page.route('**/api/runs?*',async route=>{
+    sidebarHeld=true;await sidebarGate;await route.continue();
+  });
+  await page.locator('#prompt').fill('Show this before the save finishes');
+  await page.locator('#prompt').press('Enter');
+  await page.getByRole('status').filter({hasText:'Creating session'}).waitFor();
+  assert.equal(saved,false);
+  assert.equal(await page.locator('.chat-message.user .message-content').textContent(),'Show this before the save finishes');
+  save();
+  await page.locator('#followup').waitFor();
+  assert.equal(sidebarHeld,true);
+  assert.equal(await page.locator('.chat-message.user').count(),1);
+  sidebar();
+});

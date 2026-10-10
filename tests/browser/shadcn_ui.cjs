@@ -1598,6 +1598,9 @@ test('session connection selections survive navigation and reach the submit payl
     await page.getByRole('button', { name: 'Start session', exact: true }).click();
     assert.deepEqual((await request).postDataJSON().plugins.sort(), expected);
     await page.waitForFunction(() => !state.sending.has('new'));
+    await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+    await page.locator('#prompt').waitFor();
+    await page.getByLabel('Session options', { exact: true }).click();
   }
 });
 
@@ -1924,6 +1927,8 @@ for (const width of [1440, 768, 320]) test(`Pi selection, keyboard, logo and sub
   await page.getByText('Synthetic submission captured.', { exact: true }).waitFor();
   assert.equal(submitted.harness, 'pi');
   assert.equal(submitted.prompt, 'Check the Pi integration');
+  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+  await page.locator('#prompt').waitFor();
   assert.equal(await source.inputValue(), 'pi', 'Selection survives a failed submission');
 });
 
