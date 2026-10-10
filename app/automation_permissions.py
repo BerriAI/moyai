@@ -52,7 +52,8 @@ class AutomationPermissions:
                 AND r.active_message_id=g.message_id AND r.active_user_id=m.user_id
                 AND r.deleted_at='' AND r.deletion_requested_at=''
                 AND r.status IN ('running','reconnecting','awaiting_approval','waiting_children')
-                AND m.role='user' AND m.input_kind='user' AND m.status!='deleted' ''', (run['id'], actor)):
+                AND m.role='user' AND m.input_kind='user' AND m.status!='deleted'
+                AND COALESCE(m.client_id,'') NOT LIKE 'swarm:%' ''', (run['id'], actor)):
             result.setdefault(row['automation_id'], set()).update(json.loads(row['permissions']))
         return {key: value for key, value in result.items() if value}
 
@@ -69,7 +70,8 @@ class AutomationPermissions:
 
     def human_source(self, conn, run):
         source = conn.execute('''SELECT 1 FROM messages WHERE run_id=? AND id=? AND user_id=?
-            AND role='user' AND input_kind='user' AND status!='deleted' ''',
+            AND role='user' AND input_kind='user' AND status!='deleted'
+            AND COALESCE(client_id,'') NOT LIKE 'swarm:%' ''',
             (run['id'], run['active_message_id'], run['active_user_id'])).fetchone()
         if not source or run['parent_run_id'] or conn.execute('SELECT 1 FROM automation_runs WHERE run_id=?', (run['id'],)).fetchone():
             raise HTTPException(403, 'Only an authenticated human turn in a direct chat can grant automation management.')

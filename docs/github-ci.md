@@ -1,7 +1,7 @@
 # PR milestones and CI inspection
 
-Confirmed PR creation is announced in the conversation immediately, outside the
-two-update narration allowance. The announcement and publication receipt commit
+Confirmed PR creation is announced in the conversation immediately, independently
+of agent commentary. The announcement and publication receipt commit
 together and are deduplicated on readback/retry. A later turn failure preserves the
 PR link; creation alone does not imply successful CI or completed review.
 

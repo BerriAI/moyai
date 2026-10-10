@@ -26,4 +26,17 @@ for(const width of [1440,768,320]) test(`durable goal states at ${width}px`,asyn
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),width);
     if(process.env.GOAL_SCREENSHOT_DIR&&status==='budget_exhausted')await page.screenshot({path:`${process.env.GOAL_SCREENSHOT_DIR}/goals-${width}.png`});
   }
+  await page.evaluate(()=>MoyaiGoal.render(document.querySelector('#goal-contract-preview'),{status:'running',goal:{
+    id:'synthetic',objective:'Verify the full product and report what remains.',status:'active',elapsed_seconds:10800,budget:{},
+    reporting:{at_seconds:[10800,21600],interval_seconds:3600},report_anchor:0,report_cursor:10800,checkpoint:{elapsed_seconds:10800}
+  }},String));
+  const panel=page.locator('#goal-contract-preview');
+  await panel.getByText('Running',{exact:true}).waitFor();
+  assert.match(await panel.innerText(),/Report checkpoints at/);
+  assert.match(await panel.innerText(),/Report every/);
+  assert.match(await panel.innerText(),/Checkpoints do not end the goal/);
+  assert.match(await panel.innerText(),/Last checkpoint saved at/);
+  assert.doesNotMatch(await panel.innerText(),/Timebox:/);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth),width);
+  if(process.env.GOAL_SCREENSHOT_DIR)await page.screenshot({path:`${process.env.GOAL_SCREENSHOT_DIR}/goal-reporting-${width}.png`});
 });

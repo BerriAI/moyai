@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.connector_errors import ConnectorError
-from app.github import Change, Publish, PERMISSIONS, MAX_FILE
+from app.github import Change, Publish, PERMISSIONS
 from app.security import digest
 from test_workspace import workspace, cloud_capability
 from test_spend import sign_in
@@ -134,7 +134,7 @@ def test_protected_paths(path):
 def test_bounds_and_ambiguous_changes():
     for files in [[{'path': 'a', 'content': 'x'}, {'path': 'A', 'content': 'x'}],
                   [{'path': 'a', 'content': 'x'}, {'path': 'a/b', 'content': 'x'}],
-                  [{'path': 'a', 'content': '\0'}], [{'path': 'a', 'content': 'a' * (MAX_FILE + 1)}]]:
+                  [{'path': 'a', 'content': 'invalid binary', 'encoding': 'base64'}]]:
         with pytest.raises(ValidationError):
             Publish.model_validate({**PAYLOAD, 'files': files})
 

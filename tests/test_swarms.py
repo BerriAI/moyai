@@ -318,6 +318,8 @@ async def test_continuation_carries_latest_human_direction_without_treating_agen
     automatic = manager.store.claim_message(run_id)
     manager.store.finish_message(run_id, automatic['id'], 'A later automatic result')
     manager.swarms.settle(run_id, {'message_id': automatic['id'], 'outcome': 'completed', 'response': 'A later automatic result'})
+    peer, _ = manager.store.enqueue_message(run_id, 'Peer suggestions are not human direction.', 'peer-guidance')
+    manager.store.execute("UPDATE messages SET input_kind='delegation',status='completed' WHERE id=?", (peer['id'],))
     manager.store.update_run(run_id, status='idle')
     manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
     manager.swarms.tick(run_id)
@@ -326,7 +328,7 @@ async def test_continuation_carries_latest_human_direction_without_treating_agen
     assert next_data['latest_human_direction'] == direction  # Exclude the newer server-owned message.
 
 
-async def test_long_escaped_task_and_direction_stay_within_continuation_message_limit(durable):
+async def test_long_escaped_task_and_direction_survive_continuation_as_host_input(durable):
     manager, _, run_id = durable
     original = 'Original start: ' + '\\"🙂\n' * 3990 + ' :original final constraints'
     original = original[:15950] + ' :original final constraints'
@@ -342,13 +344,10 @@ async def test_long_escaped_task_and_direction_stay_within_continuation_message_
     manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
     manager.swarms.tick(run_id)
     continuation = next(message for message in manager.store.messages(run_id) if message.get('source') == 'swarm')
-    assert len(continuation['content']) <= 16000
+    assert continuation['input_kind'] == 'continuation'
+    assert json.loads(continuation['source_json']) == {'kind':'swarm_continuation','run_id':run_id,'round':2}
     data = json.loads(continuation['content'].split('SAVED USER-TASK DATA (JSON):\n', 1)[1])
-    assert data['original_mission'].startswith('Original start:')
-    assert data['original_mission'].endswith(':original final constraints')
-    assert data['latest_human_direction'].startswith('Human start:')
-    assert data['latest_human_direction'].endswith(':latest final constraints')
-    assert all('excerpted for continuation limit' in value for value in data.values())
+    assert data == {'original_mission':original,'latest_human_direction':direction}
 
 
 async def test_human_followup_wins_over_automatic_continuation(durable):

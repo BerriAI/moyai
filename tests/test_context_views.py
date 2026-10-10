@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent.context_views import current_view, history_view, size
+from agent.context_views import context_view, current_view, history_view, size
 
 
 def saved(view):
@@ -71,3 +71,16 @@ def test_fresh_child_discards_inherited_parent_reference_files(tmp_path):
         assert unrelated.read_text() == 'workspace evidence'
     finally:
         store.close()
+
+
+def test_large_instruction_sources_keep_complete_immutable_references(tmp_path):
+    source = 'Repository requirement: 日志🔎\n' * 10000
+    first = context_view(source, label='Root repository guidance', directory=tmp_path, budget=2000)
+    path = Path(re.search(r'(/[^\s]+\.jsonl)', first)[1].rstrip(','))
+    assert len(first.encode()) < 2000 and 'scope and authority are unchanged' in first
+    assert json.loads(path.read_text()) == {
+        'role': 'assistant', 'context_label': 'Root repository guidance', 'content': source}
+    newer = context_view(source + 'New requirement', label='Root repository guidance', directory=tmp_path, budget=2000)
+    assert first != newer and json.loads(path.read_text())['content'] == source
+    assert first == context_view(source, label='Root repository guidance', directory=tmp_path, budget=2000)
+    assert context_view(source, label='Root repository guidance', directory=tmp_path, budget=len(source.encode())) == source

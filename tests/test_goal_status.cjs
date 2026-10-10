@@ -28,3 +28,15 @@ test('budget exhaustion and reporting never imply completion',()=>{
   for(const status of ['wrapping','budget_exhausted','needs_input','interrupted']) assert.equal(goal.current({status:'idle',goal:{status}}).status,status);
   assert.equal(goal.elapsed({elapsed_seconds:10800},{status:'idle'},999999999),10800);
 });
+
+test('report schedules remain distinct from stop budgets and confirmed delivery',()=>{
+  globalThis.MoyaiActivity=require('../app/static/activity.js');
+  const schedule={at_seconds:[10800,21600],interval_seconds:3600};
+  const text=goal.reporting({reporting:schedule,checkpoint:{elapsed_seconds:10800}});
+  assert.match(text,/Report checkpoints at/);
+  assert.match(text,/Report every/);
+  assert.match(text,/Checkpoints do not end the goal/);
+  assert.match(text,/Last checkpoint saved/);
+  assert.doesNotMatch(text,/delivered|completed|Timebox/);
+  assert.equal(goal.reporting({}), '');
+});

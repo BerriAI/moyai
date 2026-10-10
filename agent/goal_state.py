@@ -1,5 +1,6 @@
 """Portable goal state transitions; persistence and authorization belong to app/."""
 from copy import deepcopy
+import math
 from uuid import uuid4
 
 OPEN = {'active', 'wrapping', 'paused', 'needs_input', 'interrupted'}
@@ -30,6 +31,40 @@ def advance(state, *, now, elapsed=0):
 def floor_unmet(state):
     return (state['budget'].get('kind') in {'floor', 'timebox'} and
             state['elapsed_seconds'] < state['budget'].get('seconds', 0))
+
+
+def reporting_due(state):
+    """Latest requested active-work checkpoint crossed since the saved receipt."""
+    if state['status'] != 'active' or not state.get('reporting'):
+        return None
+    elapsed = state['elapsed_seconds']
+    cursor = state['report_cursor']
+    reporting = state['reporting']
+    due = [value for value in reporting.get('at_seconds', []) if cursor < value <= elapsed]
+    if interval := reporting.get('interval_seconds'):
+        anchor = state['report_anchor']
+        latest = elapsed - math.fmod(max(0, elapsed - anchor), interval)
+        if cursor < latest <= elapsed:
+            due.append(latest)
+    return max(due) if due else None
+
+
+def checkpoint_report(state):
+    """Report saved facts without inference; a checkpoint never ends the work."""
+    progress = state.get('progress') or {}
+    lines = ['Goal progress checkpoint', '', 'Objective: ' + state['objective'], '',
+             f"Recorded active work: {state['elapsed_seconds']:.1f} seconds.",
+             'Work remains active; completion has not been verified.']
+    if progress.get('note'):
+        lines += ['', 'Last saved progress (agent report):', progress['note']]
+        lines += ['Saved at ' + str(progress.get('elapsed_seconds', 'unknown')) + ' active-work seconds.']
+    else:
+        lines += ['', 'No agent progress note has been saved yet; the conversation and tool receipts remain available.']
+    if progress.get('remaining'):
+        lines += ['', 'Remaining work:', progress['remaining']]
+    if progress.get('evidence'):
+        lines += ['', 'Saved evidence: ' + ', '.join('journal item ' + str(n) for n in progress['evidence'])]
+    return '\n'.join(lines)
 
 
 def verdict(state, result):

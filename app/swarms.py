@@ -356,13 +356,15 @@ class SwarmMissions:
                 return {'retry_seconds': max(0.01, min(delay, remaining))}
             number = mission['round'] + 1
             direction = conn.execute("""SELECT content FROM messages WHERE run_id=? AND role='user'
-                AND status!='deleted' AND COALESCE(client_id,'') NOT LIKE 'swarm:%'
+                AND input_kind='user' AND status!='deleted' AND COALESCE(client_id,'') NOT LIKE 'swarm:%'
                 AND id>(SELECT MIN(id) FROM messages WHERE run_id=? AND role='user')
                 ORDER BY id DESC LIMIT 1""", (run_id, run_id)).fetchone()
             content = continuation_message(number, run['prompt'], direction['content'] if direction else None)
             try:
-                self.store.enqueue_message_in(conn, run_id, content, f'swarm:round:{number}',
+                message, _ = self.store.enqueue_message_in(conn, run_id, content, f'swarm:round:{number}',
                                               model=run['model'], user_id=run['owner_id'], restore_archived=False)
+                conn.execute("UPDATE messages SET input_kind='continuation',source_json=? WHERE id=?",
+                             (json.dumps({'kind':'swarm_continuation','run_id':run_id,'round':number}), message['id']))
             except ValueError as exc:
                 # Admission and per-session caps are policy boundaries, not
                 # transient activity failures to retry invisibly forever.

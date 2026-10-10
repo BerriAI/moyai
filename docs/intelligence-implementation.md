@@ -527,3 +527,112 @@ the returned patches are not proof of a complete local diff.
 The schema remains 11; all role protocols are 8 so mixed brokers do not disagree
 about paged read and source-revision arguments. Publication file/binary limits
 remain the next GitHub implementation step.
+
+## Complete text and binary publication (WP6; not deployed)
+
+The existing scoped GitHub publisher accepts regular text and binary files,
+complete PR descriptions and comments, and arbitrary changed-file counts.
+Removed the 100-file, 10 MiB per-file and 20 MiB total publication ceilings.
+Binary content uses canonical base64 Git blobs; existing text payloads retain
+their exact receipt serialization so old uncertain writes still reconcile.
+Large requests use the existing authenticated multipart transport. Each envelope
+has a framing limit, without imposing a total-content limit. GitHub's own API
+constraints and protected-path, exact-base, ownership and non-forced-write
+checks still apply.
+
+Validation: 234 broader GitHub and transport cases passed; the remaining test
+was updated to exercise multipart across the real loopback relay and passes.
+Nineteen payload/package cases and nineteen final binary/checkout/relay cases
+passed, including complete bytes after a fresh Git checkout, more than 100 files,
+and one publication after a lost acknowledgment. Ten publication/payload cases
+passed against PostgreSQL. Integration with main's atomic startup-index fix
+passed 65 migration/admission/runtime cases; the ownership test now waits for
+PostgreSQL to complete backend termination before asserting its fence.
+The import check also passed with the optional migration dependency, for 66
+passing integration cases. The integration guide was rendered at desktop/mobile widths and
+inspected. All provider responses in these checks are synthetic.
+
+Current source requires schema 12 (main's startup fix) and role protocols 9.
+No deployment was performed.
+
+## Complete automation sources and attributed continuations (WP2/WP7)
+
+Automation source filters now inspect complete event bodies; selected titles,
+URLs and body fields retain all text. Native session events snapshot all prior
+undeleted messages with identities, authors, roles, timestamps and input
+provenance. Removed the ten-message, 1,000-character history and 4,000-character
+body cuts. Large event prompts use the shared context/reference path. The
+snapshot is currently copied per occurrence; a future storage optimization must
+preserve its event-time contents and permissions.
+
+Swarm continuation retains the complete mission and latest actual human
+direction, removing the 16,000-character excerpt. Host-generated inputs now
+carry continuation provenance and cannot authorize a new goal, grant automation
+management, trigger human-message workflows or replace the saved human direction.
+Legacy continuations remain excluded using their server-owned receipt identity.
+Ishaan's initial twenty-worker team and renewable timing policy are preserved.
+
+Validation: 180 core contracts passed; one Unicode test compared encoded JSON
+with decoded text and its corrected case passed. The final six source/authority
+checks passed, including agent guidance after a real human direction. Fifty-one
+PostgreSQL cases passed before that assertion correction; the corrected case and
+final authority checks also passed on PostgreSQL. Another 103 automation,
+history, time-control, runtime and package regressions passed. The automation
+and swarm guides were rendered at desktop/mobile widths and inspected.
+Schema remains 12; all role protocols are 10. Nothing was deployed.
+
+## Complete public progress and independent goal checkpoints (WP4/WP9)
+
+Removed the server's two-update allowance and both 3,000/1,200-character
+commentary cuts. The model already receives guidance to report meaningful
+changes rather than narrate every tool. Updates now retain complete redacted
+text and actual input provenance. Receipt/text deduplication, stale-input
+rejection and final-answer precedence remain. All public updates reach the
+connected Slack thread through the same durable outbox, with long updates split
+into transport parts. Saved text and send intent commit together.
+
+Goals can register explicit one-off active-work checkpoints and repeating report
+intervals independently of a stopping budget. At a requested checkpoint, the
+existing clock transaction saves the latest reported progress, its age, remaining
+work and evidence references as public commentary, together with send intent.
+This path requires no additional inference. Reports do not imply verification,
+pause work or invent a cadence. Missed intervals coalesce into one current report;
+clock and event receipts prevent replay after acknowledgment loss or recovery.
+A simultaneous stop budget takes precedence and uses final report settlement.
+The goal panel shows the reporting schedule separately from the stop budget.
+
+Validation: 270 initial progress/Slack checks passed; two old suppression
+expectations were corrected. The final PostgreSQL suite passed 112 activity,
+Slack, goal and checkpoint cases, including rollback, duplicate ticks, a
+three-hour report-and-continue case, pause/resume, revocation and atomic Slack
+intent. Another 181 Slack/source/gateway/status/schema cases passed, and all ten
+new checkpoint contracts passed locally. Eight Node/browser cases passed at
+1440/768/320; before/after rendered panels and updated documentation were
+inspected. The UI build and typecheck passed. This is local behavior with a fake
+clock and synthetic Slack; the live three-hour release rehearsal remains open.
+
+Schema remains 12; all role protocols are 11. Nothing was deployed.
+
+## Complete side-chat snapshots and instruction references (WP2/WP5)
+
+Side conversations retain the complete original task, latest result and every
+undeleted message at creation time, including queued inputs. IDs, authors,
+timestamps, delivery status and input provenance remain explicit. Removed the
+30-message, per-field character and total-snapshot cuts. Later changes to the
+parent do not rewrite the snapshot or grant access to its live computer.
+
+System context composition uses the selected model window to allocate optional
+source components: the skill catalog, root repository guidance, project setup
+instructions and side-chat reference. Oversized components become explicit
+references to complete immutable records outside the repository. Their scope
+and authority remain labeled, and older references survive later compositions.
+Core orientation stays inline; complete-request admission remains authoritative.
+The allocation is conservative UTF-8 sizing, not optimal token packing.
+
+Validation: 20 focused source, lifecycle and snapshot cases passed. Four side-chat
+cases passed against PostgreSQL. The broader context, SDK, runtime and harness
+suite passed 380 cases with 66 optional runtime/database skips. The product guide
+was rendered and inspected at desktop/mobile widths. These are source/protocol
+checks, not live model-quality evidence.
+
+Schema remains 12; all role protocols are 12. Nothing was deployed.

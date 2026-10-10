@@ -173,7 +173,7 @@ class ActivityReporter:
         # separate reasoning_callback. Strip tagged reasoning defensively too.
         if isinstance(text, str):
             focus, prose = split_focus(text)
-            prose = public_text(prose, 3000).strip()
+            prose = public_text(prose, None).strip()
             if focus:
                 self.emit('status', focus, {'activity_version': 1, 'phase': 'focus'})
             if prose:

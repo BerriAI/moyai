@@ -103,7 +103,7 @@ def test_parent_grant_is_inherited_and_revoked_at_source_boundary(workspace, cha
     assert app.state.automations.row(saved['id'])['revision'] == 1
 
 
-@pytest.mark.parametrize('kind', ['delegation', 'observation', 'automation'])
+@pytest.mark.parametrize('kind', ['delegation', 'observation', 'automation', 'continuation'])
 def test_nonhuman_inputs_cannot_mint_grants_or_saved_self_management(workspace, kind):
     app, client = workspace
     parent, saved, _ = setup(app, client)
@@ -112,6 +112,14 @@ def test_nonhuman_inputs_cannot_mint_grants_or_saved_self_management(workspace, 
     changed = {**saved['definition'], 'self_management': {'instructions': True}}
     assert call(client, parent, 'automation_update', automation_id=saved['id'], revision=1,
                 request_key='mint-self-grant', definition=changed).status_code == 403
+    assert not app.state.store.rows('SELECT * FROM automation_grants')
+
+
+def test_legacy_swarm_continuation_cannot_mint_owner_grants(workspace):
+    app, client = workspace
+    parent, saved, _ = setup(app, client)
+    app.state.store.execute("UPDATE messages SET client_id='swarm:round:2' WHERE id=?", (parent['active_message_id'],))
+    assert grant(client, parent, saved, ['instructions']).status_code == 403
     assert not app.state.store.rows('SELECT * FROM automation_grants')
 
 

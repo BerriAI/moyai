@@ -54,7 +54,7 @@ class SlackSessions:
         self.sources = SlackSources(self.store, owner=self)
         self.store.slack_sources = self.sources
         self.chat = SlackChat(self)
-        self.store.answer_delivery = self.chat.settle_answer_in
+        self.store.public_delivery = self.chat.settle_public_in
         self.access = SlackCredentials(self)
         self.feedback = SlackFeedback(self, lens_feedback)
         self.agentchat, self.channel = connect_agentchat(self)

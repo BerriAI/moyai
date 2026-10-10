@@ -4,6 +4,7 @@ GitHub's pull_requests:write scope itself also permits reviews. Never expose an
 installation token, generic REST proxy, receive-pack, review or merge operation.
 """
 import asyncio
+import base64
 import copy
 import hashlib
 import json
@@ -14,9 +15,7 @@ from urllib.parse import quote
 
 import httpx
 import jwt
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from agent.tools.github_limits import MAX_FILE, MAX_TOTAL
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 from .connector_errors import ConnectorError
 from .db import now
@@ -122,14 +121,24 @@ class Feedback(PullRequest):
 
 
 class Comment(PullRequest):
-    body: str = Field(min_length=1, max_length=20000, pattern=r"\S")
+    body: str = Field(min_length=1, pattern=r"\S")
     request_key: str = Field(pattern=r"^[A-Za-z0-9_-]{8,80}$")
 
 
 class Change(Args):
-    path: str = Field(min_length=1, max_length=500)
-    content: str | None = Field(default=None, max_length=MAX_FILE)
+    path: str = Field(min_length=1)
+    content: str | None = None
     executable: bool = False
+    encoding: Literal['utf-8', 'base64'] = 'utf-8'
+
+    @model_serializer(mode='wrap')
+    def compatible_payload(self, handler):
+        # Existing text publication receipts hash this exact shape. Adding
+        # binary support must not invalidate or repeat a prior text write.
+        value = handler(self)
+        if self.encoding == 'utf-8':
+            value.pop('encoding', None)
+        return value
 
     @field_validator('path')
     @classmethod
@@ -145,19 +154,22 @@ class Change(Args):
             raise ValueError('Unsafe, credential, workflow or access-control path cannot be published.')
         return path
 
-    @field_validator('content')
-    @classmethod
-    def text_only(cls, content):
-        if content is not None and ('\x00' in content or len(content.encode('utf-8')) > MAX_FILE):
-            raise ValueError('Publish UTF-8 text files of at most 10 MiB each.')
-        return content
+    @model_validator(mode='after')
+    def encoded_content(self):
+        if self.encoding == 'base64':
+            try:
+                if self.content is None or base64.b64encode(base64.b64decode(self.content, validate=True)).decode() != self.content:
+                    raise ValueError()
+            except ValueError:
+                raise ValueError('Use canonical base64 for binary content; deletions use content=null with the default encoding.') from None
+        return self
 
 
 class Changes(Repository):
     repository: str = Field(default='', pattern='^(?:' + REPOSITORY + ')?$')
     base_sha: str = Field(pattern='^' + SHA + '$')
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
-    files: list[Change] = Field(min_length=1, max_length=100)
+    files: list[Change] = Field(min_length=1)
 
     @model_validator(mode='after')
     def bounded_changes(self):
@@ -169,8 +181,6 @@ class Changes(Repository):
         lowered = {p.lower() for p in paths}
         if any('/'.join(p.split('/')[:i]).lower() in lowered for p in paths for i in range(1, len(p.split('/')))):
             raise ValueError('A file cannot also be the parent of another change.')
-        if sum(len((f.content or '').encode()) for f in self.files) > MAX_TOTAL:
-            raise ValueError('Publish at most 20 MiB of changed text per publication.')
         return self
 
 
@@ -180,8 +190,8 @@ class Publish(Repository):
     base_sha: str = Field(pattern='^' + SHA + '$')
     request_key: str = Field(pattern=r'^[A-Za-z0-9_-]{8,80}$')
     title: str = Field(min_length=3, max_length=250)
-    body: str = Field(min_length=1, max_length=20000)
-    files: list[Change] = Field(min_length=1, max_length=100)
+    body: str = Field(min_length=1)
+    files: list[Change] = Field(min_length=1)
 
     @model_validator(mode='after')
     def bounded_changes(self):
@@ -206,8 +216,8 @@ TOOLS = {
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
     'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, ReadPullRequest, 'Read the complete pull request description and a page of provider-supplied file patches. Follow next_arguments for every file page at the same head/base revisions. Missing patches and provider file limits are explicit; use github_checkout and verify the head for complete local diffs. Cannot approve, review, merge or enable auto-merge.'),
-    'github_create_pull_request': ('github', True, Publish, 'Publish local text changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
-    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text changes to an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
+    'github_create_pull_request': ('github', True, Publish, 'Publish local text and binary changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_update_pull_request': ('github', True, Update, 'Publish follow-up text and binary changes to an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
     'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
 }
@@ -567,7 +577,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                         raise ConnectorError('A parent path is not a regular directory.')
                     sha = found['sha'] if found else None
                 elif found and (found['type'] != 'blob' or found['mode'] not in {'100644', '100755'}):
-                    raise ConnectorError('Only regular text files may be changed; directories, symlinks and submodules are protected.')
+                    raise ConnectorError('Only regular files may be changed; directories, symlinks and submodules are protected.')
             if change.content is None and not found:
                 raise ConnectorError('Cannot delete a file that does not exist in the checkout base.')
 
@@ -696,7 +706,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             if change.content is not None:
                 self.ensure_publish_allowed(run, version, tool)
                 blob = await self.request('POST', prefix + '/git/blobs', token=token,
-                                          json={'content': change.content, 'encoding': 'utf-8'})
+                                          json={'content': change.content, 'encoding': change.encoding})
                 sha = blob['sha']
             tree.append({'path': change.path, 'mode': '100755' if change.executable else '100644',
                          'type': 'blob', 'sha': sha})

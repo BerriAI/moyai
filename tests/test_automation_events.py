@@ -64,7 +64,7 @@ def test_signed_webhook_deduplicates_and_limits_context_to_safe_fields(workspace
     assert client.post(path, **signed('webhook', payload)).json()['status'] == 'duplicate'
     event = app.state.store.rows('SELECT * FROM automation_events')[0]
     assert 'NEVER-PERSIST-THIS' not in event['context']
-    assert len(json.loads(event['context'])['body']) == 4000
+    assert json.loads(event['context'])['body'] == payload['body']
     asyncio.run(app.state.automations.events.dispatch())
     run = app.state.store.rows('SELECT * FROM runs')[0]
     assert run['owner_id'] == a['owner_id'] == run['active_user_id']
@@ -437,7 +437,35 @@ def test_native_excludes_workers_automation_ancestry_cycles_and_invalid_messages
     assert len(app.state.store.rows('SELECT * FROM automation_events')) == 2
 
 
-def test_native_context_is_bounded_and_multiple_filters_share_receipt(workspace):
+def test_event_filters_and_source_fields_preserve_text_beyond_old_cutoffs(workspace):
+    app, client = workspace
+    a = configured(app, client, text_contains='MATCH AT END')
+    payload = {'event':'benchmark.ready', 'id':'source-id', 'title':'漢🙂' * 500,
+               'body':'Complete evidence 漢🙂 ' * 1500 + 'MATCH AT END',
+               'url':'https://example.com/' + 'path/' * 300}
+    assert client.post('/hooks/automations/' + a['id'], **signed('webhook', payload)).json()['status'] == 'accepted'
+    context = json.loads(app.state.store.rows('SELECT context FROM automation_events')[0]['context'])
+    for key in ('title','body','url'):
+        assert context[key] == payload[key]
+    asyncio.run(app.state.automations.events.dispatch())
+    prompt = app.state.store.rows('SELECT prompt FROM runs')[0]['prompt']
+    saved = prompt.split('<automation_event>\n', 1)[1].split('\n', 1)[1].split('\n</automation_event>', 1)[0]
+    assert json.loads(saved)['body'] == payload['body']
+
+
+@pytest.mark.parametrize('kind,client_id', [('continuation','swarm:round:2'), ('user','swarm:round:2'),
+                                          ('delegation','agent-guidance'), ('observation','ambient'), ('automation','scheduled')])
+def test_native_source_never_treats_generated_inputs_as_human(workspace, kind, client_id):
+    app, client = workspace
+    a = native(app, client)
+    source = human(app, a['owner_id'])
+    app.state.store.execute('UPDATE messages SET input_kind=?,client_id=? WHERE run_id=?', (kind, client_id, source['id']))
+    asyncio.run(app.state.automations.events.capture_sessions())
+    assert not app.state.store.rows('SELECT * FROM automation_events')
+    assert cursor(app, a) == app.state.store.rows('SELECT MAX(id) AS id FROM messages')[0]['id']
+
+
+def test_native_context_is_complete_attributed_and_multiple_filters_share_receipt(workspace):
     app, client = workspace
     owner = sign_in(app, client)
     source = human(app, owner, 'Very old context')
@@ -458,11 +486,12 @@ def test_native_context_is_bounded_and_multiple_filters_share_receipt(workspace)
     assert context['matched_trigger_ids'] == ['one','two']
     assert context['message_id'] == msg['id'] and context['session_id'] == source['id']
     assert context['url'] == app.state.settings.public_url + '/#run=' + source['id']
-    assert len(context['body']) == 4000 and context['context_truncated']
-    assert len(context['conversation']) == 10
-    assert all(len(m['content']) <= 1000 and set(m) == {'role','content'} for m in context['conversation'])
-    assert context['conversation'][0]['content'].startswith('2:')
-    assert 'DELETED-CONTEXT' not in receipts[0]['context'] and 'Very old context' not in receipts[0]['context']
+    assert context['body'] == 'url=https://evil.example message_id=999 '+ 'b'*8000 and not context['context_truncated']
+    assert len(context['conversation']) == 13
+    assert [m['content'] for m in context['conversation']] == ['Very old context'] + [str(i)+':'+'x'*2000 for i in range(12)]
+    assert context['conversation'][0]['user_id'] == owner
+    assert all(set(m) == {'id','role','content','user_id','created_at','input_kind','source','response_to_id'} for m in context['conversation'])
+    assert 'DELETED-CONTEXT' not in receipts[0]['context']
 
 
 @pytest.mark.parametrize('limit', ['rate','inbox'])

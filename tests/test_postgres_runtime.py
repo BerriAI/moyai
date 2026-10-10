@@ -161,7 +161,9 @@ def test_lost_ownership_fences_old_process_and_allows_replacement(store, target,
     url, schema = target
     run = store.create_run('Preserve me', '', 'demo', [], chat_enabled=True)
     with psycopg.connect(url, autocommit=True) as conn:
-        conn.execute('SELECT pg_terminate_backend(%s)', (store.database.owner_pid,))
+        # Wait for PostgreSQL to release the terminated backend's advisory lock;
+        # sending the signal alone races the immediately following owner check.
+        assert conn.execute('SELECT pg_terminate_backend(%s, 5000)', (store.database.owner_pid,)).fetchone()[0]
     with pytest.raises(DatabaseError, match='ownership'):
         store.rows('SELECT 1')
     with pytest.raises(DatabaseError, match='ownership'):

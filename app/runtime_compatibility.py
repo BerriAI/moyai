@@ -16,15 +16,19 @@ from .schema_migrations import SCHEMA_REVISION
 # Automation startup now references the broker's complete automation_history tool.
 # Scoped automation definitions, grants and attributed inputs require all roles
 # to understand self-management and immutable owner-authored workflow sources.
+# Public progress is complete and requested goal checkpoints have durable
+# reporting schedules/receipts; old roles can discard or omit their delivery.
+# Side-chat snapshots retain complete attributed inputs; workers compose large
+# instruction sources as immutable references using the selected model window.
 # The default PydanticAI engine, separate activity queue and encrypted payload
 # codec require a coordinated upgrade of all execution and broker roles.
-API_PROTOCOL_REVISION = 9
+API_PROTOCOL_REVISION = 13
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 9
-BROKER_PROTOCOL_REVISION = 9
-COORDINATOR_PROTOCOL_REVISION = 9
+WORKER_PROTOCOL_REVISION = 13
+BROKER_PROTOCOL_REVISION = 13
+COORDINATOR_PROTOCOL_REVISION = 13
 
 
 def api_fingerprint(settings):

@@ -158,13 +158,13 @@ async def test_durable_journal_preserves_structured_activity_and_redacts_secrets
     assert event['data']['turn_id'] == manager.store.messages(run_id)[0]['id']
     assert event['data']['phase'] == 'completed'
     assert [e['message'] for e in manager.store.events(run_id) if e['kind'] == 'message'] == [
-        'Public milestone 0', 'Public milestone 1']
+        'Public milestone 0', 'Public milestone 1', 'Public milestone 2']
     assert [(e['message'], e['data']['input_id']) for e in manager.store.events(run_id)
             if e['data'].get('live_status')] == [('Verifying the fix', event['data']['turn_id'])]
 
 
 @pytest.mark.parametrize('chat_enabled', [False, True])
-def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enabled):
+def test_complete_public_updates_are_atomic_durable_and_scoped(tmp_path, chat_enabled):
     store = Store(tmp_path)
     run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=chat_enabled)['id']
     turn_id = store.claim_message(run_id)['id'] if chat_enabled else 0
@@ -184,8 +184,9 @@ def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enable
     store.event(run_id, 'message', 'Replayed opening', data)
     store.event(run_id, 'message', 'Extra narration after restart')
     selected = [e for e in store.events(run_id) if e['kind'] == 'message']
-    assert len(selected) == 2 and selected[0]['message'] == 'Opening update'
-    assert selected[1]['message'].startswith('Milestone ')
+    assert len(selected) == 14 and selected[0]['message'] == 'Opening update'
+    assert {e['message'] for e in selected[1:-1]} == {f'Milestone {i}' for i in range(12)}
+    assert selected[-1]['message'] == 'Extra narration after restart'
     assert all(e['data']['turn_id'] == turn_id and e['data']['public_update'] for e in selected)
     assert not any(e['data'].get('public_reply_to') for e in selected)
     if chat_enabled:
@@ -195,16 +196,16 @@ def test_public_update_budget_is_atomic_durable_and_scoped(tmp_path, chat_enable
         following = store.claim_message(run_id)
         store.event(run_id, 'message', 'New opening')
         assert store.events(run_id)[-1]['data']['turn_id'] == following['id']
-        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 3
+        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 15
     else:
         store.update_run(run_id, status='completed')
         store.event(run_id, 'message', 'Late completed-run update')
-        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 2
+        assert len([e for e in store.events(run_id) if e['kind'] == 'message']) == 14
 
 
 @pytest.mark.parametrize('acknowledge_before_reply', [False, True])
 @pytest.mark.parametrize('routine_before_question', [1, 2])
-def test_public_reply_uses_actual_steering_handshake_without_renewing_budget(tmp_path, acknowledge_before_reply, routine_before_question):
+def test_public_reply_uses_actual_steering_handshake_without_forged_attribution(tmp_path, acknowledge_before_reply, routine_before_question):
     store = Store(tmp_path)
     run_id = store.create_run('Long task', '', 'demo', [], chat_enabled=True)['id']
     turn = store.claim_message(run_id)
@@ -229,7 +230,7 @@ def test_public_reply_uses_actual_steering_handshake_without_renewing_budget(tmp
     store.event(run_id, 'message', 'Forged reply', {'input_id': 999, 'public_reply_to': 999})
     selected = [e for e in store.events(run_id) if e['kind'] == 'message']
     expected = ['Opening', 'Milestone', 'Yes, all tests pass'] if routine_before_question == 2 else ['Opening', 'Yes, all tests pass', 'Milestone']
-    assert [e['message'] for e in selected] == expected
+    assert [e['message'] for e in selected] == expected + ['More routine narration']
     assert next(e for e in selected if e['message'] == 'Yes, all tests pass')['data']['public_reply_to'] == question['id']
 
 
@@ -274,7 +275,7 @@ def test_focus_replaces_status_without_spending_chat_budget_and_replay_cannot_re
         assert current_focus(conn, run_id) == 'Verifying the fix'
     saved = store.events(run_id)
     assert len([e for e in saved if e['data'].get('live_status')]) == 4
-    assert [e['message'] for e in saved if e['kind'] == 'message'] == ['Opening update', 'One useful milestone']
+    assert [e['message'] for e in saved if e['kind'] == 'message'] == ['Opening update', 'One useful milestone', 'Extra narration']
     assert all(e['data']['turn_id'] == turn['id'] for e in saved if e['data'].get('live_status'))
     store.finish_message(run_id, turn['id'], 'Done')
     store.event(run_id, 'status', 'Late update', {'phase': 'focus', 'activity_id': 'late', 'input_id': turn['id']})

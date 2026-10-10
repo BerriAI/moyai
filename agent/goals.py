@@ -52,7 +52,7 @@ class GoalLoop:
         if (previous or {}).get('id') != (self.state or {}).get('id'):
             self.segment, self.elapsed = uuid4().hex, 0
             self.last_tick = self.clock()
-        if any((previous or {}).get(k) != (self.state or {}).get(k) for k in ('id', 'status', 'reason', 'directive_revision')):
+        if any((previous or {}).get(k) != (self.state or {}).get(k) for k in ('id', 'status', 'reason', 'directive_revision', 'checkpoint')):
             self.publish()
         return value
 
@@ -90,7 +90,8 @@ class GoalLoop:
         # The old file is an import source only; never overwrite durable state.
 
     def publish(self):
-        self.on_change({k: self.state[k] for k in ('id', 'objective', 'status', 'reason', 'elapsed_seconds', 'budget')} if self.state else None)
+        self.on_change({k: self.state[k] for k in ('id', 'objective', 'status', 'reason', 'elapsed_seconds', 'budget',
+            'reporting', 'report_anchor', 'report_cursor', 'checkpoint') if k in self.state} if self.state else None)
 
     def status(self):
         if not self.state:
@@ -210,6 +211,8 @@ def goal_instructions(state):
             'Read its authenticated input IDs. Register the objective and only the user-authorized budget. '
             'For 3 hours means a timebox; at least 3 hours a floor; up to 3 hours a cap; until an outcome has no invented duration. '
             'Record progress, remaining requirements and source evidence as work proceeds. Request completion through goal complete; '
+            'A requested report checkpoint uses reporting separately from the stop budget. Keep progress notes current: '
+            'the durable checkpoint reports the last saved facts and keeps working, even when report inference is unavailable. '
             'independent review owns completion. A normal final answer does not end an active goal. '
             'Preserve accrued time on resume. A budget boundary requires reporting; it is never proof of completion. '
             'New user messages may change the objective or be simple questions; interpret them in context. '

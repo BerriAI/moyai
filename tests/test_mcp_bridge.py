@@ -141,7 +141,7 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
         messages = [{'jsonrpc': '2.0', 'id': index, 'method': 'tools/call', 'params': {
             'name': 'automation_create', 'arguments': {'turn_id': run['active_message_id'],
                 'request_key': 'correct-automation-fields', 'definition': definition(**changes)}}}
-            for index, changes in enumerate([{'metadata': {'bootstrap_source': 'private-input-marker' + 'x' * (16385 - len('private-input-marker'))}}, {}], 1)]
+            for index, changes in enumerate([{'metadata': {'bootstrap_source': ['private-input-marker']}}, {}], 1)]
     elif tool_family.startswith('memory-'):
         quote = 'Keep all future explanations concise.'
         app.state.store.execute('UPDATE messages SET content=? WHERE id=?', (quote, run['active_message_id']))
@@ -196,6 +196,7 @@ def test_validation_remains_a_tool_error_through_broker_and_mcp(workspace, harne
                 failure = json.loads(rejected['content'][0]['text'])
                 assert failure['status_code'] == 422
                 assert failure['validation_errors'][0]['field'] == 'definition.metadata.bootstrap_source'
+                assert failure['validation_errors'][0]['type'] == 'string_type'
                 assert json.loads(recovered['content'][0]['text'])['status'] == 'paused'
                 assert len(app.state.store.rows('SELECT * FROM automation_operations')) == 1
             else:
