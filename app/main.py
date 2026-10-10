@@ -252,6 +252,30 @@ def _create_app(settings, store):
     @asynccontextmanager
     async def lifespan(app):
         try:
+            if settings.moyai_runtime_role == 'api':
+                # Replicas serve requests and persist intents. The singleton
+                # coordinator owns recovery, dispatch and background delivery.
+                try:
+                    await manager.recover()
+                    await manager.wait_ready()
+                    yield
+                finally:
+                    await session_lifecycle.close()
+                    await session_titles.close()
+                    await memory_review.close()
+                    await spend.recovery.close()
+                    await infrastructure.close()
+                    await automations.close()
+                    await environments.close()
+                    await identities.close()
+                    await slack.shutdown()
+                    await manager.shutdown()
+                    await manager.modal_clients.close()
+                    await session_pull_requests.close()
+                    await computer.close()
+                    await tracing.close()
+                    await lens_feedback.close()
+                return
             if settings.moyai_runtime_role == 'worker':
                 # Workers consume Temporal work only. They must not interrupt
                 # gateway streams or take over singleton background recovery.
@@ -346,6 +370,9 @@ def _create_app(settings, store):
     elif settings.moyai_separate_broker:
         from .runtime_coordination import BrokerRoleMiddleware
         app.add_middleware(BrokerRoleMiddleware, broker_only=settings.moyai_runtime_role == 'broker')
+    if settings.moyai_runtime_role == 'api':
+        from .runtime_coordination import ApiRoleMiddleware
+        app.add_middleware(ApiRoleMiddleware)
     app.state.session_lifecycle = session_lifecycle
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
@@ -455,7 +482,7 @@ def _create_app(settings, store):
 
     @app.get("/health")
     async def health():
-        if settings.moyai_runtime_role in {'worker', 'broker'} and not manager.ready.is_set():
+        if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
             raise HTTPException(503, 'Runtime is connecting to Temporal.')
         if store.database:
             from .database import DatabaseError
@@ -691,7 +718,7 @@ def _create_app(settings, store):
                 await database(manager.submit, run)
             else:
                 manager.submit(run)
-            session_titles.schedule(run['id'])
+            await session_titles.request(run['id'])
         return public_run(run)
 
     @app.get('/api/runs/{run_id}/side-chats')
@@ -836,7 +863,7 @@ def _create_app(settings, store):
         await checkpoints.flush()
         # Resume even for a duplicate whose first acknowledgement was lost.
         if not metadata_request:
-            session_titles.schedule(run_id)
+            await session_titles.request(run_id)
             if store.has_queued_messages(run_id):
                 manager.submit(store.run(run_id))
         return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}

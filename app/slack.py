@@ -177,7 +177,7 @@ class SlackSessions:
             if run:
                 self.manager.submit(run)
                 if self.session_titles:
-                    self.session_titles.schedule(run['id'])
+                    await self.session_titles.request(run['id'])
             return
         if not mentioned or len(prompt) < 3:
             return
@@ -196,7 +196,7 @@ class SlackSessions:
             self.manager.submit(run)
             self.submit_reply(run['id'])
             if self.session_titles:
-                self.session_titles.schedule(run['id'])
+                await self.session_titles.request(run['id'])
 
     async def prepare(self, run_id):
         await self.prepare_source(run_id)

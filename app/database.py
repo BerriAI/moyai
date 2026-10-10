@@ -253,6 +253,8 @@ class PostgresDatabase:
             raise ValueError('Unknown schema mode.')
         if schema_mode == 'migrate' and (not application_instance or runtime_role != 'standalone'):
             raise ValueError('Schema migration requires exclusive application ownership.')
+        if runtime_role == 'api' and schema_mode != 'verify':
+            raise DatabaseError('API replicas require verified schema startup.')
         self.schema_updates = schema_mode != 'verify'
         if application_instance and runtime_role != 'standalone' and runtime_settings is None:
             raise DatabaseError('Distributed application startup requires its runtime configuration before schema setup.')
@@ -351,6 +353,8 @@ class PostgresDatabase:
     def admit_runtime(self, settings):
         if settings.moyai_runtime_role != self.runtime_role:
             raise DatabaseError('Runtime role does not match the database owner.')
+        if self.runtime_role == 'api' and not settings.moyai_separate_broker:
+            raise DatabaseError('API replicas require a separate inference broker.')
         owns_broker = self.runtime_role == 'broker' or (
             self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
         if owns_broker and self.owner_pid is not None and not self.broker_owner:

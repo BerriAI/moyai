@@ -5,7 +5,7 @@ paid model call is made. API and broker are separate, unmodified server processe
 """
 import argparse
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -72,7 +72,7 @@ def server(environment, role, directory):
                 stop(process)
 
 
-def probe(url, temporal_address, output, hold_seconds):
+def probe(url, temporal_address, output, hold_seconds, replicated_api=False):
     started, events = time.monotonic(), []
 
     def record(message):
@@ -134,9 +134,19 @@ def probe(url, temporal_address, output, hold_seconds):
                 'LITELLM_API_KEY': 'synthetic-local-key',
             }
             record('START  Real PostgreSQL, Temporal, API and broker processes; local model fixture.')
-            with server(environment, 'coordinator', root / 'api') as (api_process, api):
+            with ExitStack() as lifetime:
+                coordinator_process = None
+                if replicated_api:
+                    environment['MOYAI_SCHEMA_MODE'] = 'verify'
+                    migrated = subprocess.run([sys.executable, '-m', 'app.schema_migrations', '--apply'],
+                        cwd=root, env={**environment, 'MOYAI_RUNTIME_ROLE': 'coordinator'}, capture_output=True, text=True, timeout=30)
+                    assert migrated.returncode == 0, 'Offline fixture migration failed.'
+                    coordinator_process, _ = lifetime.enter_context(server(environment, 'coordinator', root / 'coordinator'))
+                role = 'api' if replicated_api else 'coordinator'
+                api_process, api = lifetime.enter_context(server(environment, role, root / 'api'))
                 with server(environment, 'broker', root / 'broker') as (broker_process, broker):
-                    store = Store(root / 'observer', database_url=url, database_schema=schema)
+                    store = Store(root / 'observer', database_url=url, database_schema=schema,
+                                  schema_mode='verify' if replicated_api else 'auto')
                     try:
                         run = store.create_run('Synthetic broker continuity', '', 'modal', [], model='openai/gpt-6-astra')
                         # No execution worker is started. The durable journal
@@ -169,6 +179,22 @@ def probe(url, temporal_address, output, hold_seconds):
                                 failures.append(type(exc).__name__)
                                 first_chunk.set()
 
+                        traffic_stop, traffic_failures, traffic_samples = threading.Event(), [], []
+                        selected_api = [str(api.base_url).rstrip('/')]
+                        traffic = None
+
+                        def requests_during_handoff():
+                            with httpx.Client(timeout=5, cookies=api.cookies) as client:
+                                while not traffic_stop.is_set():
+                                    start = time.monotonic()
+                                    try:
+                                        response = client.get(selected_api[0] + '/api/runs/' + run['id'])
+                                        assert response.status_code == 200 and response.json()['id'] == run['id']
+                                        traffic_samples.append(round((time.monotonic() - start) * 1000, 2))
+                                    except Exception as exc:
+                                        traffic_failures.append(type(exc).__name__)
+                                    traffic_stop.wait(.05)
+
                         stream = threading.Thread(target=consume, daemon=True)
                         stream.start()
                         try:
@@ -181,11 +207,27 @@ def probe(url, temporal_address, output, hold_seconds):
                             assert queued.status_code == 429 and queued.headers['x-moyai-model-queue'] == '1'
                             assert len(provider_calls) == 1
                             record('CHECK  API rejects inference; broker enforces run auth and the one-call limit.')
+                            replacement = None
+                            if replicated_api:
+                                assert api.get('/api/session').json()['authenticated']
+                                traffic = threading.Thread(target=requests_during_handoff, daemon=True)
+                                traffic.start()
+                                replacement_process, replacement = lifetime.enter_context(server(environment, 'api', root / 'replica'))
+                                replacement.cookies.update(api.cookies)
+                                assert replacement.get('/api/runs/' + run['id']).json()['id'] == run['id']
+                                assert api.get('/health').status_code == replacement.get('/health').status_code == 200
+                                assert replacement.post('/hooks/slack/events', json={}).status_code == 503
+                                assert coordinator_process.poll() is None
+                                record('READY  Two API replicas serve the same signed session; coordinator stays alive.')
+                                selected_api[0] = str(replacement.base_url).rstrip('/')
+                                record('ROUTE  New HTTP requests now go to the ready replacement API.')
                             stop(api_process)
                             assert broker_process.poll() is None
                             assert store.rows('SELECT status FROM model_requests')[0]['status'] == 'pending'
                             record('STOP   API process exited. Broker and original model request remain alive.')
-                            with server(environment, 'coordinator', root / 'replacement') as (_, replacement):
+                            replacement_context = (nullcontext((replacement_process, replacement)) if replicated_api
+                                                   else server(environment, 'coordinator', root / 'replacement'))
+                            with replacement_context as (_, replacement):
                                 assert replacement.get('/health').status_code == 200
                                 assert store.rows('SELECT status FROM model_requests')[0]['status'] == 'pending'
                                 assert broker.post(route, headers=headers, json=body).status_code == 429
@@ -202,12 +244,25 @@ def probe(url, temporal_address, output, hold_seconds):
                                 wait_for(lambda: store.rows('SELECT status FROM model_requests')[0]['status'] == 'completed')
                                 assert len(provider_calls) == 1
                                 record('PASS   Same stream completed after API restart; one provider call, one completed ledger row.')
+                                if replicated_api:
+                                    traffic_stop.set()
+                                    traffic.join(timeout=10)
+                                    assert not traffic.is_alive() and not traffic_failures and traffic_samples
+                                    assert coordinator_process.poll() is None
+                                    record(f'PASS   {len(traffic_samples)} authenticated HTTP reads, zero errors; coordinator PID unchanged.')
                                 report = {'api_restarted': True, 'broker_pid_unchanged': True,
                                     'native_stream_preserved': True, 'provider_calls': 1,
                                     'capacity_enforced_during_restart': True, 'request_status': 'completed',
                                     'real_postgres': True, 'real_temporal': True, 'upstream': 'local_fixture',
-                                    'same_build': True, 'production_changed': False}
+                                    'same_build': True, 'production_changed': False,
+                                    'api_replicas_overlapped': replicated_api,
+                                    'coordinator_pid_unchanged': bool(coordinator_process and coordinator_process.poll() is None),
+                                    'http_reads': len(traffic_samples), 'http_errors': traffic_failures,
+                                    'http_max_latency_ms': max(traffic_samples, default=0)}
                         finally:
+                            traffic_stop.set()
+                            if traffic:
+                                traffic.join(timeout=10)
                             release.set()
                             stream.join(timeout=15)
                     finally:
@@ -224,7 +279,7 @@ def probe(url, temporal_address, output, hold_seconds):
             (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
             header = {'version': 2, 'width': 112, 'height': 18, 'timestamp': int(time.time()),
                       'title': 'Moyai: real broker continuity across an API restart'}
-            (output / 'broker-restart.cast').write_text('\n'.join(json.dumps(e) for e in [header, *events]) + '\n')
+            (output / ('api-overlap.cast' if replicated_api else 'broker-restart.cast')).write_text('\n'.join(json.dumps(e) for e in [header, *events]) + '\n')
     return report
 
 
@@ -232,6 +287,8 @@ async def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
     parser.add_argument('--hold-seconds', type=float, default=0)
+    parser.add_argument('--replicated-api', action='store_true',
+        help='Migrate the fixture schema and overlap two API replicas under a separate coordinator.')
     args = parser.parse_args()
     url = os.environ.get('MOYAI_TEST_POSTGRES_URL')
     if not url:
@@ -240,7 +297,7 @@ async def main():
         parser.error('Use --hold-seconds between 0 and 10.')
     async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as temporal:
         await asyncio.to_thread(probe, url, temporal.client.service_client.config.target_host,
-                                args.output, args.hold_seconds)
+                                args.output, args.hold_seconds, args.replicated_api)
 
 
 if __name__ == '__main__':

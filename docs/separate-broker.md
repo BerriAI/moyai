@@ -3,7 +3,9 @@
 This opt-in topology isolates sandbox model/tool traffic from the coordinator's
 UI/API lifecycle. It does **not** enable mixed-build rollouts, API replicas or
 zero-downtime API updates. All processes still require the same full build SHA
-and runtime fingerprint. Keep the default topology until the coordinated cutover
+and runtime fingerprint. The opt-in [API replica extension](api-replicas.md) adds
+same-build API overlap with an independent coordinator; mixed-build releases
+still require coordination. Keep the default topology until the coordinated cutover
 and edge routing below are ready.
 
 ## Ownership

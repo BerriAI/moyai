@@ -63,7 +63,7 @@ def probe(url, output, hold_seconds=0):
             applied = migrate()
             assert applied.returncode == 0, applied.stderr
             assert json.loads(applied.stdout)['status'] == 'ready'
-            record('PASS   Schema revision 1 prepared; no worker or provider started.')
+            record(f"PASS   Schema revision {json.loads(applied.stdout)['schema_revision']} prepared; no worker or provider started.")
             api, broker, worker = start('coordinator'), start('broker'), start('worker')
             store = broker.state.store
             run = store.create_run('Synthetic pending receipt', '', 'modal', [])

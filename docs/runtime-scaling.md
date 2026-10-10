@@ -37,8 +37,9 @@ model capacity only with upstream RPM/TPM and measured coordinator headroom.
 
 Run one server process per container. A worker can be replicated independently.
 There must still be exactly one coordinator; a second coordinator is refused.
-This is not support for arbitrary API replicas or uninterrupted coordinator
-deployments. The single API/model broker remains a capacity and availability
+This base topology does not support arbitrary API replicas or uninterrupted coordinator
+deployments. The opt-in [API role](api-replicas.md) adds same-build API overlap
+under an independent singleton coordinator. The single API/model broker remains a capacity and availability
 boundary that must be measured before a 3,000-live-session production commitment.
 
 The opt-in [separate broker topology](separate-broker.md) moves sandbox inference

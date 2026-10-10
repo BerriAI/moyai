@@ -78,6 +78,24 @@ class BrokerRoleMiddleware:
                            headers={'Cache-Control': 'no-store'})(scope, receive, send)
 
 
+class ApiRoleMiddleware:
+    """Signed event ingress stays with the singleton coordinator's channel locks."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get('path', '')
+        if scope['type'] in {'http', 'websocket'} and (path == '/hooks' or path.startswith('/hooks/')):
+            if scope['type'] == 'websocket':
+                await send({'type': 'websocket.close', 'code': 1008})
+            else:
+                from starlette.responses import JSONResponse
+                await JSONResponse({'detail': 'Route event hooks to the coordinator.'}, status_code=503,
+                                   headers={'Cache-Control': 'no-store'})(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 @asynccontextmanager
 async def lease(database, name: str, *, wait: bool = True, ttl: float = 30):
     owner = asyncio.current_task()
