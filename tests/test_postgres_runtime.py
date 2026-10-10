@@ -1,7 +1,8 @@
 """Runtime guarantees against PostgreSQL 17, including an imported database."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 import json
 import os
+import threading
 from pathlib import Path
 from uuid import uuid4
 from unittest.mock import AsyncMock
@@ -11,8 +12,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.database import DatabaseError, IntegrityError, bindings
+from app.database import DatabaseError, IntegrityError, PostgresConnection, bindings
 from app.db import Store
+from app.durable_runner import initialize_schema as initialize_durable_schema
 from app.main import create_app
 from app import postgres_migration as migration
 
@@ -94,6 +96,45 @@ def test_concurrent_submission_and_claim_are_atomic(store):
         claimed = list(executor.map(lambda _: store.claim_message(run_id), range(12)))
     assert sum(message is not None for message in claimed) == 1
     assert len(store.messages(run_id)) == 1
+
+
+def test_concurrent_durable_initializers_replace_the_capacity_index_atomically(store, monkeypatch):
+    initialize_durable_schema(store)
+    first_creating, release_first, second_started = (threading.Event() for _ in range(3))
+    initializer = threading.local()
+    execute = PostgresConnection.execute
+
+    def hold_replacement(conn, sql, params=()):
+        if getattr(initializer, 'first', False) and sql.startswith('CREATE INDEX idx_durable_sessions_occupied'):
+            first_creating.set()
+            assert release_first.wait(10)
+        return execute(conn, sql, params)
+
+    def initialize(first):
+        initializer.first = first
+        if not first:
+            second_started.set()
+        initialize_durable_schema(store)
+
+    monkeypatch.setattr(PostgresConnection, 'execute', hold_replacement)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(initialize, True)
+        try:
+            assert first_creating.wait(10)
+            second = pool.submit(initialize, False)
+            assert second_started.wait(10)
+            # The second constructor must wait for the whole replacement, not
+            # create an index in the first constructor's DROP/CREATE gap.
+            with pytest.raises(TimeoutError):
+                second.result(timeout=1)
+            assert store.rows('''SELECT indexname FROM pg_indexes
+                WHERE schemaname=current_schema() AND indexname='idx_durable_sessions_occupied' ''')
+        finally:
+            release_first.set()
+        first.result(timeout=10)
+        second.result(timeout=10)
+    assert len(store.rows('''SELECT indexname FROM pg_indexes
+        WHERE schemaname=current_schema() AND indexname='idx_durable_sessions_occupied' ''')) == 1
 
 
 def test_read_projection_keeps_one_snapshot_while_writes_continue(store):
