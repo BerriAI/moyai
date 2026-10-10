@@ -44,6 +44,42 @@ def test_should_keep_the_default_production_prompt_paths():
     assert 'references under /session' in prompt
 
 
+def test_context_recovery_reason_survives_last_broker_failure(monkeypatch, tmp_path):
+    from agent.context_store import ContextUnavailable
+    from agent.harnesses.harness_agent import TurnJournal
+    reason = 'Context needs compaction, but tool outcomes are pending. Verify their receipts before resuming.'
+    failure = {'version': 1, 'route': '/v1/responses', 'http_status': 503,
+               'transient': True, 'response_started': False, 'uncertain_tool': False}
+    relay = SimpleNamespace(last_error='The cloud connection failed before a response could finish.',
+                            last_failure=failure, wait_group='', wait_credential='')
+    events = []
+
+    def create_agent(harness, **kwargs):
+        store = kwargs['context_store']
+        runtime = SimpleNamespace(validate=lambda: None, close=lambda: None,
+                                  context_store=store, compaction_window=None, context=SimpleNamespace(relay=relay))
+
+        def run_conversation(prompt, **conversation):
+            runtime.journal = TurnJournal([], prompt, store)
+            runtime.journal.tool_started('preview', 'terminal', {'cmd': 'run-preview'})
+            raise ContextUnavailable(reason)
+
+        runtime.run_conversation = run_conversation
+        return runtime
+
+    monkeypatch.setattr(agent, 'create_agent', create_agent)
+    result = agent.run(
+        {'run_id': 'test-session', 'prompt': 'Inspect the repository.', 'harness': 'codex'},
+        relay=relay, workspace=tmp_path, session=tmp_path / 'session', config={},
+        emit=lambda kind, text, *args, **kwargs: events.append((kind, text, kwargs)),
+    )
+    assert result['exit_code'] == 1 and result['context_pending']
+    assert result['summary'] == result['result']['context_failure'] == reason
+    final = next(event for event in events if event[0] == 'final')
+    assert final[1] == reason and final[2]['context_failure'] == reason
+    assert final[2]['transport_failure'] == failure and 'transport_retry' not in final[2]
+
+
 @pytest.mark.parametrize('failure_stage', ['factory', 'history', 'close'])
 def test_should_release_session_resources_after_startup_or_cleanup_failure(monkeypatch, tmp_path, failure_stage):
     captured = {}

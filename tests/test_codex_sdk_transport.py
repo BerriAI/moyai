@@ -614,6 +614,22 @@ def test_context_rejection_compacts_in_place_with_live_tools(tmp_path, monkeypat
     assert proof['final_response'] == 'yield-test-complete'
 
 
+def test_native_compaction_recovers_broker_outage_with_running_preview(tmp_path, monkeypatch):
+    proof = native_yield_case(tmp_path, monkeypatch, 1000, 'settle-context-preview',
+                             compact_outage_seconds=4, progress=print)
+    assert proof['completed'] and not proof['pending_tools'], proof
+    assert proof['native_clients'] == proof['native_threads'] == 1
+    assert proof['tool_executions'] == proof['completed_receipts'] == proof['command_starts'] == 1
+    assert proof['native_compactions'] == 2 and proof['transport_attempt'] == 1
+    assert proof['original_request_receipts'] == 1 and proof['original_request_in_continuation']
+    assert proof['upstream_requests'] == proof['model_calls'] == 6
+    assert proof['readiness_statuses'][0] == 503 and proof['readiness_statuses'][-1] == 200
+    assert {sample['phase'] for sample in proof['preview_samples']} == {'before', 'during', 'after'}
+    assert len({(sample['pid'], sample['port']) for sample in proof['preview_samples']}) == 1
+    assert all(sample['status'] == 200 for sample in proof['preview_samples'])
+    assert not proof['faults'] and proof['saved_prose'].count('yield-test-complete') == 1
+
+
 @pytest.mark.parametrize('outcome', ['settle-transport-finite', 'settle-transport-preview'])
 def test_native_transport_recovery_preserves_running_commands(tmp_path, monkeypatch, outcome):
     proof = native_yield_case(tmp_path, monkeypatch, 1000, outcome)
@@ -673,7 +689,7 @@ def test_native_interrupted_sse_preserves_existing_command(tmp_path, monkeypatch
 def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                       agent_class=CodexAgent, progress=lambda text: None, context_delay=0.3,
                       context_rounds=1, compact_rejections=0,
-                      outage_seconds=0, interrupted=None, on_outage=lambda: None,
+                      outage_seconds=0, compact_outage_seconds=0, interrupted=None, on_outage=lambda: None,
                       on_status=lambda kind, message, data: None, tool_catalog=None, read_status=502):
     """Real Codex + MCP + relay, including the default ~30-second exec yield.
 
@@ -724,6 +740,8 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             pid = int((workspace / 'preview-pid').read_text())
             with urlopen(f'http://127.0.0.1:{port}/command.py', timeout=2) as response:
                 sample = {'phase': phase, 'pid': pid, 'port': port, 'status': response.status}
+            if compact_outage_seconds and not any(saved['phase'] == phase for saved in preview_samples):
+                progress(f'Preview {phase} recovery: HTTP {sample["status"]}, PID {pid}, port {port}')
             preview_samples.append(sample)
             return sample
         except (OSError, ValueError) as exc:
@@ -832,6 +850,15 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                 compactions.append(body)
                 progress('Native compaction request; original command remains live')
                 assert agent.journal.pending
+                if compact_outage_seconds and len(compactions) == 1:
+                    sample_preview('before')
+                    outage_started = time.monotonic()
+                    outage_until = outage_started + compact_outage_seconds
+                    observer = threading.Thread(target=observe_outage, daemon=True)
+                    observer.start()
+                    progress(f'Compaction receives HTTP 503; broker unavailable for {compact_outage_seconds} seconds')
+                    on_outage()
+                    return self.reply({}, 503)
                 if len(compactions) <= compact_rejections:
                     return self.reply({'detail': {'code': 'context_compaction_required',
                         'input_tokens': 300000, 'input_budget': 200000}}, 409)
@@ -905,7 +932,7 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
                     (context_rounds + 2 + int(transport) if context_case else 2 if interrupted else 3)):
                 assert bool(agent.journal.pending) != finish_during_compaction
                 assert agent.model_calls == sequence + len(compactions)
-                if transport and preview:
+                if (transport or compact_outage_seconds) and preview:
                     sample_preview('after')
                     progress('After reconnect: original preview server still answers HTTP 200')
                 corrections.extend(item for item in body['input'] if 'Keep the final response concise.' in json.dumps(item))
@@ -1012,6 +1039,9 @@ def native_yield_case(tmp_path, monkeypatch, yield_ms, outcome='complete', *,
             outage_elapsed=time.monotonic() - outage_started if outage_started else 0,
             readiness_statuses=readiness_statuses, preview_samples=preview_samples, status_events=status_events,
             saved_prose='\n'.join(m.get('content') or '' for m in result['messages'] if m['role'] == 'assistant'))
+        proof['original_request_receipts'] = sum(m.get('role') == 'user'
+            and m.get('content') == 'Run the local slow tool once.' for m in store.history())
+        proof['original_request_in_continuation'] = 'Run the local slow tool once.' in json.dumps(requests[-1])
         progress('Result: ' + json.dumps({key: proof[key] for key in (
             'completed', 'boundary_failed', 'upstream_requests', 'tool_executions', 'completed_receipts', 'pending_tools')}))
         return proof

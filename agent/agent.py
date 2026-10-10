@@ -134,7 +134,8 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
                 notify=lambda: emit('status', 'Continuing toward the goal',
                                     {'activity_version': 1, 'phase': 'processing'}))
         except ContextUnavailable as exc:
-            result = {'completed': False, 'failed': True, 'messages': [], 'final_response': str(exc)}
+            result = {'completed': False, 'failed': True, 'messages': [], 'final_response': str(exc),
+                      'context_failure': str(exc)}
         steering.close()
         completed = result.get("completed") is True and not result.get("interrupted") and not result.get("partial")
         transport_retry = recovery_marker(agent, result) if definition.durable_context else None
@@ -147,7 +148,8 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
                    "Access is needed. Connect securely through the form in this session, not in chat." if continuing and wait_credential else
                    "Parallel agents are working; the coordinator will resume with their results." if continuing and wait_group else
                    "Work is checkpointed for cloud machine renewal; the task is not finished yet." if continuing else
-                   split_focus(str((relay.last_error if not completed else '') or result.get("final_response") or "Agent ended without a final response."))[1])
+                   split_focus(str(result.get('context_failure') or (relay.last_error if not completed else '')
+                                   or result.get("final_response") or "Agent ended without a final response."))[1])
         # The control plane durably stores this before any filesystem saving or
         # archive work can fail. A nonzero exit still marks the turn incomplete.
         emit("final", summary, completed=completed, continuation=bool(continuing), wait_group=wait_group, wait_credential=wait_credential, steer_message_id=steered,
@@ -155,6 +157,7 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
              **({'transport_retry': transport_retry} if transport_retry else {}),
              **({'transport_failure': relay.last_failure} if getattr(relay, 'last_failure', None) else {}),
              **({'sdk_failure': result['sdk_failure']} if result.get('sdk_failure') else {}),
+             **({'context_failure': result['context_failure']} if result.get('context_failure') else {}),
              steering_applied=steering.receipts() if hasattr(steering, 'receipts') else [])
         goal.save()
         if context_store is not None:
