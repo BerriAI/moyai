@@ -271,6 +271,7 @@ def _create_app(settings, store):
                     # must not mark an in-flight broker action ambiguous.
                     store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
                     await manager.recover()
+                    await manager.wait_ready()
                     spend.recovery.start()
                     memory_review.start()
                     yield

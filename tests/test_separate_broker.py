@@ -1,6 +1,7 @@
 """Real PostgreSQL fences and application lifecycles; no provider calls."""
 from contextlib import ExitStack
 import asyncio
+import socket
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 import pytest
 import httpx
+import uvicorn
 from starlette.websockets import WebSocketDisconnect
 
 from app.config import Settings
@@ -179,14 +181,61 @@ def test_broker_health_fails_when_database_ownership_is_lost(split_settings):
             assert client.get('/health').status_code == 503
 
 
-def test_broker_health_waits_for_temporal(split_settings, monkeypatch):
+async def test_broker_does_not_accept_tcp_until_temporal_is_ready(split_settings, monkeypatch):
+    connecting, connected = asyncio.Event(), asyncio.Event()
+
+    async def delayed(self):
+        connecting.set()
+        await connected.wait()
+        return SimpleNamespace(start_workflow=AsyncMock())
+
+    monkeypatch.setattr(TemporalRunManager, 'connect_temporal', delayed)
+    coordinator = create_app(split_settings)
+    broker = create_app(split_settings.model_copy(update={'moyai_runtime_role': 'broker'}))
+    with socket.socket() as available:
+        available.bind(('127.0.0.1', 0))
+        port = available.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(broker, host='127.0.0.1', port=port, log_level='error'))
+    serving = asyncio.create_task(server.serve())
+    try:
+        await asyncio.wait_for(connecting.wait(), 3)
+        assert not server.started
+        with pytest.raises(OSError):
+            await asyncio.open_connection('127.0.0.1', port)
+        connected.set()
+        async with asyncio.timeout(5):
+            while not server.started:
+                await asyncio.sleep(.01)
+        async with httpx.AsyncClient(base_url=f'http://127.0.0.1:{port}') as client:
+            assert (await client.get('/health')).status_code == 200
+            broker.state.manager.ready.clear()
+            assert (await client.get('/health')).status_code == 503
+    finally:
+        connected.set()
+        server.should_exit = True
+        await asyncio.wait_for(serving, 5)
+        coordinator.state.store.close()
+
+
+def test_broker_startup_timeout_releases_ownership(split_settings, monkeypatch):
     async def unavailable(self):
         await asyncio.Event().wait()
+
     monkeypatch.setattr(TemporalRunManager, 'connect_temporal', unavailable)
-    with TestClient(create_app(split_settings), base_url=split_settings.public_url, client=('127.0.0.1', 50000)):
-        broker = create_app(split_settings.model_copy(update={'moyai_runtime_role': 'broker'}))
-        with TestClient(broker, base_url=split_settings.public_url, client=('127.0.0.1', 50000)) as client:
-            assert client.get('/health').status_code == 503
+    coordinator = create_app(split_settings)
+    options = split_settings.model_copy(update={'moyai_runtime_role': 'broker',
+                                                'temporal_startup_timeout_seconds': 1})
+    broker = create_app(options)
+    try:
+        with pytest.raises(RuntimeError, match='startup deadline'):
+            with TestClient(broker):
+                pytest.fail('An unready broker completed startup')
+        assert broker.state.manager.closing
+        # The failed process must release the broker fence for the next attempt.
+        replacement = create_app(options)
+        replacement.state.store.close()
+    finally:
+        coordinator.state.store.close()
 
 
 def test_split_capacity_does_not_report_local_zeros_as_broker_usage(split_settings):

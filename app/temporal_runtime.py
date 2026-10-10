@@ -86,6 +86,19 @@ class TemporalRunManager(DurableRunner):
             identity=self.identity,
         )
 
+    async def wait_ready(self):
+        # Render private services use TCP readiness. Complete this before ASGI
+        # startup yields, so Uvicorn cannot bind its port while still connecting.
+        try:
+            async with asyncio.timeout(self.settings.temporal_startup_timeout_seconds):
+                while True:
+                    await self.ready.wait()
+                    await database(self.store.rows, 'SELECT 1')
+                    if self.ready.is_set() and not self.closing:
+                        return
+        except TimeoutError:
+            raise RuntimeError('Temporal did not become ready before the broker startup deadline.') from None
+
     def make_worker(self, client):
         return Worker(client, task_queue=self.settings.temporal_task_queue,
                       workflows=[SessionWorkflow, AutomationWorkflow], activities=[self.advance_session, self.launch_automation, self.automation_finished],

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
     moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker'] = 'standalone'
     moyai_separate_broker: bool = False
+    temporal_startup_timeout_seconds: float = Field(default=60, ge=1, le=600)
     temporal_worker_activities: int = Field(default=120, ge=1, le=10000)
     temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000)
     temporal_dispatch_concurrency: int = Field(default=10, ge=1, le=1000)

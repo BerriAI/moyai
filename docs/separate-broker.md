@@ -91,9 +91,16 @@ the connector alongside the API could still break those connections.
 
 With pool size 8, three processes require up to 27 database connections, plus
 administrative reserve. One overlapping worker adds 9. This does not authorize
-overlapping coordinator or broker instances. Keep Render readiness at `/health`;
-broker/worker readiness also requires a connected Temporal client and valid DB
-ownership. No production deployment or paid service is created by this PR.
+overlapping coordinator or broker instances. Render [private services use TCP
+health checks](https://render.com/docs/health-checks), not an HTTP health-check
+path. The broker therefore waits for Temporal and valid database ownership before
+ASGI startup completes and Uvicorn opens its port. After
+`TEMPORAL_STARTUP_TIMEOUT_SECONDS` (default 60, range 1–600), unsuccessful startup
+exits and releases the ownership lock. Verify `/health` explicitly from the private
+network during cutover; broker/worker HTTP readiness also checks Temporal and DB
+ownership. A later dependency failure returns 503 but does not close the TCP port;
+the existing release checks must observe HTTP readiness. No production deployment
+or paid service is created by this PR.
 
 After writes reach this topology, rollback is another drained, coordinated switch
 of all roles and the edge route. Keep PostgreSQL/S3 and the original keys; never
