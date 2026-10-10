@@ -91,7 +91,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
     assert response.status_code == 200
     catalogs.append(response.json())
-    safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
+    safe = set('''swarm_board agents_results agents_read_artifact automation_environments automation_webhook_info
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
         github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
         linear_my_issues linear_teams linear_search linear_issue
@@ -100,7 +100,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
     read_effects = set('''automation_list memory_search skills_search skills_load skills_read_file'''.split())
-    writes = set('''agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
+    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
         automation_update automation_enable automation_pause automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request

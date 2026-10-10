@@ -11,7 +11,7 @@ import pytest
 
 from app.blob_storage import ObjectStorage
 from app.config import Settings
-from app.db import Store
+from app.db import Store, now
 from app.persistence import Checkpoints, restore_checkpoint
 from storage_fixture import MemoryObjects
 
@@ -139,6 +139,84 @@ def test_upload_publication_failure_shadowing_and_snapshots(tmp_path):
     with pytest.raises(HTTPException):
         reopened.artifacts.save('latest.zip', b'rollback')
     assert (legacy / 'latest.zip').is_symlink()
+
+
+def test_batched_availability_matches_metadata_without_reading_objects(tmp_path):
+    backend = MemoryObjects()
+    store = Store(tmp_path, object_storage=backend)
+    store.artifacts.save('remote.zip', b'remote archive')
+    legacy = tmp_path / 'artifacts'
+    legacy.mkdir(exist_ok=True)
+    (legacy / 'local.zip').write_bytes(b'legacy archive')
+    (legacy / 'directory.zip').mkdir()
+    (legacy / 'linked.zip').symlink_to(legacy / 'local.zip')
+    (legacy / 'linked-directory').symlink_to(legacy, target_is_directory=True)
+    names = ['remote.zip', 'local.zip', 'absent.zip', 'directory.zip',
+             'linked.zip', 'linked-directory/local.zip']
+    before = backend.reads
+    assert store.artifacts.available_names(names) == {
+        name for name in names if store.artifacts.info(name) is not None
+    } == {'remote.zip', 'local.zip'}
+    assert backend.reads == before
+    assert store.artifacts.available_names([]) == set()
+    with pytest.raises(ValueError):
+        store.artifacts.available_names(['../outside.zip'])
+
+
+def test_capture_inventory_reads_remote_metadata_in_one_query(tmp_path, monkeypatch):
+    backend = MemoryObjects()
+    store = Store(tmp_path, object_storage=backend)
+    prefix = 'a' * 32 + '-captures/'
+    stamp = now()
+    rows = [(prefix + f'capture-{index:04}.png', 'test:unused', index + 1, f'{index:064x}', stamp)
+            for index in range(306)]
+    with store.connect() as conn:
+        conn.executemany('INSERT INTO artifact_objects(name,reference,size,sha256,created_at) VALUES(?,?,?,?,?)', rows)
+    expected = [store.artifacts.info(row[0]) for row in rows]
+    queries = []
+    with store.connect() as conn:
+        if store.database:
+            execute = conn.raw.execute
+            def traced(sql, *args, **kwargs):
+                queries.append(sql)
+                return execute(sql, *args, **kwargs)
+            with monkeypatch.context() as tracing:
+                tracing.setattr(conn.raw, 'execute', traced)
+                result = store.artifacts.listing(prefix, conn)
+        else:
+            conn.set_trace_callback(queries.append)
+            result = store.artifacts.listing(prefix, conn)
+    assert result == expected
+    assert len(queries) == 1
+    assert backend.reads == 0
+
+
+def test_batched_inventory_preserves_legacy_files_shadowing_and_validation(tmp_path):
+    backend = MemoryObjects()
+    store = Store(tmp_path, object_storage=backend)
+    prefix = 'captures_%/'
+    remote = prefix + 'remote.png'
+    nested = prefix + 'nested/remote.png'
+    store.artifacts.save(remote, b'remote capture')
+    store.artifacts.save(nested, b'nested remote capture')
+    store.artifacts.save('capturesAB/unrelated.png', b'not in the literal prefix')
+    legacy = tmp_path / 'artifacts' / prefix
+    legacy.mkdir(parents=True)
+    (legacy / 'local.png').write_bytes(b'local capture')
+    (legacy / 'remote.png').symlink_to(legacy / 'local.png')
+    (legacy / 'linked.png').symlink_to(legacy / 'local.png')
+    (legacy / 'directory.png').mkdir()
+    (legacy / '.upload-in-progress').write_bytes(b'incomplete')
+    expected = [store.artifacts.info(name) for name in sorted([prefix + 'local.png', remote, nested])]
+    assert store.artifacts.listing(prefix) == expected
+    assert backend.reads == 0
+    with pytest.raises(ValueError):
+        store.artifacts.listing('../captures/')
+    # Reusing a manifest row must retain info()'s stored-name validation too.
+    store.execute('INSERT INTO artifact_objects(name,reference,size,sha256,created_at) VALUES(?,?,?,?,?)',
+                  (prefix + '../invalid.png', 'test:unused', 1, 'a' * 64, now()))
+    with pytest.raises(ValueError):
+        store.artifacts.listing(prefix)
 
 
 async def test_checkpoint_restores_remote_manifest_without_copying_payload(tmp_path):
