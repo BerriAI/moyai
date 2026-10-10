@@ -59,7 +59,9 @@ class AgentTracing:
         self.store, self.settings = store, settings
         self.preferences = preferences or UserPreferences(store, None, None)
         destinations = settings.trace_destinations()
-        self.enabled = bool(destinations)
+        # Local debugging history must survive exporter delivery and must also
+        # work in installations without an external tracing destination.
+        self.enabled = True
         self.resource = Resource({'service.name': 'moyai',
                                   'deployment.environment.name': settings.trace_environment,
                                   'deployment.environment': settings.trace_environment,
@@ -240,6 +242,22 @@ class AgentTracing:
             # LangSmith maps exception events to errors; status alone is lost.
             events=[Event('exception', {'exception.message': error, 'exception.type': str(attrs.get('error.type', 'OperationError'))}, timestamp=int(end))] if failed else [],
         )
+        record = json.dumps({
+            'trace_id': format(trace_id, '032x'),
+            'span_id': format(span.context.span_id, '016x'),
+            'parent_span_id': format(parent_id, '016x') if parent_id else None,
+            'turn_id': message_id, 'name': span.name,
+            # Nanoseconds exceed JavaScript's exact integer range.
+            'start_ns': str(span.start_time), 'end_ns': str(span.end_time),
+            'attributes': attrs, 'status': 'error' if failed else 'completed',
+        })
+        values = (run['id'], format(span.context.span_id, '016x'), record)
+        sql = '''INSERT INTO session_trace_spans(run_id,span_id,payload) VALUES(?,?,?)
+            ON CONFLICT(run_id,span_id) DO UPDATE SET payload=excluded.payload'''
+        if connection is not None:
+            connection.execute(sql, values)
+        else:
+            self.store.execute(sql, values)
         if self.processor is not None:
             self.processor.on_end(span)
         for outbox in self.outboxes:
@@ -422,6 +440,9 @@ class AgentTracing:
 
 def initialize_schema(store):
     with store.connect() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS session_trace_spans (
+            run_id TEXT NOT NULL, span_id TEXT NOT NULL, payload TEXT NOT NULL,
+            PRIMARY KEY(run_id,span_id))''')
         conn.execute('''CREATE TABLE IF NOT EXISTS trace_contexts (
             run_id TEXT NOT NULL, message_id INTEGER NOT NULL,
             trace_id TEXT NOT NULL, span_id TEXT NOT NULL, parent_id TEXT,

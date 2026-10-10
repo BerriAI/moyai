@@ -748,6 +748,17 @@ def _create_app(settings, store):
         summary = session_pull_requests.summaries([run_id])[run_id]
         return {**result, 'pr_summary': summary, 'pull_requests': summary['pull_requests']}
 
+    @app.get('/api/runs/{run_id}/export')
+    async def export_session(run_id: str, request: Request):
+        security.require(request)
+        from .session_export import session_export
+        result = await run_in_threadpool(session_export, store, run_id)
+        return JSONResponse(result, headers={
+            'Content-Disposition': f'attachment; filename="moyai-session-{result["session"]["id"]}.json"',
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff',
+        })
+
     def feedback_author(request):
         actor = store.identity(security.session_info(request))
         rows = store.rows('''

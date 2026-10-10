@@ -1,10 +1,27 @@
 /* Extend the shared session menu; Rename and Move keep their existing owners. */
 function bindSessionLifecycleActions(menu, run) {
   const icon = name => globalThis.MoyaiIcon?.(name, 16) || '';
+  MoyaiUI.insert(menu, 'beforeend', `<button type="button" data-download-session>${icon('file')}Download session JSON</button>`);
+  menu.querySelector('[data-download-session]').onclick = () => {
+    menu.hidePopover();
+    downloadSessionJSON(run).catch(showError);
+  };
   MoyaiUI.insert(menu, 'beforeend', `<button type="button" data-archive-session>${icon(run.archived ? 'restore' : 'archive')}${run.archived ? 'Restore session' : 'Archive session'}</button>
     ${run.can_delete ? `<button type="button" data-delete-session class="session-delete">${icon('trash')}Delete session…</button>` : ''}`);
   menu.querySelector('[data-archive-session]').onclick = () => { menu.hidePopover(); changeSessionArchive(run).catch(showError); };
   menu.querySelector('[data-delete-session]')?.addEventListener('click', () => { menu.hidePopover(); deleteSessionDialog(run); });
+}
+
+async function downloadSessionJSON(run) {
+  const result = await api(`/api/runs/${encodeURIComponent(run.id)}/export`);
+  const url = URL.createObjectURL(new Blob([JSON.stringify(result, null, 2)], {type:'application/json'}));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `moyai-session-${run.id}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 async function changeSessionArchive(run) {
