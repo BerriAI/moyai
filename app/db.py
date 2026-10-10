@@ -400,7 +400,7 @@ class Store:
         return linked['id'] if linked else user_id
 
     def sidebar_run_ids(self, user_id=None, extra_ids=(), *, archive_owner=None, archived=False, pin_owner=None,
-                        search=(), limit=100, exclude_id='', search_folders=False):
+                        search=(), limit=100, exclude_id='', search_folders=False, target_id=''):
         """Filter before the recent limit and apply the same scope to filed/focused runs.
 
         Identity links affect this shared-workspace view only, never authorization.
@@ -422,6 +422,9 @@ class Store:
         if archive_owner is not None and archived is not None:
             predicate += ' AND ' + ('' if archived else 'NOT ') + 'EXISTS(SELECT 1 FROM session_archives a WHERE a.run_id=runs.id AND a.owner_id=?)'
             params.append(archive_owner)
+        if target_id:
+            predicate += ' AND id=?'
+            params.append(target_id)
         if exclude_id:
             predicate += ' AND id!=?'
             params.append(exclude_id)

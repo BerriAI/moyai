@@ -1080,6 +1080,11 @@ def _create_app(settings, store):
                 result = {'error': exc.detail, 'status_code': exc.status_code}
             await checkpoints.flush()
             return result
+        if body.name == 'sessions_read':
+            try:
+                return session_lifecycle.read(run, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Invalid session read arguments. Use session_id, section, cursor and limit (1-20).') from None
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
