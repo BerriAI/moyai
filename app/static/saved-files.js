@@ -38,6 +38,8 @@
     if(!container)return;
     container.querySelectorAll('.markdown [data-file-ref],.markdown strong,.markdown code,.work-image [data-file-ref]').forEach(node=>{
       if(node.closest('pre')||(!node.matches('[data-file-ref]')&&(node.closest('a')||node.children.length)))return;
+      const messageRun=node.closest('[data-message-run]')?.dataset.messageRun;
+      if(messageRun&&messageRun!==runId)return;
       const ref=node.dataset.fileRef||node.textContent,file=resolve(ref,files);
       if(!file){
         if(node.dataset.savedFile){
