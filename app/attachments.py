@@ -1,6 +1,7 @@
 """Bounded, durable user uploads. Drafts are private; sent files share chat access."""
 import asyncio
 import base64
+import codecs
 from datetime import datetime, timedelta, timezone
 import hashlib
 from io import BytesIO
@@ -65,7 +66,10 @@ def inspect_file(raw):
     text = ''
     if not preview and b'\x00' not in raw[:16000]:
         try:
-            text = raw[:16000].decode('utf-8')[:4000]
+            # A bounded prefix may end in the middle of a valid code point.
+            # Still reject malformed bytes and incomplete complete-file uploads.
+            text = codecs.getincrementaldecoder('utf-8')().decode(
+                raw[:16000], final=len(raw) <= 16000)[:4000]
             media_type = 'text/plain'
         except UnicodeDecodeError:
             pass
