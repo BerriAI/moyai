@@ -46,7 +46,7 @@ function createCommandPalette() {
       // A folder-only hit has no row-level match. Keep its root as a destination.
       const visible = !query || sessionMatches(root, query) || !matches.length ? [root, ...matches] : matches;
       return visible.map(run => ({id:'run:'+run.id, label:sessionTitle(run), icon:'chat',
-        description:[run.parent_run_id?sessionTitle(root):'', sessionStatus(run)].filter(Boolean).join(' · '),
+        description:[run.parent_run_id?sessionTitle(root):'', run.archived?'Archived':'', sessionStatus(run)].filter(Boolean).join(' · '),
         snippet:query && run.search_query === query ? run.search_snippet : '',
         action:() => openRun(run.id)}));
     });
@@ -85,7 +85,7 @@ function createCommandPalette() {
     timer = setTimeout(async() => {
       try {
         const params = new URLSearchParams({scope:sessionListScope()});
-        if (query) params.set('search', query);
+        if (query) { params.set('search', query); params.set('include_archived', 'true'); }
         const result = await api('/api/runs?'+params);
         if (!valid()) return;
         runs = result;
