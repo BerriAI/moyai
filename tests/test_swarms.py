@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 import asyncio
 import json
 
@@ -9,7 +10,7 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.db import Store, now
 from app.main import NewRun, create_app, public_messages
-from app.swarms import create_in, execution_policy, MAX_ROUNDS
+from app.swarms import create_in, execution_policy, remaining_seconds
 from app.temporal_runtime import TemporalRunManager
 from test_durable import durable, drive
 from test_agents import attach, launch, pause_parent
@@ -26,10 +27,12 @@ def expire(manager, run_id):
 
 
 def test_swarm_input_budget_is_strict_and_bounded():
-    for value in [0, 59, 86401, 60.5, True, '300']:
+    for value in [-1, 59, 30 * 86400 + 1, 60.5, True, '300']:
         with pytest.raises(ValidationError):
             NewRun(prompt='A mission', swarm={'budget_seconds': value})
     assert NewRun(prompt='A mission', swarm={'budget_seconds': 60}).swarm.budget_seconds == 60
+    assert NewRun(prompt='A mission', swarm={}).swarm.budget_seconds == 0
+    assert NewRun(prompt='A mission', swarm={'budget_seconds': 7 * 86400}).swarm.budget_seconds == 7 * 86400
     assert NewRun(prompt='A normal task').swarm is None
 
 
@@ -246,7 +249,8 @@ async def test_completed_round_waits_durably_then_queues_one_identified_continua
     assert 0 < waiting['retry_seconds'] <= 30
     assert len(cloud.launches) == 1
     assert 'SWARM MODE' in cloud.machines[0].spec['prompt']
-    assert 0 < cloud.machines[0].spec['timeout'] <= 300
+    assert cloud.machines[0].spec['timeout'] is None
+    assert 'deadline_at' not in cloud.machines[0].spec
     manager.store.execute('UPDATE swarm_missions SET next_at=0 WHERE run_id=?', (run_id,))
     replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
     replacement.swarms.tick(run_id)
@@ -428,8 +432,8 @@ async def test_deadline_before_initial_work_never_launches_a_process(durable):
     manager, cloud, run_id = durable
     enable(manager, run_id)
     expire(manager, run_id)
-    assert await manager.advance(run_id) is False
-    assert manager.swarms.get(run_id)['status'] == 'expired'
+    assert await manager.advance(run_id) == {'retry_seconds': 60}
+    assert manager.swarms.get(run_id)['status'] == 'paused'
     assert manager.store.run(run_id)['status'] == 'cancelled'
     assert not cloud.launches and not cloud.machines
 
@@ -441,7 +445,7 @@ async def test_deadline_between_install_and_launch_cancels_without_execution(dur
     assert not cloud.launches
     expire(manager, run_id)
     await drive(manager, run_id)
-    assert manager.swarms.get(run_id)['status'] == 'expired'
+    assert manager.swarms.get(run_id)['status'] == 'paused'
     assert not cloud.launches
     assert cloud.terminations
 
@@ -479,7 +483,7 @@ async def test_deadline_during_overlapped_startup_cleans_acquired_workspace_with
         release.set()
         await asyncio.wait_for(task, 2)
     await drive(manager, run_id)
-    assert manager.swarms.get(run_id)['status'] == 'expired'
+    assert manager.swarms.get(run_id)['status'] == 'paused'
     assert manager.store.run(run_id)['status'] == 'cancelled'
     assert len(cloud.machines) == 1 and not cloud.machines[0].alive
     assert not cloud.launches
@@ -498,7 +502,7 @@ async def test_deadline_while_waiting_for_children_cascades_stop_and_prevents_ch
         await manager.advance(child['id'])
         assert manager.store.run(child['id'])['status'] == 'cancelled'
     assert len(cloud.launches) == 1
-    assert manager.swarms.get(run_id)['status'] == 'expired'
+    assert manager.swarms.get(run_id)['status'] == 'paused'
 
 
 async def test_explicit_stop_is_persistent_and_cannot_requeue_after_restart(durable):
@@ -512,8 +516,8 @@ async def test_explicit_stop_is_persistent_and_cannot_requeue_after_restart(dura
     assert await replacement.advance(run_id) is False
     assert replacement.swarms.get(run_id)['status'] == 'stopped'
     assert not replacement.store.has_queued_messages(run_id)
-    with pytest.raises(ValueError, match='ended'):
-        await replacement.swarms.resume(run_id)
+    await replacement.swarms.resume(run_id)
+    assert replacement.swarms.get(run_id)['status'] == 'active'
 
 
 async def test_pause_resume_requires_cleanup_and_preserves_original_deadline(durable):
@@ -541,7 +545,7 @@ async def test_paused_idle_mission_keeps_a_deadline_timer(durable):
     assert 0 < wait['retry_seconds'] <= 300
     expire(manager, run_id)
     await manager.advance(run_id)
-    assert manager.swarms.get(run_id)['status'] == 'expired'
+    assert manager.swarms.get(run_id)['status'] == 'paused'
 
 
 async def test_pause_after_completed_round_keeps_deadline_timer(durable):
@@ -621,17 +625,82 @@ async def test_restored_interrupted_run_is_blocked_without_model_replay(durable)
     assert not cloud.launches
 
 
-async def test_round_limit_and_repeated_answer_guard_require_human_intervention(durable):
+async def test_repeated_answer_guard_requires_human_intervention_but_rounds_are_unbounded(durable):
     manager, _, run_id = durable
     enable(manager, run_id)
     mission = manager.swarms.get(run_id)
     for message_id in [1001, 1002, 1003]:
         manager.swarms.settle(run_id, {'message_id': message_id, 'outcome': 'completed', 'response': 'Same unchanged answer'})
     assert manager.swarms.get(run_id)['status'] == 'blocked'
-    manager.store.execute("UPDATE swarm_missions SET status='active',round=?,answer_digest='',no_progress=0 WHERE run_id=?", (MAX_ROUNDS, run_id))
+    manager.store.execute("UPDATE swarm_missions SET status='active',round=?,answer_digest='',no_progress=0 WHERE run_id=?", (2500, run_id))
     manager.swarms.settle(run_id, {'message_id': 1004, 'outcome': 'completed', 'response': 'Another answer'})
-    assert manager.swarms.get(run_id)['status'] == 'paused'
+    assert manager.swarms.get(run_id)['status'] == 'active'
     assert manager.swarms.get(run_id)['ends_at'] == mission['ends_at']
+
+
+async def test_unlimited_mission_survives_worker_replacement_and_long_round_history(durable):
+    manager, cloud, run_id = durable
+    enable(manager, run_id, 0)
+    await drive(manager, run_id)
+    mission = manager.swarms.get(run_id)
+    assert mission['ends_at'] == '' and remaining_seconds(mission) == float('inf')
+    assert cloud.machines[0].spec['timeout'] is None
+    assert 'deadline_at' not in cloud.machines[0].spec
+    manager.store.execute('UPDATE swarm_missions SET round=2500,next_at=0 WHERE run_id=?', (run_id,))
+    replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    await replacement.advance(run_id)
+    assert replacement.swarms.get(run_id)['round'] == 2501
+    assert replacement.swarms.get(run_id)['status'] == 'active'
+    assert len(cloud.launches) == 1
+
+
+async def test_expired_child_observer_rereads_time_after_root_extension(durable, monkeypatch):
+    manager, _, _ = durable
+    run = bootstrap(manager)
+    root = run['id']
+    child = manager.coordinator.children(manager.swarms.initial_group(root)['id'])[0]['id']
+    expire(manager, root)
+    guard = manager.session_guard
+    waiting = asyncio.Event()
+
+    @asynccontextmanager
+    async def observed_guard(identity, **kwargs):
+        if identity == root:
+            waiting.set()
+        async with guard(identity, **kwargs) as acquired:
+            yield acquired
+
+    async with guard(root):
+        monkeypatch.setattr(manager, 'session_guard', observed_guard)
+        observer = asyncio.create_task(manager.swarms.enforce(child))
+        await asyncio.wait_for(waiting.wait(), 2)
+        assert not observer.done()
+        # The authenticated handler owns this same root lease while its
+        # transaction extends the mission. The stale child must read again.
+        manager.store.execute('UPDATE swarm_missions SET ends_at=? WHERE run_id=?',
+                              ((datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(), root))
+    mission = await asyncio.wait_for(observer, 2)
+    assert mission['status'] == 'active'
+    assert manager.store.run(child)['status'] == 'queued'
+    assert remaining_seconds(mission) > 5 * 3600
+
+
+async def test_resume_does_not_restart_failed_children_or_change_saved_messages(durable):
+    manager, _, _ = durable
+    run = bootstrap(manager)
+    root = run['id']
+    group = manager.swarms.initial_group(root)['id']
+    children = manager.coordinator.children(group)
+    await manager.cancel(root)
+    await manager.advance(root)
+    for child in children:
+        await manager.advance(child['id'])
+    manager.store.update_run(children[0]['id'], status='failed', error='Unconfirmed external action')
+    before = {child['id']: manager.store.messages(child['id']) for child in children}
+    await manager.swarms.set_time(root, 2 * 86400)
+    assert manager.swarms.get(root)['status'] == 'active'
+    assert manager.store.run(children[0]['id'])['status'] == 'failed'
+    assert {child['id']: manager.store.messages(child['id']) for child in children} == before
 
 
 async def test_credential_wait_gets_deadline_timer_and_side_chat_has_no_inherited_policy(durable):
@@ -663,7 +732,7 @@ def test_api_requires_auth_csrf_and_durable_mode(tmp_path):
             create_in(conn, run['id'], 60, now())
         app.state.store.execute("UPDATE swarm_missions SET status='paused' WHERE run_id=?", (run['id'],))
         rejected = client.post(f'/api/runs/{run["id"]}/messages', json={'content': 'Save this direction', 'client_id': 'paused-direction'})
-        assert rejected.status_code == 409 and 'Resume the swarm' in rejected.json()['detail']
+        assert rejected.status_code == 409 and 'durable cloud runtime' in rejected.json()['detail']
         assert len(app.state.store.messages(run['id'])) == 1
         client.cookies.clear()
         assert client.post(endpoint).status_code == 401

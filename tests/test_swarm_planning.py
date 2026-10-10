@@ -138,13 +138,21 @@ def test_coordinator_receives_only_resolved_runtimes_and_the_actual_deadline():
         runtimes=[Runtime('codex', 'openai/model'), Runtime('hermes', 'anthropic/model'),
                   Runtime('hermes', 'openai/model'), Runtime('codex', 'openai/model')],
     )
-    assert 'round 3/25; absolute deadline 2026-10-10T20:00:00+00:00' in prompt
+    assert 'round 3; current work window ends 2026-10-10T20:00:00+00:00' in prompt
     assert 'Configured maximum workers per group: 12.' in prompt
     assert 'do not create another initial team' in prompt
     assert json.loads(prompt.rsplit('\n', 1)[1]) == [
         {'harness': 'codex', 'models': ['openai/model']},
         {'harness': 'hermes', 'models': ['anthropic/model', 'openai/model']},
     ]
+
+
+def test_unlimited_coordinator_policy_has_no_round_or_time_expiry():
+    prompt = coordinator_prompt(round_number=1000, ends_at='', max_workers=10,
+                                runtimes=[Runtime('hermes', 'model')])
+    assert 'round 1000; keep working until the user pauses or stops you' in prompt
+    assert '/25' not in prompt and 'absolute deadline' not in prompt
+    assert 'host owns timing and safe machine renewal' in prompt
 
 
 def test_planning_imports_and_runs_without_host_runtime_dependencies():

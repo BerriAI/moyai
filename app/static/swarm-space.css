@@ -5,7 +5,20 @@
 .swarm-view-switch button[aria-pressed="true"]{background:var(--line);color:var(--text)}
 .swarm-budget{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px}
 .swarm-budget>span{white-space:nowrap}
-.swarm-budget select{width:112px;font-size:12px;height:32px}
+.swarm-duration-fields{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.swarm-duration-fields>label{color:var(--muted);font-size:12px;white-space:nowrap}
+.swarm-duration-fields select{width:140px;font-size:12px;height:36px}
+.swarm-duration-custom{display:flex;align-items:center;gap:8px;min-width:0}
+.swarm-duration-custom[hidden]{display:none!important}
+.swarm-duration-custom input{width:76px;height:36px}
+.swarm-duration-custom select{width:100px}
+.swarm-time-form{display:flex;flex-direction:column;gap:16px;min-width:0}
+.swarm-time-form h2,.swarm-time-form p{margin:0}
+.swarm-time-form p{font-size:13px;line-height:1.5;color:var(--muted)}
+.swarm-time-form .swarm-time-error{color:var(--ui-danger)}
+.swarm-time-error:empty{display:none}
+.swarm-time-form footer{display:flex;justify-content:flex-end;gap:8px}
+@media(max-width:480px){.swarm-duration-fields input,.swarm-duration-fields select{font-size:16px;min-height:44px}.swarm-duration-custom{flex-basis:100%}.swarm-time-form footer{flex-wrap:wrap}}
 .swarm-setup-note{color:var(--muted);font-size:12px;max-width:290px}
 .swarm-setup-note:empty{display:none}
 .swarm-space{position:relative;isolation:isolate;flex:1;min-height:0;width:100%;overflow:auto;scrollbar-width:thin}
