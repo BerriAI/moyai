@@ -219,12 +219,18 @@ def test_destination_schema_is_explicit_and_restricted(schema):
 def test_temporal_admission_index_is_ported_and_checked_for_drift(source, target):
     from app.temporal_runtime import TemporalRunManager
     store = source.state.store
-    TemporalRunManager(store, source.state.settings)
+    manager = TemporalRunManager(store, source.state.settings)
+    manager.submit(store.run(source.state.test_run_id))
     url, name = target
     assert migration.transfer(store.path.parent, url, name)['verified']
     with psycopg.connect(url) as conn:
-        assert conn.execute('SELECT 1 FROM pg_indexes WHERE schemaname=%s AND indexname=%s',
-                            (name, 'idx_durable_sessions_occupied')).fetchone()
+        for index in ('idx_durable_sessions_occupied', 'idx_durable_sessions_wake'):
+            assert conn.execute('SELECT 1 FROM pg_indexes WHERE schemaname=%s AND indexname=%s',
+                                (name, index)).fetchone()
+        conn.execute(f'SET search_path TO {migration.identifier(name)}, pg_catalog')
+        assert conn.execute('SELECT run_id FROM durable_sessions WHERE revision>delivered').fetchall() == [(source.state.test_run_id,)]
+        conn.execute('UPDATE durable_sessions SET delivered=revision')
+        assert not conn.execute('SELECT run_id FROM durable_sessions WHERE revision>delivered').fetchall()
     store.execute('DROP INDEX idx_durable_sessions_occupied')
     store.execute('CREATE INDEX idx_durable_sessions_occupied ON durable_sessions(run_id) WHERE revision>0')
     with pytest.raises(migration.MaintenanceError, match='admission index'):

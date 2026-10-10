@@ -26,7 +26,7 @@ SCHEMA_PATTERN = r'moyai_[a-z][a-z0-9_]{0,49}'
 # Schema SQL is executable input. Accept only the constructs used by Moyai;
 # new functions, generated columns, triggers, etc. need an explicit port.
 DDL_NODES = frozenset('''Create Index Identifier Table IndexParameters Ordered
-    Column Where EQ Literal NEQ And Is Null Between Schema ColumnDef PrimaryKey
+    Column Where EQ GT Literal NEQ And Is Null Between Schema ColumnDef PrimaryKey
     UniqueColumnConstraint DataType ColumnConstraint NotNullColumnConstraint
     Reference PrimaryKeyColumnConstraint DefaultColumnConstraint
     AutoIncrementColumnConstraint CheckColumnConstraint In ForeignKey

@@ -81,7 +81,12 @@ async def test_finished_turn_is_captured_without_agent_save_and_recalled_after_r
     assert note['source']['message_id'] == message_id and note['source']['capture'] == 'background'
     assert app.state.memory.listing('google:bob') == []
     assert 'p95' not in json.dumps(jobs(app))
-    assert 'p95' not in app.state.store.rows('SELECT encrypted FROM personal_memories')[0]['encrypted']
+    ciphertext = app.state.store.rows('SELECT encrypted FROM personal_memories')[0]['encrypted']
+    # A short word can occur by chance in random base64 ciphertext. Verify the
+    # encryption round trip and absence of the complete plaintext instead.
+    plaintext = app.state.security.decrypt(ciphertext)
+    assert ciphertext != plaintext and note['content'] not in ciphertext
+    assert json.loads(plaintext)['content'] == note['content']
     assert 'p95' not in json.dumps(app.state.store.rows('SELECT * FROM events'))
     billed = app.state.store.rows('SELECT * FROM model_requests')[0]
     assert (billed['message_id'], billed['user_id'], billed['status'], billed['total_tokens']) == (message_id, 'google:alice', 'completed', 130)
