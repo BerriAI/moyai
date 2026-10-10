@@ -62,6 +62,8 @@ async def lease(database, name: str, *, wait: bool = True, ttl: float = 30):
         yield True
         return
     token = uuid4().hex
+    # Each database attempt skips contention. Only this async loop may wait;
+    # eviction passes wait=False while holding global admission.
     while not await asyncio.to_thread(database.acquire_lease, name, token, ttl):
         if not wait:
             yield False

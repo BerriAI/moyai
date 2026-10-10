@@ -1,7 +1,11 @@
 """Actual PostgreSQL ownership and concurrency, without sandbox/model spend."""
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import Context
 import subprocess
 import sys
+import threading
 import time
 from unittest.mock import AsyncMock
 
@@ -96,6 +100,79 @@ async def test_execution_lease_is_exclusive_and_renewed_without_holding_pool_con
     async with lease(second.database, 'test-owner', wait=False) as acquired:
         assert acquired
     assert not coordinator.rows('SELECT * FROM runtime_leases')
+
+
+async def test_nonwaiting_eviction_skips_owner_write_and_reclaims_another_session(cluster):
+    coordinator, settings, open_store = cluster
+    second, options = open_store()
+    manager = DurableRunner(second, options)
+    manager.cleanup = AsyncMock()
+    runs = [coordinator.create_run('Warm capacity test', '', 'demo', []) for _ in range(3)]
+    for index, run in enumerate(runs):
+        manager.submit(run)
+        manager.save(run['id'], {'phase': 'warm', 'sandbox_id': 'synthetic', 'idle_until': index + 1})
+    busy, reclaimable, _ = [run['id'] for run in runs]
+    assert not manager.has_capacity()
+
+    async def evict():
+        async with manager.admission_lock:
+            assert await manager.make_capacity('incoming-session')
+
+    async with lease(coordinator.database, 'session:' + busy):
+        with coordinator.connect(write_scope=busy) as conn:
+            # The actual owner write holds FOR SHARE on its lease until commit.
+            conn.execute('UPDATE runs SET summary=? WHERE id=?', ('Still writing', busy))
+            task = asyncio.create_task(evict(), context=Context())
+            await asyncio.wait_for(task, 1)
+            assert manager.state(busy)['phase'] == 'warm'
+            assert manager.state(reclaimable)['phase'] == 'idle'
+            # Eviction has released global admission even while the first
+            # owner's write is still open. The next worker can admit work.
+            async with lease(second.database, 'sandbox-admission', wait=False) as acquired:
+                assert acquired
+    manager.cleanup.assert_awaited_once()
+
+
+def test_lease_creation_contention_returns_without_waiting_for_the_first_commit(cluster, monkeypatch):
+    coordinator, _, open_store = cluster
+    second, _ = open_store()
+    inserted, commit = threading.Event(), threading.Event()
+    connect = coordinator.database.connect
+
+    @contextmanager
+    def hold_commit(**kwargs):
+        with connect(**kwargs) as conn:
+            yield conn
+            inserted.set()
+            assert commit.wait(5)
+
+    monkeypatch.setattr(coordinator.database, 'connect', hold_commit)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(coordinator.database.acquire_lease, 'new-lease', 'first', 30)
+        try:
+            assert inserted.wait(2)
+            second_attempt = pool.submit(second.database.acquire_lease, 'new-lease', 'second', 30)
+            assert second_attempt.result(timeout=1) is False
+        finally:
+            commit.set()
+        assert first.result(timeout=2)
+    assert second.rows("SELECT token FROM runtime_leases WHERE name='new-lease'") == [{'token': 'first'}]
+
+
+def test_locked_expired_lease_is_skipped_then_reclaimed_after_commit(cluster):
+    coordinator, _, open_store = cluster
+    second, _ = open_store()
+    assert coordinator.database.acquire_lease('expiring-write', 'old', .1)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with coordinator.database.connect() as conn:
+            conn.raw.execute("SELECT 1 FROM runtime_leases WHERE name='expiring-write' FOR SHARE")
+            time.sleep(.15)
+            assert second.rows("SELECT 1 FROM runtime_leases WHERE name='expiring-write' AND expires_at<=clock_timestamp()")
+            attempt = pool.submit(second.database.acquire_lease, 'expiring-write', 'new', 30)
+            assert attempt.result(timeout=1) is False
+            assert second.rows("SELECT token FROM runtime_leases WHERE name='expiring-write'") == [{'token': 'old'}]
+    assert second.database.acquire_lease('expiring-write', 'new', 30)
+    assert second.rows("SELECT token FROM runtime_leases WHERE name='expiring-write'") == [{'token': 'new'}]
 
 
 async def test_expired_owner_is_fenced_before_any_write_even_before_heartbeat_notices(cluster):

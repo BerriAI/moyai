@@ -420,11 +420,12 @@ def test_broker_hides_delegation_without_temporal_and_keeps_run_scope(workspace)
     assert client.get(f"/broker/{other['id']}/tools", headers=headers).status_code == 401
 
 
-def test_capacity_configuration_accepts_100_not_unbounded():
-    assert Settings(_env_file=None, max_concurrent_runs=100).max_concurrent_runs == 100
-    assert Settings(_env_file=None, max_concurrent_model_requests=100).max_concurrent_model_requests == 100
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, max_concurrent_runs=101)
+@pytest.mark.parametrize('name', ['max_concurrent_runs', 'max_concurrent_model_requests'])
+def test_capacity_configuration_supports_explicit_scale_but_requires_positive_budgets(name):
+    assert getattr(Settings(_env_file=None, **{name: 3000}), name) == 3000
+    for invalid in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, **{name: invalid})
 
 
 async def test_direct_child_chat_joins_pending_work_and_keeps_sender_and_model(durable):
@@ -502,7 +503,7 @@ async def test_post_handoff_chat_preserves_answers_and_files_across_restart(dura
     if storage == 'mixed':
         frozen = json.loads(coordinator.group(root, result['group_id'])['result_snapshot'])[0]['artifact_name']
         with manager.store.connect() as conn:
-            conn.execute('BEGIN IMMEDIATE')
+            conn.begin_write()
             manager.store.artifacts.snapshot_in(conn, child + '.zip', frozen)
     restarted = Store(manager.settings.data_dir, object_storage=objects if storage != 'local' else None)
     coordinator = attach(cloud.attach(TemporalRunManager(restarted, manager.settings)))

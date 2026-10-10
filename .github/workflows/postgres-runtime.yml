@@ -95,3 +95,5 @@ jobs:
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_capacity.py tests/test_memory_review.py
       - name: Verify 3000 synthetic reservations across four worker processes
         run: uv run --frozen --python 3.13 python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4
+      - name: Verify agent handoffs and admission on PostgreSQL
+        run: uv run --frozen --python 3.13 pytest --postgres-backend -q --tb=short tests/test_agents.py tests/test_admission_scaling.py

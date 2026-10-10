@@ -326,6 +326,18 @@ class PostgresDatabase:
     def acquire_lease(self, name, token, ttl):
         with self.connect() as conn:
             conn.check_owner()
+            # Serialize contenders without waiting, including when the row is
+            # not visible yet because another acquisition has not committed.
+            key = int.from_bytes(hashlib.sha256((self.schema + ':lease:' + name).encode()).digest()[:8], 'big', signed=True)
+            if not conn.raw.execute('SELECT pg_try_advisory_xact_lock(%s::bigint)', (key,)).fetchone()[0]:
+                return False
+            # Owner writes fence themselves with FOR SHARE. Skip their row
+            # rather than holding global admission behind the write. A second
+            # read distinguishes a locked row from an absent one; the advisory
+            # lock excludes concurrent creation during this check and insert.
+            row = conn.raw.execute('SELECT name FROM runtime_leases WHERE name=%s FOR UPDATE SKIP LOCKED', (name,)).fetchone()
+            if row is None and conn.raw.execute('SELECT 1 FROM runtime_leases WHERE name=%s', (name,)).fetchone():
+                return False
             return bool(conn.raw.execute('''INSERT INTO runtime_leases VALUES(%s,%s,clock_timestamp()+%s*interval '1 second')
                 ON CONFLICT(name) DO UPDATE SET token=excluded.token,expires_at=clock_timestamp()+%s*interval '1 second'
                 WHERE runtime_leases.expires_at<=clock_timestamp() RETURNING token''', (name, token, ttl, ttl)).fetchone())
