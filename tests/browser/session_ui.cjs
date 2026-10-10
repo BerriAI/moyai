@@ -211,19 +211,21 @@ test('session deletion dialog preserves cancellation, errors and locked shadcn c
   assert.equal(requests.length,2);
 });
 
-test('rename persists after reload, preserves messages and drafts, and rejects stale reads',async t=>{
+test('rename persists after reload, preserves messages and drafts, and rejects stale reads',{timeout:60000},async t=>{
   const page=await setup(t);
   await send(page,'Original rename request');
   await page.locator('#followup').fill('Unsent follow-up');
   let release,arrived;let count=0;
   const gate=new Promise(resolve=>release=resolve),ready=new Promise(resolve=>arrived=resolve);
+  t.after(()=>release());
   const stale=async route=>{
     const response=await route.fetch();
     if(++count===2)arrived();await gate;await route.fulfill({response});
   };
   const id=await page.evaluate(()=>state.selected);
+  const detail=new RegExp('/api/runs/'+id+'(?:\\?.*)?$');
   await page.route('**/api/runs?*',stale);
-  await page.route(`**/api/runs/${id}`,stale);
+  await page.route(detail,stale);
   await page.evaluate(()=>{refreshRuns();refreshChat(state.selected);});await ready;
   const dialog=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Navigation follow-up');
@@ -239,7 +241,8 @@ test('rename persists after reload, preserves messages and drafts, and rejects s
   assert.equal(await page.locator('.chat-message.user .message-content').first().textContent(),'Original rename request');
   let resume,loaded;
   const opening=new Promise(resolve=>loaded=resolve),hold=new Promise(resolve=>resume=resolve);
-  await page.route(`**/api/runs/${id}`,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});});
+  t.after(()=>resume());
+  await page.route(detail,async route=>{const response=await route.fetch();loaded();await hold;await route.fulfill({response});});
   await page.evaluate(id=>{openRun(id);},id);await opening;
   const duringOpen=await renameDialog(page);
   await page.getByLabel('Session name',{exact:true}).fill('Renamed while opening');
