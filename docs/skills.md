@@ -111,7 +111,8 @@ single-requester conversations. A verified personal account (including a fresh
 matching Slack identity) is required. Demo runs, subagents, failed tasks, deleted
 sessions and conversations with other requesters are excluded. Evidence is checked
 again before a draft is written or accepted. Changed/deleted sources invalidate
-the draft. No private tool payloads, raw tool outputs, reasoning or native SDK
+the draft without treating it as a dismissal: later valid work can propose the
+same workflow again, using a new draft ID. No private tool payloads, raw tool outputs, reasoning or native SDK
 history are sent to the reviewer. Secret-pattern rejection is defense in depth,
 not a guarantee of detecting arbitrary secrets.
 
@@ -131,6 +132,12 @@ container acquisition occurs before the task's first response.
 
 Operational bounds:
 
+At 20 pending drafts, queued reviews wait for capacity instead of being discarded.
+The worker defers that person's due backlog for 60 seconds without consuming retry
+attempts, while other people's reviews can continue. Accepting or dismissing a
+draft frees capacity; the next due review can proceed. Invalid source evidence is
+retired during listing and review claiming, so it cannot hold a slot indefinitely.
+
 - `SKILL_LEARNING_ENABLED=true` permits the feature; personal opt-in is still required.
 - `SKILL_LEARNING_MODEL` defaults to the completed turn's approved model.
 - `SKILL_LEARNING_IDLE_SECONDS=60` delays review after completion; busy sessions defer again.
@@ -142,7 +149,8 @@ Operational bounds:
 - The inference owner alone recovers/runs reviews: the separate broker, or the
   standalone/coordinator process when no separate broker is configured. API
   replicas and execution workers never start this worker.
-- Schema revision **4** adds the preferences, queue and draft tables. This release
+- Schema revision **7** adds the preferences, queue and draft tables after the
+  released sign-in and swarm migrations. This release
   needs the normal coordinated schema migration with runtime owners stopped;
   it is not an API-only compatible release. See [schema migrations](schema-migrations.md).
 

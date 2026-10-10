@@ -218,8 +218,14 @@ class SkillLearning:
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status IN ('running','queued','injected') LIMIT 1", (source['run_id'],)).fetchone():
                 conn.execute('UPDATE skill_learning_jobs SET available_at=? WHERE message_id=?', (later(30), job['message_id']))
                 return {}
+            # Retire invalid evidence even when the owner has not opened Settings.
+            self.pending_in(conn, job['owner_id'])
             if conn.execute("SELECT count(*) FROM skill_suggestions WHERE owner_id=? AND status='pending'", (job['owner_id'],)).fetchone()[0] >= MAX_DRAFTS:
-                conn.execute("UPDATE skill_learning_jobs SET status='skipped' WHERE message_id=?", (job['message_id'],))
+                # Capacity is temporary: retain the work and its attempt budget.
+                # Defer this owner's due backlog together so other owners can run.
+                conn.execute("""UPDATE skill_learning_jobs SET available_at=?
+                    WHERE owner_id=? AND status='pending' AND available_at<=?""",
+                    (later(60), job['owner_id'], now()))
                 return {}
             conn.execute("UPDATE skill_learning_jobs SET status='running',attempts=attempts+1 WHERE message_id=?", (job['message_id'],))
             return {**job, 'actor_id': source['user_id'], 'run_id': source['run_id'], 'model': source['model'], 'repository': source['repo_url']}
@@ -368,7 +374,17 @@ class SkillLearning:
                 elif conn.execute("SELECT 1 FROM skills WHERE name=? AND (owner_id=? OR scope='organization')", (item.name, job['owner_id'])).fetchone():
                     continue
                 key = fingerprint((item.target_id or item.name, item.target_revision, job['repository']))
-                if conn.execute('SELECT 1 FROM skill_suggestions WHERE owner_id=? AND workflow_key=?', (job['owner_id'], key)).fetchone():
+                previous = conn.execute('SELECT * FROM skill_suggestions WHERE owner_id=? AND workflow_key=?',
+                                        (job['owner_id'], key)).fetchone()
+                if previous and previous['status'] == 'pending':
+                    try:
+                        self.unpack_in(conn, previous)
+                    except HTTPException:
+                        # Sources can change while the model is reviewing. Only
+                        # an actual dismissal should suppress later valid work.
+                        self.invalidate_in(conn, previous)
+                        previous = None
+                if previous:
                     continue
                 encrypted = self.security.encrypt(json.dumps({'proposal': item.model_dump(), 'sources': evidence}))
                 conn.execute('''INSERT INTO skill_suggestions(id,owner_id,workflow_key,message_id,preferences_revision,encrypted,created_at)
@@ -384,20 +400,32 @@ class SkillLearning:
     def unpack_in(self, conn, row):
         data = json.loads(self.security.decrypt(row['encrypted']))
         if any(self.evidence_in(conn, s['message_id'], row['owner_id'], row['preferences_revision']) != s for s in data['sources']):
-            raise HTTPException(409, 'The source or learning settings changed. Dismiss this suggestion.')
+            raise HTTPException(409, 'The source or learning settings changed. Refresh the suggestions list.')
         return data
+
+    def invalidate_in(self, conn, row):
+        # Keep the old ID retired so a stale review form cannot accept a new
+        # proposal. Release its unique workflow key without recording a rejection.
+        conn.execute("""UPDATE skill_suggestions SET status='invalidated',encrypted='',workflow_key=?
+            WHERE id=? AND status='pending'""", ('invalidated:' + row['id'], row['id']))
+
+    def pending_in(self, conn, owner):
+        result = []
+        for row in conn.execute("SELECT * FROM skill_suggestions WHERE owner_id=? AND status='pending' ORDER BY created_at DESC LIMIT ?", (owner, MAX_DRAFTS)).fetchall():
+            try:
+                data = self.unpack_in(conn, row)
+            except HTTPException:
+                self.invalidate_in(conn, row)
+                continue
+            result.append((row, data))
+        return result
 
     def listing(self, owner):
         with self.store.connect() as conn:
             conn.begin_write()
             prefs = self.preferences_in(conn, owner)
             suggestions = []
-            for row in conn.execute("SELECT * FROM skill_suggestions WHERE owner_id=? AND status='pending' ORDER BY created_at DESC LIMIT ?", (owner, MAX_DRAFTS)).fetchall():
-                try:
-                    data = self.unpack_in(conn, row)
-                except HTTPException:
-                    conn.execute("UPDATE skill_suggestions SET status='dismissed',encrypted='' WHERE id=?", (row['id'],))
-                    continue
+            for row, data in self.pending_in(conn, owner):
                 suggestions.append({'id': row['id'], **{k: data['proposal'][k] for k in ('name','description','reason','target_id')}, 'created_at': row['created_at']})
             return {'preferences': {'enabled': bool(prefs['enabled']), 'revision': prefs['revision']},
                     'configured': self.configured, 'suggestions': suggestions, 'limit': MAX_DRAFTS}

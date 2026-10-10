@@ -152,6 +152,83 @@ async def test_sources_revalidated_before_apply_and_accept(review_app, change):
     with pytest.raises(HTTPException) as error:
         app.state.skill_learning.accept(OWNER, False, draft['id'], form(draft))
     assert error.value.status_code == 409 and not app.state.skills.rows_for(OWNER)
+    # Invalidation is not a user rejection. New eligible work can propose the
+    # same workflow, but a stale form cannot accept the replacement draft.
+    turn(app)
+    await process(app)
+    replacement = drafts(app)
+    assert len(replacement) == 1 and replacement[0]['id'] != draft['id']
+    assert replacement[0]['name'] == draft['name']
+    with pytest.raises(HTTPException) as error:
+        app.state.skill_learning.accept(OWNER, False, draft['id'], form(draft))
+    assert error.value.status_code == 409
+
+
+@pytest.mark.parametrize('updating', [False, True])
+async def test_invalid_duplicate_is_replaced_without_visiting_the_draft_list(review_app, updating):
+    app = review_app
+    enable(app)
+    target = {}
+    if updating:
+        skill_id = app.state.skills.save(SkillForm(name='benchmark', description='Check benchmarks.',
+            instructions='Original procedure.', scope='personal', client_id='original-benchmark'), OWNER, False)
+        target = {'target_id': skill_id, 'target_revision': 1}
+    _, message = turn(app)
+    await process(app, lambda data: completion([proposal(data, **target)]))
+    old = app.state.store.rows('SELECT * FROM skill_suggestions')[0]
+    turn(app)
+    def change_during_review(data):
+        app.state.store.execute("UPDATE messages SET content='Changed request' WHERE id=?", (message,))
+        return completion([proposal(data, **target)])
+    await process(app, change_during_review)
+    replacement = drafts(app)
+    assert len(replacement) == 1 and replacement[0]['id'] != old['id']
+    retired = app.state.store.rows('SELECT * FROM skill_suggestions WHERE id=?', (old['id'],))[0]
+    assert retired['status'] == 'invalidated' and retired['encrypted'] == ''
+
+
+@pytest.mark.parametrize('release', ['dismiss', 'accept'])
+async def test_draft_cap_defers_without_losing_jobs_or_blocking_other_owners(review_app, monkeypatch, release):
+    app = review_app
+    service, store = app.state.skill_learning, app.state.store
+    monkeypatch.setattr('app.skill_learning.MAX_DRAFTS', 1)
+    enable(app)
+    turn(app)
+    await process(app)
+    first = service.detail(OWNER, drafts(app)[0]['id'])
+    queued = [turn(app)[1], turn(app)[1]]
+    await process(app, lambda _: pytest.fail('A full draft list must not call the model'))
+    waiting = [job for job in jobs(app) if job['message_id'] in queued]
+    assert all(job['status'] == 'pending' and job['attempts'] == 0 for job in waiting)
+    assert not await process(app, lambda _: pytest.fail('Deferred jobs should not spin'))
+    service.set_preferences('google:bob', Preferences(enabled=True))
+    turn(app, actor='google:bob')
+    await process(app)
+    assert len(service.listing('google:bob')['suggestions']) == 1
+    assert len(store.rows('SELECT * FROM model_requests')) == 2
+    if release == 'dismiss':
+        service.dismiss(OWNER, first['id'])
+    else:
+        service.accept(OWNER, False, first['id'], form(first))
+    # Advance the durable deadline without sleeping.
+    store.execute("UPDATE skill_learning_jobs SET available_at='' WHERE owner_id=? AND status='pending'", (OWNER,))
+    await process(app, lambda data: completion([proposal(data, name='next-benchmark-review')]))
+    assert drafts(app)[0]['name'] == 'next-benchmark-review'
+    assert next(job for job in jobs(app) if job['message_id'] == queued[0])['status'] == 'completed'
+    assert next(job for job in jobs(app) if job['message_id'] == queued[1])['status'] == 'pending'
+
+
+async def test_invalid_draft_releases_capacity_without_user_refresh(review_app, monkeypatch):
+    app = review_app
+    monkeypatch.setattr('app.skill_learning.MAX_DRAFTS', 1)
+    enable(app)
+    _, message = turn(app)
+    await process(app)
+    app.state.store.execute("UPDATE messages SET content='Changed request' WHERE id=?", (message,))
+    _, next_message = turn(app)
+    await process(app)
+    assert len(drafts(app)) == 1
+    assert next(job for job in jobs(app) if job['message_id'] == next_message)['status'] == 'completed'
 
 
 @pytest.mark.parametrize('change',['quote','tool','scope','secret'])

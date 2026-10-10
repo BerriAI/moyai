@@ -27,7 +27,7 @@ from .db import Store, now, database
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
-from .security import Security, digest
+from .security import Security, Throttle, digest
 from .cloudflare_access import CloudflareAccess, CloudflareAccessMiddleware
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
@@ -66,6 +66,11 @@ Provider = Literal["linear", "slack", "notion", "github"]
 AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 
+class SwarmOptions(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    budget_seconds: int = Field(ge=60, le=86400, strict=True)
+
+
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     harness: str | None = Field(default=None, min_length=1, max_length=80)
@@ -80,6 +85,7 @@ class NewRun(BaseModel):
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
     side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+    swarm: SwarmOptions | None = None
 
     @model_validator(mode='after')
     def require_input(self):
@@ -248,7 +254,7 @@ def _create_app(settings, store):
     model_tools = ModelTools(store, settings)
     manager.automations = automations
     slack.automation_events = automations.events
-    login_attempts = []
+    login_attempts, all_login_failures = Throttle(10), Throttle(300)
     owns_inference = settings.moyai_runtime_role == 'broker' or (
         settings.moyai_runtime_role in {'standalone', 'coordinator'} and not settings.moyai_separate_broker)
 
@@ -534,15 +540,17 @@ def _create_app(settings, store):
         security.check_origin(request)
         if not settings.password_login_enabled:
             raise HTTPException(403, "Use Google to sign in to this workspace.")
-        login_attempts[:] = [stamp for stamp in login_attempts if stamp > time.monotonic() - 60]
-        if len(login_attempts) >= 10:
+        client = security.client_key(request)
+        # Per-client limit, plus a backstop on total guesses from many addresses.
+        if login_attempts.blocked(client) or all_login_failures.blocked("all"):
             raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
-        login_attempts.append(time.monotonic())
         if settings.workspace_password and hmac.compare_digest(body.password, settings.workspace_password):
             role = "admin"
         elif settings.workspace_member_password and hmac.compare_digest(body.password, settings.workspace_member_password):
             role = "member"
         else:
+            login_attempts.record(client)
+            all_login_failures.record("all")
             raise HTTPException(401, "Incorrect workspace password.")
         response = JSONResponse({"authenticated": True, "role": role})
         security.new_session(response, role)
@@ -584,7 +592,7 @@ def _create_app(settings, store):
             return preferred_model(conn, settings, actor)
 
     @app.get("/api/config")
-    async def config(request: Request):
+    def config(request: Request):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
@@ -693,8 +701,10 @@ def _create_app(settings, store):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         await database(security.require, request, mutation=True)
+        if body.swarm and (not settings.temporal_enabled or body.mode != 'modal'):
+            raise HTTPException(422, 'Swarm mode requires the durable cloud runtime.')
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
-                            and not body.attachment_ids and is_session_id_request(body.prompt))
+                            and not body.swarm and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
             parent = await database(store.run, body.side_chat_of)
             if not parent or parent['deleted_at']:
@@ -727,12 +737,17 @@ def _create_app(settings, store):
         user_id = await database(store.identity, session)
         try:
             run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
+                                   swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
+                                   durable_submit=manager.submit_in if body.swarm else None,
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         if not metadata_request:
-            if settings.temporal_enabled:
+            if body.swarm:
+                pass  # Input, mission and outbox wake committed together.
+            elif settings.temporal_enabled:
                 await database(manager.submit, run)
             else:
                 manager.submit(run)
@@ -767,7 +782,7 @@ def _create_app(settings, store):
         project = environments.context(run)
         actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request))
+        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = store.root_id(run_id)
@@ -780,7 +795,7 @@ def _create_app(settings, store):
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
-                "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
+                "credential_requests": credentials.pending(run,actor,security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "slack_source": store.slack_source(run_id)}
 
@@ -793,8 +808,9 @@ def _create_app(settings, store):
         summary = session_pull_requests.summaries([run_id])[run_id]
         return {**result, 'pr_summary': summary, 'pull_requests': summary['pull_requests']}
 
-    def feedback_author(request):
-        actor = store.identity(security.session_info(request))
+    def feedback_author(request, actor=None):
+        if actor is None:
+            actor = store.identity(security.session_info(request))
         rows = store.rows('''
             SELECT COALESCE(NULLIF(linked.email,''),NULLIF(users.email,''),linked.name,users.name,'') AS author
             FROM users
@@ -822,7 +838,7 @@ def _create_app(settings, store):
         return {'message_id': message_id, **result}
 
     @app.get('/api/runs/{run_id}/activity')
-    async def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
+    def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
                                after: int = Query(default=0, ge=0, le=2**63-1),
                                until: int | None = Query(default=None, ge=0, le=2**63-1)):
         security.require(request)
@@ -894,6 +910,20 @@ def _create_app(settings, store):
         await manager.cancel(run_id)
         return public_run(store.run(run_id))
 
+    @app.post('/api/runs/{run_id}/swarm/{action}')
+    async def swarm_control(run_id: str, action: Literal['pause', 'resume'], request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Task not found')
+        if not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        try:
+            await getattr(manager.swarms, action)(run_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        await checkpoints.flush()
+        return public_run(store.run(run_id))
+
     @app.patch('/api/runs/{run_id}/messages/{message_id}')
     async def change_queued_message(run_id: str, message_id: int, body: QueueChange, request: Request):
         security.require(request, mutation=True)
@@ -908,10 +938,25 @@ def _create_app(settings, store):
             manager.submit(store.run(run_id))
         return {'id': result['id'], 'status': result['status'], 'revision': result['revision']}
 
+    def read_event_batch(run_id, cursor):
+        # Each open conversation polls the database. Keep the whole read off
+        # the event loop so a busy database cannot stall navigation in other tabs.
+        row = store.run(run_id)
+        if not row or row['deleted_at']:
+            return None, [], None
+        batch = store.events(run_id, cursor)
+        status = {'status': response_status(row), 'active': manager.is_active(run_id),
+                  'model': row['model'], 'active_model': row['active_model'],
+                  'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'],
+                  'checkpoint_error': row['checkpoint_error'],
+                  'deletion_error': session_lifecycle.deletion_error(run_id),
+                  'slack_mirroring': slack.chat.mirroring(run_id)}
+        return row, batch, status
+
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, request: Request, after: int = 0):
         security.require(request)
-        if not store.run(run_id):
+        if not await run_in_threadpool(store.run, run_id):
             raise HTTPException(404, "Task not found")
         try:
             last_id = int(request.headers.get("last-event-id", "0"))
@@ -921,18 +966,17 @@ def _create_app(settings, store):
         async def stream():
             cursor = max(after, last_id, 0)
             while not await request.is_disconnected():
-                row = store.run(run_id)
-                if not row or row['deleted_at']:
+                row, batch, status = await run_in_threadpool(read_event_batch, run_id, cursor)
+                if row is None:
                     yield "event: deleted\ndata: {}\n\n"
                     break
-                batch = store.events(run_id, cursor)
                 for event in batch:
                     cursor = event["id"]
                     yield f"id: {cursor}\ndata: {json.dumps(event)}\n\n"
-                if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
+                if not row["chat_enabled"] and row["status"] in TERMINAL and not status['active'] and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': response_status(row), 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'deletion_error': session_lifecycle.deletion_error(run_id), 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps(status)}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -1479,6 +1523,7 @@ def _create_app(settings, store):
 
 def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -> list[dict[str, object]]:
     """Show a durable answer receipt while its canonical turn is still saving."""
+    messages = [{**message, 'source': 'swarm'} if str(message.get('client_id', '')).startswith('swarm:') else message for message in messages]
     raw = run.get('pending_result')
     if not isinstance(raw, str) or not raw:
         return messages

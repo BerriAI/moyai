@@ -91,7 +91,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
     assert response.status_code == 200
     catalogs.append(response.json())
-    safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
+    safe = set('''swarm_board agents_results agents_read_artifact automation_environments automation_webhook_info
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
         github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
         linear_my_issues linear_teams linear_search linear_issue
@@ -100,7 +100,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
     read_effects = set('''automation_list memory_search skills_search skills_load skills_read_file'''.split())
-    writes = set('''agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
+    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
         automation_update automation_enable automation_pause automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
@@ -439,3 +439,92 @@ def test_linear_issue_creation_runs_directly_for_admins_and_members(workspace, m
     assert tool['annotations']['readOnlyHint'] is False
     if role == 'member':
         assert client.patch('/api/connections/linear/policy', json={'enabled':True,'read_only':False}).status_code == 403
+
+
+def as_client(app, host):
+    client = TestClient(app, base_url=app.state.settings.public_url, client=(host, 50000))
+    client.headers["Origin"] = app.state.settings.public_url
+    return client
+
+
+def test_failed_logins_from_one_client_do_not_block_others(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    attacker, admin = as_client(app, "203.0.113.9"), as_client(app, "192.0.2.10")
+    for _ in range(10):
+        assert attacker.post("/api/login", json={"password": "guess"}).status_code == 401
+    assert attacker.post("/api/login", json={"password": "guess"}).status_code == 429
+    for _ in range(11):
+        assert admin.post("/api/login", json={"password": "organization-admin-password"}).status_code == 200
+
+
+def test_ipv6_clients_are_limited_per_56(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    for n in range(10):
+        assert as_client(app, f"2001:db8:0:{n:x}::1").post("/api/login", json={"password": "guess"}).status_code == 401
+    assert as_client(app, "2001:db8:0:ff::1").post("/api/login", json={"password": "guess"}).status_code == 429
+    assert as_client(app, "2001:db8:1::1").post("/api/login", json={"password": "organization-admin-password"}).status_code == 200
+
+
+def test_failed_logins_have_a_global_backstop(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    for n in range(300):
+        assert as_client(app, f"198.51.100.{n // 10}").post("/api/login", json={"password": "guess"}).status_code == 401
+    assert as_client(app, "192.0.2.10").post("/api/login", json={"password": "organization-admin-password"}).status_code == 429
+
+
+@pytest.mark.parametrize("peer,hops,attacker,other", [
+    # Captured from Render: loopback peer, "<forged>, <client>, <Cloudflare edge>, <Render proxy>".
+    ("127.0.0.1", 3, "{}, 110.235.218.74, 104.22.66.198, 10.30.126.74", "192.0.2.10, 104.22.66.198, 10.30.126.74"),
+    # A Cloudflare Worker's own address is in Cloudflare's ranges; it must not unlock the forged hop.
+    ("127.0.0.1", 3, "{}, 2a06:98c0:3600::103, 104.22.66.198, 10.30.126.74", "192.0.2.10, 104.22.66.198, 10.30.126.74"),
+    # Captured from Modal: private peer, proxy replaces X-Forwarded-For with the client.
+    ("172.20.5.85", 1, "110.235.218.74", "192.0.2.10"),
+])
+def test_trusted_proxy_hops_resolve_the_real_client(workspace, peer, hops, attacker, other):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    app.state.settings.trusted_proxy_hops = hops
+    proxied = as_client(app, peer)
+    for n in range(10):
+        forwarded = {"X-Forwarded-For": attacker.format(f"203.0.113.{n}")}
+        assert proxied.post("/api/login", json={"password": "guess"}, headers=forwarded).status_code == 401
+    assert proxied.post("/api/login", json={"password": "guess"}, headers={"X-Forwarded-For": attacker.format("x")}).status_code == 429
+    assert proxied.post("/api/login", json={"password": "organization-admin-password"},
+                        headers={"X-Forwarded-For": other}).status_code == 200
+
+
+def test_forwarded_for_is_ignored_from_a_public_peer(workspace):
+    app, _ = workspace
+    app.state.settings.workspace_password = "organization-admin-password"
+    app.state.settings.trusted_proxy_hops = 1
+    direct = as_client(app, "93.184.216.34")
+    for n in range(10):
+        assert direct.post("/api/login", json={"password": "guess"}, headers={"X-Forwarded-For": f"203.0.113.{n}"}).status_code == 401
+    assert direct.post("/api/login", json={"password": "guess"}, headers={"X-Forwarded-For": "203.0.113.99"}).status_code == 429
+
+
+def test_throttle_survives_a_mistype_then_a_later_success(monkeypatch):
+    from app.security import Throttle
+    clock = [1000.0]
+    monkeypatch.setattr("app.security.time.monotonic", lambda: clock[0])
+    throttle = Throttle(2)
+    for at, action in [(1030, lambda: throttle.record("admin")),        # mistyped password
+                       (1080, lambda: throttle.blocked("other")),       # sweep keeps the recent miss
+                       (1100, lambda: throttle.blocked("admin")),       # later success prunes the key
+                       (1150, lambda: throttle.blocked("other"))]:      # next sweep must not crash
+        clock[0] = at
+        action()
+    throttle.record("other")
+    throttle.record("other")
+    assert throttle.blocked("other") and not throttle.blocked("admin")
+
+
+def test_throttle_tracks_a_bounded_number_of_clients():
+    from app.security import Throttle
+    throttle = Throttle(1, max_keys=3)
+    for key in "abcd":
+        throttle.record(key)
+    assert len(throttle.hits) == 3 and not throttle.blocked("a") and throttle.blocked("d")
