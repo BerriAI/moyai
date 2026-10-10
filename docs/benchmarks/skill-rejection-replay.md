@@ -2,7 +2,7 @@
 
 This is the **historical paired benchmark** of baseline `33900218` and candidate `f39dc2bc`, recorded on October 9, 2026. PR #308 subsequently shipped the recovery behavior and removed the five-skill cap. The chart and raw results below remain the original measurements; they do not describe the new unlimited-skill policy. This PR now adds regression coverage for the seven rejection classes that still exist (19 checks including fatal-state controls), without changing application behavior.
 
-Current-main validation: 187 tests passed across skill recovery, skills, skill saving, broker transport, and the MCP bridge on Python 3.13. Python compilation and `git diff --check` passed. The current tests deliberately do not reintroduce the removed cap.
+Current-main validation (`66e61fdb`): 354 tests passed across skill recovery, skills, skill saving, broker transport, MCP, spend accounting, and the harness gateway on Python 3.13. This includes the corrected preserved-429 assertion from PR #314. Python compilation and `git diff --check` passed. The current tests deliberately do not reintroduce the removed cap.
 
 A production skill-sync run spent **11.8 minutes** on 33 model calls and 180 tool calls, then ended with “Use at most five skills in one turn.” It later issued a successful delegation, but the earlier rejection left a fatal relay error that prevented continuation. This fix keeps the limit and makes definite skill rejections actionable tool receipts.
 
