@@ -109,7 +109,7 @@ async def test_five_receivers_get_identical_tree_and_raindrop_gets_interaction(t
     await tracing.close()
 
 
-async def test_message_json_stays_valid_when_large_and_errors_have_sanitized_exception(tmp_path):
+async def test_message_json_stays_valid_when_large_and_errors_keep_body_out_of_exception(tmp_path):
     store = Store(tmp_path)
     tracing = store.tracing = AgentTracing(store, settings())
     run = store.create_run('Check', '', 'modal', [], chat_enabled=True)
@@ -129,11 +129,15 @@ async def test_message_json_stays_valid_when_large_and_errors_have_sanitized_exc
                             'end_ns': time.time_ns(), 'status': 'error', 'output': 'Failure ls-secret'})
     row = store.rows('SELECT payload FROM trace_outbox')[0]
     span = spans(row['payload'])[0]
-    assert span.status.message == 'Failure [redacted]'
+    attrs = {a.key: a.value.string_value for a in span.attributes}
+    assert attrs['output.value'] == attrs['gen_ai.tool.call.result'] == 'Failure [redacted]'
+    assert b'ls-secret' not in row['payload']
+    assert span.status.code == 2  # OTLP STATUS_CODE_ERROR
+    assert span.status.message == 'Operation error'
     event = span.events[0]
     assert event.name == 'exception'
-    assert event.attributes[0].key == 'exception.message'
-    assert event.attributes[0].value.string_value == 'Failure [redacted]'
+    exception = {a.key: a.value.string_value for a in event.attributes}
+    assert exception == {'exception.message': 'Operation error', 'exception.type': 'OperationError'}
     await tracing.close()
 
 
