@@ -11,7 +11,7 @@ from uuid import uuid4
 from agentchat.models import Message, Sender
 
 from .model_preferences import preferred_model, save_model
-from .db import now
+from .db import database, now
 from .file_links import file_link
 from .progress import active_turn
 from .pr_delivery import link_captures, select_captures, select_prs
@@ -93,6 +93,7 @@ class SlackChat:
         self.media_wake = asyncio.Event()
         self.last_post = {}
         self.delivering: set[int] = set()
+        self.delivery_claim = asyncio.Lock()
         self.activity = SlackActivity(owner)
 
 
@@ -528,7 +529,6 @@ class SlackChat:
                     key = (f"answer:{source['answer_id']}:outcome" if source and source['answer_id'] else
                            f"interrupted:{run_id}:{source['id'] if source else binding['updated_at']}")
                     self.queue(conn, run_id, key, 'control', self.status_text('interrupted') + '\n' + self.link(run_id))
-        self.media_wake.set()
 
     def reconcile_sending(self) -> None:
         # The supported single process owns every live send. A lost receipt
@@ -537,7 +537,8 @@ class SlackChat:
         exclude = ' AND id NOT IN (' + ','.join('?' for _ in active) + ')' if active else ''
         self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE status='sending'" + exclude, active)
 
-    async def deliver_one(self, *, media=None):
+    def next_delivery(self, *, media=None):
+        """Inspect durable candidates while the caller holds delivery_claim."""
         self.reconcile_sending()
         lane = (" AND o.dedupe_key LIKE 'answer:%:media'" if media else
                 " AND o.dedupe_key NOT LIKE 'answer:%:media'") if media is not None else ''
@@ -557,71 +558,98 @@ class SlackChat:
                     or (row['paused'] and row['kind'] in {'answer', 'input', 'input_update', 'progress', 'approval', 'reaction'})):
                 self.store.execute("UPDATE slack_outbox SET status='skipped' WHERE id=?", (row['id'],))
                 continue
-            if not self.store.execute("""UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'
-                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='' AND deletion_requested_at='')""", (row['id'],)):
-                continue
+            return row
+
+    async def claim_delivery(self, *, media=None):
+        # Offloading adds yield points. Serialize both lanes until the durable
+        # claim has an in-memory owner, before either can reconcile or send it.
+        async with self.delivery_claim:
+            row = await database(self.next_delivery, media=media)
+            if row is None:
+                return None
             self.delivering.add(row['id'])
-            # Both lanes reserve channel pacing before either can await Slack.
-            self.last_post[row['channel']] = time.monotonic()
             try:
-                # Persist before external side effects. Ambiguous sends are
-                # marked uncertain and never replayed automatically.
-                await self.owner.checkpoints.flush()
-                if self.skip_stale_progress(row):
-                    continue
-                if row['kind'] == 'reaction':
-                    await self.owner.channel.acknowledge(row['run_id'], row['text'])
-                    sent_ts = row['text']
-                elif row['kind'] == 'input':
-                    data = json.loads(row['metadata'])
-                    source = self.owner.channel.source_for_run(row['run_id'])
-                    message = Message(id=data['message_id'], conversation_id=source.conversation_id,
-                        channel='web', sender=Sender(id=data['sender_id'], display_name=data['sender_name']),
-                        text=row['text'], role='user')
-                    response = await self.owner.agentchat.mirror(self.owner.channel, source, message, origin='Moyai web')
-                    sent_ts = response.metadata['slack_ts']
-                else:
-                    data = json.loads(row['metadata'])
-                    source = self.owner.channel.source_for_run(row['run_id'], {**data, 'kind': row['kind']})
-                    if data.get('credential_request_id'):
-                        sent_ts, delivered = await self.owner.channel.credential_card(source, row['id'])
-                        self.store.execute("UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
-                    elif data.get('captures'):
-                        sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
-                    else:
-                        if data.get('pull_requests') or data.get('blocks') or data.get('feedback_message_id') is not None:
-                            content = self.owner.channel.build_rich_reply(
-                                source, row['text'], data.get('pull_requests', ()), data.get('blocks'),
-                                data.get('feedback_message_id'))
-                            response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
-                        else:
-                            response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
-                        sent_ts = response.metadata['slack_ts']
-                if not json.loads(row['metadata']).get('credential_request_id'):
-                    self.store.execute("UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
-                if row['kind'] != 'reaction':
-                    self.activity.posted(row['run_id'])
-                if row['kind'] in {'ack', 'reaction'}:
-                    self.store.execute("UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
-            except (Exception, asyncio.CancelledError) as exc:
-                self.store.execute("UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
-                if row['kind'] in {'ack', 'reaction'}:
-                    self.store.execute("UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
-                self.store.event(row['run_id'], 'status',
-                    'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
-                    if row['kind'] == 'reaction' else
-                    'Slack access card update could not be confirmed. It will be retried in the same message.'
-                    if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
-                    'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
-            finally:
+                claimed = await database(self.store.execute, """UPDATE slack_outbox SET status='sending' WHERE id=? AND status='pending'
+                    AND EXISTS(SELECT 1 FROM runs WHERE id=slack_outbox.run_id AND deleted_at='' AND deletion_requested_at='')""", (row['id'],))
+            except asyncio.CancelledError:
+                # database() drains the write. No external send has begun, so
+                # this known-unsent claim can safely remain pending on shutdown.
                 try:
-                    self.last_post[row['channel']] = time.monotonic()
-                    await self.owner.checkpoints.flush()
+                    await database(self.store.execute, "UPDATE slack_outbox SET status='pending' WHERE id=? AND status='sending'", (row['id'],))
                 finally:
                     self.delivering.discard(row['id'])
+                raise
+            except Exception:
+                self.delivering.discard(row['id'])
+                raise
+            if not claimed:
+                self.delivering.discard(row['id'])
+                return None
+            self.last_post[row['channel']] = time.monotonic()
+            return row
+
+    async def deliver_one(self, *, media=None):
+        row = await self.claim_delivery(media=media)
+        if row is None:
             return
+        try:
+            # Persist before external side effects. Ambiguous sends are
+            # marked uncertain and never replayed automatically.
+            await self.owner.checkpoints.flush()
+            if await database(self.skip_stale_progress, row):
+                return
+            if row['kind'] == 'reaction':
+                await self.owner.channel.acknowledge(row['run_id'], row['text'])
+                sent_ts = row['text']
+            elif row['kind'] == 'input':
+                data = json.loads(row['metadata'])
+                source = await database(self.owner.channel.source_for_run, row['run_id'])
+                message = Message(id=data['message_id'], conversation_id=source.conversation_id,
+                    channel='web', sender=Sender(id=data['sender_id'], display_name=data['sender_name']),
+                    text=row['text'], role='user')
+                response = await self.owner.agentchat.mirror(self.owner.channel, source, message, origin='Moyai web')
+                sent_ts = response.metadata['slack_ts']
+            else:
+                data = json.loads(row['metadata'])
+                source = await database(self.owner.channel.source_for_run, row['run_id'], {**data, 'kind': row['kind']})
+                if data.get('credential_request_id'):
+                    sent_ts, delivered = await self.owner.channel.credential_card(source, row['id'])
+                    await database(self.store.execute, "UPDATE slack_outbox SET status=CASE WHEN metadata=? THEN 'sent' ELSE 'pending' END,slack_ts=? WHERE id=?", (delivered, sent_ts, row['id']))
+                elif data.get('captures'):
+                    sent_ts = await self.owner.channel.deliver_captures(source, data['captures'])
+                else:
+                    if data.get('pull_requests') or data.get('blocks') or data.get('feedback_message_id') is not None:
+                        content = self.owner.channel.build_rich_reply(
+                            source, row['text'], data.get('pull_requests', ()), data.get('blocks'),
+                            data.get('feedback_message_id'))
+                        response = await self.owner.agentchat.reply_rich(self.owner.channel, source, content)
+                    else:
+                        response = await self.owner.agentchat.reply(self.owner.channel, source, row['text'])
+                    sent_ts = response.metadata['slack_ts']
+            if not json.loads(row['metadata']).get('credential_request_id'):
+                await database(self.store.execute, "UPDATE slack_outbox SET status='sent',slack_ts=? WHERE id=?", (sent_ts, row['id']))
+            if row['kind'] != 'reaction':
+                await database(self.activity.posted, row['run_id'])
+            if row['kind'] in {'ack', 'reaction'}:
+                await database(self.store.execute, "UPDATE slack_events SET reply_status='sent' WHERE run_id=?", (row['run_id'],))
+        except (Exception, asyncio.CancelledError) as exc:
+            await database(self.store.execute, "UPDATE slack_outbox SET status='uncertain' WHERE id=?", (row['id'],))
+            if row['kind'] in {'ack', 'reaction'}:
+                await database(self.store.execute, "UPDATE slack_events SET reply_status='uncertain' WHERE run_id=?", (row['run_id'],))
+            await database(self.store.event, row['run_id'], 'status',
+                'Slack acknowledgment reaction could not be confirmed. Check the bot’s reactions:write permission; the answer will still be delivered.'
+                if row['kind'] == 'reaction' else
+                'Slack access card update could not be confirmed. It will be retried in the same message.'
+                if row['slack_ts'] and json.loads(row['metadata']).get('credential_request_id') else
+                'Slack message delivery could not be confirmed. The message remains in the web session and will not be sent twice automatically.')
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+        finally:
+            try:
+                self.last_post[row['channel']] = time.monotonic()
+                await self.owner.checkpoints.flush()
+            finally:
+                self.delivering.discard(row['id'])
 
     def skip_stale_progress(self, row):
         if row['kind'] != 'progress':
@@ -645,10 +673,11 @@ class SlackChat:
             try:
                 wake.clear()
                 if not media:
-                    for row in self.store.rows('SELECT event_id,run_id FROM slack_receipts WHERE handled=0'):
+                    for row in await database(self.store.rows, 'SELECT event_id,run_id FROM slack_receipts WHERE handled=0'):
                         await self.owner.manager.cancel(row['run_id'])
-                        self.store.execute('UPDATE slack_receipts SET handled=1 WHERE event_id=?', (row['event_id'],))
-                    self.collect()
+                        await database(self.store.execute, 'UPDATE slack_receipts SET handled=1 WHERE event_id=?', (row['event_id'],))
+                    await database(self.collect)
+                    self.media_wake.set()
                 await self.deliver_one(media=media)
                 if not media:
                     await self.activity.sync()
@@ -658,6 +687,10 @@ class SlackChat:
             except Exception as exc:
                 # A provider outage must not kill the durable delivery worker.
                 logger.warning('Slack reply worker will retry after %s', type(exc).__name__)
+            # A database operation can fail while database() is draining a
+            # cancelled thread. Shutdown must not turn that error into a retry.
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
             try:
                 await asyncio.wait_for(wake.wait(), timeout=1)
             except TimeoutError:

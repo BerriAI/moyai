@@ -123,6 +123,10 @@ jobs:
         run: |
           uv run --frozen --python 3.13 pytest -q tests/test_finish_tracing.py
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_finish_tracing.py tests/test_tracing.py
+      - name: Verify Slack polling responsiveness and delivery ownership
+        run: |
+          uv run --frozen --python 3.13 pytest -q tests/test_slack_polling.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py
       - name: Verify 3000 synthetic reservations across four worker processes
         run: uv run --frozen --python 3.13 python scripts/runtime_capacity_probe.py --sessions 3000 --workers 4
       - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL
