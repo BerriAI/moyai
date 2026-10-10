@@ -162,7 +162,7 @@ def test_slack_metadata_uses_durable_control_reply_without_agent_work(mirror, mo
     else:
         assert app.state.store.run(run_id) == before
         assert app.state.store.rows('SELECT paused FROM slack_threads')[0]['paused'] == 1
-    drain(app)
+    drain(app, client)
     assert len([message for message in sent if session_id_response(run_id) in message.get('text', '')]) == 1
     assert not submitted
 
@@ -200,7 +200,7 @@ def test_slack_dm_returns_its_own_session_id(mirror, monkeypatch):
     forbid_agent_work(app, monkeypatch)
     assert client.post('/hooks/slack/events', **signed(dm_event(1, '/session-id'))).status_code == 200
     run_id = app.state.store.rows('SELECT id FROM runs')[0]['id']
-    drain(app)
+    drain(app, client)
     reply = next(message for message in sent if session_id_response(run_id) in message.get('text', ''))
     assert reply['channel'].startswith('D')
     assert not submitted
