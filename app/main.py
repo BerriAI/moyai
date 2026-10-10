@@ -671,6 +671,7 @@ def _create_app(settings, store):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
+        from agent.swarm.planning import INITIAL_TEAM_SIZE
         return {"harnesses": choices(), "harness": settings.default_harness(), "cloud_ready": not missing, "missing": missing,
                 "evaluation": {"environment": settings.trace_environment, "agent_version": settings.moyai_build_sha,
                                "tracing_enabled": bool(settings.litellm_trace_endpoint and settings.litellm_trace_api_key)},
@@ -678,6 +679,7 @@ def _create_app(settings, store):
                 "sandbox_provider": settings.sandbox_provider, "sandbox_providers": sandbox_settings.view(False)["providers"],
                 "public_url": settings.public_url, "max_concurrent_runs": settings.max_concurrent_runs,
                 "max_parallel_agents": settings.max_parallel_agents, "parallel_agents_enabled": settings.temporal_enabled,
+                "swarm_initial_team_size": INITIAL_TEAM_SIZE,
                 "max_concurrent_model_requests": settings.max_concurrent_model_requests,
                 "run_timeout_seconds": settings.run_timeout_seconds, "max_agent_iterations": settings.max_agent_iterations,
                 "sandbox_rotation_seconds": settings.sandbox_rotation_seconds,
@@ -828,6 +830,17 @@ def _create_app(settings, store):
                 manager.submit(run)
             await session_titles.request(run['id'])
         return public_run(run)
+
+    @app.get('/api/runs/{run_id}/swarm/chat')
+    async def swarm_chat(run_id: str, request: Request, limit: int = Query(default=50, ge=1, le=100),
+                         after: str | None = Query(default=None, max_length=1024),
+                         before: str | None = Query(default=None, max_length=1024),
+                         watch: str | None = Query(default=None, max_length=8192)):
+        from .swarm_chat import read_page
+        def load():
+            security.require(request)
+            return read_page(store, run_id, public_messages, limit=limit, after=after, before=before, watch=watch)
+        return await run_in_threadpool(load)
 
     @app.get('/api/runs/{run_id}/side-chats')
     async def side_chats(run_id: str, request: Request):
