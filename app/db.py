@@ -44,6 +44,18 @@ def require_database_owner(path: Path) -> None:
 
 
 class Store:
+    # The sidebar does not display saved answers, errors or sandbox state. Keep
+    # the original prompt for title fallback/search and pending_result for the
+    # same saving/deleting status projection used by session detail.
+    SIDEBAR_COLUMNS = ('id', 'prompt', 'repo_url', 'mode', 'status', 'created_at',
+                       'updated_at', 'owner_id', 'active_user_id', 'chat_enabled',
+                       'model', 'parent_run_id', 'agent_group_id', 'agent_label',
+                       'display_title', 'active_message_id', 'side_chat_of',
+                       'deletion_requested_at', 'deleted_at', 'pending_result')
+    SIDEBAR_CHILD_COLUMNS = ('id', 'parent_run_id', 'agent_label', 'status', 'mode',
+                             'created_at', 'updated_at', 'active_message_id',
+                             'deletion_requested_at', 'deleted_at', 'pending_result')
+
     def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None):
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
@@ -413,15 +425,28 @@ class Store:
     def subtree(self, run_id: str):
         return self.subtrees([run_id])
 
-    def subtrees(self, run_ids):
+    def subtrees(self, run_ids, *, sidebar=False):
         rows = []
+        columns = ','.join('r.' + key for key in self.SIDEBAR_CHILD_COLUMNS) if sidebar else 'r.*'
         for offset in range(0, len(run_ids), 400):
             batch = run_ids[offset:offset + 400]
             rows.extend(self.rows("""WITH RECURSIVE tree(ancestor_id,run_id) AS (
                 SELECT id,id FROM runs WHERE id IN (""" + ','.join('?' for _ in batch) + """) UNION
                 SELECT tree.ancestor_id,r.id FROM tree JOIN runs r ON r.parent_run_id=tree.run_id
-            ) SELECT r.*,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
+            ) SELECT """ + columns + """,tree.ancestor_id FROM tree JOIN runs r ON r.id=tree.run_id ORDER BY r.created_at,r.id""", batch))
         return rows
+
+    def runs_by_ids(self, run_ids, *, sidebar=False):
+        """Read a bounded batch while retaining the caller's recency ordering."""
+        rows = {}
+        columns = ','.join(self.SIDEBAR_COLUMNS) if sidebar else '*'
+        for offset in range(0, len(run_ids), 400):
+            batch = run_ids[offset:offset + 400]
+            for row in self.rows('SELECT ' + columns + ' FROM runs WHERE id IN (' + ','.join('?' for _ in batch) + ')', batch):
+                if not sidebar:
+                    row['plugins'] = json.loads(row['plugins'])
+                rows[row['id']] = row
+        return [rows[run_id] for run_id in run_ids if run_id in rows]
 
     def run(self, run_id: str, *, connection=None):
         rows = self.rows("SELECT * FROM runs WHERE id=?", (run_id,), connection=connection)

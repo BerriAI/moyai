@@ -280,7 +280,7 @@ async function navigate(view,initialConfig) {
 }
 async function refreshRuns(){
   const refresh=++state.runsRefresh,focus=state.selected||parseSessionLink(location.hash)?.runId||'';
-  const params=new URLSearchParams({scope:sessionListScope()});
+  const params=new URLSearchParams({scope:sessionListScope(),view:'sidebar'});
   if(focus)params.set('focus',focus);
   try{
     const [runs,folders]=await Promise.all([api('/api/runs?'+params),api('/api/session-folders')]);

@@ -179,12 +179,12 @@ class SessionPullRequests:
             if (current_target, fresh.number) != (target, receipt.number):
                 raise HTTPException(404, 'This pull request is no longer available in this session.')
 
-    def summaries(self, run_ids):
+    def summaries(self, run_ids, *, receipts=None):
         result = {identity: {'open': 0, 'merged': 0, 'closed': 0, 'unknown': 0,
                              'stale': False, 'label': '', 'pull_requests': []} for identity in run_ids}
         if not result:
             return result
-        parsed = self.receipts(result)
+        parsed = self.receipts(result) if receipts is None else receipts
         context = self.context()
         receipt_ids = {}
         for row, receipt in parsed:

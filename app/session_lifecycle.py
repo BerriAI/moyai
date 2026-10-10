@@ -162,9 +162,10 @@ class SessionLifecycle:
 
     def metadata(self, run, actor, admin, archives=None):
         archives = self.archives(actor) if archives is None else archives
-        return {'archived': self.store.root_id(run['id']) in archives,
+        root_id = self.store.root_id(run['id']) if run['parent_run_id'] else run['id']
+        return {'archived': root_id in archives,
                 'can_delete': self.can_delete(run, actor, admin),
-                'deletion_error': self.deletion_error(run['id'])}
+                'deletion_error': self.deletion_errors.get(root_id, '')}
 
     def deletion_error(self, run_id):
         return self.deletion_errors.get(self.store.root_id(run_id), '')

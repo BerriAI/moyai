@@ -75,6 +75,10 @@ Writes invalidate at both request boundaries; account/role changes and access
 errors clear the cache. Explicit Refresh and background polls still fetch fresh
 data. Secrets and credential forms are excluded from the allowlist.
 
+The sidebar requests the compact `view=sidebar` session list, with batched root
+reads and lightweight agent rows. See [session list performance](session-list-performance.md)
+for the real API demo, before/after measurements and database-wait regression.
+
 Hover intent (80 ms) and keyboard focus preload the chosen page, analytics tab,
 conversation, or a PR linked to the current session. Speculative reads stop when
 three cacheable requests are in flight and are disabled in hidden tabs or with
