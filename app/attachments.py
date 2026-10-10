@@ -115,7 +115,8 @@ class Attachments:
             columns = conn.column_names('attachments')
             for name, definition in [('data_ref', "TEXT NOT NULL DEFAULT ''"),
                                      ('preview_ref', "TEXT NOT NULL DEFAULT ''"),
-                                     ('preview_size', 'INTEGER NOT NULL DEFAULT 0')]:
+                                     ('preview_size', 'INTEGER NOT NULL DEFAULT 0'),
+                                     ('position', 'INTEGER NOT NULL DEFAULT 0')]:
                 if name not in columns:
                     conn.execute(f'ALTER TABLE attachments ADD COLUMN {name} {definition}')
             if 'preview_size' not in columns:
@@ -192,20 +193,20 @@ class Attachments:
             total += row['size']
         if total > MAX_MESSAGE:
             raise ValueError('Attachments must total 20 MB or less per message.')
-        for attachment_id in ids:
-            conn.execute('UPDATE attachments SET message_id=? WHERE id=?', (message_id, attachment_id))
+        for position, attachment_id in enumerate(ids):
+            conn.execute('UPDATE attachments SET message_id=?,position=? WHERE id=?', (message_id, position, attachment_id))
 
     def message_ids(self, conn, message_id):
         return {row['id'] for row in conn.execute('SELECT id FROM attachments WHERE message_id=?', (message_id,))}
 
     def messages(self, run_id, messages):
         grouped = {}
-        for row in self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=?) ORDER BY created_at,id', (run_id,)):
+        for row in self.store.rows(f'SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=?) ORDER BY position,created_at,id', (run_id,)):
             grouped.setdefault(row['message_id'], []).append(public_file(row))
         return [{**message, 'attachments': grouped.get(message['id'], [])} for message in messages]
 
     def for_run(self, run_id, through_message):
-        rows = self.store.rows(f"SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=? AND status!='deleted' AND (id=? OR status!='queued')) ORDER BY message_id,created_at,id", (run_id, through_message))
+        rows = self.store.rows(f"SELECT {META} FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE run_id=? AND status!='deleted' AND (id=? OR status!='queued')) ORDER BY message_id,position,created_at,id", (run_id, through_message))
         return [{**public_file(row), 'message_id': row['message_id'], 'sha256': row['sha256'],
                  'path': f"/workspace/.moyai-attachments/{row['id']}/{row['name']}"} for row in rows]
 
