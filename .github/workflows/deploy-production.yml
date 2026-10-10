@@ -1,0 +1,46 @@
+name: Deploy production
+run-name: Deploy latest main to Moyai production
+
+on:
+  workflow_dispatch:
+    inputs:
+      preflight_only:
+        description: Only check configuration (no deployment)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+  statuses: read
+
+concurrency:
+  group: moyai-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy-production:
+    if: github.repository == 'BerriAI/moyai' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 210
+    environment: moyai-production
+    steps:
+      # Deploy the same main commit as checkout, selected at button press.
+      # A later push cannot change this release's tooling or deployment target.
+      - uses: actions/checkout@v4
+      - name: Coordinate app and worker deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RENDER_DEPLOY_API_KEY: ${{ secrets.RENDER_DEPLOY_API_KEY }}
+          RENDER_DEPLOY_SSH_KEY: ${{ secrets.RENDER_DEPLOY_SSH_KEY }}
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
+        run: python3 -m scripts.release.deploy --receipt release-receipt.json
+      - name: Save deployment receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-release-${{ github.run_id }}
+          path: release-receipt.json
+          if-no-files-found: warn
+          retention-days: 30
