@@ -373,7 +373,7 @@ async function renderHome(initialConfig,recent=false){
     $('.swarm-budget').hidden=!swarm;
     if(swarm){$('#mode').value='modal';$('#mode').disabled=true;}else $('#mode').disabled=false;
     $('#mode').dispatchEvent(new Event('change'));
-    if(swarm)$('#mode-note').textContent='Works in rounds until the time limit · You can pause or stop';
+    if(swarm)$('#mode-note').textContent='10 agents · A shuffled mix of harnesses · Pause or stop anytime';
   };
   if(draft.session_mode==='swarm'&&(!config.cloud_ready||!config.parallel_agents_enabled))state.newDraft.session_mode='chat';
   $('#swarm-budget').value=String([300,1800,3600,14400].includes(draft.budget_seconds)?draft.budget_seconds:1800);
@@ -534,7 +534,7 @@ function renderChat(run){
   bindSessionHeaderActions(run);
   workspacePanel=MoyaiPanel.create({run,layout:$('.chat-layout'),api,computer,markdown:renderMarkdown,escape:esc,size:fileSize,titleFor:sessionTitle,matchesSession:sessionMatches,statusFor:sessionStatus,user:state.userId||'shared:local:admin',models:harnessModels(run.harness),toast,onActivity:loadAllActivity,onCreated:()=>refreshRuns().catch(showError)});
   state.sessionViews??=new Map();
-  state.swarmSpace=globalThis.MoyaiSwarm?.create({host:$('#swarm-space'),layout:$('.chat-layout'),run,initialView:state.sessionViews.get(id),titleFor:sessionTitle,harnessName,modelName,onView:view=>state.sessionViews.set(id,view),onAgent:agent=>workspacePanel?.open('chat',{chatId:agent.id,title:agent.label}),onActivity:()=>workspacePanel?.open('activity'),onAllAgents:()=>workspacePanel?.open('agents')});
+  state.swarmSpace=globalThis.MoyaiSwarm?.create({host:$('#swarm-space'),layout:$('.chat-layout'),run,api,initialView:state.sessionViews.get(id),titleFor:sessionTitle,harnessName,modelName,onView:view=>state.sessionViews.set(id,view),onAgent:agent=>workspacePanel?.open('chat',{chatId:agent.id,title:agent.label}),onActivity:()=>workspacePanel?.open('activity'),onAllAgents:()=>workspacePanel?.open('agents')});
   document.querySelectorAll('[data-session-view]').forEach(button=>button.addEventListener('click',()=>state.swarmSpace?.setView(button.dataset.sessionView,{focus:true})));
   $('#swarm-pause')?.addEventListener('click',async()=>{
     const button=$('#swarm-pause'),version=state.pageVersion,action=state.chatRun?.swarm?.status==='active'?'pause':'resume';

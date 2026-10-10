@@ -96,3 +96,111 @@ test('swarm controls merge compact API responses, refresh details, and ignore re
   assert.equal(c.state.swarmControlPending,null);
  }
 });
+
+test('response previews choose public prose, retain saving answers, and never substitute tools or private reasoning',()=>{
+ const older={id:8,role:'assistant',content:'Previous answer',status:'completed',response_to_id:7,created_at:'2026-10-10T12:00:00Z'};
+ const current=run({active_message_id:9,messages:[older,{id:9,role:'user',content:'Next question',status:'running'}],events:[
+  {id:10,kind:'message',message:'I am comparing the results.',created_at:'2026-10-10T12:01:00Z',data:{phase:'commentary',turn_id:9}},
+  {id:11,kind:'message',message:'Do not show processing',data:{phase:'processing'}},
+  {id:12,kind:'message',message:'Do not show private reasoning',data:{phase:'reasoning'}},
+  {id:13,kind:'tool',message:'Do not show tool output',data:{output:'private'}},
+  {id:14,kind:'status',message:'Do not show focus as a reply',data:{phase:'focus'}},
+ ]});
+ assert.equal(swarm.latestResponse(current).text,'I am comparing the results.');
+ assert.equal(swarm.latestResponse(current).kind,'update');
+ current.messages.push({id:-9,role:'assistant',content:'The actual completed answer',status:'saving',created_at:'2026-10-10T12:02:00Z'});
+ assert.equal(swarm.latestResponse(current).id,-9);assert.equal(swarm.latestResponse(current).kind,'reply');
+ current.messages.push({id:15,role:'assistant',content:'Superseded answer',status:'steered',created_at:'2026-10-10T12:03:00Z'});
+ assert.equal(swarm.latestResponse(current).text,'The actual completed answer');
+ assert.equal(swarm.latestResponse(run({summary:'Stale previous answer',events:[{kind:'error',message:'Private diagnostic'}]})),null);
+ assert.equal(swarm.latestResponse(run({messages:[{role:'assistant',content:'The task failed before replying.',status:'failed'}]})).kind,'error');
+});
+
+test('reply controls expose escaped bounded excerpts and full-conversation action; empty and retry states are honest',()=>{
+ const node={id:id(2),label:'<Agent>',harness:'codex'};
+ const html=swarm.responseHTML(node,{response:{kind:'reply',text:'<script>bad()</script> '+ 'x'.repeat(600)}});
+ assert.match(html,/data-swarm-agent=/);assert.match(html,/Read reply/);assert.match(html,/&lt;script&gt;/);assert.doesNotMatch(html,/<script>|x{300}/);
+ assert.match(swarm.responseHTML(node),/No reply yet/);
+ assert.match(swarm.responseHTML(node,{loading:true}),/Loading reply/);
+ assert.match(swarm.responseHTML(node,{error:'retry'}),/data-swarm-retry=/);
+ assert.match(swarm.responseHTML(node,{error:'unavailable'}),/Reply unavailable/);
+ const nodeMarkup=swarm.nodeHTML({...node,x:.5,y:.5,status:'running'},{harnessName:()=>'<Codex>'});
+ assert.match(nodeMarkup,/<span class="swarm-node-harness">&lt;Codex&gt;<\/span>/);
+});
+
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
+const child=(n,status='running',updated_at='version1')=>({id:id(n),status,updated_at});
+const snapshot=(n,extra={})=>({id:id(n),status:'idle',active:false,messages:[{id:n,role:'assistant',content:`Reply ${n}`,status:'completed'}],events:[],...extra});
+
+test('child responses use at most three concurrent snapshots, never overlap, and stop refreshing terminal agents',async()=>{
+ let time=0;const calls=[];
+ const cache=swarm.responseCache({now:()=>time,api:path=>{const pending=deferred();calls.push({path,...pending});return pending.promise;}});
+ const nodes=[2,3,4,5].map(n=>child(n));cache.sync(nodes);cache.poll();cache.poll();await flush();
+ assert.equal(calls.length,3);assert.ok(calls.every(call=>call.path.endsWith('?activity=summary')));
+ calls[0].resolve(snapshot(2));await flush();assert.equal(calls.length,4);
+ calls[1].resolve(snapshot(3));calls[2].resolve(snapshot(4));calls[3].resolve(snapshot(5));await flush();
+ assert.equal(cache.get(id(2)).response.text,'Reply 2');
+ time=8000;cache.sync(nodes);cache.poll();await flush();assert.equal(calls.length,4);
+ cache.sync([child(2,'running','version2'),...nodes.slice(1)]);cache.poll();await flush();assert.equal(calls.length,5);
+ calls[4].resolve(snapshot(2,{status:'running',active:true}));await flush();cache.poll();await flush();assert.equal(calls.length,5);
+ time+=4000;cache.poll();await flush();assert.equal(calls.length,6);
+ calls[5].resolve(snapshot(2));await flush();cache.dispose();
+});
+
+test('response cache rejects stale results after hiding, membership changes, and disposal',async()=>{
+ let visible=true,time=0,changes=0;const calls=[];
+ const cache=swarm.responseCache({now:()=>time,active:()=>visible,onChange:()=>changes++,api:()=>{const pending=deferred();calls.push(pending);return pending.promise;}});
+ cache.sync([child(2)]);cache.poll();await flush();assert.equal(calls.length,1);
+ visible=false;cache.pause();calls[0].resolve(snapshot(2));await flush();assert.equal(changes,0);assert.equal(cache.get(id(2)).response,null);
+ time=10000;cache.poll();await flush();assert.equal(calls.length,1);
+ visible=true;cache.poll();await flush();assert.equal(calls.length,2);
+ cache.sync([child(2,'running','version2')]);calls[1].resolve(snapshot(2));await flush();assert.equal(changes,0);assert.equal(calls.length,3);
+ cache.sync([]);calls[2].resolve(snapshot(2));await flush();assert.equal(cache.get(id(2)),null);assert.equal(changes,0);
+ cache.sync([child(3)]);cache.poll();await flush();assert.equal(calls.length,4);
+ cache.dispose();calls[3].resolve(snapshot(3));await flush();cache.poll();assert.equal(changes,0);assert.equal(cache.get(id(3)),null);assert.equal(calls.length,4);
+});
+
+test('authorization loss clears every cached reply and fences concurrent results; deleted agents clear their reply',async()=>{
+ for(const status of [401,403]){
+  let time=0;const calls=[];
+  const cache=swarm.responseCache({now:()=>time,api:()=>{const pending=deferred();calls.push(pending);return pending.promise;}});
+  cache.sync([child(2),child(3)]);cache.poll();await flush();
+  calls[0].resolve(snapshot(2));await flush();assert.equal(cache.get(id(2)).response.text,'Reply 2');
+  calls[1].reject({status});await flush();assert.equal(cache.get(id(2)).response,null);assert.equal(cache.get(id(2)).error,'unavailable');
+  time=20000;cache.poll();await flush();assert.equal(calls.length,2);cache.dispose();
+ }
+ let time=0,count=0;
+ const cache=swarm.responseCache({now:()=>time,api:async()=>{if(count++===0)return snapshot(2,{status:'running',active:true});throw {status:404};}});
+ cache.sync([child(2)]);cache.poll();await flush();assert.ok(cache.get(id(2)).response);
+ time=4000;cache.poll();await flush();assert.equal(cache.get(id(2)).response,null);assert.equal(cache.get(id(2)).error,'unavailable');
+ time=8000;cache.poll();await flush();assert.equal(count,2);cache.dispose();
+});
+
+test('a transient snapshot failure can be retried without replacing it with made-up text',async()=>{
+ let calls=0;
+ const cache=swarm.responseCache({api:async()=>{if(calls++===0)throw {status:503};return snapshot(2);}});
+ cache.sync([child(2)]);cache.poll();await flush();assert.equal(cache.get(id(2)).response,null);assert.equal(cache.get(id(2)).error,'retry');
+ cache.retry(id(2));await flush();assert.equal(calls,2);assert.equal(cache.get(id(2)).error,'');assert.equal(cache.get(id(2)).response.text,'Reply 2');cache.dispose();
+});
+
+test('shared responses retain the six most recent actual agent replies in chronological order with harness identity',()=>{
+ const nodes=Array.from({length:10},(_,i)=>({id:id(i+1),label:`Agent ${i+1}`,harness:'codex'}));
+ const items=swarm.sharedResponses(nodes,node=>Number.parseInt(node.id,16)===10?null:{id:node.id,text:`Actual ${node.label} <reply>`,kind:'reply',createdAt:`2026-10-10T12:00:0${Number.parseInt(node.id,16)}Z`});
+ assert.deepEqual(items.map(item=>item.node.label),['Agent 4','Agent 5','Agent 6','Agent 7','Agent 8','Agent 9']);
+ const html=swarm.busHTML(items,()=> 'Codex');assert.match(html,/Actual Agent 9 &lt;reply&gt;/);assert.match(html,/Codex/);assert.doesNotMatch(html,/Agent 10|<reply>/);
+ assert.match(swarm.busHTML([]),/Replies will appear/);
+ const graph=swarm.layout(nodes.concat({id:id(11),status:'running'}),10,true);
+ assert.equal(graph.length,11);assert.equal(new Set(graph.map(node=>`${node.x}:${node.y}`)).size,11);
+});
+
+
+test('response cache extracts bounded public prose without retaining a live dependency on the full snapshot',async()=>{
+ const payload=snapshot(2,{messages:[{id:2,role:'assistant',content:'A'.repeat(12000),status:'completed'}],events:[{kind:'tool',message:'Tool completed',data:{output:'Private tool body'}}]});
+ const {proxy,revoke}=Proxy.revocable(payload,{});
+ const cache=swarm.responseCache({api:async()=>proxy});
+ cache.sync([child(2)]);cache.poll();await flush();revoke();
+ const state=cache.get(id(2));assert.equal(state.response.text.length,2000);assert.equal(state.loading,false);
+ assert.equal(state.response.kind,'reply');assert.doesNotMatch(JSON.stringify(state),/Private tool body|events|messages/);
+ cache.dispose();
+});
