@@ -407,7 +407,7 @@ def test_quota_preflight_excludes_expired_drafts_without_deleting_them_before_up
 def test_legacy_schema_upgrade_is_idempotent_and_preserves_preview_bytes(tmp_path):
     store = Store(tmp_path)
     with store.connect() as conn:
-        for name in ('data_ref', 'preview_ref', 'preview_size'):
+        for name in ('data_ref', 'preview_ref', 'preview_size', 'position'):
             conn.execute(f'ALTER TABLE attachments DROP COLUMN {name}')
         conn.execute('INSERT INTO attachments VALUES(?,?,NULL,?,?,?,?,?,?,?,?)',
                      (uuid4().hex, 'legacy-owner', 'legacy.png', 3, 'hash', 'image/png', '', '2026-01-01', b'raw', b'preview'))
@@ -415,6 +415,7 @@ def test_legacy_schema_upgrade_is_idempotent_and_preserves_preview_bytes(tmp_pat
         restored = Store(tmp_path)
         row = restored.rows('SELECT * FROM attachments')[0]
         assert row['preview_size'] == 7 and not row['data_ref'] and not row['preview_ref']
+        assert row['position'] == 0
         assert restored.attachments.payload(row) == b'raw'
         assert restored.attachments.payload(row, 'preview') == b'preview'
 
