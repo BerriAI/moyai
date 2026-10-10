@@ -1,9 +1,10 @@
-# Deploy the production app and worker
+# Deploy the production app, worker and broker
 
 Use **GitHub → Actions → Deploy production → Run workflow → main** after the
-one-time setup below. One button coordinates `moyai-private` and `moyai-worker`.
+one-time setup below. One button coordinates `moyai-private` and `moyai-worker`,
+plus `moyai-broker` after the separate-broker topology is activated.
 It selects the main commit at button press, waits for its CI, and deploys that
-exact commit to both services. Later pushes do not change the selected release.
+exact commit to every active role. Later pushes do not change the selected release.
 Start a new run to deploy newer changes; re-running an old job keeps its old
 commit and cannot roll a newer production version backward.
 
@@ -23,14 +24,14 @@ Render's separate **Deploy latest commit** buttons while it is running.
 
    | Secret | Purpose |
    | --- | --- |
-   | `RENDER_DEPLOY_API_KEY` | Read the two services and their deployment history; update their three release flags and create deployments. Render API keys inherit their account's access; use the least-privileged available deployment account. |
+   | `RENDER_DEPLOY_API_KEY` | Read the app, worker and activated broker and their deployment history; update their three release flags and create deployments. Render API keys inherit their account's access; use the least-privileged available deployment account. |
    | `RENDER_DEPLOY_SSH_KEY` | Dedicated, non-interactive SSH private key, including its header/footer and newlines. Add its public key to the intended Render account. SSH is used only for runtime checks over Render's authenticated SSH endpoint. |
 
    Never put either credential in workflow YAML, PR comments, artifacts, or logs.
    No separate GitHub token, database exposure, public management endpoint, or
-   new paid service is needed. Keep Render auto-deploy **off** for both services.
+   new paid service is needed for the button. Keep Render auto-deploy **off** for every service.
 4. Run the workflow on `main` with **Only check configuration (no deployment)**
-   checked. It verifies CI, both Render services, SSH access, running build IDs,
+   checked. It verifies CI, all active Render services, SSH access, running build IDs,
    local health, database ownership, and matching shared settings without writing
    to Render or the database. Its receipt must say `preflight_passed`.
 5. Run it again with that option unchecked for the first coordinated deployment.
@@ -58,6 +59,23 @@ host key stops the workflow and must be verified against Render before updating.
 5. Activate the worker at the same commit, clear its drain flag, and verify both
    services and database ownership before declaring success.
 
+When all roles already use `MOYAI_SEPARATE_BROKER=true`, the same button also:
+
+- Checks the broker's private service identity, build, shared configuration,
+  HTTP health and exclusive database ownership before any writes.
+- After the worker stops, stages the new broker and waits for the old broker's
+  database ownership, requests and leases to clear before deploying the app.
+- Activates the matching broker after the app, checks HTTP readiness and ownership,
+  and only then resumes the worker. A failed broker deployment or readiness check
+  leaves execution staged for inspection.
+
+This is six Render deployments in the split topology. The button never changes
+`MOYAI_SEPARATE_BROKER` or Cloudflare routes and does not perform the first topology
+switch. A broker provisioned in maintenance staging is left alone while the app
+and worker still use the combined topology. Follow the coordinated cutover in
+[separate-broker.md](separate-broker.md) first; all three roles must then be live
+on the same build, with staging and drain disabled, before using this button.
+
 The only environment values this workflow changes are `MOYAI_BUILD_SHA`,
 `MAINTENANCE_DRAIN`, and `RENDER_MIGRATION_STAGE`. It checks that all other saved
 values are preserved, including signing/encryption keys, shared storage, Temporal
@@ -66,7 +84,8 @@ nonsecret **production-release** artifact. No-op releases still verify the
 running services.
 
 This is coordinated deployment, not yet seamless deployment. There are four
-Render deployments, so builds and safe draining can take several minutes. New
+Render deployments in the combined topology and six with a separate broker,
+so builds and safe draining can take several minutes. New
 execution pauses, and the app still restarts. The separate work on broker
 isolation, removing the app disk, and overlapping app instances is needed to
 remove that interruption.
@@ -84,7 +103,9 @@ not automatically roll back, cancel sessions, or reactivate a staged worker.
 | CI or preflight, with no recorded writes | Fix the reported problem and start a new run. Missing credentials can fail before a receipt exists. |
 | Worker drain | The coordinator remains on its previous build. Inspect any active deployment, then either finish the drain or restore the worker's previous build with drain off. Do not cancel user work just to pass the check. |
 | Worker staging / old ownership check | Execution remains paused. Verify the old workers have exited before changing the coordinator. To abandon the release, restore the worker to the still-live coordinator's build and matching flags. |
+| Broker staging / old ownership check | The worker remains staged. Verify the broker's live deployment and old ownership before changing the coordinator. Restoring execution requires the broker and worker to match the still-live coordinator. |
 | Coordinator deployment | Keep the worker staged. Determine which coordinator commit is actually live and whether its runtime and database policy are healthy. Finish the coordinator deployment before activating a matching worker. |
+| Broker activation / readiness | Keep the worker staged. Verify the broker and coordinator are on the selected build with matching configuration, successful HTTP readiness and exactly one broker owner. A Render TCP health check alone is insufficient. |
 | Worker activation / final verification | Check live commit IDs, drain/staging flags, health and singleton ownership on both services. Resolve the failing check; do not deploy an arbitrary latest commit to only one service. |
 
 A partial release is deliberately rejected by a fresh run until a clean matching
@@ -99,17 +120,21 @@ another operator. Keep one release owner and do not run a parallel manual deploy
 
 ## Supported topology and local verification
 
-This version supports one coordinator (`srv-db41eiqj9qps73fpuan0`) and one worker
-(`srv-db4s0b142hec73epgpt0`), both private Oregon services using shared Postgres,
+This version supports one coordinator (`srv-db41eiqj9qps73fpuan0`), one worker
+(`srv-db4s0b142hec73epgpt0`) and, when activated, one broker
+(`srv-db4tlsajnfac738gigb0`), all private Oregon services using shared Postgres,
 S3 and Temporal. It rejects auto-deploy, autoscaling, extra runtime owners,
-staged/draining baselines, and `MOYAI_SEPARATE_BROKER=true`. Update the release
-workflow and its tests alongside a broker split or a change to the runtime policy
-or ownership protocol; do not bypass these checks to force a deployment.
+staged/draining baselines and inconsistent split flags. The read-only probe
+verifies the runtime fingerprint schema of the running build, including the
+pre-broker format during the first upgrade. It does not accept a legacy
+fingerprint for a new build. Further ownership or compatibility changes need
+corresponding release checks; never bypass them to force a deployment.
 
 Run the credential-free rehearsal from the repository root:
 
 ```sh
 python3 -m scripts.release.rehearse --pace 0.7
+python3 -m scripts.release.rehearse --separate-broker --pace 0.7
 ```
 
 It runs the actual orchestrator against simulated Render, SSH and CI responses,

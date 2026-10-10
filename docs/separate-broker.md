@@ -89,6 +89,13 @@ the connector alongside the API could still break those connections.
    then restart **only the coordinator at the same build** during a live model
    request. Check its stream, request accounting, saved result and latency.
 
+The [production deployment button](production-deploy.md) supports subsequent
+coordinated releases of all three activated roles. It verifies and stages the
+broker before updating the coordinator, then verifies the new broker before
+resuming the worker. It does not change the split flag or edge route and does
+not perform this first topology switch. Clear the broker's `MAINTENANCE_DRAIN`
+flag during activation so all three services form a clean release baseline.
+
 With pool size 8, three processes require up to 27 database connections, plus
 administrative reserve. One overlapping worker adds 9. This does not authorize
 overlapping coordinator or broker instances. Render [private services use TCP

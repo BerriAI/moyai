@@ -23,13 +23,14 @@ jobs:
   deploy-production:
     if: github.repository == 'BerriAI/moyai' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 210
+    # Includes the bounded waits for six deployments in the broker topology.
+    timeout-minutes: 250
     environment: moyai-production
     steps:
       # Deploy the same main commit as checkout, selected at button press.
       # A later push cannot change this release's tooling or deployment target.
       - uses: actions/checkout@v4
-      - name: Coordinate app and worker deployment
+      - name: Coordinate app, worker and activated broker deployment
         env:
           GH_TOKEN: ${{ github.token }}
           RENDER_DEPLOY_API_KEY: ${{ secrets.RENDER_DEPLOY_API_KEY }}

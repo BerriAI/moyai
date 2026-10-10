@@ -27,11 +27,12 @@ def snapshot(connection, schema):
     connection.execute("SET LOCAL statement_timeout = '5s'")
     connection.execute(sql.SQL('SET LOCAL search_path TO {},pg_catalog').format(sql.Identifier(schema)))
     owners = dict(connection.execute('''SELECT classid::bigint,count(*) FROM pg_locks
-        WHERE locktype='advisory' AND classid IN (726940,726943)
+        WHERE locktype='advisory' AND classid IN (726940,726943,726944)
         AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
         AND objid=%s::regnamespace::oid AND objsubid=2 AND granted GROUP BY classid''', (schema,)).fetchall())
     return {
         'owners': owners.get(726940, 0), 'coordinators': owners.get(726943, 0),
+        'brokers': owners.get(726944, 0),
         'unsafe_sessions': connection.execute('''SELECT count(*) FROM durable_sessions d
             JOIN runs r ON r.id=d.run_id WHERE r.deleted_at='' AND
             (COALESCE(d.state::jsonb->>'phase','idle') != ALL(%s) OR r.status='stopping')''',
@@ -49,6 +50,14 @@ def snapshot(connection, schema):
 def require(condition):
     if not condition:
         raise ValueError('Runtime check failed')
+
+
+def policy_fingerprint(settings):
+    # The first split-capable release adds a policy field even while disabled.
+    # Select the schema from the running build's Settings, never from a failed
+    # comparison, so the same release can verify its pre-upgrade baseline.
+    fields = POLICY_FIELDS + (('moyai_separate_broker',) if hasattr(settings, 'moyai_separate_broker') else ())
+    return hashlib.sha256(json.dumps({key: getattr(settings, key) for key in fields}, sort_keys=True).encode()).hexdigest()
 
 
 def probe(options):
@@ -77,7 +86,7 @@ def probe(options):
     require(health == {'status': 'ok'})
     with psycopg.connect(settings.moyai_database_url, connect_timeout=10) as connection:
         state = snapshot(connection, settings.moyai_database_schema)
-    expected = hashlib.sha256(json.dumps({key: getattr(settings, key) for key in POLICY_FIELDS}, sort_keys=True).encode()).hexdigest()
+    expected = policy_fingerprint(settings)
     require(state.pop('policy') == expected)
     return {'ok': True, **state}
 

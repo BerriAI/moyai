@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from scripts.release.deploy import COORDINATOR, WORKER, GitHub, Release, ReleaseError, MUTABLE
+from scripts.release.deploy import BROKER, COORDINATOR, WORKER, GitHub, Release, ReleaseError, MUTABLE
 
 from scripts.release.rehearse import OLD, NEW, Render, Candidate
 
@@ -20,6 +20,140 @@ def setup(tmp_path):
     release = Release(render, github, render.probe, tmp_path / 'receipt.json', wait_seconds=1,
                       drain_timeout=3, deploy_timeout=3, clock=lambda: elapsed[0], sleep=sleep)
     return release, render, github
+
+
+@pytest.fixture
+def split_setup(setup):
+    release, _, github = setup
+    render = Render(split=True)
+    release.render, release.probe = render, render.probe
+    return release, render, github
+
+
+def test_split_release_stages_old_broker_and_verifies_new_broker_before_execution(split_setup):
+    release, render, _ = split_setup
+    original = deepcopy(render.env)
+    render.owner_delay, render.broker_owner_delay = 3, 3
+    release.run()
+    assert [call for call in render.calls if call[0] == 'POST'] == [
+        ('POST', WORKER, OLD, 'false'), ('POST', WORKER, NEW, 'true'),
+        ('POST', BROKER, NEW, 'true'), ('POST', COORDINATOR, NEW, 'false'),
+        ('POST', BROKER, NEW, 'false'), ('POST', WORKER, NEW, 'false')]
+    assert render.owner_delay == render.broker_owner_delay == 0
+    assert release.record['topology'] == 'separate_broker'
+    for sid in original:
+        assert render.env[sid] == {**original[sid], 'MOYAI_BUILD_SHA': NEW}
+
+
+@pytest.mark.parametrize('brokers', [None, False, 0, 2])
+def test_split_preflight_requires_exact_broker_ownership(split_setup, brokers):
+    release, render, _ = split_setup
+    probe = render.probe
+    release.probe = lambda service: {**probe(service), 'brokers': brokers}
+    with pytest.raises(ReleaseError, match='Preflight'):
+        release.run()
+    assert render.calls == []
+
+
+@pytest.mark.parametrize('key,value', [
+    ('MOYAI_SEPARATE_BROKER', 'false'), ('ENCRYPTION_KEY', 'different'),
+    ('MOYAI_BUILD_SHA', NEW), ('RENDER_MIGRATION_STAGE', 'true'),
+    ('MAX_CONCURRENT_MODEL_REQUESTS', '64')])
+def test_split_preflight_refuses_inconsistent_broker_without_writes(split_setup, key, value):
+    release, render, _ = split_setup
+    render.env[BROKER][key] = value
+    with pytest.raises(ReleaseError):
+        release.run()
+    assert render.calls == []
+
+
+@pytest.mark.parametrize('counter', ['owners', 'brokers', 'model_requests', 'live_leases'])
+def test_old_broker_must_relinquish_ownership_and_requests_before_app_update(split_setup, counter):
+    release, render, _ = split_setup
+    probe = render.probe
+    def stale_broker(service):
+        state = probe(service)
+        if service.id == COORDINATOR and not render.broker_running:
+            state[counter] += 1
+        return state
+    release.probe = stale_broker
+    with pytest.raises(ReleaseError, match='Old broker ownership did not clear'):
+        release.run()
+    assert render.live[COORDINATOR]['commit']['id'] == OLD
+    assert not render.worker_running
+    assert not any(call[1] == COORDINATOR for call in render.calls)
+
+
+@pytest.mark.parametrize('activation', [False, True])
+def test_broker_deployment_failure_never_resumes_worker(split_setup, activation):
+    release, render, _ = split_setup
+    call = render.call
+    def fail_broker(method, path, body=None):
+        if method == 'POST' and BROKER in path:
+            if (render.env[BROKER]['RENDER_MIGRATION_STAGE'] == 'false') == activation:
+                render.fail_service = BROKER
+        return call(method, path, body)
+    render.call = fail_broker
+    with pytest.raises(ReleaseError, match='Render deployment failed'):
+        release.run()
+    assert not render.worker_running
+    assert render.env[WORKER]['RENDER_MIGRATION_STAGE'] == 'true'
+    assert render.live[COORDINATOR]['commit']['id'] == (NEW if activation else OLD)
+    assert [call for call in render.calls if call[0] == 'POST' and call[1] == WORKER] == [
+        ('POST', WORKER, OLD, 'false'), ('POST', WORKER, NEW, 'true')]
+
+
+def test_broker_http_readiness_is_required_even_when_render_deploy_is_live(split_setup):
+    release, render, _ = split_setup
+    probe = render.probe
+    def unready_broker(service):
+        if service.id == BROKER and service.sha == NEW and not service.probe_options()['staged']:
+            return {'ok': False}
+        return probe(service)
+    release.probe = unready_broker
+    with pytest.raises(ReleaseError, match='runtime checks'):
+        release.run()
+    assert render.live[BROKER]['commit']['id'] == NEW
+    assert not render.worker_running
+
+
+def test_broker_dashboard_edits_stop_release_without_overwriting_them(split_setup):
+    release, render, _ = split_setup
+    probe = render.probe
+    def changed_broker(service):
+        state = probe(service)
+        if service.id == WORKER and render.draining_seen:
+            render.env[BROKER]['MAX_CONCURRENT_MODEL_REQUESTS'] = '64'
+        return state
+    release.probe = changed_broker
+    with pytest.raises(ReleaseError, match='environment changed outside'):
+        release.run()
+    assert render.env[BROKER]['MAX_CONCURRENT_MODEL_REQUESTS'] == '64'
+    assert not any(call[1] == BROKER for call in render.calls)
+
+
+@pytest.mark.parametrize('preflight', [False, True])
+def test_split_noop_and_preflight_never_redeploy_services(split_setup, preflight):
+    release, render, github = split_setup
+    release.preflight_only = preflight
+    if not preflight:
+        github.sha = OLD
+    release.run()
+    assert render.calls == []
+    assert release.record['status'] == ('preflight_passed' if preflight else 'success')
+
+
+def test_legacy_combined_broker_without_separate_lock_can_upgrade(setup):
+    release, render, _ = setup
+    probe = render.probe
+    def legacy_lock(service):
+        state = probe(service)
+        if service.sha == OLD and 'brokers' in state:
+            state['brokers'] = 0
+        return state
+    release.probe = legacy_lock
+    release.run()
+    assert release.record['status'] == 'success'
 
 
 def test_release_pins_one_commit_and_orders_all_four_deployments(setup):

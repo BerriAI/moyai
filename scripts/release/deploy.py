@@ -1,4 +1,4 @@
-"""Coordinate the existing Render coordinator + worker; never deploy on import.
+"""Coordinate the verified Render topology; never deploy on import.
 
 Run via .github/workflows/deploy-production.yml. Requests that change state are
 never retried automatically: a lost response may still mean Render accepted it.
@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent
 REPOSITORY = 'BerriAI/moyai'
 COORDINATOR = 'srv-db41eiqj9qps73fpuan0'
 WORKER = 'srv-db4s0b142hec73epgpt0'
+BROKER = 'srv-db4tlsajnfac738gigb0'
+SERVICE_NAMES = {'coordinator': 'moyai-private', 'worker': 'moyai-worker', 'broker': 'moyai-broker'}
 MUTABLE = {'MOYAI_BUILD_SHA', 'MAINTENANCE_DRAIN', 'RENDER_MIGRATION_STAGE'}
 ACTIVE_DEPLOYS = {'created', 'queued', 'build_in_progress', 'pre_deploy_in_progress', 'update_in_progress'}
 FAILED_DEPLOYS = {'build_failed', 'pre_deploy_failed', 'update_failed', 'canceled', 'deactivated'}
@@ -227,7 +229,7 @@ class Release:
     def inspect(self, service_id, role):
         service = self.render.call('GET', '/services/' + service_id)
         details = service['serviceDetails']
-        expected_name = 'moyai-private' if role == 'coordinator' else 'moyai-worker'
+        expected_name = SERVICE_NAMES[role]
         auto_off = service.get('autoDeployTrigger') == 'off' or (
             not service.get('autoDeployTrigger') and service.get('autoDeploy') == 'no')
         if (service['name'] != expected_name or service['type'] != 'private_service'
@@ -235,7 +237,7 @@ class Release:
                 or service.get('branch') != 'main' or service.get('repo', '').removesuffix('.git') != 'https://github.com/' + REPOSITORY
                 or details['region'] != 'oregon' or details['numInstances'] != 1 or details.get('autoscaling')
                 or details.get('sshAddress') != service_id + '@ssh.oregon.render.com'):
-            raise ReleaseError('Service topology changed. This workflow supports the verified one-coordinator/one-worker setup only.')
+            raise ReleaseError('Service topology changed. This workflow supports one coordinator, one worker and an optional separate broker only.')
         deploys = self.deploys(service_id)
         if any(d['status'] in ACTIVE_DEPLOYS for d in deploys):
             raise ReleaseError('Another Render deployment is active; no overlapping release is allowed.')
@@ -251,7 +253,8 @@ class Release:
                 or env.get('MOYAI_DATABASE_INITIALIZE', '').lower() != 'false'
                 or not all(env.get(k) for k in ('MOYAI_DATABASE_URL', 'MOYAI_DATABASE_SCHEMA',
                     'OBJECT_STORAGE_BUCKET', 'SESSION_SECRET', 'ENCRYPTION_KEY'))
-                or env.get('MOYAI_SEPARATE_BROKER', 'false').lower() != 'false'):
+                or env.get('MOYAI_SEPARATE_BROKER', 'false').lower() not in {'true', 'false'}
+                or (role == 'broker' and env.get('MOYAI_SEPARATE_BROKER', '').lower() != 'true')):
             raise ReleaseError('Production is not at a clean matching-build baseline. Inspect the prior release receipt before retrying.')
         item = Service(service_id, role, dict(env), dict(env), sha, live[0]['id'])
         self.expected[service_id] = item
@@ -313,19 +316,22 @@ class Release:
         self.wait(lambda: self.probe(service).get('ok'), 'Live deployment did not pass runtime checks.', 300)
 
     @staticmethod
-    def settled(state, owners, *, drained=False):
-        keys = ('owners', 'coordinators', 'unsafe_sessions', 'legacy_active_sessions', 'model_requests', 'live_leases')
+    def settled(state, owners, *, drained=False, brokers=None):
+        keys = ('owners', 'coordinators', 'brokers', 'unsafe_sessions', 'legacy_active_sessions', 'model_requests', 'live_leases')
         if not state.get('ok') or any(type(state.get(key)) is not int for key in keys):
             return False
-        return (state['owners'] == owners and state['coordinators'] == 1 and (not drained or
-                all(state[key] == 0 for key in keys[2:])))
+        # Legacy combined builds predate the broker lock. New combined builds
+        # hold it in the coordinator; split rollouts require an exact count.
+        return (state['owners'] == owners and state['coordinators'] == 1
+                and (state['brokers'] in (0, 1) if brokers is None else state['brokers'] == brokers)
+                and (not drained or all(state[key] == 0 for key in keys[3:])))
 
     @classmethod
-    def execution_stopped(cls, state):
+    def execution_stopped(cls, state, *, brokers=None):
         # Drain session state while workers can still complete it. After staging,
         # a new Stop request needs the replacement worker to finish; it must not
         # block the ownership handoff. Still fence actual workers and execution.
-        return (cls.settled(state, 1) and state['model_requests'] == 0
+        return (cls.settled(state, 1 + (brokers or 0), brokers=brokers) and state['model_requests'] == 0
                 and state['live_leases'] == 0)
 
     def run(self):
@@ -336,13 +342,20 @@ class Release:
             self.wait(lambda: self.github.ready(sha), 'CI did not finish before the release deadline; no production changes made.', 1800)
             coordinator, owner = self.inspect(COORDINATOR, 'coordinator')
             worker, worker_owner = self.inspect(WORKER, 'worker')
-            if owner != worker_owner or coordinator.sha != worker.sha or any(
-                    coordinator.env.get(k, '') != worker.env.get(k, '') for k in SHARED_KEYS):
-                raise ReleaseError('The two services do not share the same build and runtime configuration.')
+            split = coordinator.env.get('MOYAI_SEPARATE_BROKER', 'false').lower() == 'true'
+            services = [coordinator, worker]
+            self.check_shared(coordinator, owner, worker, worker_owner, split)
+            broker = None
+            if split:
+                broker, broker_owner = self.inspect(BROKER, 'broker')
+                self.check_shared(coordinator, owner, broker, broker_owner, split)
+                services.append(broker)
+            owners, brokers = len(services), 1 if split else None
+            self.record['topology'] = 'separate_broker' if split else 'combined_broker'
             self.record['previous_commit'] = coordinator.sha
             self.github.forward_from(coordinator.sha, sha)
-            for service in (coordinator, worker):
-                if not self.settled(self.probe(service), 2):
+            for service in services:
+                if not self.settled(self.probe(service), owners, brokers=brokers):
                     raise ReleaseError('Preflight SSH, health, configuration or ownership check failed; no production changes made.')
             if self.preflight_only:
                 self.record['status'] = 'preflight_passed'
@@ -356,22 +369,36 @@ class Release:
                 self.configure(worker, {'MAINTENANCE_DRAIN': 'true'})
                 self.deploy(worker, worker.sha)
                 self.phase('Wait for active work to reach saved boundaries')
-                self.wait(lambda: self.settled(self.probe(worker), 2, drained=True),
+                self.wait(lambda: self.settled(self.probe(worker), owners, brokers=brokers, drained=True),
                           'Drain timed out. New execution remains paused; no user sessions were cancelled.', self.drain_timeout)
                 self.phase('Stage the replacement worker without consuming jobs')
                 self.configure(worker, {'RENDER_MIGRATION_STAGE': 'true', 'MOYAI_BUILD_SHA': sha})
                 self.deploy(worker, sha)
                 self.phase('Confirm all old execution workers have exited')
-                self.wait(lambda: self.execution_stopped(self.probe(coordinator)),
+                self.wait(lambda: self.execution_stopped(self.probe(coordinator), brokers=brokers),
                           'Old worker ownership did not clear; the coordinator was not changed.', 600)
+                if broker:
+                    self.phase('Stage the replacement broker after execution has stopped')
+                    self.configure(broker, {'RENDER_MIGRATION_STAGE': 'true', 'MOYAI_BUILD_SHA': sha})
+                    self.deploy(broker, sha)
+                    self.phase('Confirm old broker ownership and requests have cleared')
+                    self.wait(lambda: self.execution_stopped(self.probe(coordinator), brokers=0),
+                              'Old broker ownership did not clear; the coordinator was not changed.', 600)
                 self.phase('Deploy the coordinator at the selected commit')
                 self.configure(coordinator, {'MOYAI_BUILD_SHA': sha})
                 self.deploy(coordinator, sha)
+                if broker:
+                    self.phase('Activate and verify the matching broker before resuming execution')
+                    self.configure(broker, {'RENDER_MIGRATION_STAGE': 'false'})
+                    self.deploy(broker, sha)
+                    self.wait(lambda: all(self.execution_stopped(self.probe(s), brokers=1)
+                                          for s in (coordinator, broker)),
+                              'Broker runtime checks failed; the worker remains staged.', 300)
                 self.phase('Activate the matching worker and resume queued work')
                 self.configure(worker, {'RENDER_MIGRATION_STAGE': 'false', 'MAINTENANCE_DRAIN': 'false'})
                 self.deploy(worker, sha)
-                self.phase('Verify both services, preserved settings and singleton ownership')
-                self.wait(lambda: all(self.settled(self.probe(s), 2) for s in (coordinator, worker)),
+                self.phase('Verify every service, preserved settings and singleton ownership')
+                self.wait(lambda: all(self.settled(self.probe(s), owners, brokers=brokers) for s in services),
                           'Final runtime checks failed; inspect the release receipt.', 300)
                 self.unchanged()
             self.record['status'] = 'success'
@@ -381,6 +408,13 @@ class Release:
             self.record['reason'] = str(exc) if isinstance(exc, ReleaseError) else 'Release interrupted or unexpected response; inspect the last recorded phase.'
             self.save()
             raise
+
+    @staticmethod
+    def check_shared(coordinator, owner, service, service_owner, split):
+        if (owner != service_owner or coordinator.sha != service.sha
+                or (service.env.get('MOYAI_SEPARATE_BROKER', 'false').lower() == 'true') != split
+                or any(coordinator.env.get(k, '') != service.env.get(k, '') for k in SHARED_KEYS)):
+            raise ReleaseError('The services do not share the same build and runtime configuration.')
 
 
 def main():

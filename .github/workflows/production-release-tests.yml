@@ -1,10 +1,10 @@
 name: Production release rehearsal
 on:
   pull_request:
-    paths: ['scripts/release/**', 'tests/release/**', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
+    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
   push:
     branches: [main]
-    paths: ['scripts/release/**', 'tests/release/**', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
+    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
 permissions:
   contents: read
 jobs:
