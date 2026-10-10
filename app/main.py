@@ -1080,6 +1080,12 @@ def _create_app(settings, store):
                 result = {'error': exc.detail, 'status_code': exc.status_code}
             await checkpoints.flush()
             return result
+        if body.name == 'sessions_read':
+            from .session_read import read_session
+            try:
+                return await asyncio.to_thread(read_session, session_lifecycle, run, body.arguments)
+            except ValidationError:
+                raise HTTPException(422, 'Use a session ID or URL, nonnegative cursors, and a limit from 1 to 20.') from None
         if body.name == 'sessions_search':
             try:
                 return session_lifecycle.search(run, body.arguments)
