@@ -128,7 +128,7 @@ class SlackSessions:
         visible, prompt = routing_text(text, mention)
         # A mention can be the subject of a question to somebody else:
         # "@OtherAgent what is @Moyai?" must not wake both agents.
-        addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?((?:<@[UW][A-Z0-9]{7,30}>[,:]?\s*)+)',
+        addressed = re.match(r'^\s*(?:(?i:hey|hi|hello)[,:]?\s+)?(<@[UW][A-Z0-9]{7,30}>(?:[,:]?\s*(?:(?i:and)\s+|&(?:amp;)?\s*)?<@[UW][A-Z0-9]{7,30}>)*)',
                              visible.translate(str.maketrans('', '', '*_~')))
         if addressed and mention not in addressed[1]:
             return {'ok': True}
