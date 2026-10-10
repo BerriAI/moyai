@@ -98,6 +98,8 @@ class Store:
     def _initialize(self, directory, default_model, object_storage):
         if self.schema_updates:
             self._initialize_schema(default_model)
+            from .swarms import initialize_schema
+            initialize_schema(self)
         if not self.database:
             self.path.chmod(0o600)
         self.objects = object_storage if object_storage is not None else ObjectStorage()
@@ -525,9 +527,15 @@ class Store:
             return None
         row = rows[0]
         row["plugins"] = json.loads(row["plugins"])
+        mission = self.rows('SELECT * FROM swarm_missions WHERE run_id=?', (run_id,), connection=connection)
+        if mission:
+            from .swarms import public_mission
+            row['swarm'] = public_mission(mission[0])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, swarm_budget_seconds=None, durable_submit=None, swarm_bootstrap=None):
+        if swarm_budget_seconds is not None and (not chat_enabled or mode != 'modal' or metadata_request or not durable_submit):
+            raise ValueError('Swarm mode requires a durable cloud chat session.')
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
         run_id = uuid4().hex
         stamp = now()
@@ -541,6 +549,9 @@ class Store:
                 if previous:
                     if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
+                    mission = conn.execute('SELECT budget_seconds FROM swarm_missions WHERE run_id=?', (previous['run_id'],)).fetchone()
+                    if (mission['budget_seconds'] if mission else None) != swarm_budget_seconds:
+                        raise ValueError('That submission ID was already used for different content.')
                     if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
@@ -579,6 +590,12 @@ class Store:
                     complete_in(conn, run_id, message_id, stamp, initial=True)
             elif attachment_ids:
                 raise ValueError('Attachments require a chat session.')
+            if swarm_budget_seconds is not None:
+                from .swarms import create_in
+                create_in(conn, run_id, swarm_budget_seconds, stamp)
+                if swarm_bootstrap:
+                    swarm_bootstrap(conn, run_id, message_id, stamp)
+                durable_submit(conn, {'id': run_id})
         if not metadata_request:
             self.event(run_id, "status", "Task queued")
         return self.run(run_id)
@@ -645,7 +662,10 @@ class Store:
             WHERE m.run_id=? AND m.status!='deleted'
             ORDER BY CASE WHEN m.role='user' AND m.started_at='' THEN 1 ELSE 0 END,
                 COALESCE(NULLIF(m.started_at,''),m.created_at),m.id""", (run_id,), connection=connection)
+        generated = {row['id'] for row in self.rows("SELECT id FROM messages WHERE run_id=? AND client_id LIKE 'swarm:%'", (run_id,), connection=connection)}
         for message in messages:
+            if message['id'] in generated:
+                message['source'] = 'swarm'
             slack_user = message.pop('slack_reply_user')
             name, email = message.pop('sender_name'), message.pop('sender_email')
             prefix = f'Slack reply from {slack_user}:\n'
@@ -688,6 +708,12 @@ class Store:
                     or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
+        from .swarms import execution_policy, remaining_seconds
+        mission = execution_policy(self, run_id, connection=conn)
+        if mission and (mission['status'] != 'active' or remaining_seconds(mission) <= 0):
+            if mission['status'] in {'paused', 'blocked'} and remaining_seconds(mission) > 0:
+                raise ValueError('Resume the swarm before sending a new message. Your draft has not been sent.')
+            raise ValueError('This swarm has ended. Start a new mission to continue.')
         if metadata_request:
             from .session_metadata import complete_in
             count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id=? AND role='user' AND status!='deleted'", (run_id,)).fetchone()[0]
@@ -738,7 +764,7 @@ class Store:
                 return None
             if conn.execute("SELECT 1 FROM messages WHERE run_id=? AND status='running'", (run_id,)).fetchone():
                 return None
-            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 WHEN send_immediately=1 THEN 1 ELSE 2 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
+            row = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='user' AND status='queued' ORDER BY CASE WHEN id=? THEN 0 WHEN send_immediately=1 THEN 1 WHEN client_id LIKE 'swarm:%' THEN 3 ELSE 2 END,id LIMIT 1", (run_id, run['steer_message_id'])).fetchone()
             if not row:
                 return None
             conn.execute("UPDATE messages SET status='running',started_at=? WHERE id=?", (now(), row["id"]))

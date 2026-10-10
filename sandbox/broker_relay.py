@@ -200,7 +200,7 @@ class BrokerRelay:
                         try:
                             name = json.loads(raw).get('name')
                             tool_read = isinstance(name, str) and name in relay.retry_safe_tools
-                            control_call = name in {'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
+                            control_call = name in {'swarm_start', 'agents_fanout', 'agents_retry', 'credentials_request', 'credentials_report_failure', 'credentials_http_request'}
                             # These broker operations only read repository/PR
                             # metadata. Git mutations happen after their reply.
                             repository_read = (relay.repository_startup and self.command == 'POST'

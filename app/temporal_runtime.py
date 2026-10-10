@@ -76,7 +76,9 @@ class TemporalRunManager(DurableRunner):
         except TimeoutError:
             pass
 
-    async def cancel(self, run_id):
+    async def cancel(self, run_id, *, swarm_stop=True):
+        if swarm_stop:
+            await database(self.swarms.stop, run_id)
         state = self.state(run_id)
         if (not (self.store.run(run_id) or {}).get('deletion_requested_at')
                 and not self.is_active(run_id) and state.get('phase') not in {'warm', 'warm_cleanup'}
@@ -120,6 +122,8 @@ class TemporalRunManager(DurableRunner):
             if (state.get('phase') in {'warm', 'warm_cleanup'}
                     or (state.get('computer_only') and state.get('phase') != 'idle')):
                 self.submit(self.store.run(row['run_id']))
+        for row in self.store.rows("SELECT run_id FROM swarm_missions WHERE status='active'"):
+            self.submit(self.store.run(row['run_id']))
         # An external write interrupted during Render shutdown is ambiguous;
         # preserve it for review instead of treating it as an unexecuted action.
         if not self.settings.moyai_separate_broker:

@@ -378,7 +378,7 @@ def test_agent_entrypoint_dispatches_claude_without_importing_hermes(tmp_path, m
     assert json.loads(read_records(tmp_path / 'session/context.sqlite3')[-1]['text'])['content'] == 'SDK result'
 
 
-@pytest.mark.parametrize('boundary', ['rotation', 'agents', 'credentials'])
+@pytest.mark.parametrize('boundary', ['rotation', 'agents', 'swarm', 'credentials'])
 def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypatch, recovery_catalog, boundary):
     """Real relay/journal/final emitter; only the model invocation is scripted."""
     from sandbox import agent
@@ -406,7 +406,7 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
             if body['name'] == 'github_repositories':
                 reads.append(body)
                 return self.reply({'repositories': []}, 524 if len(reads) == 1 else 200)
-            self.reply({'moyai_wait_group' if boundary == 'agents' else 'moyai_wait_credential': handle})
+            self.reply({'moyai_wait_group' if boundary in {'agents', 'swarm'} else 'moyai_wait_credential': handle})
     async def invoke(runtime, prompt, system_message):
         with httpx.Client(base_url=runtime.context.relay.url,
                           headers={'Authorization': 'Bearer private-capability'}, timeout=5) as client:
@@ -421,7 +421,7 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
                 runtime.journal.tool_finished('read-retry', response.text)
             assert response.status_code == 200
             if boundary != 'rotation':
-                name = 'agents_fanout' if boundary == 'agents' else 'credentials_request'
+                name = {'agents': 'agents_fanout', 'swarm': 'swarm_start', 'credentials': 'credentials_request'}[boundary]
                 runtime.journal.tool_started('wait', name, {})
                 response = client.post('/tools/call', json={'name': name, 'arguments': {}})
                 assert response.status_code == 200
@@ -446,7 +446,7 @@ def test_recovered_broker_read_preserves_emitted_continuation(tmp_path, monkeypa
         assert len(reads) == 2 and not diagnostics and not relay.last_error and not relay.uncertain_tool
     final = next(extra for kind, _, extra in events if kind == 'final')
     assert final['continuation'] and not final['completed']
-    assert final['wait_group'] == (handle if boundary == 'agents' else '')
+    assert final['wait_group'] == (handle if boundary in {'agents', 'swarm'} else '')
     assert final['wait_credential'] == (handle if boundary == 'credentials' else '')
     assert 'transport_retry' not in final and 'transport_failure' not in final
     store = ContextStore(tmp_path / 'session/context.sqlite3', spec['run_id'])

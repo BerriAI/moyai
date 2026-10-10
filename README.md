@@ -12,6 +12,8 @@ Use ↑/↓ and Enter to select, or Escape to close. **Cmd+Shift+O**
 
 A self-hosted coding agent for background work. Give it a task from your browser or Slack; it edits code, runs tests, and opens a pull request for review. Send corrections while it works or resume with saved files and conversation history.
 
+Choose **Swarm** to give a team one mission and a maximum duration. Watch real delegated agents in **Space**, open their conversations, and steer the coordinator through chat. Swarms keep their saved deadline across restarts and support Pause, Resume, and Stop. Requires the cloud runtime and Temporal; see [Swarm mode](docs/swarm-mode.md).
+
 Search sessions by title, original request, or words inside saved user and assistant messages. Matching excerpts appear in the sidebar, including agent conversations and side chats. Search covers older sessions beyond the recent list and follows your selected My sessions/All sessions view. Archived sessions remain recoverable by asking Moyai in chat.
 
 Confirm **Delete session** once to stop its agents, close their sandboxes, and remove the session for everyone. Cleanup continues if you close the page or the app restarts, and retries automatically when a sandbox provider is temporarily unavailable. New work is blocked while the session shows **Deleting**. Stored conversation data, files, billing records, and backups remain retained; independent side chats remain available.

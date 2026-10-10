@@ -629,7 +629,7 @@ test('model and session scope pickers retain choices through real controller upd
     const response = await route.fetch();
     const data = await response.json();
     data.models.push({ id: 'synthetic-model', name: 'Synthetic model', default_harness: 'codex' });
-    data.harnesses.push({ id: 'codex', name: 'Codex' });
+    data.harnesses = [{ id: 'hermes', name: 'Hermes' }, { id: 'codex', name: 'Codex' }];
     await route.fulfill({ response, json: data });
   });
   await page.reload();
@@ -1188,8 +1188,9 @@ test('prefilled session repository stays editable and survives draft restoration
   await page.evaluate(() => navigate('tasks'));
   await page.getByLabel('Session options', { exact: true }).click();
   assert.equal(await page.locator('#repo').inputValue(), 'https://github.com/example/first');
-  await page.locator('#repo').press('End');
-  await page.locator('#repo').pressSequentially('-updated');
+  await page.locator('#repo').focus();
+  await page.locator('#repo').evaluate(input => input.setSelectionRange(input.value.length, input.value.length));
+  await page.keyboard.type('-updated');
   await page.locator('#repo').press('Tab');
   assert.equal(await page.evaluate(() => state.newDraft.repo), 'https://github.com/example/first-updated');
 });

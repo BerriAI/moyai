@@ -21,6 +21,25 @@ const agentSessions=[
 const model='openai/gpt-6-astra';
 const recipe=(name,repository)=>({name,repository,ref:'main',setup_mode:'detect',clone_access:'github',apt_packages:[],setup:'',startup:'',verify:'',shutdown:'',instructions:''});
 let fixture='populated';
+let swarmFixtureState='active',swarmFixtureDeadline=new Date(Date.now()+1800000).toISOString(),swarmFixtureMessages=[];
+const swarmRoot='a'.repeat(32);
+function swarmFixtureRun(id=swarmRoot){
+ let children=[
+  {id:'b'.repeat(32),agent_label:'Research',harness:'claude-agent-sdk',model:'anthropic/claude-opus-4-6',status:'idle',children:[{id:'e'.repeat(32),agent_label:'Sources',harness:'opencode',model:'openai/gpt-6-astra',status:'idle',children:[]}]},
+  {id:'c'.repeat(32),agent_label:'Build',harness:'codex',model:'openai/gpt-6-astra',status:'running',children:[]},
+  {id:'d'.repeat(32),agent_label:'Review',harness:'hermes',model:'openai/gpt-6-astra',status:'running',children:[]},
+ ];
+ if(fixture==='swarm-ten'){
+  const harnesses=['claude-agent-sdk','codex','hermes','opencode','deepagents','tool-loop','pi'];
+  const labels=['Explore','Research','Design','Build','Review','Challenge','Verify','Simplify','Plan','Synthesize'];
+  children=labels.map((agent_label,index)=>({id:(index+20).toString(16).padStart(32,'0'),agent_label,harness:harnesses[index%harnesses.length],model:index%7===0?'anthropic/claude-opus-4-6':'openai/gpt-6-astra',status:index%3===0?'idle':'running',children:[]}));
+ }
+ const flat=children.flatMap(child=>[child,...child.children]);
+ if(swarmFixtureState!=='active')flat.forEach(child=>{if(child.status==='running')child.status='cancelled';});
+ const child=flat.find(child=>child.id===id);
+ return {id,display_title:child?.agent_label||'Build a better way to work together',prompt:child?'Review the implementation and report findings.':'Research a useful feature, build a small prototype, and review the result.',status:child?.status||(swarmFixtureState==='active'?'waiting_children':swarmFixtureState==='blocked'?'failed':'cancelled'),chat_enabled:true,mode:'modal',harness:child?.harness||'claude-agent-sdk',model:child?.model||'anthropic/claude-opus-4-6',active_model:child?.model||'anthropic/claude-opus-4-6',plugins:[],repo_url:'',parent_run_id:child?swarmRoot:null,snapshot_id:'synthetic',created_at:stamp,updated_at:stamp,approvals:[],credential_requests:[],artifacts:[],pull_requests:[],agents:{groups:child?[]:[{id:'fixture-team',label:'Prototype team',status:'working',children}]},...(child?{}:{swarm:{status:swarmFixtureState,budget_seconds:1800,ends_at:swarmFixtureDeadline,round:2,reason:swarmFixtureState==='paused'?'Paused by you. Resume before the original time limit.':swarmFixtureState==='blocked'?'The model request failed. Your work is saved.':''}}),messages:child?[{id:11,role:'assistant',status:'completed',created_at:stamp,content:`${child.agent_label}: I checked the implementation and saved the findings for the coordinator. This is a synthetic preview response.`}]:[{id:1,role:'user',user_name:'Alex',status:'completed',content:'Research a useful feature, build a small prototype, and review the result.'},{id:2,role:'assistant',status:'completed',content:'Research is complete. Build and review are working in parallel.'},{id:3,role:'user',source:'swarm',client_id:'swarm:fixture:2',status:'completed',content:'Continue the mission with the next useful step.'},...swarmFixtureMessages],events:[{id:1,kind:'agents',message:'Research saved its findings. Build and Review are working.',created_at:stamp,data:{phase:'agent-result',input_id:3}},{id:2,kind:'tool',message:'Build is checking the prototype.',created_at:stamp,data:{phase:'tool',name:'terminal',input_id:3}}]};
+}
+
 let accountLinkPolls=0;
 const skills=[
  ['review-pr','Review a pull request for correctness, regressions, and missing tests.','organization'],
@@ -108,6 +127,7 @@ const server=http.createServer(async(req,res)=>{
  if(p==='/'){
   fixture=url.searchParams.get('fixture')||'populated';
   accountLinkPolls=0;
+  if(fixture.startsWith('swarm')){swarmFixtureState=fixture==='swarm-paused'?'paused':fixture==='swarm-expired'?'expired':fixture==='swarm-error'?'blocked':'active';swarmFixtureDeadline=new Date(Date.now()+(swarmFixtureState==='expired'?-60000:1800000)).toISOString();swarmFixtureMessages=[];}
   let html=fs.readFileSync(path.join(root,'index.html'),'utf8');
   res.writeHead(200,{'Content-Type':'text/html','Cache-Control':'no-store'});return res.end(html);
  }
@@ -118,7 +138,8 @@ const server=http.createServer(async(req,res)=>{
  const role=fixture==='member'?'member':'admin',empty=fixture==='empty';
  if(delayMs&&req.method==='GET'&&p.startsWith('/api/'))await new Promise(resolve=>setTimeout(resolve,delayMs));
  let body={};if(req.method!=='GET'){const chunks=[];for await(const chunk of req)chunks.push(chunk);try{body=JSON.parse(Buffer.concat(chunks).toString()||'{}');}catch{return json(res,400,{detail:'Invalid JSON'});}}
- const supportedWrite = (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
+ const swarmPreview=fixture.startsWith('swarm');
+ const supportedWrite = (swarmPreview&&req.method==='POST'&&(p==='/api/runs'||/^\/api\/runs\/[a-f0-9]{32}\/(messages|cancel|swarm\/(pause|resume))$/.test(p))) || (req.method==='PUT' && ['/api/settings/preferences','/api/settings/sandboxes','/api/settings/session-titles','/api/memory/preferences','/api/admin/users/role'].includes(p)) ||
   (req.method==='POST' && p==='/api/memory') ||
   (['PUT','DELETE'].includes(req.method) && /^\/api\/memory\/[^/]+$/.test(p)) ||
   (req.method==='POST' && /^\/api\/automations\/[^/]+\/state$/.test(p));
@@ -135,11 +156,17 @@ const server=http.createServer(async(req,res)=>{
   }
   return json(res,200,role==='admin'?sandboxConnection:{provider:sandboxConnection.provider});
  }
+ if(swarmPreview&&p==='/api/runs'&&req.method==='POST'){swarmFixtureState='active';swarmFixtureDeadline=new Date(Date.now()+(body.swarm?.budget_seconds||1800)*1000).toISOString();return json(res,200,swarmFixtureRun());}
+ if(swarmPreview&&/^\/api\/runs\/[a-f0-9]{32}\/(swarm\/(pause|resume)|cancel)$/.test(p)){swarmFixtureState=p.endsWith('/pause')?'paused':p.endsWith('/resume')?'active':'stopped';const {messages,events,agents,approvals,credential_requests,...summary}=swarmFixtureRun();return json(res,200,summary);}
+ if(swarmPreview&&p.endsWith('/messages')&&req.method==='POST'){swarmFixtureMessages.push({id:10+swarmFixtureMessages.length,role:'user',user_name:'Alex',status:'completed',content:body.content});return json(res,200,swarmFixtureRun());}
+ if(swarmPreview&&/^\/api\/runs\/[a-f0-9]{32}\/events$/.test(p)){res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache','Connection':'keep-alive'});res.write(': synthetic preview connected\n\n');return;}
+ if(swarmPreview&&p.endsWith('/files'))return json(res,200,{files:[]});
+ if(swarmPreview&&p.endsWith('/activity'))return json(res,200,{events:swarmFixtureRun().events,has_more:false});
  if(p==='/api/session')return json(res,200,{authenticated:true,local:true,role,user_id:'user-0',preferences:chatPreferences,csrf:'local-fixture',identity:{email:'alex@example.com',name:'Alex Morgan'}});
- if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]}],models:[{id:model,name:'GPT-6 Astra'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
+ if(p==='/api/config')return json(res,200,{missing:[],cloud_ready:true,harness:'claude-agent-sdk',harnesses:[{id:'claude-agent-sdk',name:'Claude Agent SDK',models:[model]},{id:'codex',name:'Codex'},{id:'hermes',name:'Hermes'},{id:'opencode',name:'OpenCode'}],models:[{id:model,name:'GPT-6 Astra'},{id:'anthropic/claude-opus-4-6',name:'Claude Opus'}],model,execution_engine:'Temporal',execution_connected:true,checkpoint_interval_seconds:600,max_concurrent_runs:100,parallel_agents_enabled:true,max_parallel_agents:100,sandbox_idle_seconds:300,run_timeout_seconds:0});
  if(p==='/api/organization')return json(res,200,{name:'Example team',google_signin:true,activity:[],slack_sessions:{enabled:true,audience:'Workspace members',thread_reply_ready:true,direct_message_ready:true}});
- if(p==='/api/runs')return json(res,200,fixture==='agent-sidebar'?agentSessions:['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
- if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:['skill-picker','feedback'].includes(fixture),feedback_enabled:fixture==='feedback',mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',messages:fixture==='feedback'?[{id:1,role:'user',status:'completed',content:'Review the latest change.'},{id:2,role:'assistant',status:'completed',content:'The change looks good. I checked the API and its regression tests.'}]:[],events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
+ if(p==='/api/runs')return json(res,200,swarmPreview?[swarmFixtureRun()]:fixture==='agent-sidebar'?agentSessions:['Review release readiness','Investigate gateway latency','Update integration tests','Draft the engineering digest'].map((prompt,i)=>({id:String(i+1).repeat(32),prompt,status:'idle',updated_at:stamp,created_at:stamp,children:[]})));
+ if(/^\/api\/runs\/[0-9a-f]{32}$/.test(p))return json(res,200,swarmPreview?swarmFixtureRun(p.split('/').at(-1)):{id:p.split('/').at(-1),prompt:'Review release readiness',status:'completed',chat_enabled:['skill-picker','feedback'].includes(fixture),feedback_enabled:fixture==='feedback',mode:'modal',sandbox_provider:fixture==='modal-run'?'modal':'substrate',harness:'claude-agent-sdk',plugins:[],repo_url:'',messages:fixture==='feedback'?[{id:1,role:'user',status:'completed',content:'Review the latest change.'},{id:2,role:'assistant',status:'completed',content:'The change looks good. I checked the API and its regression tests.'}]:[],events:[{id:1,kind:'result',message:'Review complete. No changes needed.',created_at:stamp}],approvals:[],artifacts:[],updated_at:stamp,created_at:stamp});
  if(p==='/api/session-folders')return json(res,200,{folders:[]});
  if(p==='/api/connections')return json(res,200,connections);
  if(p==='/api/settings/preferences'){
