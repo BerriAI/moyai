@@ -76,9 +76,9 @@ async def delegate_known_jobs(agentswarm):
 | --- | --- |
 | `types.py`, `mission.py`: participant types, shared goal, internal deduplication, member protocol | `app/swarm_collaboration.py`: durable board, leadership, assignments and wakes |
 | `contracts.py`, `client.py`: validation, explicit partitions, receipts and results | `app/agents.py`, `app/swarm_backend.py`: owner scope, admission, snapshots and saved results |
-| `planning.py`: balanced runtime selection and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic ten-member bootstrap, inherited deadline and scheduling |
+| `planning.py`: balanced runtime selection and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic twenty-member bootstrap, inherited time policy and scheduling |
 
-Product Swarm mode uses `plan_swarm()` to choose ten neutral members across approved harness/model pairs, without preset roles. It commits the pinned roster, shared goal, scoped uploads and dispatch wakes atomically. `plan_team()` remains an explicit role-based planner for advanced callers.
+Product Swarm mode uses `plan_swarm()` to choose twenty neutral members across approved harness/model pairs, without preset roles. It commits the pinned roster, shared goal, scoped uploads and dispatch wakes atomically. Execution capacity controls how many can run at once; the rest wait in the durable queue. Existing swarms retain their saved roster. `plan_team()` remains an explicit role-based planner for advanced callers.
 
 A new host implements `SwarmBackend.call(name, arguments)` for `swarm_start`, `agents_fanout`, `agents_results`, `agents_wait`, `agents_send`, `agents_cancel` and `agents_retry`, plus the collaboration tools exposed to members. It must authenticate ownership, enforce budgets, persist deduplication and implement checkpoint/resume. The client interface alone does not provide durability.
 

@@ -12,7 +12,7 @@ import random
 
 ROUND_DELAY_SECONDS = 30
 MAX_CONTINUATION_CHARACTERS = 16000
-INITIAL_TEAM_SIZE = 10
+INITIAL_TEAM_SIZE = 20
 INITIAL_ROLES = (
     ('Mission analyst', 'Clarify the desired outcome, constraints, and acceptance criteria.'),
     ('Explorer', 'Develop a promising approach and explain why it fits the task.'),

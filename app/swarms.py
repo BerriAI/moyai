@@ -185,7 +185,7 @@ class SwarmMissions:
 
     def initial_plan(self, task, model):
         if self.manager.settings.max_parallel_agents < INITIAL_TEAM_SIZE:
-            raise ValueError('Swarm mode needs a worker-group limit of at least 10. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
+            raise ValueError(f'Swarm mode needs a worker-group limit of at least {INITIAL_TEAM_SIZE}. Ask the workspace administrator to raise MAX_PARALLEL_AGENTS.')
         return plan_swarm(task, runtimes=self.runtime_catalog(model, for_dispatch=True))
 
     def bootstrap_in(self, conn, run_id, message_id, stamp):
@@ -208,14 +208,14 @@ class SwarmMissions:
         runtimes = [{'id': uuid4().hex, 'harness': task.harness, 'model': task.model} for task in plan]
         pending = conn.execute("SELECT COUNT(*) FROM runs WHERE status NOT IN ('completed','failed','cancelled','interrupted','idle')").fetchone()[0]
         if pending + INITIAL_TEAM_SIZE > self.manager.settings.max_pending_runs:
-            raise ValueError('The session queue needs room for all 10 swarm workers. Wait for a task to finish.')
+            raise ValueError(f'The session queue needs room for all {INITIAL_TEAM_SIZE} swarm workers. Wait for a task to finish.')
         uploads = conn.execute('SELECT * FROM attachments WHERE message_id=?', (message_id,)).fetchall()
         if uploads:
             cutoff = (datetime.fromisoformat(stamp) - timedelta(days=1)).isoformat()
             used = conn.execute("SELECT COALESCE(SUM(size + CASE WHEN preview_ref!='' THEN preview_size ELSE length(preview) END),0) FROM attachments WHERE message_id IS NOT NULL OR created_at>=?", (cutoff,)).fetchone()[0]
             copies = INITIAL_TEAM_SIZE * sum(upload['size'] + (upload['preview_size'] if upload['preview_ref'] else len(upload['preview'])) for upload in uploads)
             if used + copies > self.manager.settings.attachment_storage_limit_mb * 1024 * 1024:
-                raise ValueError('Attachment storage needs room for the 10 swarm workers. Use smaller files or raise the workspace storage limit.')
+                raise ValueError(f'Attachment storage needs room for the {INITIAL_TEAM_SIZE} swarm workers. Use smaller files or raise the workspace storage limit.')
         group_id = uuid4().hex
         conn.execute('''INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at,runtime_assignments)
             VALUES(?,?,?,?,?,'running',?,?)''',
@@ -248,7 +248,7 @@ class SwarmMissions:
                              tuple(copy[column] for column in columns))
             self.manager.submit_in(conn, {'id': child_id})
         conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'agents',?,?,?)",
-                     (run_id, 'Queued 10 agents across configured harnesses. Workers start as capacity becomes available.',
+                     (run_id, f'Queued {INITIAL_TEAM_SIZE} agents across configured harnesses. Workers start as capacity becomes available.',
                       json.dumps({'group_id': group_id, 'phase': 'swarm_team_queued', 'workers': INITIAL_TEAM_SIZE}), stamp))
         return group_id
 

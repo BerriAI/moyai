@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from agent.swarm.planning import INITIAL_TEAM_SIZE
 from app.config import Settings
 from app.db import Store, now
 from app.main import NewRun, create_app, public_messages
@@ -58,7 +59,7 @@ def test_create_commits_mission_initial_input_and_outbox_atomically_and_idempote
     assert len(store.rows('SELECT run_id FROM swarm_missions')) == 1
 
 
-def bootstrap(manager, *, client_id='ten-agent-mission', attachment_ids=None):
+def bootstrap(manager, *, client_id='shared-agent-mission', attachment_ids=None):
     attach(manager)
     return manager.store.create_run('Compare options and deliver a recommendation. Preserve this final constraint.',
         '', 'modal', [], chat_enabled=True, model='anthropic/claude-opus-5-5', user_id='user:swarm',
@@ -66,12 +67,13 @@ def bootstrap(manager, *, client_id='ten-agent-mission', attachment_ids=None):
         durable_submit=manager.submit_in, swarm_bootstrap=manager.swarms.bootstrap_in)
 
 
-def test_initial_team_commits_ten_native_workers_with_pinned_diverse_runtimes(durable):
+def test_initial_team_commits_twenty_native_workers_with_pinned_diverse_runtimes(durable):
     manager, cloud, _ = durable
     manager.settings.swarm_models = 'anthropic/claude-opus-5-5,openai/gpt-6.1-sol'
     run = bootstrap(manager)
     children = manager.store.rows('SELECT * FROM runs WHERE parent_run_id=?', (run['id'],))
-    assert len(children) == 10 and len({child['agent_label'] for child in children}) == 10
+    assert len(children) == INITIAL_TEAM_SIZE == 20
+    assert len({child['agent_label'] for child in children}) == INITIAL_TEAM_SIZE
     assert {child['harness'] for child in children} == {
         'codex', 'claude-agent-sdk', 'hermes', 'opencode', 'deepagents', 'tool-loop', 'pi'}
     counts = [sum(child['harness'] == harness for child in children) for harness in {child['harness'] for child in children}]
@@ -91,9 +93,9 @@ def test_initial_team_commits_ten_native_workers_with_pinned_diverse_runtimes(du
     group = manager.swarms.initial_group(run['id'])
     team = manager.store.rows('SELECT * FROM swarm_teams WHERE group_id=?', (group['id'],))[0]
     assert team['task'] == run['prompt'] and team['leader_id'] == ''
-    assert {child['agent_label'] for child in children} == {f'Agent {i}' for i in range(1, 11)}
+    assert {child['agent_label'] for child in children} == {f'Agent {i}' for i in range(1, INITIAL_TEAM_SIZE + 1)}
     assert all('swarm_claim_lead' in child['prompt'] and 'swarm_publish' in child['prompt'] for child in children)
-    assert manager.coordinator.results(run['id'], group['id'])['total'] == 10
+    assert manager.coordinator.results(run['id'], group['id'])['total'] == INITIAL_TEAM_SIZE
     pinned = {child['id']: (child['harness'], child['model']) for child in children}
     again = bootstrap(manager)
     assert again['id'] == run['id']
@@ -116,7 +118,7 @@ def test_initial_team_failure_rolls_back_mission_children_and_dispatch(durable, 
     if failure == 'group_limit':
         manager.settings.max_parallel_agents = 3
     elif failure == 'queue_limit':
-        manager.settings.max_pending_runs = 10
+        manager.settings.max_pending_runs = INITIAL_TEAM_SIZE
     elif failure == 'unknown_model':
         manager.settings.swarm_models = 'disabled-model'
     else:
@@ -148,19 +150,19 @@ async def test_initial_team_queues_under_capacity_then_resumes_coordinator_with_
     for child in children:
         await drive(manager, child['id'])
         assert not any(machine.alive for machine in cloud.machines)
-    assert len(cloud.launches) == 10
+    assert len(cloud.launches) == INITIAL_TEAM_SIZE
     # Worker replacement retains the initial waiting state and pinned roster.
     replacement = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
     attach(replacement)
     await drive(replacement, root, phase='launch')
     spec = cloud.machines[-1].spec
     assert spec['prompt'].startswith(run['prompt'])
-    assert spec['agent_results']['total'] == spec['agent_results']['completed'] == 10
+    assert spec['agent_results']['total'] == spec['agent_results']['completed'] == INITIAL_TEAM_SIZE
     assert all(child['summary'] == 'Saved answer' for child in spec['agent_results']['children'])
-    assert len(cloud.launches) == 10  # Coordinator has not called a model yet.
+    assert len(cloud.launches) == INITIAL_TEAM_SIZE  # Coordinator has not called a model yet.
     await drive(replacement, root)
-    assert len(cloud.launches) == 11
-    assert len(replacement.coordinator.children(group['id'])) == 10
+    assert len(cloud.launches) == INITIAL_TEAM_SIZE + 1
+    assert len(replacement.coordinator.children(group['id'])) == INITIAL_TEAM_SIZE
 
 
 @pytest.mark.parametrize('control', ['pause', 'stop', 'expire'])
@@ -200,7 +202,7 @@ def test_initial_uploads_are_copied_into_each_child_attachment_scope(durable):
         assert manager.store.attachments.payload(row) == b'Important source'
         with pytest.raises(HTTPException):
             manager.store.attachments.broker_row(manager.store.run(unrelated), copied[0]['id'])
-    assert len(ids) == 10
+    assert len(ids) == INITIAL_TEAM_SIZE
     assert manager.store.messages(run['id'])[0]['attachments'][0]['id'] == upload['id']
 
 
@@ -219,7 +221,7 @@ def test_initial_upload_copies_respect_storage_limit_and_rollback_binding(durabl
     assert not manager.store.rows('SELECT * FROM agent_groups')
 
 
-def test_api_new_swarm_returns_ten_persisted_children_and_retry_keeps_same_team(tmp_path):
+def test_api_new_swarm_returns_twenty_persisted_children_and_retry_keeps_same_team(tmp_path):
     from test_spend import sign_in
     settings = Settings(_env_file=None, data_dir=tmp_path, public_url='https://workspace.test', workspace_password='test-workspace-password',
                         temporal_enabled=True, session_secret='stable-test-key', modal_token_id='fixture-token',
@@ -229,12 +231,13 @@ def test_api_new_swarm_returns_ten_persisted_children_and_retry_keeps_same_team(
     # Endpoint verification without starting a Temporal client or cloud worker.
     client = TestClient(app, base_url=settings.public_url)
     sign_in(app, client)
-    body = {'prompt': 'Compare two approaches', 'mode': 'modal', 'swarm': {'budget_seconds': 300}, 'client_id': 'api-ten-workers'}
+    assert client.get('/api/config').json()['swarm_initial_team_size'] == INITIAL_TEAM_SIZE
+    body = {'prompt': 'Compare two approaches', 'mode': 'modal', 'swarm': {'budget_seconds': 300}, 'client_id': 'api-shared-workers'}
     response = client.post('/api/runs', json=body)
     assert response.status_code == 201, response.text
     root = response.json()['id']
     children = app.state.store.rows('SELECT id FROM runs WHERE parent_run_id=?', (root,))
-    assert len(children) == 10
+    assert len(children) == INITIAL_TEAM_SIZE
     assert client.post('/api/runs', json=body).json()['id'] == root
     assert app.state.store.rows('SELECT id FROM runs WHERE parent_run_id=?', (root,)) == children
 
