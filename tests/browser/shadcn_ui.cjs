@@ -1466,6 +1466,81 @@ test('retained workspace tabs and toolbar actions survive focus updates and repe
   await page.evaluate(() => navigate('tasks'));
 });
 
+for (const width of [1440, 320]) test(`conversation space retains the composer through updates and releases on navigation at ${width}px`, async t => {
+  const page = await pageFor(t, 'tasks', 'conversation-space', width);
+  await page.route('**/api/runs/*/files', route => route.fulfill({ json: {
+    files: ['release-checks.md', 'reconnect.test.js'].map(name => ({
+      name, path: name, archive_path: `new-files/${name}`, kind: 'text', size: 128,
+    })),
+  } }));
+  await page.evaluate(() => {
+    const mount = MoyaiSpace.mount;
+    window.conversationSpaceLifecycle = { mounts: 0, cleanups: 0 };
+    MoyaiSpace.mount = (canvas, options) => {
+      const cleanup = mount(canvas, options);
+      if (canvas?.id !== 'conversation-space-field') return cleanup;
+      window.conversationSpaceLifecycle.mounts++;
+      return () => { window.conversationSpaceLifecycle.cleanups++; cleanup(); };
+    };
+    return openRun('1'.repeat(32));
+  });
+  const header = page.locator('#header-actions');
+  const activity = header.locator('#toggle-details');
+  const files = header.locator('#files-button');
+  const panel = page.locator('#workspace-panel');
+  assert.equal(await activity.getAttribute('aria-controls'), 'workspace-panel');
+  assert.equal(await activity.getAttribute('aria-expanded'), 'false');
+  assert.equal(await files.isVisible(), false, 'Files stays hidden until the session has saved results');
+  await activity.focus();
+  await activity.press('Enter');
+  await panel.getByRole('heading', { name: 'Session activity', exact: true }).waitFor();
+  assert.equal(await activity.getAttribute('aria-expanded'), 'true');
+  assert.equal(await panel.getByRole('tab', { name: 'Activity', exact: true }).getAttribute('aria-selected'), 'true');
+  await panel.getByRole('button', { name: 'Hide workspace panel', exact: true }).click();
+  await panel.waitFor({ state: 'hidden' });
+  assert.equal(await activity.getAttribute('aria-expanded'), 'false');
+  await page.evaluate(() => updateChat({ ...state.chatRun, has_artifact: true }));
+  await header.getByRole('button', { name: 'Files · 2', exact: true }).waitFor();
+  await files.focus();
+  await files.press('Enter');
+  await panel.getByRole('searchbox', { name: 'Find a saved file', exact: true }).waitFor();
+  assert.equal(await panel.locator('.panel-file-choice').count(), 2);
+  assert.equal(await panel.getByRole('tab', { name: 'Files', exact: true }).getAttribute('aria-selected'), 'true');
+  assert.equal(await activity.getAttribute('aria-expanded'), 'false');
+  await panel.getByRole('button', { name: 'Hide workspace panel', exact: true }).click();
+  await panel.waitFor({ state: 'hidden' });
+  const input = page.locator('#followup');
+  await input.fill('Keep my unfinished reply');
+  await page.evaluate(() => {
+    window.retainedConversationCanvas = document.querySelector('#conversation-space-field');
+    window.retainedConversationComposer = document.querySelector('#followup');
+    const next = structuredClone(state.chatRun);
+    next.messages.at(-1).content += '\n\nThe transcript was refreshed.';
+    updateChat(next);
+  });
+  await page.locator('#conversation').getByText('The transcript was refreshed.', { exact: true }).waitFor();
+  assert.equal(await input.evaluate(el => el.value), 'Keep my unfinished reply');
+  assert.deepEqual(await page.evaluate(() => ({
+    sameCanvas: document.querySelector('#conversation-space-field') === window.retainedConversationCanvas,
+    sameComposer: document.querySelector('#followup') === window.retainedConversationComposer,
+    focusRetained: document.activeElement === window.retainedConversationComposer,
+    rendered: window.retainedConversationCanvas.width > 0 && window.retainedConversationCanvas.height > 0,
+    hiddenFromAccessibility: window.retainedConversationCanvas.getAttribute('aria-hidden') === 'true',
+    ...window.conversationSpaceLifecycle,
+  })), { sameCanvas: true, sameComposer: true, focusRetained: true, rendered: true, hiddenFromAccessibility: true, mounts: 1, cleanups: 0 });
+  await page.evaluate(() => document.fonts.ready);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'The conversation stays within the viewport');
+  const composer = await page.locator('#message-form').boundingBox();
+  assert.ok(composer.width > 0 && composer.x >= 0 && composer.x + composer.width <= width + 1, 'The full reply composer stays reachable');
+  await page.evaluate(() => navigate('tasks'));
+  await page.locator('#prompt').waitFor();
+  assert.deepEqual(await page.evaluate(() => ({
+    oldCanvasConnected: window.retainedConversationCanvas.isConnected,
+    oldComposerConnected: window.retainedConversationComposer.isConnected,
+    ...window.conversationSpaceLifecycle,
+  })), { oldCanvasConnected: false, oldComposerConnected: false, mounts: 1, cleanups: 1 });
+});
+
 for (const surface of ['main', 'side']) test(`${surface} transcript replacement retains rendered activity and releases removed controls`, async t => {
   const page = await pageFor(t);
   await page.evaluate(surface => {

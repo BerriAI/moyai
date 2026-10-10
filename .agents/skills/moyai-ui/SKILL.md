@@ -7,6 +7,8 @@ description: Build or refine Moyai frontend pages using the repository’s estab
 
 Keep Moyai’s deep-space workspace identity: near-black navy surfaces, icy blue actions, ivory text, thin local Geist typography, and restrained glass panels. The new-session screen uses a deterministic constellation around the Moyai hub; conversation and Settings surfaces stay quiet for sustained work. A new screen should look like a sibling of the existing screens. Use the current implementation and [space redesign gallery](../../../docs/space-redesign.md) as the visual reference; do not start a new aesthetic for a feature.
 
+Chat components follow the Codex app's layout with the space palette applied: right-aligned user bubbles, plain assistant prose, unboxed work disclosures, quiet inline response actions, and a rounded composer. Keep Files and Activity in the existing top bar. Do not add a second conversation masthead, boxed transcript rows, or decorative identity labels.
+
 ## Read the source of the primitive
 
 - `frontend/components/ui`: the shared shadcn/ui components. `frontend/render.tsx` maps the existing escaped feature templates to these components; `frontend/overlays.tsx` supplies shadcn Dialog and Popover. Read [the rendering contract](../../../docs/shadcn-ui.md). Build with `npm run build` after editing component sources and commit the generated `app/static/ui` assets with the source.
