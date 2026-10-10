@@ -455,3 +455,9 @@ fixture failure already repaired and covered by the delegation suite.
 
 Owner-granted automation self-management remains the next implementation step.
 These are source and local behavioral checks, not deployment or model-quality proof.
+
+Integration with the latest renewable-swarm and shared-chat changes passed 96
+Python cases (one optional skip) and 40 Node/browser cases. The two corrected
+catalog cases and schema manifest check also passed. Main now requires schema 10
+(shared swarm chat) and role protocols 6 (complete automation-history references).
+Use a coordinated release of all roles; no deployment was performed.
