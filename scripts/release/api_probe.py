@@ -12,6 +12,11 @@ import urllib.request
 from urllib.parse import urlsplit
 
 
+def require(condition):
+    if not condition:
+        raise ValueError('Runtime check failed')
+
+
 def snapshot(connection, schema):
     from psycopg import sql
     connection.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
@@ -42,7 +47,6 @@ def probe(options):
     from app.runtime_compatibility import api_fingerprint
     from app.schema_migrations import SCHEMA_REVISION
     from render_start import configure_environment
-    from scripts.release.probe import require
     import psycopg
 
     require(not options['staged'] and not options['drain'])
