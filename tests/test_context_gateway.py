@@ -380,6 +380,9 @@ def test_private_summary_is_complete_scoped_tool_free_and_accounted(workspace, m
 @pytest.mark.parametrize('route', ['context/compact', 'v1/messages', 'v1/responses', 'v1/chat/completions'])
 def test_inference_rechecks_origin_after_await(workspace, monkeypatch, change, boundary, route):
     app, client = workspace
+    # The fault belongs to the inference checkpoint. A concurrent Slack flush
+    # could otherwise retire the scope before the request even starts.
+    client.portal.call(app.state.slack.shutdown)
     private = route == 'context/compact'
     if private:
         private_summary_route(monkeypatch)
