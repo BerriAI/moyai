@@ -20,7 +20,7 @@ addEventListener('DOMContentLoaded', () => {
   let start = 0, visible = null, ready = null, acknowledged = null, sidebar = null;
   const time = n => n === null ? 'waiting' : `${Math.round(n)} ms`;
   function paint() {
-    panel.innerHTML = `<strong>Local startup verification</strong><br>Real UI + local APIs; simulated execution.<br>Injected delays: create 3s · detail 2s · sidebar 8s.<hr>Message visible: <b>${time(visible)}</b><br>Create acknowledged: ${time(acknowledged)}<br>Conversation ready: <b>${time(ready)}</b><br>Sidebar refreshed: ${time(sidebar)}`;
+    panel.innerHTML = `<strong>Local startup verification</strong><br>Real UI + local APIs; simulated execution.<br>Injected delays: create 3s · detail 2s · sidebar 8s.<hr>Message visible: <b>${time(visible)}</b><br>Create acknowledged: ${time(acknowledged)}<br>Conversation ready: <b>${time(ready)}</b><br>Sidebar response: ${time(sidebar)}`;
   }
   paint();
   const fetchRequest = window.fetch;
