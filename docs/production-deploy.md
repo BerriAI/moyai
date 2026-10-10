@@ -44,7 +44,11 @@ host key stops the workflow and must be verified against Render before updating.
 ## What the button does
 
 1. Require the selected commit's Docker startup push workflow to succeed, along
-   with all other reported checks and commit statuses. Verify both services are
+   with all other reported CI checks and commit statuses. Checks belonging to
+   this deployment workflow are identified through GitHub's workflow-run
+   inventory and excluded, including earlier failed preflights on the same
+   commit. A previous deployment failure does not substitute for CI or bypass
+   the live-state preflight. Verify both services are
    live at the same build and no other deployment is in progress.
 2. Redeploy the **existing worker build** with `MAINTENANCE_DRAIN=true`. Wait for
    active sessions to reach saved boundaries, model requests and leases to clear,

@@ -414,10 +414,19 @@ class CheckAPI:
         self.docker = {'id': 9, 'status': 'completed', 'conclusion': 'success'}
         self.checks = [{'status': 'completed', 'conclusion': 'success', 'details_url': 'https://github.com/job'}]
         self.status = {'total_count': 0, 'state': 'pending'}
+        self.deployments = [{'id': 123, 'check_suite_id': 456, 'head_sha': NEW, 'head_branch': 'main',
+                             'event': 'workflow_dispatch', 'path': '.github/workflows/deploy-production.yml'}]
+        self.deployment_pages = []
 
     def call(self, method, path):
         if 'docker.yml' in path:
             return {'workflow_runs': [self.docker] if self.docker else []}
+        if 'deploy-production.yml' in path:
+            query = parse_qs(urlsplit(path).query)
+            assert query['head_sha'] == [NEW] and query['event'] == ['workflow_dispatch']
+            page = int(query['page'][0])
+            self.deployment_pages.append(page)
+            return {'workflow_runs': self.deployments[(page - 1) * 100:page * 100]}
         if 'check-runs' in path:
             return {'total_count': len(self.checks), 'check_runs': self.checks}
         return self.status
@@ -468,6 +477,51 @@ def test_ci_pagination_refuses_inventory_over_its_bound():
     assert len(api.pages) == 20
 
 
+@pytest.mark.parametrize('status,conclusion', [('completed', 'failure'), ('completed', 'cancelled'), ('in_progress', None)])
+def test_ci_ignores_verified_previous_deployment_attempts(status, conclusion):
+    api = CheckAPI()
+    api.checks.append({'name': 'deploy-production', 'status': status, 'conclusion': conclusion,
+                       'check_suite': {'id': 456},
+                       'details_url': 'https://github.com/BerriAI/moyai/actions/runs/123/job/456'})
+    assert GitHub(api, '789', NEW).ready(NEW)
+    # A real test failure still blocks the release, even with a deployment name
+    # and a details URL pointing at the current deployment run.
+    api.checks.append({**api.checks[-1], 'status': 'completed', 'conclusion': 'failure',
+                       'check_suite': {'id': 999},
+                       'details_url': 'https://github.com/BerriAI/moyai/actions/runs/789/job/456'})
+    with pytest.raises(ReleaseError, match='A check failed'):
+        GitHub(api, '789', NEW).ready(NEW)
+
+
+@pytest.mark.parametrize('key,value', [('head_sha', OLD), ('head_branch', 'feature'),
+                                     ('event', 'push'), ('path', '.github/workflows/docker.yml')])
+def test_ci_never_excludes_checks_from_another_workflow_or_commit(key, value):
+    api = CheckAPI()
+    api.deployments[0][key] = value
+    api.checks = [{'status': 'completed', 'conclusion': 'failure', 'check_suite': {'id': 456}}]
+    with pytest.raises(ReleaseError, match='A check failed'):
+        GitHub(api, '789', NEW).ready(NEW)
+
+
+@pytest.mark.parametrize('suite_id', [None, True, 0])
+def test_ci_refuses_missing_or_invalid_deployment_suite_identity(suite_id):
+    api = CheckAPI()
+    api.deployments[0]['check_suite_id'] = suite_id
+    with pytest.raises(ReleaseError, match='deployment check inventory was incomplete'):
+        GitHub(api, '789', NEW).ready(NEW)
+
+
+def test_ci_paginates_previous_deployments_before_excluding_their_checks():
+    api = CheckAPI()
+    api.deployments = [{**api.deployments[0], 'id': i, 'check_suite_id': i + 1} for i in range(101)]
+    api.checks = [{'status': 'completed', 'conclusion': 'failure', 'check_suite': {'id': 101}}]
+    assert GitHub(api, '789', NEW).ready(NEW)
+    assert api.deployment_pages == [1, 2]
+    api.deployments *= 20
+    with pytest.raises(ReleaseError, match='deployment check inventory was incomplete'):
+        GitHub(api, '789', NEW).ready(NEW)
+
+
 def test_ci_requires_docker_and_every_reported_check():
     api = CheckAPI()
     github = GitHub(api, '123', NEW)
@@ -484,6 +538,8 @@ def test_ci_requires_docker_and_every_reported_check():
     api.checks[0] = {'status': 'in_progress', 'conclusion': None, 'details_url': 'https://github.com/job'}
     assert not github.ready(NEW)
     api.checks[0]['details_url'] = 'https://github.com/BerriAI/moyai/actions/runs/123/job/456'
+    assert not github.ready(NEW)  # A details URL alone does not identify our check.
+    api.checks[0]['check_suite'] = {'id': 456}
     assert github.ready(NEW)
     api.status = {'total_count': 1, 'state': 'failure'}
     with pytest.raises(ReleaseError, match='commit status'):

@@ -106,6 +106,24 @@ class GitHub:
         if comparison['status'] not in {'ahead', 'identical'}:
             raise ReleaseError('The selected commit is older than or diverges from production. Start a new main workflow; automatic rollback is not supported.')
 
+    def deployment_check_suites(self, sha: str) -> set[int]:
+        suites = set()
+        for page in range(1, 21):
+            query = urllib.parse.urlencode({'head_sha': sha, 'event': 'workflow_dispatch',
+                                           'per_page': 100, 'page': page})
+            runs = self.api.call('GET', self.prefix + '/actions/workflows/deploy-production.yml/runs?' + query)['workflow_runs']
+            for run in runs:
+                if (run.get('head_sha') == sha and run.get('head_branch') == 'main'
+                        and run.get('event') == 'workflow_dispatch'
+                        and run.get('path') == '.github/workflows/deploy-production.yml'):
+                    suite_id = run.get('check_suite_id')
+                    if type(suite_id) is not int or suite_id <= 0:
+                        raise ReleaseError('GitHub deployment check inventory was incomplete.')
+                    suites.add(suite_id)
+            if len(runs) < 100:
+                return suites
+        raise ReleaseError('GitHub deployment check inventory was incomplete.')
+
     def ready(self, sha: str) -> bool:
         # Docker startup runs on every push, including changes outside path filters.
         runs = self.api.call('GET', self.prefix + '/actions/workflows/docker.yml/runs?' +
@@ -123,10 +141,14 @@ class GitHub:
                 break
         else:
             raise ReleaseError('GitHub checks inventory was incomplete.')
+        deployment_suites = self.deployment_check_suites(sha)
         ready = bool(docker and docker['conclusion'] == 'success')
         for check in checks:
-            if f'/actions/runs/{self.run_id}/' in check.get('details_url', ''):
-                continue  # This deployment job is itself a check on main.
+            if check.get('check_suite', {}).get('id') in deployment_suites:
+                # Deployment attempts are consumers of CI, not CI results.
+                # Verify their workflow identity through GitHub's run inventory;
+                # check names and external details URLs are not trusted identity.
+                continue
             if check['status'] != 'completed':
                 ready = False
             elif check['conclusion'] not in {'success', 'neutral', 'skipped'}:
