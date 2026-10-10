@@ -1011,3 +1011,46 @@ def test_native_canonical_ledger_tracks_delivered_inputs_and_ignores_deleted_que
         assert native_exchange(client, run['id'], 'commit').json()['saved']
         native_followup(app, run)
         assert native_exchange(client, run['id'], 'begin', 'd' * 32, token='next-capability').json()['reason'] == 'resumed'
+
+
+def test_goal_review_and_report_use_accounted_tool_free_gateway(workspace, monkeypatch):
+    from app.session_journal import SessionJournal
+    app, client = workspace
+    store = app.state.store
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    seen = []
+    def upstream(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        assert body['stream'] is False and 'tools' not in body
+        assert request.url.path == '/v1/chat/completions'
+        if len(seen) == 1:
+            assert 'Independently review' in body['messages'][0]['content']
+            assert 'source-backed' in body['messages'][0]['content']
+            return summary_response(json.dumps({'verdict': 'complete', 'reasons': 'Saved file and the original requested verification are present.'}))
+        return httpx.Response(503, text='final provider unavailable')
+    actual = httpx.AsyncClient
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(transport=httpx.MockTransport(upstream), **kw))
+    run = store.create_run('Keep working until the artifact is verified', '', 'modal', [], chat_enabled=True, user_id='owner')
+    source = store.claim_message(run['id'])
+    store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    caller = store.run(run['id'])
+    journal = SessionJournal(store)
+    journal.exchange(caller, {'action': 'import', 'manifest': {'id': 'test', 'count': 1}, 'complete': True,
+        'entries': [{'id': 'proof', 'message': {'role': 'tool', 'tool_call_id': 'test', 'content': 'Artifact hash matches; verification passed.'}}]})
+    def post(route, body):
+        return client.post(f"/broker/{run['id']}" + route, content=seal('cap', route, json.dumps(body).encode()),
+                           headers={'Authorization': 'Bearer cap', 'Content-Type': CONTENT_TYPE})
+    created = post('/tools/call', {'name': 'goal', 'arguments': {'action': 'create', 'objective': 'Verify artifact', 'source_input_id': source['id']}})
+    assert created.status_code == 200, created.text
+    reviewed = post('/tools/call', {'name': 'goal', 'arguments': {'action': 'complete', 'note': 'Artifact is verified.', 'evidence': [1]}})
+    assert reviewed.status_code == 200, reviewed.text
+    assert reviewed.json()['goal']['status'] == 'wrapping', reviewed.text
+    report = post('/goal', {'action': 'report'})
+    assert report.status_code == 200 and 'Goal report' in report.json()['report']
+    assert len(seen) == 2
+    requests = store.rows('SELECT status FROM model_requests WHERE run_id=? ORDER BY created_at', (run['id'],))
+    assert len(requests) == 2 and {r['status'] for r in requests} == {'completed', 'failed'}
+    ordinary = post('/v1/responses', {'model': 'unconfigured', 'input': 'Keep doing substantive work'})
+    assert ordinary.status_code == 409
+    assert len(seen) == 2

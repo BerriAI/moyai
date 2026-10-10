@@ -1793,3 +1793,21 @@ def test_legacy_channel_sessions_preserve_forwarded_body(slack_app):
     payload = event(text='<@U99999999> explain', attachments=[forwarded_attachment('legacy body')])
     assert client.post('/hooks/slack/events', **signed(payload)).status_code == 200
     assert 'legacy body' in submitted[0]['prompt']
+
+
+def test_goal_fallback_report_and_slack_intent_commit_together(slack_app):
+    app, client, run_id = start(slack_app)
+    store = app.state.store
+    message = store.claim_message(run_id)
+    store.update_run(run_id, status='running', token_hash='owner')
+    caller = store.run(run_id)
+    store.goals.exchange(caller, {'action': 'create', 'source_input_id': message['id'],
+                                 'objective': 'Work for 3 hours and report', 'budget': {'kind': 'timebox', 'seconds': 10800}})
+    store.goals.exchange(caller, {'action': 'tick', 'segment': 'worker', 'elapsed': 10800}, internal=True)
+    saved = store.finish_message(run_id, message['id'], 'Final inference failed.', 'failed')
+    # No collector invocation: answer and send intent are already committed.
+    outbox = store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,))
+    assert 'Goal report' in saved and any('Goal report' in row['text'] for row in outbox)
+    assert store.goal(run_id)['status'] == 'budget_exhausted'
+    store.finish_message(run_id, message['id'], 'Retry after lost acknowledgment.', 'failed')
+    assert len(store.rows("SELECT * FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,))) == len(outbox)

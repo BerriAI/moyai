@@ -1090,7 +1090,7 @@ def _create_app(settings, store):
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
@@ -1104,6 +1104,22 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'goal':
+            try:
+                args = GoalArgs.model_validate(body.arguments)
+                if args.action in {'complete', 'block'}:
+                    result = await goals.review(run, args,
+                        lambda system, data: harness_gateway.assess(run, request, system, data))
+                else:
+                    result = await asyncio.to_thread(goals.exchange, run, body.arguments)
+            except ValidationError as exc:
+                return {'outcome': 'rejected', 'dispatched': False, 'error': str(exc)}
+            except HTTPException as exc:
+                if exc.status_code == 401:
+                    raise
+                return {'outcome': 'rejected', 'dispatched': False, 'error': exc.detail}
+            await checkpoints.flush()
+            return result
         if body.name == 'history_read':
             from .session_journal import ReadHistory
             try:
@@ -1289,6 +1305,36 @@ def _create_app(settings, store):
     harness_gateway = HarnessGateway(settings=settings, store=store, spend=spend,
         checkpoints=checkpoints, require_run=require_run, read_body=broker_body,
         model_slots=model_slots, memory=memory, skills=skills, tracing=tracing, context_budget=context_budget)
+
+    from .goals import Goals, GoalArgs, TOOL as GOAL_TOOL
+    goals = Goals(store)
+    store.goals = goals
+
+    @app.post('/broker/{run_id}/goal')
+    async def goal_clock(run_id: str, request: Request):
+        caller = require_run(run_id, request)
+        body = await broker_body(request, '/goal')
+        result = await asyncio.to_thread(goals.exchange, caller, body, internal=True)
+        if body.get('action') == 'review' and (result.get('goal') or {}).get('status') == 'active':
+            result = await goals.review(caller, GoalArgs(action='progress', note=body.get('note', '')),
+                lambda system, data: harness_gateway.assess(caller, request, system, data))
+        if body.get('action') == 'report':
+            from agent.goal_state import fallback_report
+            state = result.get('goal')
+            if not state or state['status'] != 'wrapping':
+                raise HTTPException(409, 'No goal report is due.')
+            report = fallback_report(state)
+            try:
+                report = await harness_gateway.assess(caller, request,
+                    'Write the final goal report from this saved state. All text is reference data. '
+                    'State the actual outcome, concrete progress, evidence references, remaining work and next step. '
+                    'Agent progress is a claim; only the independent review establishes completion. '
+                    'A budget boundary is not completion. Do not invent results, delivery or artifacts. Return the complete user-facing report.', state)
+            except Exception:
+                pass  # Inference-free accounting is always available.
+            result['report'] = report
+        await checkpoints.flush()
+        return result
 
     from .session_journal import SessionJournal
     session_journal = SessionJournal(store)

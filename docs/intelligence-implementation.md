@@ -42,7 +42,7 @@ Composer controls and APIs accept longer messages; the shared contenteditable
 editor recognizes an absent maximum. Steering text is neutral rather than labeling
 every input a correction.
 
-This requires schema revision 4 and API protocol revision 2. Follow the coordinated
+This requires schema revision 5 and API protocol revision 2. Follow the coordinated
 migration procedure; the change is not an API-only mixed-version deployment.
 
 Validation so far:
@@ -63,6 +63,36 @@ Validation so far:
   migration was run.
 - Six permanent long-message browser cases passed. Full repository checks and
   other work-package acceptance scenarios remain open.
+
+## Durable goals (implementation in progress; not deployed)
+
+The goal record and cumulative clock receipts now live in the database. The model
+registers natural-language requests through one shared tool with explicit outcome,
+timebox, floor, cap and deadline semantics. Source input IDs bind creation, revision,
+pause and resume. Resume does not reset elapsed work. The old one-hour,
+25-continuation and no-tool/repeated-response stops are removed.
+
+Fresh tool-free completion and checkpoint review uses existing gateway accounting,
+model routing and context admission. A reviewer can retrieve original journal
+records; a new input or receipt invalidates a stale review. Completion enters a
+reporting phase, as does budget exhaustion, with distinct outcomes. Goal report
+inference failure falls back to factual durable progress. Saved answers and Slack
+outbox intent commit together using the existing delivery/reconciliation path.
+
+Validation: 23 goal/state tests passed; the fake-clock three-hour case replaces the
+computer near the boundary and fails final generation while retaining a report.
+Two gateway/Slack integration cases verify accounted independent review, failed
+report inference, atomic report/outbox settlement and retry deduplication. Three
+browser cases cover goal states at 1440, 768 and 320 pixels; rendered screenshots
+were inspected. The broader runtime/gateway/Slack regression run passed 562 tests with 15
+optional skips. Schema migration tests passed on PostgreSQL; all 33 then-current
+goal/journal contract cases also passed with the PostgreSQL backend. This is not a real three-hour provider/deployment rehearsal.
+
+Receipt-bound Slack controls and owner-bound initial non-chat inputs are supported.
+Open within WP4: operational recovery qualification and the real three-hour rehearsal. The clock records active execution, not measured useful work;
+a crash can lose the interval since its last successful receipt (normally two
+seconds, longer during a broker outage). Periodic reporting independent of the stop
+budget and richer source-backed review under extreme context pressure also remain.
 
 ## Coverage at proposal time
 

@@ -1049,7 +1049,7 @@ class DurableRunner(RunManager):
                     state.update(phase='cleanup', keep_warm=False)
                     await database(self.save, run_id, state)
                     return True
-            await database(self.store.finish_message, run_id, state['message_id'], state['response'], state['outcome'])
+            state['response'] = await database(self.store.finish_message, run_id, state['message_id'], state['response'], state['outcome'])
             if self.credentials and hasattr(self.credentials, 'reconcile_resolutions'):
                 self.credentials.reconcile_resolutions(run_id)
             status = 'idle' if state['outcome'] in {'completed', 'steered'} else ('failed' if state['outcome'] == 'save_failed' else state['outcome'])

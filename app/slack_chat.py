@@ -412,6 +412,14 @@ class SlackChat:
             return None  # A received answer supersedes progress while files save.
         return turn_id
 
+    def settle_answer_in(self, conn, run_id):
+        """Commit the saved answer and its existing delivery intent together."""
+        binding = conn.execute('SELECT * FROM slack_threads WHERE run_id=?', (run_id,)).fetchone()
+        if binding:
+            allowed = (self.settings.slack_thread_chat_enabled and self.owner.status()['enabled'] and
+                       binding['team_id'] == self.owner.connectors.slack_installation().get('team_id'))
+            self.collect_answers_in(conn, binding, allowed)
+
     def collect_answers_in(self, conn, binding, allowed):
         run_id = binding['run_id']
         messages = conn.execute("SELECT * FROM messages WHERE run_id=? AND role='assistant' AND id>? ORDER BY id", (run_id, binding['last_message_id'])).fetchall()
@@ -420,8 +428,6 @@ class SlackChat:
                 value = self.scrub(message['content'])
                 if message['status'] in {'failed', 'cancelled', 'interrupted'}:
                     value = 'Response ' + message['status'] + ':\n\n' + value
-                if len(value) > 32000:
-                    value = value[:32000] + '\n\n[Long response shortened; the full answer is in the web session.]'
                 prs = select_prs(conn, run_id, value)
                 for pr in prs:
                     pr.title = self.scrub(pr.title)

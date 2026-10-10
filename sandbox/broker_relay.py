@@ -485,6 +485,18 @@ class BrokerRelay:
         return _read_with_reconnect(request, lambda response: json.load(response),
                                     stage='conversation_journal', notify=self.notify, opener=open_broker)
 
+    def goal(self, body):
+        route = '/goal'
+        request = urllib.request.Request(self.remote.rstrip('/') + route,
+            data=seal(self.token, route, json.dumps(body).encode()),
+            headers={**broker_headers(self.remote, self.token), 'Content-Type': CONTENT_TYPE,
+                     'X-Moyai-Request-ID': uuid4().hex}, method='POST')
+        # Cumulative clock receipts and one-time imports are idempotent. A short
+        # timeout leaves the next heartbeat to retry, without blocking tools.
+        timeout = 330 if body.get('action') in {'review', 'report'} else 5
+        with open_broker(request, timeout=timeout) as response:
+            return json.load(response)
+
     def native(self, body):
         route = '/context/native'
         request = urllib.request.Request(self.remote.rstrip('/') + route,

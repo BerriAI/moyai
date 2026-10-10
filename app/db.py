@@ -83,6 +83,8 @@ class Store:
         self.default_model = default_model
         self.tracing = None
         self.memory_review = None
+        self.goals = None
+        self.answer_delivery = None
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
@@ -757,27 +759,39 @@ class Store:
             # Older interruption paths may have settled the input alone. Repair
             # only its still-saving answer, never rewrite a terminal outcome.
             source = conn.execute("SELECT status FROM messages WHERE id=? AND run_id=? AND role='user'", (message_id, run_id)).fetchone()
+            answer = conn.execute('SELECT status FROM messages WHERE run_id=? AND response_to_id=?', (run_id, message_id)).fetchone()
+            goal = self.goals.current(conn, run_id) if self.goals else None
+            missing_goal_report = not answer and goal and goal['status'] in {'active', 'wrapping'}
             if (not source or source['status'] != status or status in {'running', 'queued', 'injected'}
-                    or not conn.execute("SELECT 1 FROM messages WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id)).fetchone()):
+                    or not ((answer and answer['status'] == 'saving') or missing_goal_report)):
                 return
         conn.execute("UPDATE messages SET status=? WHERE run_id=? AND steering_parent_id=? AND status='injected'", (status, run_id, message_id))
         conn.execute("UPDATE messages SET steering_parent_id=NULL,queue_locked=0 WHERE run_id=? AND steering_parent_id=? AND status='queued'", (run_id, message_id))
+        if self.goals:
+            content = self.goals.settle_in(conn, run_id, message_id, content, status)
         if status != 'steered':
             self.save_answer_in(conn, run_id, message_id, content, status)
         else:
             conn.execute("UPDATE messages SET status='steered' WHERE run_id=? AND response_to_id=? AND status='saving'", (run_id, message_id))
+        if self.answer_delivery:
+            self.answer_delivery(conn, run_id)
         if self.tracing:
             # Commit the answer and its pending span together. A crash
             # after saving the answer must not lose its root trace.
             self.tracing.finish_turn(run_id, message_id, content, status, connection=conn)
         if status == 'completed' and self.memory_review:
             self.memory_review.enqueue_in(conn, message_id)
+        return content
 
     def finish_message(self, run_id, message_id, content, status="completed"):
         with self.connect(write_scope=run_id) as conn:
             conn.begin_write()
-            self.finish_message_in(conn, run_id, message_id, content, status)
+            saved = self.finish_message_in(conn, run_id, message_id, content, status)
         self.event(run_id, "chat", "Response saved", {"message_id": message_id})
+        if saved is not None:
+            return saved
+        answers = self.rows('SELECT content FROM messages WHERE run_id=? AND response_to_id=?', (run_id, message_id))
+        return answers[0]['content'] if answers else content
 
     def interrupt_messages(self, run_id, status='interrupted'):
         """Retire orphaned inputs and published answers together, without replay."""
@@ -789,6 +803,10 @@ class Store:
                 WHERE a.run_id=? AND a.status='saving'""", (run_id,)).fetchall()
             for answer in answers:
                 self.finish_message_in(conn, run_id, answer['response_to_id'], answer['content'], answer['status'])
+            if self.goals:
+                run = conn.execute('SELECT active_message_id FROM runs WHERE id=?', (run_id,)).fetchone()
+                if run and run['active_message_id']:
+                    self.finish_message_in(conn, run_id, run['active_message_id'], '', status)
 
     def has_queued_messages(self, run_id):
         return bool(self.rows("SELECT id FROM messages WHERE run_id=? AND status='queued' LIMIT 1", (run_id,)))
@@ -896,8 +914,15 @@ class Store:
         if not fields.keys() <= allowed:
             raise ValueError("Unsupported run update")
         fields["updated_at"] = now()
-        keys = ",".join(f"{key}=?" for key in fields)
-        self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id), write_scope=run_id)
+        with self.connect(write_scope=run_id) as conn:
+            conn.begin_write()
+            if self.goals and fields.get('status') in {'completed', 'failed', 'cancelled', 'interrupted'}:
+                current = conn.execute('SELECT chat_enabled,summary FROM runs WHERE id=?', (run_id,)).fetchone()
+                if current and not current['chat_enabled']:
+                    fields['summary'] = self.goals.settle_in(conn, run_id, None,
+                        fields.get('summary', current['summary']) or fields.get('error', ''), fields['status'])
+            keys = ",".join(f"{key}=?" for key in fields)
+            conn.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id))
 
     def event(self, run_id: str, kind: str, message: str, data=None, *, turn_id=None):
         data = dict(data) if isinstance(data, dict) else {}
@@ -938,6 +963,11 @@ class Store:
         return rows
 
     def goal(self, run_id: str):
+        if self.goals:
+            with self.connect() as conn:
+                state = self.goals.current(conn, run_id)
+                if state:
+                    return state
         rows = self.rows("SELECT data FROM events WHERE run_id=? AND kind='status' "
                          "AND json_number(data,'goal_version')=1 AND json_text(data,'phase')='goal' "
                          "ORDER BY id DESC LIMIT 1", (run_id,))

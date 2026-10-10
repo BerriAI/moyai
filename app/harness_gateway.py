@@ -145,6 +145,12 @@ class HarnessGateway:
         body = await self.read_body(request, route)
         return await self.summarize(run_id, request, body)
 
+    async def assess(self, run, request, system, data):
+        """Fresh, tool-free verification using ordinary admission and billing."""
+        response = await self._forward_once(run['id'], request, '/internal/assessment',
+            compaction_body={'system': system, 'data': data}, expected_run=dict(run))
+        return json.loads(response.body)['text']
+
     async def summarize_private(self, run, request, history: list[str], model: str, summary_bytes: int) -> str:
         response = await self.summarize(run['id'], request,
             {'history': history.copy(), 'summary_bytes': summary_bytes},
@@ -181,7 +187,8 @@ class HarnessGateway:
 
     async def _forward_once(self, run_id, request, route, attempt=0, compaction_body=None, *,
                             expected_run=None, private=False, expected_model=None):
-        compact = route == '/context/compact'
+        assessment = route == '/internal/assessment'
+        compact = route == '/context/compact' or assessment
         if (route not in NATIVE_ROUTES and not compact) or (private and not compact):
             raise HTTPException(404, 'Unsupported model endpoint.')
         def current_run():
@@ -198,6 +205,11 @@ class HarnessGateway:
                     raise HTTPException(409, 'The originating model has changed.')
             return current
         run = current_run()
+        if not compact and self.store.goals:
+            with self.store.connect() as conn:
+                goal = self.store.goals.current(conn, run_id)
+            if goal and goal['status'] == 'wrapping':
+                raise HTTPException(409, 'Goal work has ended. Save and deliver the goal report; no new task inference is admitted.')
         if not compact:
             model_stage(request, 'admission')
         # Internal private work already has a bounded snapshot. Let it queue
@@ -263,7 +275,12 @@ class HarnessGateway:
             if not compact:
                 expected_run, expected_model = dict(run), model
             body = compaction_body if compact else await self.read_body(request, route)
-            if compact:
+            partial_cursor = False
+            if assessment:
+                payload = {'model': model, 'stream': False, 'messages': [
+                    {'role': 'system', 'content': body['system']},
+                    {'role': 'user', 'content': json.dumps(body['data'], ensure_ascii=False)}]}
+            elif compact:
                 limits = await self.context_budget.limits(model)
                 allocation = max(1, min(limits.max_input_tokens, limits.context_window -
                     (limits.default_output_tokens or limits.max_output_tokens)) // 8)
@@ -302,7 +319,7 @@ class HarnessGateway:
                         self.store.event(run_id, 'context', 'Compacting before the next model request.', exc.budget)
                         await self.checkpoints.flush()
                         raise
-                    if private:
+                    if private or assessment:
                         raise SummaryFailure('summary_input_too_large', retryable=False) from None
                     if not partial_cursor:
                         raise HTTPException(422, 'Reconnect the runtime to compact smaller journal batches safely. Saved records are preserved.') from None
@@ -381,7 +398,8 @@ class HarnessGateway:
                         raise HTTPException(502, 'Model response exceeded the size limit.')
                 capture.feed(bytes(raw))
                 capture.finish()
-                result = (JSONResponse({**compaction_result(raw, body['summary_bytes']),
+                result = (JSONResponse({'text': compaction_result(raw)['summary']}) if assessment else
+                          JSONResponse({**compaction_result(raw, body['summary_bytes']),
                                        **({} if private else {'through_seq': body['entries'][-1]['seq']})})
                           if compact else Response(bytes(raw), media_type='application/json',
                                                    headers=upstream_headers(request_id, upstream)))

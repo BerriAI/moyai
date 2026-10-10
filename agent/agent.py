@@ -35,15 +35,15 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
     definition = resolve(harness)
     rotation = RotationDeadline(spec.get("rotation_seconds", 0), rotation_at=spec.get("rotation_at"))
     waiting = AgentWait(relay)
-    goal = GoalLoop(session / 'goal.json', spec['run_id'],
+    goal = GoalLoop(session / 'goal.json', spec['run_id'], relay=relay,
                     restore=not (spec.get('fresh_child') or spec.get('workspace_warning')),
                     continuation=bool(spec.get('continuation')),
                     on_change=lambda value: emit('status', 'Goal ' + (value['status'] if value else 'cleared'),
                                                 {'phase': 'goal', 'goal_version': 1, 'goal': value}))
     if not spec.get('continuation'):
-        goal.accept(spec['prompt'])
+        goal.accept(spec['prompt'], spec.get('message_id'))
     goal.publish()
-    steering = ActiveTurnSteering(relay, prepare_input, on_input=lambda item: goal.steer(item['content']))
+    steering = ActiveTurnSteering(relay, prepare_input, on_input=lambda item: goal.steer(item['content'], item['id']))
     if not definition.live_steering:
         steering = AgentSteer(relay)
     activity = ActivityReporter(emit, tracing=bool(spec.get('tracing_enabled')),
@@ -77,6 +77,7 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
                              relay=relay, config=config, activity=harness_activity, step=step,
                              cwd=str(workspace), **({'context_store': context_store} if context_store is not None else {}))
         cleanup.callback(agent.close)
+        cleanup.callback(goal.save)
         cleanup.callback(steering.close)
         result = {}
         history = spec.get("history_fallback", [])

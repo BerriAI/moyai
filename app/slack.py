@@ -50,6 +50,7 @@ class SlackSessions:
         self.session_titles = None
         self.files = SlackFiles(self)
         self.chat = SlackChat(self)
+        self.store.answer_delivery = self.chat.settle_answer_in
         self.access = SlackCredentials(self)
         self.feedback = SlackFeedback(self, lens_feedback)
         self.agentchat, self.channel = connect_agentchat(self)
