@@ -216,7 +216,7 @@ async def test_lead_cannot_revive_failed_stopped_or_deleted_member(durable, stat
     assert collaboration.store.rows('SELECT * FROM swarm_posts WHERE group_id=?', (group_id,)) == posts_before
 
 
-async def test_queue_failure_rolls_back_post_trace_and_assignment(durable):
+async def test_queue_failure_rolls_back_post_trace_and_assignment(durable, monkeypatch):
     collaboration, members, group_id = await team(durable)
     lead, worker = members[:2]
     collaboration.claim_lead(lead, ClaimLead(plan='Collect proposals.'))
@@ -224,7 +224,10 @@ async def test_queue_failure_rolls_back_post_trace_and_assignment(durable):
         collaboration.coordinator.enqueue_child(worker['id'], f'Pending human direction {index}',
             f'human-{index}', worker['model'], worker['owner_id'])
     events_before = len(collaboration.store.events(lead['parent_run_id']))
-    with pytest.raises(ValueError, match='5 queued'):
+    def unavailable(*args, **kwargs):
+        raise ValueError('Queue persistence unavailable')
+    monkeypatch.setattr(collaboration.coordinator, 'enqueue_child_in', unavailable)
+    with pytest.raises(ValueError, match='Queue persistence unavailable'):
         collaboration.assign(lead, Assign(member_id=worker['id'], task='Must not partially save.'))
     assert len(collaboration.store.rows('SELECT * FROM swarm_posts WHERE group_id=?', (group_id,))) == 1
     assert len(collaboration.store.events(lead['parent_run_id'])) == events_before

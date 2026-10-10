@@ -163,10 +163,14 @@ def test_should_use_production_instructions_with_isolated_session_storage(worker
     assert conversation['prompt'] == payload['input']
     assert conversation['conversation_history'] == []
     assert payload['workspace'] in conversation['system_message']
-    assert "Do not claim a check passed unless you ran it." in conversation['system_message']
-    assert "Before each meaningful phase" in conversation['system_message']
+    assert 'Final answers contain no status tags and distinguish verified results' in conversation['system_message']
+    assert 'meaningful progress when the state changes' in conversation['system_message']
+    assert 'bundled_skill_read' in conversation['system_message']
     assert state['context_path'] == Path(payload['state']) / 'context.sqlite3'
-    assert (Path(payload['state']) / 'goal.json').is_file()
+    assert not (Path(payload['state']) / 'goal.json').exists()
+    # Ordinary evaluation work does not invent a durable goal. Goal state is
+    # owned by the broker, not exported into the evaluated repository.
+    assert state['app'].state.store.rows('SELECT * FROM session_goals') == []
     assert not list(Path(payload['workspace']).iterdir())
 
 

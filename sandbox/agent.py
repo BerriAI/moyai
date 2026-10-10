@@ -100,8 +100,12 @@ def hermes_config(spec, broker_url, workspace):
 
 
 def run_agent(spec, relay):
-    with native_storage(Path('/session/.native-sdk'), Path('/root'), Path('/tmp')):
-        return _run_agent(spec, relay)
+    original = os.getcwd()
+    try:
+        with native_storage(Path('/session/.native-sdk'), Path('/root'), Path('/tmp')):
+            return _run_agent(spec, relay)
+    finally:
+        os.chdir(original)
 
 
 def _run_agent(spec, relay):

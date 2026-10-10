@@ -362,7 +362,7 @@ def memory_profiles(profiles, monkeypatch):
     actor = sender(app.state.store)
     run = app.state.store.run(app.state.store.rows('SELECT id FROM runs')[0]['id'])
     sync(app)
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     app.state.memory.save('google:alice', Note(key='response-style', title='Response style',
         content='Use a 25-word TLDR.', request_id='response-style-demo'))
     return app, control, clock, actor, run
@@ -372,9 +372,9 @@ def test_automatic_refresh_keeps_memory_available_across_hours(memory_profiles):
     app, control, clock, actor, run = memory_profiles
     for _ in range(4):
         clock[0] += 31 * 60
-        assert len(app.state.memory.tools(run)) == 3  # Refresh happens before expiry.
+        assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}  # Refresh happens before expiry.
         sync(app)
-        assert len(app.state.memory.tools(run)) == 3
+        assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
         assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
         assert '25-word TLDR' in app.state.memory.context(run)
         calls = len(control['calls'])
@@ -394,7 +394,7 @@ def test_old_daily_timer_recovers_expired_memory_automatically(memory_profiles):
     assert not app.state.memory.tools(run)
     sync(app)
     assert control['calls'] == [USER, USER]
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
     assert app.state.memory.search(run, 'google:alice', 'response style')['loaded'] == 1
 
 
@@ -414,7 +414,7 @@ def test_refresh_failure_blocks_memory_and_recovers_after_retry(memory_profiles)
     clock[0] += 2
     sync(app)
     assert len(control['calls']) == calls + 1
-    assert len(app.state.memory.tools(run)) == 3
+    assert {tool['name'] for tool in app.state.memory.tools(run)} == {'memory_search', 'memory_read', 'memory_save', 'memory_forget'}
 
 
 @pytest.mark.parametrize('change', ['deleted', 'email'])

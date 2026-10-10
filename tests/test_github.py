@@ -272,7 +272,11 @@ def test_direct_pr_still_requires_connection_policy_and_live_capability(workspac
         app.state.store.update_run(run_id, token_hash=digest('rotated'))
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': 'github_create_pull_request', 'arguments': PAYLOAD})
-    assert response.status_code == (401 if restriction in {'cancelled', 'revoked'} else 403)
+    if restriction in {'read_only', 'disabled', 'disconnect'}:
+        assert response.status_code == 200
+        assert response.json()['outcome'] == 'rejected' and response.json()['dispatched'] is False
+    else:
+        assert response.status_code == (401 if restriction in {'cancelled', 'revoked'} else 403)
     assert not api.calls and not app.state.store.approvals(run_id)
     if restriction == 'read_only':
         names = [t['name'] for t in client.get(f'/broker/{run_id}/tools', headers=headers).json()]
