@@ -212,6 +212,12 @@ class Connectors:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.request(method, url, **kwargs)
+                if response.status_code == 403:
+                    raise ConnectorError("App access denied (403). Check the connected account's permissions and scopes for this resource.")
+                if response.status_code == 429:
+                    delay = response.headers.get('Retry-After', '').strip()
+                    wait = f'Wait at least {int(delay)} seconds before retrying.' if delay.isascii() and delay.isdecimal() and len(delay) <= 9 else 'Wait before retrying.'
+                    raise ConnectorError(f"App rate limit reached (429). {wait}")
                 if response.status_code >= 400:
                     raise ConnectorError(f"App request failed ({response.status_code}). Check access, scopes, or rate limits.")
                 data = response.json()
