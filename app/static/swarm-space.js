@@ -33,8 +33,8 @@
       dense?.30+Math.floor(index/2)*.11:index<2?.40:.59])):
       children.length===1?[[.5,.54]]:children.length===2?[[.27,.54],[.73,.54]]:
       children.length===3?[[.18,.54],[.5,.54],[.82,.54]]:children.length===4?[[.14,.54],[.38,.54],[.62,.54],[.86,.54]]:
-      children.map((_,index)=>{const row=Math.floor(index/5),count=Math.min(5,children.length-row*5),column=index%5;return [count===1?.5:.10+(.80/(count-1))*column,row===0?.42:.61];});
-    return [{...nodes[0],x:.5,y:dense?(narrow?.17:.29):(narrow?.20:.28)},...children.map((node,index)=>({...node,x:positions[index][0],y:positions[index][1]}))];
+      children.map((_,index)=>{const row=Math.floor(index/5),count=Math.min(5,children.length-row*5),column=index%5;return [count===1?.5:.10+(.80/(count-1))*column,row===0?.64:.88];});
+    return [{...nodes[0],x:.5,y:dense?(narrow?.17:.40):(narrow?.20:.28)},...children.map((node,index)=>({...node,x:positions[index][0],y:positions[index][1]}))];
   }
   function clock(run,now=Date.now()){
     const swarm=run.swarm;if(!swarm)return null;
