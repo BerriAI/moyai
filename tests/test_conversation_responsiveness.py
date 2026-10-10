@@ -81,3 +81,33 @@ async def test_conversation_support_reads_run_outside_the_event_loop(workspace, 
         response = await reader.get(path)
     assert response.status_code == 200, response.text
     assert observed
+
+
+async def test_sending_a_follow_up_reads_and_writes_off_the_event_loop(workspace, monkeypatch):
+    app, client = workspace
+    store = app.state.store
+    run = store.create_run('Busy conversation', '', 'demo', [], chat_enabled=True)
+    loop_thread = threading.get_ident()
+    original_run, original_identity = store.run, store.identity
+    calls = []
+
+    def read_run(*args, **kwargs):
+        calls.append('run')
+        assert threading.get_ident() != loop_thread
+        return original_run(*args, **kwargs)
+
+    def identity(*args, **kwargs):
+        calls.append('identity')
+        assert threading.get_ident() != loop_thread
+        return original_identity(*args, **kwargs)
+
+    monkeypatch.setattr(store, 'run', read_run)
+    monkeypatch.setattr(store, 'identity', identity)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                 base_url=app.state.settings.public_url,
+                                 cookies=dict(client.cookies), headers=dict(client.headers)) as browser:
+        sent = await browser.post(f"/api/runs/{run['id']}/messages",
+                                  json={'content': 'is this done ?', 'client_id': 'instant-1'})
+    assert sent.status_code == 202, sent.text
+    assert {'run', 'identity'} <= set(calls)
+    assert any(m['content'] == 'is this done ?' for m in store.messages(run['id']))

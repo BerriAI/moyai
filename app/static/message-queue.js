@@ -1,6 +1,6 @@
 (function(root){
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const canEdit=(message,user,role)=>!message.queue_locked&&(role==='admin'||message.user_id===user);
+  const canEdit=(message,user,role)=>!message.pending&&!message.queue_locked&&(role==='admin'||message.user_id===user);
   function presentation(run){
     const messages=run.messages||[];
     const priority=message=>message.id===run.steer_message_id?0:message.send_immediately?1:2;
@@ -14,7 +14,7 @@
   const queued=run=>presentation(run).queued;
   function card(message,run,user,role,editing,busy,attachments,renderMessage=message=>esc(message.display_content??message.content)){
     const allowed=canEdit(message,user,role),requested=message.id===run.steer_message_id;
-    const status=message.queue_locked?'Picking up…':requested?'Send requested':'Queued';
+    const status=message.pending?'Sending…':message.queue_locked?'Picking up…':requested?'Send requested':'Queued';
     const controls=allowed?`<div class="queued-controls"><button type="button" data-queue-action="steer" data-queue-id="${message.id}" title="Send now (Ctrl or ⌘ Enter)" ${busy||requested?'disabled':''}>↳ Send now</button><button type="button" data-queue-action="edit" data-queue-id="${message.id}" aria-label="Edit queued message" ${busy?'disabled':''}>Edit</button><button type="button" data-queue-action="delete" data-queue-id="${message.id}" aria-label="Delete queued message" title="Delete queued message" ${busy?'disabled':''}>×</button></div>`:'';
     return `<article class="queued-message" data-queued-row="${message.id}" tabindex="0" aria-label="${status} message"><div class="queued-heading"><span class="queued-mark" aria-hidden="true">↳</span><span>${status}</span><small>${message.user_id===user?'You':esc(message.user_name||'Teammate')}</small>${controls}</div>${editing?'':`<p class="queued-content">${renderMessage(message)}</p>`}${attachments(message.attachments)}</article>`;
   }
@@ -45,6 +45,7 @@
     async function act(id,action){
       if(busy||deleting)return;
       const message=run.messages.find(message=>message.id===id),draft=drafts.get(id);
+      if(message?.pending)return;
       if(action==='discard'){drafts.delete(id);render();return;}
       if(action==='followup'){if(draft){useDraft(draft.content);drafts.delete(id);render();}return;}
       if(!message||message.status!=='queued'||!canEdit(message,user,role)){toast('Moyai already picked up this message, or it belongs to a teammate.');return;}
