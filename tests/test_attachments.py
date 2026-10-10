@@ -418,3 +418,17 @@ def test_legacy_schema_upgrade_is_idempotent_and_preserves_preview_bytes(tmp_pat
         assert restored.attachments.payload(row) == b'raw'
         assert restored.attachments.payload(row, 'preview') == b'preview'
 
+
+
+def test_long_upload_name_keeps_extension_and_download_bytes(workspace):
+    from urllib.parse import unquote
+    app, client = workspace
+    original = 'monthly-report-' * 16 + '.csv'
+    response = upload(client, original, b'count\n7\n')
+    assert response.status_code == 200
+    saved = response.json()
+    assert len(saved['name']) <= 180
+    assert saved['name'].endswith('.csv')
+    download = client.get(saved['url'])
+    assert download.content == b'count\n7\n'
+    assert unquote(download.headers['content-disposition']).endswith(saved['name'])
