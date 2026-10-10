@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 from threading import Event, Timer
 
@@ -28,10 +29,14 @@ def test_list_query_count_stays_bounded_and_full_detail_keeps_answers(users_app,
     seed(store, 'google:tin', 100)
     queries = []
     connect = store.connect
+    measuring = ContextVar('sidebar_query_measurement', default=False)
 
     @contextmanager
-    def counted():
-        with connect() as conn:
+    def counted(*args, **kwargs):
+        with connect(*args, **kwargs) as conn:
+            if not measuring.get():
+                yield conn
+                return
             if store.database:
                 execute = conn.raw.execute
 
@@ -49,13 +54,19 @@ def test_list_query_count_stays_bounded_and_full_detail_keeps_answers(users_app,
                 yield conn
 
     monkeypatch.setattr(store, 'connect', counted)
-    response = client.get('/api/runs?scope=all&view=sidebar')
+    # TestClient and database() propagate this request's context. Background
+    # polling keeps its own context and cannot inflate the N+1 query budget.
+    token = measuring.set(True)
+    try:
+        response = client.get('/api/runs?scope=all&view=sidebar')
+    finally:
+        measuring.reset(token)
     assert response.status_code == 200
     rows = response.json()
     assert len(rows) == 100
     # Includes authentication, identity registration, metadata, PR receipts and
     # agent trees. A per-session read would exceed this even with only 100 rows.
-    assert len(queries) < 40
+    assert 0 < len(queries) < 40
     assert len(response.content) < 150_000
     assert all('summary' not in row and 'pending_result' not in row and 'token_hash' not in row for row in rows)
     assert [row['id'] for row in rows] == [f'{index:032x}' for index in range(100, 0, -1)]
