@@ -429,3 +429,32 @@ def test_attachment_blocks_preserve_inline_text_and_fallback_order():
         {'text': ['invalid'], 'fallback': 'second body'}]})
     assert not clipped
     assert json.loads(reference[len(REFERENCE_LABEL):]) == 'read this now\n\nsecond body'
+
+
+def test_thread_context_marks_bot_senders(slack_app, monkeypatch):
+    from agent.agent import conversation_prompt
+    app, client, runs, _ = slack_app
+    root, mention = '1790718000.654321', '1790719000.123456'
+    client.post('/hooks/slack/events', **signed(event(thread_ts=root)))
+    async def read(method, url, **kwargs):
+        if url.endswith('chat.getPermalink'):
+            return {'permalink': 'https://test.slack.com/archives/C12345678/p1790719000123456'}
+        return {'messages': [
+            {'ts': root, 'user': 'U0C81KNMC1K', 'bot_id': 'B0LENS',
+             'bot_profile': {'name': 'Lens'}, 'text': 'Bug Fix: Reliability — Repository calls fail'},
+            {'ts': '1790718500.123456', 'thread_ts': root, 'user': 'U11111111',
+             'username': 'Old Integration', 'subtype': 'bot_message', 'text': 'Deploy finished'},
+            {'ts': '1790718600.123456', 'thread_ts': root, 'bot_id': 'B0NONAME', 'text': 'Unnamed bot'},
+            {'ts': mention, 'thread_ts': root, 'user': 'U12345678', 'text': 'Update this slack message to show the agent name'},
+        ]}
+    monkeypatch.setattr(app.state.connectors, 'request', read)
+    run_id = runs[0]['id']
+    client.portal.call(app.state.slack.prepare, run_id)
+    source = app.state.store.slack_source(run_id)
+    messages = source['messages']
+    assert messages[0]['sender_kind'] == 'bot' and messages[0]['sender_name'] == 'Lens'
+    assert messages[1]['sender_kind'] == 'bot' and messages[1]['sender_name'] == 'Old Integration'
+    assert messages[2]['sender_kind'] == 'bot' and 'sender_name' not in messages[2]
+    assert messages[3]['sender_kind'] == 'user' and 'sender_name' not in messages[3]
+    prompt = conversation_prompt({'prompt': runs[0]['prompt'], 'slack_source': source})
+    assert '"sender_name": "Lens"' in prompt

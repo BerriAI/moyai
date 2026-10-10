@@ -294,10 +294,21 @@ class SlackSessions:
                 reference, clipped = attachment_reference(item)
                 text = text + reference or "[Message has no text]"
                 clipped = clipped or len(text) > 3000
-                messages[ts] = {"ts": ts, "user": item.get("user") or item.get("bot_id") or "unknown",
-                                "text": text[:3000], "text_truncated": clipped,
-                                "has_attachments": bool(item.get("files") or item.get("attachments")),
-                                "file_ids": slack_file_ids(item.get('files'))}
+                entry = {"ts": ts, "user": item.get("user") or item.get("bot_id") or "unknown",
+                         "text": text[:3000], "text_truncated": clipped,
+                         "has_attachments": bool(item.get("files") or item.get("attachments")),
+                         "file_ids": slack_file_ids(item.get('files'))}
+                if item.get("bot_id") or item.get("bot_profile") or item.get("subtype") == "bot_message":
+                    entry["sender_kind"] = "bot"
+                    profile = item.get("bot_profile")
+                    name = profile.get("name") if isinstance(profile, dict) else None
+                    if not isinstance(name, str) or not name:
+                        name = item.get("username")
+                    if isinstance(name, str) and name:
+                        entry["sender_name"] = name[:80]
+                else:
+                    entry["sender_kind"] = "user"
+                messages[ts] = entry
             cursor = data.get("response_metadata", {}).get("next_cursor", "")
             truncated = bool(data.get("has_more") or cursor)
             if not cursor:
