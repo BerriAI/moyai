@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .contracts import Assignment, Fanout, Group, Results, Retry
 from .planning import PlannedTask
+from .types import Agent, Harness
 
 
 class SwarmBackend(Protocol):
@@ -119,7 +120,7 @@ def _handle(backend: SwarmBackend, value: Mapping[str, Any], *, expected_id: str
 
 @dataclass(frozen=True)
 class SwarmRun:
-    """Durable group handle. Save id to restore through the same owner's Swarm.
+    """Durable group handle. Restore id through the same owner's AgentSwarm.
 
     checkpoint_required signals an accepted start/retry whose owner must yield
     to the durable host. It does not mean workers are complete. Read result()
@@ -156,7 +157,7 @@ class SwarmRun:
         return result
 
 
-class Swarm:
+class AgentSwarm:
     """A swarm capability belonging to the agent authenticated by backend.
 
     Harness/model selectors request a runtime; host policy determines whether
@@ -167,20 +168,30 @@ class Swarm:
     def __init__(self, backend: SwarmBackend):
         self._backend = backend
 
-    async def start(self, *, request_key: str, tasks: Sequence[Assignment | PlannedTask] = (),
+    async def start(self, *, request_key: str, agents: Sequence[Agent] = (),
+                    tasks: Sequence[Assignment | PlannedTask] = (),
                     instructions: str = '', items: Sequence[str] = (), workers: int = 10,
-                    harness: str | None = None, model: str | None = None) -> SwarmRun:
-        """Submit explicit tasks or partition items, returning a durable receipt.
+                    harness: Harness | None = None, model: str | None = None) -> SwarmRun:
+        """Submit typed agents or partition items, returning a durable receipt.
 
         Reuse request_key only for retries of identical input. The host rejects
-        conflicting reuse and pins the selected workers across recovery.
+        conflicting reuse and pins the selected workers across recovery. The
+        legacy tasks argument also accepts host-generated plans.
         """
-        assignments = [asdict(task) if isinstance(task, PlannedTask) else task for task in tasks]
+        if agents and tasks:
+            raise ValueError('Supply agents or tasks, not both.')
+        assignments = ([Agent.model_validate(agent).to_assignment() for agent in agents] if agents else
+                       [asdict(task) if isinstance(task, PlannedTask) else task for task in tasks])
+        selected_harness = Harness(harness).value if harness is not None else None
         request = Fanout(request_key=request_key, instructions=instructions, items=list(items),
-                         workers=workers, tasks=assignments, harness=harness, model=model)
+                         workers=workers, tasks=assignments, harness=selected_harness, model=model)
         value = await _call(self._backend, 'agents_fanout', request)
         return _handle(self._backend, value)
 
     def group(self, group_id: str) -> SwarmRun:
         """Restore a handle without I/O; host ownership is checked on every call."""
         return SwarmRun(id=Group(group_id=group_id).group_id, _backend=self._backend)
+
+
+# Preserve the first internal API name while callers adopt AgentSwarm.
+Swarm = AgentSwarm

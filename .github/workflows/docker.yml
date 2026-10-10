@@ -56,7 +56,7 @@ jobs:
       - name: Test cloud diagnostics and durable recovery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_startup_overlap.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py
       - name: Test durable swarm mode and mixed-harness delegation
-        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_planning.py tests/test_swarm_backend.py
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_planning.py tests/test_swarm_backend.py
       - name: Build production image
         run: docker build -t moyai-docker-smoke .
       - name: Exercise mounted disk migration and restart

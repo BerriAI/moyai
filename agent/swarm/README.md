@@ -1,4 +1,4 @@
-# Agent-owned swarms
+# AgentSwarm
 
 A swarm belongs to an agent session. That agent delegates work, receives saved worker results, and produces the synthesis. Workers remain ordinary agents with their own harness, model, conversation and artifacts. Descendant teams inherit the root mission's permissions and absolute deadline.
 
@@ -9,25 +9,41 @@ A swarm belongs to an agent session. That agent delegates work, receives saved w
 The host injects an authenticated `SwarmBackend` bound to the current agent. Application integration can obtain the same capability with `coordinator.swarm(agent_run_id)` during an active turn. Callers cannot select a different owner or extend its budget through the client.
 
 ```python
-from agent.swarm import Swarm, Task
+from agent.swarm import Agent, AgentSwarm, Harness
 
 async def delegate_review(backend):
-    swarm = Swarm(backend)
+    swarm = AgentSwarm(backend)
     return await swarm.start(
         request_key="proposal-review",
         instructions="Review this proposal and cite evidence for your conclusions.",
-        tasks=[
-            Task(label="Research", prompt="Find supporting evidence.",
-                 harness="codex", model="openai/gpt-6.1-sol"),
-            Task(label="Critic", prompt="Find assumptions that do not hold.",
-                 harness="claude-agent-sdk", model="anthropic/claude-opus-5-5"),
+        agents=[
+            Agent(name="Researcher", task="Find supporting evidence.",
+                  harness=Harness.CODEX, model="openai/gpt-6.1-sol"),
+            Agent(name="Critic", task="Find assumptions that do not hold.",
+                  harness=Harness.CLAUDE_AGENT_SDK, model="anthropic/claude-opus-5-5"),
         ],
     )
 ```
 
-The result is a `SwarmRun` receipt with `id`, `children`, and `checkpoint_required`. Submission returns after durable acceptance; it does not wait for workers. Runtime/model selectors must pass host policy. Omitting selectors inherits the owner's runtime. Use the same request key only for the same input in the same owner turn; the host rejects conflicting reuse. Save the group ID across turns instead of submitting again.
+The result is a `SwarmRun` receipt with `id`, `children`, and `checkpoint_required`. Submission returns after durable acceptance; it does not wait for workers. Runtime/model selectors must pass host policy. Each explicit agent selects a harness; omitting its model inherits the owner's selected model, subject to host compatibility checks. Use the same request key only for the same input in the same owner turn; the host rejects conflicting reuse. Save the group ID across turns instead of submitting again.
 
-For independent cases, supply `instructions`, `items` and `workers=10` instead of `tasks`. The shared validator partitions items exactly once, including repeated values. This is separate from Swarm mode's automatic ten complementary roles.
+For independent cases, supply `instructions`, `items` and `workers=10` instead of `agents`. Set a shared `harness=Harness.CODEX` or omit it to inherit the owner’s harness. The shared validator partitions items exactly once, including repeated values. This is separate from Swarm mode's automatic ten complementary roles.
+
+`Agent` is immutable and validated. Its fields are `name` (1–100 characters), `task` (3–12,000 characters), required `harness: Harness`, and optional `model`. Names and tasks are free-form text; harness IDs use the enum:
+
+```python
+Harness.HERMES
+Harness.CLAUDE_AGENT_SDK
+Harness.CODEX
+Harness.OPENCODE
+Harness.DEEPAGENTS
+Harness.TOOL_LOOP
+Harness.PI
+```
+
+Unknown harnesses, extra fields, and blank names/tasks are rejected before dispatch. JSON uses the stable string harness IDs, and definitions map to the existing `label`/`prompt` broker fields without changing stored requests.
+
+`Swarm` remains an alias for `AgentSwarm`; the earlier `tasks=` interface remains available for existing callers and host-generated `plan_team()` output. Do not combine `agents=` and `tasks=`. Host-resolved planner runtimes and the existing tool wire remain extensible; the public `Agent` definition uses the known harness enum.
 
 ## Resume with results
 
@@ -37,7 +53,7 @@ After the host resumes the owner:
 
 ```python
 async def read_review(backend, saved_group_id):
-    group = Swarm(backend).group(saved_group_id)
+    group = AgentSwarm(backend).group(saved_group_id)
     result = await group.result()
     if not result.settled:
         return result  # The host still owns the wait; do not start a polling loop.
@@ -54,8 +70,8 @@ async def read_review(backend, saved_group_id):
 
 | Agent package | Moyai adapter |
 | --- | --- |
-| `contracts.py`: task validation, partitioning, existing broker schemas | `app/agents.py`: ownership, admission, workspace snapshots and saved group results |
-| `client.py`: `Swarm`, durable handles, typed public results, `SwarmBackend` protocol | `app/swarm_backend.py`: owner-bound adapter to that same coordinator |
+| `types.py`: `Agent` and `Harness`; `contracts.py`: task validation, partitioning, existing broker schemas | `app/agents.py`: ownership, admission, workspace snapshots and saved group results |
+| `client.py`: `AgentSwarm`, durable handles, typed public results, `SwarmBackend` protocol | `app/swarm_backend.py`: owner-bound adapter to that same coordinator |
 | `planning.py`: complementary roles, balanced runtime assignment, worker and continuation prompts | `app/swarms.py`: approved runtime catalog, atomic bootstrap, mission state and durable scheduling |
 
 `plan_team(task, runtimes=[Runtime(...)])` composes ten complementary assignments using only the supplied runtime pairs. Extra models for one harness do not give that harness extra workers. A host persists the first plan and assigns IDs; it does not reroll on recovery. Moyai's initial bootstrap commits the plan, child sessions, scoped uploads and dispatch wakes in one transaction. This path precedes the first live agent turn, so it intentionally does not take a coordinator workspace snapshot.

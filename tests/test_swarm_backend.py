@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agent.swarm import Swarm, Task
+from agent.swarm import Agent, AgentSwarm, Harness, Task
 from app.agents import Assignment, Fanout
 from app.db import Store, now
 from app.swarms import create_in
@@ -41,11 +41,11 @@ def test_saved_swarm_prompt_skips_removed_runtime_catalog_entries(durable):
 async def test_sdk_dispatch_survives_host_replacement_and_returns_saved_handoff(durable):
     manager, cloud, owner, coordinator = await start_owner(durable)
     team = coordinator.swarm(owner)
-    assert isinstance(team, Swarm)
-    tasks = [Task(label='Research', prompt='Find the evidence.', harness='codex', model='sol'),
-             Task(label='Review', prompt='Challenge the assumptions.', harness='claude-agent-sdk', model='opus')]
-    run = await team.start(request_key='sdk-review', tasks=tasks)
-    again = await team.start(request_key='sdk-review', tasks=tasks)
+    assert isinstance(team, AgentSwarm)
+    agents = [Agent(name='Research', task='Find the evidence.', harness=Harness.CODEX, model='sol'),
+              Agent(name='Review', task='Challenge the assumptions.', harness=Harness.CLAUDE_AGENT_SDK, model='opus')]
+    run = await team.start(request_key='sdk-review', agents=agents)
+    again = await team.start(request_key='sdk-review', agents=agents)
     assert run.id == again.id and run.checkpoint_required
     assert len(run.children) == 2 and cloud.snapshots == 1
     pending = await run.result()

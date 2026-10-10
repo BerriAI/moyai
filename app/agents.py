@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from uuid import uuid4
 import zipfile
 
-from agent.swarm import Swarm
+from agent.swarm import AgentSwarm
 from agent.swarm.contracts import Arguments, Assignment, Fanout, Group, Results, Artifact, Retry
 
 from .db import now
@@ -36,10 +36,10 @@ class AgentCoordinator:
         if store.schema_updates:
             initialize_schema(store)
 
-    def swarm(self, run_id):
+    def swarm(self, run_id) -> AgentSwarm:
         """Bind the public agent API to this session's existing durable backend."""
         from .swarm_backend import MoyaiSwarmBackend
-        return Swarm(MoyaiSwarmBackend(self, run_id))
+        return AgentSwarm(MoyaiSwarmBackend(self, run_id))
 
     def available(self, run):
         return self.settings.temporal_enabled and run['chat_enabled'] and not run.get('deleted_at')

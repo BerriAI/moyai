@@ -4,7 +4,7 @@ Choose **Swarm**, describe a task, and set a maximum duration. Moyai immediately
 
 Swarm mode requires the existing cloud sandbox setup and Temporal execution. It uses Moyai's durable sessions, saved conversation/workspace checkpoints, delegation tools, and permission boundaries. It is not an independent background loop or a Hermes `/goal` command.
 
-The swarm belongs to its coordinator agent. Shared planning, prompts and the typed Python interface live in [`agent/swarm`](../agent/swarm/README.md); the app supplies persistence, scheduling and visualization. Python integrations and model-facing delegation tools use the same request contracts and durable coordinator.
+The swarm belongs to its coordinator agent. Shared planning, prompts and the typed `AgentSwarm` Python interface live in [`agent/swarm`](../agent/swarm/README.md); the app supplies persistence, scheduling and visualization. Python integrations and model-facing delegation tools use the same request contracts and durable coordinator.
 
 Set `MAX_PARALLEL_AGENTS` to at least 10. `MAX_CONCURRENT_RUNS` and `MAX_CONCURRENT_MODEL_REQUESTS` still bound actual execution; a smaller capacity queues the rest of the team. Set `SWARM_MODELS` to a comma-separated list of enabled models allowed for automatic worker selection (for example `anthropic/claude-opus-5-5,openai/gpt-6.1-sol`). When unset, workers inherit the selected coordinator model. Claude Agent SDK and Codex prefer their native provider when that provider is in the list. Model choices must still pass the workspace's normal validation. This is diverse assignment, not a quality-routing claim. The initial team is pinned on creation and is never rerolled by HTTP retries or a worker restart.
 
