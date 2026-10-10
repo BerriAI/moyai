@@ -56,6 +56,8 @@ def test_moyai(tmp_path):
     lens = Lens(base_url=os.environ['LENS_BASE_URL'], api_key=os.environ['LENS_API_KEY'])
     with lens.evals.test(os.environ.get('MOYAI_EVAL_NAME', 'moyai-python-coding-regressions'),
                          execution=execution_metadata()) as evaluation:
+        verification_failures = 0
+        execution_errors = 0
         for index, case in enumerate(evaluation.cases):
             if case.followups:
                 raise ValueError('The Python coding suite expects single-turn cases.')
@@ -64,9 +66,12 @@ def test_moyai(tmp_path):
             try:
                 result = MoyaiAgent.from_env(workspace=workspace).run(input=case.input)
             except AgentRunError as exc:
+                execution_errors += 1
                 evaluation.record_error(case, exc)
                 continue
             verification = verify_solution(workspace, verification_code)
+            if verification['passed'] is not True:
+                verification_failures += 1
             evaluation.record(case, output=json.dumps({'answer': result.output, 'verification': verification}),
                               trace_id=result.trace_id)
         report = evaluation.finish()
@@ -76,3 +81,9 @@ def test_moyai(tmp_path):
             path.parent.mkdir(parents=True, exist_ok=True)
             report.write_json(path)
         report.assert_passed()
+        # Save every result and the Lens report first. A remote judge's verdict
+        # must never turn a failed independent check into a passing Python test.
+        if verification_failures:
+            raise AssertionError(f'Independent verification failed for {verification_failures} coding case(s).')
+        if execution_errors:
+            raise AssertionError(f'{execution_errors} coding case(s) did not complete; evaluation is inconclusive.')

@@ -149,7 +149,7 @@ class SessionFolders:
         router = APIRouter()
 
         @router.get('/api/session-folders')
-        async def listing(request: Request):
+        def listing(request: Request):
             return {'folders': self.listing(self.actor(request))}
 
         @router.post('/api/session-folders', status_code=201)

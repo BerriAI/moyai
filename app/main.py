@@ -18,6 +18,7 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
@@ -507,9 +508,7 @@ def _create_app(settings, store):
         connectors.audit("organization", "Updated organization name")
         return {"name": body.name}
 
-    @app.get("/api/runs")
-    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None, archived: bool = False,
-                   search: str = Query(default='', max_length=200)):
+    def load_run_list(request, focus, scope, archived, search, view):
         owner = session_folders.actor(request)
         if scope == 'all':
             security.require(request, admin=True)
@@ -525,18 +524,18 @@ def _create_app(settings, store):
                                     search=(search,) if search else (), search_folders=True)
         matches = store.sidebar_search_matches(search, ids) if search else {}
         sidebar_metadata = store.sidebar_metadata(owner, ids)
-        pr_summaries = session_pull_requests.summaries(ids)
+        receipts = session_pull_requests.receipts(ids)
         archives = session_lifecycle.archives(owner)
         admin = security.role(request) == 'admin'
         runs = {}
-        for run_id in ids:
-            run = store.run(run_id)
-            if not run or run['deleted_at']:
+        for run in store.runs_by_ids(ids, sidebar=view == 'sidebar'):
+            run_id = run['id']
+            if run['deleted_at']:
                 continue
             runs[run_id] = {**public_run(run), **session_lifecycle.metadata(run, owner, admin, archives), **sidebar_metadata.get(run_id, {}),
-                           'pr_summary': pr_summaries[run_id], 'folder_id': memberships.get(run_id), 'children': []}
+                           'folder_id': memberships.get(run_id), 'children': []}
         nodes = dict(runs)
-        for child in store.subtrees(list(runs)):
+        for child in store.subtrees(list(runs), sidebar=True):
             if child['id'] not in runs and not child['deleted_at']:
                 visible = public_run(child)
                 nodes[child['id']] = {**{key: visible[key] for key in ('id', 'parent_run_id', 'agent_label', 'status', 'mode', 'created_at', 'updated_at', 'active_message_id')},
@@ -546,7 +545,20 @@ def _create_app(settings, store):
                 nodes[child['parent_run_id']]['children'].append(child)
             if search:
                 child.update(search_query=search, search_match=child['id'] in matches, search_snippet=matches.get(child['id'], ''))
-        return list(runs.values())
+        return runs, receipts
+
+    @app.get("/api/runs")
+    async def runs(request: Request, focus: str = '', scope: Literal['all', 'mine'] | None = None, archived: bool = False,
+                   search: str = Query(default='', max_length=200), view: Literal['full', 'sidebar'] = 'full'):
+        # SQLite reads/identity writes can wait on disk or a writer. Keep the
+        # bounded worker pool responsible for those waits, not the event loop.
+        rows, receipts = await run_in_threadpool(load_run_list, request, focus, scope, archived, search, view)
+        # The PR cache and refresh tasks belong to the event loop. Recheck live
+        # GitHub access here; do not pass connection credentials across threads.
+        summaries = session_pull_requests.summaries(rows, receipts=receipts)
+        for run_id, row in rows.items():
+            row['pr_summary'] = summaries[run_id]
+        return list(rows.values())
 
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):

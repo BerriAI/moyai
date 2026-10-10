@@ -199,6 +199,109 @@ def test_should_reject_unrecognized_saved_input():
         verification_for('A prompt that is not in the versioned regression fixture.')
 
 
+@pytest.mark.parametrize(('name', 'solution'), [
+    ('stable-deduplication', 'def stable_unique(values):\n    seen, result = set(), []\n    for value in values:\n        if str(value) not in seen:\n            seen.add(str(value))\n            result.append(value)\n    return result\n'),
+    ('merge-intervals', 'def merge_intervals(intervals):\n    result = []\n    for start, end in sorted(intervals):\n        if start == end:\n            continue\n        if result and start <= result[-1][1]:\n            result[-1][1] = max(end, result[-1][1])\n        else:\n            result.append([start, end])\n    return result\n'),
+    ('iterable-chunking', 'def chunked(items, size):\n    if size <= 0:\n        raise ValueError()\n    items = list(items)\n    if size == 1:\n        return items\n    return [items[i:i + size] for i in range(0, len(items), size)]\n'),
+    ('strict-boolean-parsing', "def parse_bool(value):\n    value = value.strip().lower()\n    if value in {'true', 'yes'}:\n        return True\n    if value in {'false', 'no'}:\n        return False\n    number = float(value)\n    if number not in (0, 1):\n        raise ValueError()\n    return bool(number)\n"),
+])
+def test_should_reject_contract_defects_that_escaped_the_original_checks(tmp_path, name, solution):
+    from evals.test_moyai import verification_for, verify_solution
+    fixture = Path(__file__).resolve().parents[1] / 'evals' / 'coding_cases.json'
+    case = next(case for case in json.loads(fixture.read_text())['cases'] if case['meta']['name'] == name)
+    (tmp_path / 'solution.py').write_text(solution)
+    assert not verify_solution(tmp_path, verification_for(case['input']))['passed']
+
+
+@pytest.fixture
+def passing_lens_report(monkeypatch, tmp_path):
+    import sys
+    from evals import test_moyai as driver
+
+    fixture = Path(__file__).resolve().parents[1] / 'evals' / 'coding_cases.json'
+    case = SimpleNamespace(input=json.loads(fixture.read_text())['cases'][0]['input'], followups=[])
+    state = {'records': [], 'errors': [], 'events': [], 'solution':
+             'def stable_unique(values):\n    return list(dict.fromkeys(values))\n'}
+
+    class Report:
+        def write_json(self, path):
+            state['events'].append('write_report')
+            path.write_text(json.dumps({'gate_passed': True, 'cases': len(state['records'])}))
+
+        def assert_passed(self):
+            state['events'].append('remote_passed')
+
+    class Evaluation:
+        cases = [case]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def record(self, case, **kwargs):
+            state['records'].append(kwargs)
+
+        def record_error(self, case, error):
+            state['errors'].append(error)
+
+        def finish(self):
+            state['events'].append('finish')
+            return Report()
+
+    class Agent:
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        def run(self, *, input):
+            if state.get('execution_error'):
+                raise AgentRunError('Moyai stopped before completing the task or settling all tool calls.')
+            self.workspace.mkdir()
+            (self.workspace / 'solution.py').write_text(state['solution'])
+            return SimpleNamespace(output='The requested task is complete and tests passed.', trace_id='1' * 32)
+
+    monkeypatch.setitem(sys.modules, 'lens', SimpleNamespace(
+        Lens=lambda **kwargs: SimpleNamespace(evals=SimpleNamespace(test=lambda *args, **kwargs: Evaluation()))))
+    monkeypatch.setattr(driver.MoyaiAgent, 'from_env', lambda *, workspace: Agent(workspace))
+    monkeypatch.setattr(driver, 'execution_metadata', lambda: None)
+    monkeypatch.setenv('LENS_BASE_URL', 'https://lens.example')
+    monkeypatch.setenv('LENS_API_KEY', 'test-key')
+    artifact = tmp_path / 'report.json'
+    monkeypatch.setenv('LENS_REPORT_PATH', str(artifact))
+    return driver, state, artifact
+
+
+def test_should_fail_failed_independent_checks_even_when_lens_reports_success(passing_lens_report, tmp_path):
+    driver, state, artifact = passing_lens_report
+    state['solution'] = 'def stable_unique(values):\n    return sorted(set(values))\n'
+    with pytest.raises(AssertionError, match='Independent verification failed for 1 coding case'):
+        driver.test_moyai(tmp_path)
+    assert json.loads(state['records'][0]['output'])['verification']['passed'] is False
+    assert state['records'][0]['trace_id'] == '1' * 32
+    assert state['events'] == ['finish', 'write_report', 'remote_passed']
+    assert json.loads(artifact.read_text())['gate_passed'] is True
+
+
+def test_should_accept_correct_code_after_recording_results_and_report(passing_lens_report, tmp_path):
+    driver, state, artifact = passing_lens_report
+    driver.test_moyai(tmp_path)
+    assert json.loads(state['records'][0]['output'])['verification']['passed'] is True
+    assert state['events'] == ['finish', 'write_report', 'remote_passed']
+    assert artifact.is_file()
+
+
+def test_should_fail_incomplete_execution_even_when_lens_reports_success(passing_lens_report, tmp_path):
+    driver, state, artifact = passing_lens_report
+    state['execution_error'] = True
+    with pytest.raises(AssertionError, match='did not complete; evaluation is inconclusive'):
+        driver.test_moyai(tmp_path)
+    assert len(state['errors']) == 1
+    assert state['records'] == []
+    assert state['events'] == ['finish', 'write_report', 'remote_passed']
+    assert artifact.is_file()
+
+
 def test_should_distinguish_baseline_and_candidate_execution_metadata(monkeypatch):
     pytest.importorskip('lens')
     from evals.test_moyai import execution_metadata

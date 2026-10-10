@@ -2,6 +2,10 @@
 
 This is the CI entry point, not a deployed Moyai HTTP client. Run it in a
 throwaway container: coding agents can execute shell commands.
+
+AGENT_MODEL is supplied by this test's caller. Native harness selection follows
+production settings, but this controlled-model lane does not discover or test
+model changes made only in the deployed application's environment.
 """
 from dataclasses import dataclass, field
 import json
@@ -26,6 +30,32 @@ class AgentResult:
     agent_version: str
     model_calls: int
     tool_calls: int
+
+
+def runtime_selection(environ: Mapping[str, str]) -> tuple[str, str]:
+    """Resolve the production model/harness rules using only supplied settings."""
+    from app.config import Settings
+
+    class EvalSettings(Settings):
+        @classmethod
+        def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
+                                       dotenv_settings, file_secret_settings):
+            # A caller-provided environment must not borrow an unrelated .env or
+            # parent process's model/harness and silently change the experiment.
+            return (init_settings,)
+
+    configured = {'agent_model': environ['AGENT_MODEL']}
+    override = environ.get('MOYAI_EVAL_HARNESS') or environ.get('AGENT_HARNESS')
+    if override:
+        if override not in {'codex', 'claude-agent-sdk'}:
+            raise ValueError('MOYAI_EVAL_HARNESS or AGENT_HARNESS must be codex or claude-agent-sdk.')
+        configured['agent_harness'] = override
+    settings = EvalSettings(**configured)
+    model = settings.resolve_model()
+    harness = settings.default_harness(model)
+    if harness not in {'codex', 'claude-agent-sdk'}:
+        raise ValueError('The resolved eval harness must be codex or claude-agent-sdk.')
+    return model, harness
 
 
 def source_revision(root: Path) -> str:
@@ -66,13 +96,11 @@ class MoyaiAgent:
         version = source_revision(Path(__file__).resolve().parents[1])
         if env['LENS_VERSION'] != version:
             raise ValueError('LENS_VERSION must match the checked-out Moyai commit being tested.')
-        harness = env.get('MOYAI_EVAL_HARNESS', 'codex')
-        if harness not in {'codex', 'claude-agent-sdk'}:
-            raise ValueError('MOYAI_EVAL_HARNESS must be codex or claude-agent-sdk.')
+        model, harness = runtime_selection(env)
         timeout = int(env.get('MOYAI_EVAL_TIMEOUT', '240'))
         if not 10 <= timeout <= 900:
             raise ValueError('MOYAI_EVAL_TIMEOUT must be between 10 and 900 seconds.')
-        return cls(Path(workspace).resolve(), env['AGENT_MODEL'], env['LITELLM_API_BASE'],
+        return cls(Path(workspace).resolve(), model, env['LITELLM_API_BASE'],
                    env['LITELLM_API_KEY'], env['LITELLM_TRACE_ENDPOINT'],
                    env['LITELLM_TRACE_API_KEY'], version, harness, timeout)
 
