@@ -143,8 +143,8 @@ button.quiet:hover, .icon-button:hover, .new-task:hover, .nav-button:hover,
 }
 .rail-foot .rail-identity {
   flex: 1; min-width: 0; max-width: none; margin: 0; padding: 0;
-  font-size: 13px; line-height: 28px; color: var(--muted);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; line-height: 1.4; color: var(--muted);
+  overflow-wrap: anywhere; white-space: normal;
 }
 .rail-account-actions { display: flex; align-items: center; gap: 2px; flex: none; margin-left: auto; }
 .rail-foot .rail-settings, .rail-foot #logout {
