@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 
@@ -20,8 +21,10 @@ def git(directory, *args, env=None):
         result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'credential.helper=',
                                  '-c', 'http.followRedirects=false', *args], cwd=directory,
                                 env=env, capture_output=True, timeout=240)
-    except (OSError, subprocess.TimeoutExpired):
-        raise GitHubToolError('Git did not finish. Inspect the checkout before continuing.') from None
+    except subprocess.TimeoutExpired:
+        raise GitHubToolError('Git timed out after 240 seconds. Retry the same command; an interrupted checkout is cleaned up automatically.') from None
+    except OSError:
+        raise GitHubToolError('Git could not start in the sandbox.') from None
     if result.returncode:
         # Git errors can echo URLs/headers; never relay raw diagnostics.
         raise GitHubToolError('Git could not complete the operation. Check that the repository, base commit and connection are available.')
@@ -36,6 +39,15 @@ def directory_path(value):
     if not directory.is_relative_to(ROOT.resolve()) or directory == ROOT.resolve():
         raise GitHubToolError('Choose a repository directory inside /workspace.')
     return directory
+
+
+def abandoned_partial(target):
+    git_dir = target / '.git'
+    if not git_dir.is_dir() or git_dir.is_symlink() or (git_dir / 'moyai.json').exists():
+        return False
+    if any(entry.name != '.git' for entry in target.iterdir()):
+        return False
+    return subprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], cwd=target, capture_output=True).returncode != 0
 
 
 def metadata(directory):
@@ -81,37 +93,57 @@ def checkout(broker, remote, token, directory='', repository='', number=None, re
             (target / '.git/moyai.json').write_text(json.dumps(data))
             git(target, 'remote', 'set-url', 'origin', canonical)
             return {**data, 'directory': str(target), 'reused': True, 'instruction': 'Existing files and local changes were preserved.'}
-        if not (target / '.git').is_dir() or (target / '.git').is_symlink():
-            raise GitHubToolError('The destination already exists. Choose an empty directory; files will not be overwritten.')
-        if number is not None:
-            raise GitHubToolError('Choose a fresh directory for a PR checkout; local files were preserved.')
-        origin = git(target, 'remote', 'get-url', 'origin').decode().strip().removesuffix('.git')
-        if origin.lower() != canonical.removesuffix('.git').lower():
-            if not origin.startswith('https://github.com/'):
-                raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
-            old = broker('/tools/call', {'name': 'github_repository', 'arguments': {'repository': origin.removeprefix('https://github.com/')}})
-            if old.get('repository_id') != repo['repository_id']:
-                raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
-        base = git(target, 'rev-parse', '--verify', 'refs/remotes/origin/' + repo['default_branch']).decode().strip()
-    else:
+        if abandoned_partial(target):
+            shutil.rmtree(target)
+        else:
+            if not (target / '.git').is_dir() or (target / '.git').is_symlink():
+                raise GitHubToolError('The destination already exists. Choose an empty directory; files will not be overwritten.')
+            if number is not None:
+                raise GitHubToolError('Choose a fresh directory for a PR checkout; local files were preserved.')
+            origin = git(target, 'remote', 'get-url', 'origin').decode().strip().removesuffix('.git')
+            if origin.lower() != canonical.removesuffix('.git').lower():
+                if not origin.startswith('https://github.com/'):
+                    raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
+                old = broker('/tools/call', {'name': 'github_repository', 'arguments': {'repository': origin.removeprefix('https://github.com/')}})
+                if old.get('repository_id') != repo['repository_id']:
+                    raise GitHubToolError('The existing checkout has a different origin. Choose an empty directory.')
+            base = git(target, 'rev-parse', '--verify', 'refs/remotes/origin/' + repo['default_branch']).decode().strip()
+    staged = None
+    if not target.exists():
         # Capability is sent in a temporary environment, never in argv, URL or Git config.
         env = git_environment(remote, token)
-        if number is not None:
-            target.mkdir()
-            git(target, 'init')
-            git(target, 'remote', 'add', 'origin', canonical)
-            git(target, 'fetch', '--depth', '1', '--no-tags', '--', remote.rstrip('/') + git_path,
-                repo['checkout_ref'], env=env)
-            git(target, 'checkout', '--detach', 'FETCH_HEAD')
-        else:
-            git(target.parent, 'clone', '--depth', '1', '--single-branch', '--no-tags', '--branch', repo['default_branch'],
-                '--', remote.rstrip('/') + git_path, str(target), env=env)
-        git(target, 'remote', 'set-url', 'origin', canonical)
-        base = git(target, 'rev-parse', 'HEAD').decode().strip()
+        staged = target.parent / f'.{target.name}.moyai-partial'
+        if staged.is_symlink():
+            raise GitHubToolError('The checkout staging path is unsafe. Choose another directory.')
+        shutil.rmtree(staged, ignore_errors=True)
+        try:
+            if number is not None:
+                staged.mkdir()
+                git(staged, 'init')
+                git(staged, 'remote', 'add', 'origin', canonical)
+                git(staged, 'fetch', '--depth', '1', '--no-tags', '--', remote.rstrip('/') + git_path,
+                    repo['checkout_ref'], env=env)
+                git(staged, 'checkout', '--detach', 'FETCH_HEAD')
+            else:
+                git(target.parent, 'clone', '--depth', '1', '--single-branch', '--no-tags', '--branch', repo['default_branch'],
+                    '--', remote.rstrip('/') + git_path, str(staged), env=env)
+            git(staged, 'remote', 'set-url', 'origin', canonical)
+            base = git(staged, 'rev-parse', 'HEAD').decode().strip()
+        except Exception:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
     data = {'repository_id': repo['repository_id'], 'repository': repo['repository'], 'base_sha': base, 'default_branch': repo['default_branch']}
     if number is not None:
         data['number'] = number
-    (target / '.git/moyai.json').write_text(json.dumps(data))
+    if staged is not None:
+        try:
+            (staged / '.git/moyai.json').write_text(json.dumps(data))
+            staged.rename(target)
+        except Exception:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
+    else:
+        (target / '.git/moyai.json').write_text(json.dumps(data))
     return {**data, 'directory': str(target), 'reused': False,
             'instruction': ('Use github_update_pull_request to publish follow-up edits to this PR. An external PR requires explicit requester approval through github_request_pull_request_write_access for this saved chat.' if number is not None else
                             'Use github_create_pull_request to publish actual files as a normal PR without an administrator approval step.')

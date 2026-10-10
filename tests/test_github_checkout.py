@@ -235,3 +235,75 @@ def test_successful_publication_is_preserved_when_base_sync_fails(checkout, monk
     result = local.call('github_create_pull_request', {'directory': str(repo), 'title': 'Publish change',
         'body': 'A change', 'request_key': 'sync-failure'}, lambda *args: receipt, '', '')
     assert result['url'] == receipt['url'] and 'succeeded' in result['checkout_warning']
+
+
+def pr_broker(base_sha, number=7):
+    def broker(path, body):
+        assert path == '/tools/call'
+        assert body == {'name': 'github_checkout', 'arguments': {'repository': 'BerriAI/litellm', 'number': number}}
+        return {'repository_id': 101, 'repository': 'BerriAI/litellm', 'default_branch': 'main',
+                'base_sha': base_sha, 'git_path': '/github/repositories/101.git', 'checkout_ref': 'refs/heads/main'}
+    return broker
+
+
+def staging_path(target):
+    return target.parent / f'.{target.name}.moyai-partial'
+
+
+def test_interrupted_pr_checkout_leaves_no_directory_and_retry_recovers(checkout, monkeypatch):
+    repo, initial, _, _, server = checkout
+    remote = f'http://127.0.0.1:{server.server_port}'
+    broker = pr_broker(initial['base_sha'])
+    target = repo.parent / 'pr-work'
+    original = local.git
+    def interrupted(directory, *args, env=None):
+        if 'fetch' in args:
+            raise local.GitHubToolError('Git timed out after 240 seconds. Retry the same command; an interrupted checkout is cleaned up automatically.')
+        return original(directory, *args, env=env)
+    monkeypatch.setattr(local, 'git', interrupted)
+    with pytest.raises(local.GitHubToolError, match='timed out after 240 seconds'):
+        local.checkout(broker, remote, 'current-capability', str(target), 'BerriAI/litellm', number=7)
+    assert not target.exists() and not staging_path(target).exists()
+    monkeypatch.setattr(local, 'git', original)
+    receipt = local.checkout(broker, remote, 'current-capability', str(target), 'BerriAI/litellm', number=7)
+    assert receipt['number'] == 7
+    assert json.loads((target / '.git/moyai.json').read_text())['number'] == 7
+    assert (target / 'edit.py').read_text() == 'before = 1\n'
+    assert not staging_path(target).exists()
+
+
+def test_legacy_partial_pr_checkout_directory_is_recovered(checkout):
+    repo, initial, _, _, server = checkout
+    remote = f'http://127.0.0.1:{server.server_port}'
+    target = repo.parent / 'stale'
+    target.mkdir()
+    subprocess.run(['git', 'init'], cwd=target, check=True, capture_output=True)
+    receipt = local.checkout(pr_broker(initial['base_sha']), remote, 'current-capability',
+                           str(target), 'BerriAI/litellm', number=7)
+    assert receipt['number'] == 7 and (target / 'edit.py').exists()
+
+
+def test_directory_with_user_files_and_no_metadata_is_never_removed(checkout):
+    repo, initial, _, _, server = checkout
+    remote = f'http://127.0.0.1:{server.server_port}'
+    target = repo.parent / 'occupied'
+    target.mkdir()
+    subprocess.run(['git', 'init'], cwd=target, check=True, capture_output=True)
+    (target / 'keep.txt').write_text('preserve')
+    with pytest.raises(local.GitHubToolError, match='fresh directory'):
+        local.checkout(pr_broker(initial['base_sha']), remote, 'current-capability',
+                       str(target), 'BerriAI/litellm', number=7)
+    assert (target / 'keep.txt').read_text() == 'preserve'
+
+
+def test_git_errors_distinguish_timeout_and_start_failure(monkeypatch, tmp_path):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired('git', 240)
+    monkeypatch.setattr(local.subprocess, 'run', timeout)
+    with pytest.raises(local.GitHubToolError, match='timed out after 240 seconds'):
+        local.git(tmp_path, 'status')
+    def missing(*args, **kwargs):
+        raise OSError('exec failed')
+    monkeypatch.setattr(local.subprocess, 'run', missing)
+    with pytest.raises(local.GitHubToolError, match='could not start'):
+        local.git(tmp_path, 'status')
