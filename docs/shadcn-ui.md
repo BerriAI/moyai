@@ -267,3 +267,25 @@ takes priority. The new-session composer has no conversation history.
 
 `node --test tests/browser/message_history.cjs` checks the real composer
 against synthetic responses at desktop, tablet and mobile widths.
+
+## Plan mode
+
+Shift+Tab in either message editor toggles Work / Plan without changing the draft
+or moving focus. The adjacent button supports pointer and keyboard activation. Both composers
+show a visible Shift + Tab hint before entering Plan mode and instructions for
+returning to Work while planning.
+The choice stays with the composer while navigating within the page and travels
+with each submitted message, including queued, retried and live steering inputs.
+Reloading the page resets the composer to Work.
+
+Plan mode instructs the agent to investigate and create Markdown plans,
+checklists, specifications or diagrams under `/workspace/plans`, linked in its
+answer and available through Files. This is an agent instruction, not a separate
+tool permission sandbox. Existing permissions still apply. Demo sessions do not
+run a live model or generate real planning artifacts.
+
+`node --test tests/browser/plan_mode.cjs` verifies both composers at desktop,
+tablet and mobile widths using synthetic API responses. Backend tests in
+`tests/test_planning.py` verify persistence, retry identity and live steering.
+Existing PostgreSQL installations using explicit migrations must run the
+offline migrator before starting schema revision 2.

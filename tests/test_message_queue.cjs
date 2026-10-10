@@ -139,9 +139,9 @@ test('failed edit retains the text, and delete never submits an edited draft by 
 
 test('composer shortcuts distinguish queue/send-now and leave Shift+Enter, IME, skills, and attachments intact',()=>{
   const script=readFileSync('app/static/app.js','utf8');const handlers={},sent=[];let first=0,hasFiles=false,skillHandles=false;
-  const hidden={kind:'now'},submit={disabled:false},form={querySelector:s=>s==='[data-send-now]'?hidden:submit,requestSubmit:button=>sent.push(button?.kind||'queue')};
+  const hidden={kind:'now'},submit={disabled:false},form={dataset:{},querySelector:s=>s==='[data-plan-mode]'?{addEventListener(){},setAttribute(){}}:s==='[data-plan-hint]'?{}:s==='[data-send-now]'?hidden:submit,requestSubmit:button=>sent.push(button?.kind||'queue')};
   const input={id:'followup',value:'Draft',addEventListener:(event,fn)=>handlers[event]=fn};
-  const context={state:{selected:'run',messageQueue:{sendFirst:()=>first++}},autoSize:()=>{},bindSkillEditor:input=>input,bindInlineSkillPicker:()=>({keydown:()=>skillHandles}),bindAttachments:()=>({hasFiles:()=>hasFiles})};
+  const context={composerPlanModes:new Map(),state:{selected:'run',messageQueue:{sendFirst:()=>first++}},autoSize:()=>{},bindSkillEditor:input=>input,bindInlineSkillPicker:()=>({keydown:()=>skillHandles}),bindAttachments:()=>({hasFiles:()=>hasFiles})};
   vm.createContext(context);vm.runInContext(readFileSync('app/static/message-history.js','utf8'),context);vm.runInContext(script.slice(script.indexOf('function bindComposer'),script.indexOf('async function navigate')),context);context.bindComposer(input,form);
   const key=extra=>handlers.keydown({key:'Enter',preventDefault(){},...extra});
   key({});key({metaKey:true});key({ctrlKey:true});key({shiftKey:true});key({isComposing:true,ctrlKey:true});

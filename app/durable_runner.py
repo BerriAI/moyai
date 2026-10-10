@@ -3,6 +3,7 @@
 Standalone mode retains one application process. Distributed mode uses one
 coordinator and replicated workers with PostgreSQL leases and shared objects.
 """
+from .planning import message_prompt
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
@@ -724,8 +725,8 @@ class DurableRunner(RunManager):
                     await self.computer.restore(sandbox, run_id, required=False)
 
             def prepare_spec():
-                message = self.store.rows('SELECT content FROM messages WHERE id=?', (state['message_id'],))[0]
-                return self.spec({**run, 'prompt': message['content'], 'message_id': state['message_id'],
+                message = self.store.rows('SELECT content,plan_mode FROM messages WHERE id=?', (state['message_id'],))[0]
+                return self.spec({**run, 'prompt': message_prompt(message), 'message_id': state['message_id'],
                                   'continuation': state['segment'] > 0})
 
             # Independent provider I/O and database reads overlap. Neither can

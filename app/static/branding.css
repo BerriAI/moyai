@@ -330,3 +330,8 @@ button:hover { background: var(--soft); }
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
 }
+
+/* Planning intent stays visible without crowding the composer controls. */
+.composer-toolbar .plan-mode-hint { flex-basis: 100%; order: 10; color: var(--muted); font-size: 12px; white-space: normal; }
+.plan-mode-hint[hidden] { display: none; }
+.composer-toolbar .plan-mode-toggle[aria-pressed="true"] { color: var(--accent); border-color: currentColor; }

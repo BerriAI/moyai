@@ -1,3 +1,4 @@
+from .planning import message_prompt
 import asyncio
 import json
 import re
@@ -278,7 +279,7 @@ class RunManager:
                     if self.store.run(run_id)['status'] == 'stopping':
                         self.store.update_run(run_id, status='cancelled')
                     return
-                turn = {**self.store.run(run_id), "prompt": message["content"], "message_id": message["id"]}
+                turn = {**self.store.run(run_id), "prompt": message_prompt(message), "message_id": message["id"]}
                 await self.execute(turn)
             except asyncio.CancelledError:
                 row = self.store.run(run_id)

@@ -198,10 +198,10 @@ class AgentCoordinator:
             conn.execute("UPDATE agent_groups SET status='completed' WHERE id=? AND status='running'", (group_id,))
         return True
 
-    def enqueue_child(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False):
+    def enqueue_child(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, plan_mode=False, send_immediately=False):
         with self.store.connect() as conn:
             conn.begin_write()
-            message, created = self.enqueue_child_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=True)
+            message, created = self.enqueue_child_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, plan_mode=plan_mode, send_immediately=send_immediately, restore_archived=True)
         if created:
             child = self.store.run(run_id)
             self.store.event(run_id, 'chat', 'Message queued', {'message_id': message['id']})
@@ -209,7 +209,7 @@ class AgentCoordinator:
                              {'child_id': run_id, 'message_id': message['id']})
         return message, created
 
-    def enqueue_child_in(self, conn, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False, restore_archived):
+    def enqueue_child_in(self, conn, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, plan_mode=False, send_immediately=False, restore_archived):
         """Keep child admission and result snapshots in the caller's transaction."""
         child = conn.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
         group = conn.execute('SELECT * FROM agent_groups WHERE id=? AND parent_id=?',
@@ -223,7 +223,7 @@ class AgentCoordinator:
         settled = not self.unsettled_in(conn, group['id'])
         if group['status'] in {'completed', 'cancelled'} and not group['result_snapshot'] and settled:
             self.snapshot_group_in(conn, group)
-        return self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=restore_archived)
+        return self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, plan_mode=plan_mode, send_immediately=send_immediately, restore_archived=restore_archived)
 
     def wait_result(self, parent_id, group_id):
         return {'group_id': group_id, 'children': [{'id': c['id'], 'label': c['agent_label']} for c in self.children(group_id)],

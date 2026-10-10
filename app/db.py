@@ -297,7 +297,7 @@ class Store:
             if 'model' not in conn.column_names('messages'):
                 conn.execute("ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             columns = conn.column_names('messages')
-            for name in ('revision', 'queue_locked', 'send_immediately'):
+            for name in ('revision', 'queue_locked', 'send_immediately', 'plan_mode'):
                 if name not in columns:
                     conn.execute(f'ALTER TABLE messages ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0')
             if 'started_at' not in columns:
@@ -523,7 +523,7 @@ class Store:
         row["plugins"] = json.loads(row["plugins"])
         return row
 
-    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False):
+    def create_run(self, prompt: str, repo_url: str, mode: str, plugins: list[str], *, chat_enabled=False, model='', user_id='', attachment_ids=None, client_id=None, environment_id='auto', side_chat_of='', harness='hermes', github_repository_id=None, sandbox_provider=None, metadata_request=False, plan_mode=False):
         sandbox_provider = sandbox_provider or getattr(self, 'sandbox_provider', lambda: 'modal')()
         run_id = uuid4().hex
         stamp = now()
@@ -537,7 +537,7 @@ class Store:
                 if previous:
                     if previous['deleted_at'] or previous['deletion_requested_at']:
                         raise ValueError('This session was deleted. Start a new session.')
-                    if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
+                    if (previous['sandbox_provider'] != sandbox_provider or previous['harness'] != harness or previous['content'] != prompt or bool(previous['plan_mode']) != plan_mode or previous['model'] != model or (previous['github_repository_id'] != github_repository_id if github_repository_id else previous['repo_url'] != repo_url)
                             or previous['mode'] != mode or json.loads(previous['plugins']) != plugins or previous['environment_id'] != environment_id or previous['side_chat_of'] != side_chat_of
                             or self.attachments.message_ids(conn, previous['id']) != set(attachment_ids or [])):
                         raise ValueError('That submission ID was already used for different content.')
@@ -569,6 +569,7 @@ class Store:
                 conn.execute('UPDATE runs SET side_chat_of=?,side_chat_context=?,agent_label=? WHERE id=?', (side_chat_of, context, 'Side chat · ' + prompt[:70], run_id))
             if chat_enabled:
                 message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'queued',?,?,?,?) RETURNING id", (run_id, prompt, 'new:' + client_id if client_id else 'initial', stamp, model, user_id)).fetchone()[0]
+                conn.execute('UPDATE messages SET plan_mode=? WHERE id=?', (plan_mode, message_id))
                 self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
                 if metadata_request:
                     from .session_metadata import complete_in
@@ -624,7 +625,7 @@ class Store:
 
     def messages(self, run_id, *, connection=None):
         messages = self.rows("""SELECT m.id,m.role,m.content,m.status,m.created_at,m.started_at,m.model,
-            m.user_id,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,
+            m.user_id,m.plan_mode,m.revision,m.queue_locked,m.steering_parent_id,m.send_immediately,m.response_to_id,
             COALESCE(NULLIF(linked.email,''),NULLIF(u.email,''),linked.name,u.name,'Earlier message') AS user_name,
             u.name AS sender_name,u.email AS sender_email,
             COALESCE((SELECT r.team_id FROM slack_receipts r WHERE r.message_id=m.id AND r.run_id=m.run_id
@@ -663,15 +664,15 @@ class Store:
         messages = ordered + [m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] == 'queued']
         return self.attachments.messages(run_id, messages)
 
-    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
+    def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, plan_mode=False, send_immediately=False):
         with self.connect() as conn:
             conn.begin_write()
-            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, restore_archived=True)
+            result, created = self.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, plan_mode=plan_mode, send_immediately=send_immediately, restore_archived=True)
         if created:
             self.event(run_id, "chat", "Message queued", {"message_id": result["id"]})
         return result, created
 
-    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False, restore_archived):
+    def enqueue_message_in(self, conn, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, plan_mode=False, send_immediately=False, metadata_request=False, restore_archived):
         """Caller owns a write transaction, including any transport receipt."""
         row = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row and (row['deleted_at'] or row['deletion_requested_at']):
@@ -680,7 +681,7 @@ class Store:
             raise ValueError("This older task has no saved chat workspace. Start a new session.")
         existing = conn.execute("SELECT * FROM messages WHERE run_id=? AND client_id=?", (run_id, client_id)).fetchone()
         if existing:
-            if (existing["content"] != content or existing['user_id'] != user_id or (model is not None and existing['model'] != model)
+            if (existing["content"] != content or bool(existing['plan_mode']) != plan_mode or existing['user_id'] != user_id or (model is not None and existing['model'] != model)
                     or self.attachments.message_ids(conn, existing['id']) != set(attachment_ids or [])):
                 raise ValueError("That message ID was already used for different text or model.")
             return dict(existing), False
@@ -693,6 +694,7 @@ class Store:
             model = model if model is not None else row['model'] or self.default_model
             message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id) VALUES(?,'user',?,'completed',?,?,?,?) RETURNING id",
                                      (run_id, content, client_id, stamp, model, user_id)).fetchone()[0]
+            conn.execute('UPDATE messages SET plan_mode=? WHERE id=?', (plan_mode, message_id))
             complete_in(conn, run_id, message_id, stamp)
             return {'id': message_id, 'status': 'completed', 'model': model}, True
         if row["status"] == "stopping":
@@ -710,6 +712,7 @@ class Store:
         from .harnesses import validate_harness
         validate_harness(row['harness'], model)
         message_id = conn.execute("INSERT INTO messages(run_id,role,content,status,client_id,created_at,model,user_id,send_immediately) VALUES(?,'user',?,'queued',?,?,?,?,?) RETURNING id", (run_id, content, client_id, stamp, model, user_id, send_immediately)).fetchone()[0]
+        conn.execute('UPDATE messages SET plan_mode=? WHERE id=?', (plan_mode, message_id))
         self.attachments.bind_in(conn, attachment_ids, message_id, user_id)
         if restore_archived:
             conn.execute('DELETE FROM session_archives WHERE owner_id=? AND run_id=?',

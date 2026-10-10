@@ -194,7 +194,7 @@ test('a delayed list for a replaced route requests the missing current focus and
 });
 
 function installHome(f){
-  f.state.newDraft={};Object.assign(f.context,{modelPreferenceSave:Promise.resolve(),environmentOptions:()=>'',harnessPicker:()=>'',modelPicker:()=>'',providerNames:{},submitTask(){},bindHarnessPicker(){},bindComposer(){},Event});
+  f.state.newDraft={};Object.assign(f.context,{planModeControl:()=>'',modelPreferenceSave:Promise.resolve(),environmentOptions:()=>'',harnessPicker:()=>'',modelPicker:()=>'',providerNames:{},submitTask(){},bindHarnessPicker(){},bindComposer(){},Event});
   load(f.context,'async function navigate(','async function refreshRuns(');load(f.context,'async function renderHome(','async function submitTask(');
 }
 test('real home startup reuses shared config and renders while the sole sidebar and organization requests remain pending',async()=>{

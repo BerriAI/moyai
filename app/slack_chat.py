@@ -112,7 +112,7 @@ class SlackChat:
         conn.execute('INSERT INTO slack_outbox(run_id,dedupe_key,kind,text,created_at,metadata,status) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING',
                      (run_id, key, kind, text, now(), json.dumps(metadata or {}), status))
 
-    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, send_immediately=False, metadata_request=False):
+    def enqueue_web(self, run_id, content, client_id, model, user_id, attachment_ids=None, send_now=False, *, plan_mode=False, send_immediately=False, metadata_request=False):
         """Save a verified web input and its mirror in the same transaction.
 
         Only new inputs in an enabled, awake binding are eligible. Retrying a
@@ -130,7 +130,7 @@ class SlackChat:
                 # before saving a possible instant answer to this new input.
                 self.collect_answers_in(conn, binding, allowed)
                 self.collect_progress_in(conn, binding, allowed)
-            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
+            message, created = self.store.enqueue_message_in(conn, run_id, content, client_id, model, user_id, attachment_ids, send_now, plan_mode=plan_mode, send_immediately=send_immediately, metadata_request=metadata_request, restore_archived=not metadata_request)
             if created and binding:
                 if allowed and not binding['paused']:
                     user = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()

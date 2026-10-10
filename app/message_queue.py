@@ -1,5 +1,6 @@
 """Atomic queue edits and cooperative steering, serialized with message claim."""
 from fastapi import HTTPException
+from .planning import message_prompt
 import json
 
 from .db import now
@@ -128,4 +129,4 @@ class MessageQueue:
             conn.execute('UPDATE messages SET steering_parent_id=? WHERE id=?', (turn_id, target))
         from .attachments import attachment_context
         uploads = [item for item in self.store.attachments.for_run(run_id, target) if item['message_id'] == target]
-        return {'steer_message_id': None, 'input': {'id': target, 'content': message['content'] + attachment_context(uploads), 'attachments': uploads}}
+        return {'steer_message_id': None, 'input': {'id': target, 'content': message_prompt(dict(message)) + attachment_context(uploads), 'attachments': uploads}}

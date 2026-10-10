@@ -76,6 +76,7 @@ class NewRun(BaseModel):
     plugins: list[Provider] = Field(default_factory=list, max_length=4)
     environment_id: str = Field(default="auto", pattern=r"^(auto|none|[0-9a-f]{32})$")
     chat_enabled: bool = True
+    plan_mode: bool = False
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
@@ -129,6 +130,7 @@ class ChatMessage(BaseModel):
     model: str | None = Field(default=None, max_length=120)
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
     send_now: bool = False
+    plan_mode: bool = False
 
     @model_validator(mode='after')
     def require_input(self):
@@ -681,7 +683,7 @@ def _create_app(settings, store):
         session = await database(security.session_info, request)
         user_id = await database(store.identity, session)
         try:
-            run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
+            run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled or body.plan_mode, plan_mode=body.plan_mode, model=model, user_id=user_id,
                                    attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
@@ -830,7 +832,7 @@ def _create_app(settings, store):
             send_immediately = user_preferences.get(user_id)['send_immediately']
             message, created = enqueue(run_id, body.content, body.client_id, selected_model, user_id,
                                        body.attachment_ids, body.send_now, send_immediately=send_immediately,
-                                       **({'metadata_request': True} if metadata_request else {}))
+                                       plan_mode=body.plan_mode, **({'metadata_request': True} if metadata_request else {}))
         except ValueError as exc:
             raise HTTPException(409, str(exc))
         await checkpoints.flush()

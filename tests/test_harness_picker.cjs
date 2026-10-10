@@ -5,7 +5,7 @@ const vm=require('./helpers/ui-vm.cjs');
 const source=fs.readFileSync('app/static/app.js','utf8');
 const functions=source.slice(source.indexOf('function harnessLogo('),source.indexOf('\nfunction setSidebar('));
 function setup(){
-  const context={state:{config:{harness:'codex',model:'openai/gpt-6-astra',harnesses:[{id:'hermes',name:'Hermes'},{id:'codex',name:'Codex'},{id:'claude-agent-sdk',name:'Claude Code',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra',default_harness:'codex'},{id:'anthropic/claude-opus-5-5',name:'Opus',default_harness:'claude-agent-sdk'}]}},esc:s=>String(s),MoyaiProviderLogos:require('../app/static/provider-logos.js')};
+  const context={composerPlanModes:new Map(),state:{config:{harness:'codex',model:'openai/gpt-6-astra',harnesses:[{id:'hermes',name:'Hermes'},{id:'codex',name:'Codex'},{id:'claude-agent-sdk',name:'Claude Code',model_prefix:'anthropic/claude-'}],models:[{id:'openai/gpt-6-astra',name:'Astra',default_harness:'codex'},{id:'anthropic/claude-opus-5-5',name:'Opus',default_harness:'claude-agent-sdk'}]}},esc:s=>String(s),MoyaiProviderLogos:require('../app/static/provider-logos.js')};
   vm.createContext(context);vm.runInContext(functions,context);return context;
 }
 function picker(value){return {value,innerHTML:'',closest:()=>({querySelector:()=>null}),addEventListener(type,handler){this[type]=handler;}};}
@@ -54,7 +54,7 @@ test('new-session submission omits automatic selection and preserves an explicit
     const fields=Object.fromEntries(Object.entries({'#prompt':'Run a task','#repo':'','#project-environment':'auto','#mode':'modal','#new-model':'openai/gpt-6-astra','#new-harness':selected}).map(([key,value])=>[key,{value}]));
     fields['#task-form']={querySelector:()=>({disabled:false,isConnected:true})};
     let payload;
-    const context={stopStream(){},setView(){},sessionTitle:()=>'New session',renderSessionSubmission(){},showError:()=>{},state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>[],lock(){},clear(){}},newDraft:{}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'request-id'},api:async(path,request)=>{assert.equal(path,'/api/runs');payload=JSON.parse(request.body);return {id:'saved-session'};},refreshRuns:async()=>{},openRun:async()=>{},autoSize(){},toast(message){throw Error(message);}};
+    const context={composerPlanModes:new Map(),stopStream(){},setView(){},sessionTitle:()=>'New session',renderSessionSubmission(){},showError:()=>{},state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>[],lock(){},clear(){}},newDraft:{}},$:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'request-id'},api:async(path,request)=>{assert.equal(path,'/api/runs');payload=JSON.parse(request.body);return {id:'saved-session'};},refreshRuns:async()=>{},openRun:async()=>{},autoSize(){},toast(message){throw Error(message);}};
     vm.createContext(context);vm.runInContext(submission,context);
     await context.submitTask({preventDefault(){}});
     assert.equal(payload.model,'openai/gpt-6-astra');

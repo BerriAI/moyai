@@ -9,7 +9,7 @@ function setup(){
   const fields=Object.fromEntries(Object.entries({'#prompt':'Start now','#repo':'','#project-environment':'auto','#mode':'modal','#new-model':'test-model','#new-harness':''}).map(([k,value])=>[k,{value}]));
   fields['#retry-create']={};fields['#edit-create']={};
   const requests=[],paint=[],opened=[],cleared=[];
-  const context={state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>['file-1'],lock(){},clear(ids){cleared.push(ids);}},newDraft:{}},
+  const context={composerPlanModes:new Map(),state:{pageVersion:0,sending:new Set(),attachments:{ids:()=>['file-1'],lock(){},clear(ids){cleared.push(ids);}},newDraft:{}},
     $:id=>fields[id],document:{querySelectorAll:()=>[]},crypto:{randomUUID:()=> 'client-1'},stopStream(){},setView(){},sessionTitle:()=> 'Start now',
     renderSessionSubmission:(...args)=>paint.push(args),refreshRuns:()=>new Promise(()=>{}),openRun:async(...args)=>opened.push(args),
     api:(_path,options)=>{const d=deferred();requests.push({body:JSON.parse(options.body),...d});return d.promise;},showError(){},toast(){},navigate:async()=>{}};
