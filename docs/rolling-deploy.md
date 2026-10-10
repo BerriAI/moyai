@@ -41,8 +41,9 @@ change a build label to disguise the commit that is actually running.
 The dispatched `main` commit is immutable for the entire run. Its Docker startup,
 PostgreSQL runtime, production-release rehearsal, other reported checks, and
 commit statuses must pass. The two protocol/controller workflows must have
-successful **push** runs on that exact commit. If a path filter omitted one,
-rolling preflight fails closed; an unrelated green check is insufficient.
+successful **push** runs on that exact commit. Both run on every push to main,
+including UI-only and documentation-only commits; their pull-request path filters
+remain unchanged. A missing run still fails closed.
 
 The checked-out candidate computes its API and three background role contracts
 in an isolated process using each service's actual saved environment. All must

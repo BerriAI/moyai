@@ -4,7 +4,6 @@ on:
     paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'scripts/worker_release_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
   push:
     branches: [main]
-    paths: ['app/**', 'tests/**', 'scripts/postgres_runtime_smoke.py', 'scripts/shared_storage_smoke.py', 'scripts/scheduling_stall_demo.py', 'scripts/runtime_capacity_probe.py', 'scripts/runtime_startup_probe.py', 'scripts/runtime_startup_fence_probe.py', 'scripts/schema_migration_probe.py', 'scripts/admission_cleanup_probe.py', 'scripts/temporal_queue_probe.py', 'scripts/broker_restart_probe.py', 'scripts/worker_release_probe.py', 'render_start.py', 'pyproject.toml', 'uv.lock', '.github/workflows/postgres-runtime.yml']
 permissions:
   contents: read
 jobs:

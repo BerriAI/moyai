@@ -138,3 +138,28 @@ def test_required_rolling_suites_must_pass_on_exact_dispatched_main(outcome):
         with pytest.raises(ReleaseError, match='CI failed'): github.rolling_ready('a' * 40)
     else:
         assert github.rolling_ready('a' * 40) == (outcome == 'success')
+
+
+@pytest.mark.parametrize('workflow', ['postgres-runtime.yml', 'production-release-tests.yml'])
+def test_required_rolling_workflows_run_for_every_main_push(workflow):
+    # Any selected main commit can be deployed, including UI-only or docs-only
+    # changes. Requiring an exact-SHA check while filtering it out deadlocks CI.
+    text = Path('.github/workflows', workflow).read_text()
+    pull_request, push = text.split('  push:\n', 1)
+    assert '  pull_request:\n    paths:' in pull_request
+    push = push.split('\npermissions:', 1)[0]
+    assert '    branches: [main]' in push
+    assert 'paths' not in push
+
+
+@pytest.mark.parametrize('handoff', [False, True])
+def test_legacy_probe_includes_handoff_only_when_running_settings_support_it(handoff):
+    import hashlib
+    from types import SimpleNamespace
+    from scripts.release.probe import POLICY_FIELDS, policy_fingerprint
+    values = {name: 'synthetic-' + name for name in POLICY_FIELDS}
+    legacy = SimpleNamespace(**values)
+    assert policy_fingerprint(legacy) == hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+    current = {**values, 'moyai_separate_broker': True, 'moyai_coordinator_handoff': handoff,
+               'sandbox_prepared_pool_size': 0, 'sandbox_prepared_idle_seconds': 300}
+    assert policy_fingerprint(SimpleNamespace(**current)) == hashlib.sha256(json.dumps(current, sort_keys=True).encode()).hexdigest()
