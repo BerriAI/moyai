@@ -13,6 +13,7 @@ from .environments import EnvironmentPending
 from .security import digest
 from .message_queue import MessageQueue
 from .modal_clients import ModalClients
+from .runtime_files import sync_runtime
 
 TERMINAL = {"completed", "failed", "cancelled", "interrupted", "idle"}
 CAPTURE_RELEASE_TIMEOUT = 35
@@ -55,8 +56,7 @@ def response_status(run: dict[str, object]) -> str:
 
 async def refresh_sandbox_files(sandbox):
     """Refresh our adapter and runtime patches, preserving workspace/history."""
-    for path in sorted([*SANDBOX_FILES.glob('*.py'), *SANDBOX_FILES.glob('hermes-*.patch')]):
-        await sandbox.filesystem.write_text.aio(path.read_text(), f'/opt/workspace-runner/{path.name}')
+    await sync_runtime(sandbox, SANDBOX_FILES)
 
 
 def safe_error_detail(exc, secrets_to_hide=()):

@@ -18,6 +18,7 @@ from app.temporal_runtime import TemporalRunManager
 from app.runner import RunManager
 from app.session_lifecycle import SessionLifecycle
 from sandbox.durable_process import status, supervise
+from test_runner import ready_runtime
 
 
 def aio(fn):
@@ -32,6 +33,7 @@ class Machine:
         self.spec = {}
         self.operations = {}
         self.filesystem = SimpleNamespace(write_text=aio(self.write))
+        self.exec = aio(self.execute)
         self.poll = aio(self.poll_impl)
         self.terminate = aio(self.terminate_impl)
         self.wait = aio(self.wait_impl)
@@ -40,6 +42,10 @@ class Machine:
     async def write(self, data, path):
         if path.endswith('.json'):
             self.spec = json.loads(data)
+
+    async def execute(self, *command, **kwargs):
+        assert command[:3] == ('/usr/local/bin/python', '-I', '-c')
+        return ready_runtime()  # Runtime transfer is covered by the real HTTP fixture.
 
     async def computer_request(self, body):
         assert self.alive and body['action'] == 'state'

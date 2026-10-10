@@ -2,10 +2,12 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+import py_compile
 import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import zlib
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import modal
@@ -191,6 +193,122 @@ async def test_chunked_unicode_writes_and_empty_overwrite(transport):
     assert (await sandbox.filesystem.read_bytes.aio(path)).decode() == value
     await sandbox.filesystem.write_text.aio('', path)
     assert await sandbox.filesystem.read_bytes.aio(path) == b''
+
+
+@pytest.fixture
+def runtime_transport(
+    transport: tuple[Sandbox, Path], monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]]:
+    from app import runtime_files
+
+    sandbox, tmp = transport
+    source, target = tmp / 'source', tmp / 'installed'
+    source.mkdir()
+    target.mkdir()
+    expected = {'agent.py': "VALUE = 'current ✓'\n", 'helper.py': 'UNCHANGED = True\n',
+                'new.py': 'NEW = True\n', 'hermes-test.patch': 'runtime patch ✓\n'}
+    for name, content in expected.items():
+        (source / name).write_text(content)
+        (target / name).write_text(content)
+    (source / 'README.md').write_text('not a runtime file')
+    (source / 'nested').mkdir()
+    (source / 'nested' / 'ignored.py').write_text('not a top-level runtime file')
+    (target / 'obsolete.py').write_text('preserved older runtime file')
+    (target / 'user-note.txt').write_text('preserved user file')
+    monkeypatch.setattr(runtime_files, 'RUNTIME_ROOT', str(target))
+    monkeypatch.setattr(runtime_files, 'SANDBOX_PYTHON', sys.executable)
+    writes: list[tuple[str, str]] = []
+    write = sandbox.filesystem.write_text.aio
+
+    async def capture(text: str, path: str) -> None:
+        writes.append((text, path))
+        await write(text, path)
+
+    monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=capture))
+    return sandbox, source, target, expected, writes
+
+
+async def test_runtime_sync_skips_real_http_uploads_for_matching_files(
+    runtime_transport: tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]],
+) -> None:
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    before = {name: (target / name).stat().st_mtime_ns for name in expected}
+    await sync_runtime(sandbox, source)
+    assert writes == []
+    assert {name: (target / name).stat().st_mtime_ns for name in expected} == before
+
+
+async def test_runtime_sync_bundles_only_changed_files_without_following_symlinks(
+    runtime_transport: tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]],
+) -> None:
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    (target / 'agent.py').write_text(expected['agent.py'].replace('current', 'outdate'))
+    bytecode = Path(py_compile.compile(str(target / 'agent.py'), doraise=True))
+    (target / 'new.py').unlink()
+    (target / 'hermes-test.patch').unlink()
+    (target / 'hermes-test.patch').symlink_to(target / 'user-note.txt')
+    unchanged = (target / 'helper.py').stat().st_mtime_ns
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+    text, path = writes[0]
+    contents = json.loads(zlib.decompress(base64.b64decode(text)))
+    assert set(contents) == {'agent.py', 'new.py', 'hermes-test.patch'}
+    assert path.startswith('/tmp/moyai-runtime-') and path.endswith('.bundle')
+    assert {name: (target / name).read_text() for name in expected} == expected
+    assert not (target / 'hermes-test.patch').is_symlink()
+    assert (target / 'helper.py').stat().st_mtime_ns == unchanged
+    assert (target / 'user-note.txt').read_text() == 'preserved user file'
+    assert (target / 'obsolete.py').read_text() == 'preserved older runtime file'
+    assert not (target / 'README.md').exists() and not (target / 'nested').exists()
+    assert not bytecode.exists()
+    process = await sandbox.exec.aio(sys.executable, '-I', '-c',
+        'import sys; sys.path.insert(0, sys.argv[1]); import agent; print(agent.VALUE)', str(target), timeout=10)
+    out, err = await asyncio.gather(process.stdout.read.aio(), process.stderr.read.aio())
+    assert await process.wait.aio() == 0 and out == 'current ✓\n' and not err
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize('damage', ['bundle', 'unchanged_file'])
+async def test_runtime_sync_rejects_incomplete_update_and_recovers(
+    runtime_transport: tuple[Sandbox, Path, Path, dict[str, str], list[tuple[str, str]]],
+    monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    from app.runtime_files import sync_runtime
+
+    sandbox, source, target, expected, writes = runtime_transport
+    (target / 'agent.py').write_text('outdated runtime')
+    (target / 'new.py').unlink()
+    write = sandbox.filesystem.write_text.aio
+
+    async def corrupt(text: str, path: str) -> None:
+        if damage == 'bundle':
+            contents = json.loads(zlib.decompress(base64.b64decode(text)))
+            contents['new.py'] += 'corrupted in transit'
+            text = base64.b64encode(zlib.compress(json.dumps(contents).encode())).decode()
+        else:
+            # Simulate a changed file after comparison that was absent from the bundle.
+            (target / 'helper.py').write_text('changed between check and apply')
+        await write(text, path)
+
+    monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=corrupt))
+    with pytest.raises(RuntimeError):
+        await sync_runtime(sandbox, source)
+    assert len(writes) == 1
+    if damage == 'bundle':
+        assert (target / 'agent.py').read_text() == 'outdated runtime'
+        assert not (target / 'new.py').exists()
+    monkeypatch.setattr(sandbox.filesystem, 'write_text', SimpleNamespace(aio=write))
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 2
+    assert {name: (target / name).read_text() for name in expected} == expected
+    assert (target / 'user-note.txt').read_text() == 'preserved user file'
+    await sync_runtime(sandbox, source)
+    assert len(writes) == 2
 
 
 async def test_checkpoint_blocks_other_handle_requests_until_thawed():
