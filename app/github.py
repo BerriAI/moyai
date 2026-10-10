@@ -571,7 +571,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             raise ConnectorError('The GitHub installation changed since this publication. Inspect the existing branch before continuing.')
         if row['result']:
             result = self.receipt(row['result'], target)
-            self.record_publication(identity, result)
+            self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
             return result
         token = await self.installation_token(repository=target, write=True)
         repo = await self.repository(token, target)
@@ -642,15 +642,15 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             raise ConnectorError(f'Publication unconfirmed for {target}, branch {branch}: {error} '
                                  'No creation retry was sent. Inspect this destination; use the same request_key '
                                  'and unchanged arguments for read-only recovery after an attempted creation.') from None
-        self.record_publication(identity, result)
+        self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
         return result
 
-    def record_publication(self, identity, result):
+    def record_publication(self, identity, result, *, turn_id):
         # Receipt and announcement commit together. Only this trusted publication
         # path bypasses the two-update narration budget, once per publication.
         with self.store.connect() as conn:
             conn.begin_write()
-            row = conn.execute('SELECT run_id,message_id FROM github_publications WHERE id=?', (identity,)).fetchone()
+            row = conn.execute('SELECT run_id FROM github_publications WHERE id=?', (identity,)).fetchone()
             conn.execute('UPDATE github_publications SET result=? WHERE id=?', (json.dumps(result), identity))
             activity_id = 'github-publication:' + identity
             if conn.execute("SELECT 1 FROM events WHERE run_id=? AND kind='message' AND json_text(data,'activity_id')=?",
@@ -658,8 +658,10 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
                 return
             message = (f"Created [PR #{result['number']}]({result['url']}) in {result['repository']}. "
                        'The PR is saved on GitHub. CI and review verification are not complete yet.')
+            # Recovery may confirm creation in a later turn. Keep the original
+            # publication message_id as provenance, but announce in this turn.
             metadata = {'activity_version': 1, 'phase': 'pr_created', 'public_update': True,
-                        'activity_id': activity_id, 'turn_id': row['message_id']}
+                        'activity_id': activity_id, 'turn_id': turn_id}
             conn.execute("INSERT INTO events(run_id,kind,message,data,created_at) VALUES(?,'message',?,?,?)",
                          (row['run_id'], message, json.dumps(metadata), now()))
 
