@@ -94,7 +94,7 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
         github_pull_request github_pull_request_comments linear_my_issues linear_teams linear_search linear_issue
-        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search model_list
+        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search sessions_read model_list
         workspace_diagnostics'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
