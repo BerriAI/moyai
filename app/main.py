@@ -33,7 +33,7 @@ from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
 from .user_preferences import UserPreferences
 from .model_preferences import preferred_model, save_model
-from .model_selection import ASTRA_ULTRAFAST, gateway_model
+from .model_selection import ASTRA_ULTRAFAST, gateway_model, gateway_payload
 from .access_logging import configure_access_logging
 from .broker_diagnostics import BrokerDiagnosticsMiddleware, model_gateway_error, upstream_headers, model_error, model_stage
 from .workspace_diagnostics import DIAGNOSTIC_TOOL, DiagnosticArgs, inspect_workspace
@@ -1358,7 +1358,7 @@ def _create_app(settings, store):
                 harness_gateway.live_context.require_current(run, request, selected_model)
                 status = 'unknown'
                 async with client.stream('POST', settings.litellm_api_base.rstrip('/') + '/chat/completions',
-                                         json=payload, headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
+                                         json=gateway_payload(payload, '/v1/chat/completions'), headers={'Authorization': f'Bearer {settings.litellm_api_key}', 'x-litellm-call-id': request_id}) as upstream:
                     gateway_id = spend.headers(request_id, upstream, False)
                     if upstream.status_code >= 400:
                         status = 'failed'
