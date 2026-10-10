@@ -224,3 +224,24 @@ including multi-page and nested research, long Unicode append, complete threaded
 Slack send, argument privacy, response loss and cancellation between write batches.
 These tests use simulated provider HTTP responses through the real broker. Browser,
 GitHub workflow/binary support, durable artifacts and broader recovery remain open.
+
+## Browser observations and actions (WP6, partial; not deployed)
+
+Browser observations retain full frame text and all discovered controls, including
+open shadow roots. Optional ranges refer to an immutable observation with a
+timestamp. Frame and tab directories expose navigation; exact DOM handles prevent
+actions from silently selecting a different element after a rerender. Changed or
+detached targets require a fresh observation. Role/label and coordinate actions
+remain available, with select controls, complete text insertion, workspace uploads,
+download completion/path receipts, back/forward/reload, and tab selection. Named
+screenshots return MCP image content as well as their saved path.
+
+Validation: 200 existing computer/MCP regressions passed. Four additional contracts
+passed using real local Chromium for long Unicode observations, controls beyond
+the old cutoff, nested frames, open shadow roots, stale target rejection, complete
+form input, select/upload/download, and tabs; one case verifies MCP image bytes.
+The browser cases require Playwright and an installed Chromium (`MOYAI_TEST_CHROMIUM`
+can select it); the initial invocation lacked the matching default browser, then
+passed against the installed binary. This is local protocol/behavior verification,
+not deployed browser or model/media qualification. Capture/checkpoint storage
+quotas and explicit durable artifact publication remain open in WP6/WP2.
