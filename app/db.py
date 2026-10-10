@@ -873,6 +873,20 @@ class Store:
                     self.reconcile_email_in(conn, value)
         return user_id
 
+    def access_actor(self, identity):
+        """Read a pinned account from this request's verified Access claims."""
+        rows = self.rows('''SELECT binding.user_id,binding.email AS access_email,
+            users.kind,users.email AS user_email FROM access_identities binding
+            LEFT JOIN users ON users.id=binding.user_id
+            WHERE binding.issuer=? AND binding.subject=?''', (identity['issuer'], identity['sub']))
+        if not rows:
+            return None
+        binding = rows[0]
+        if (binding['kind'] not in {'google', 'cloudflare'}
+                or binding['access_email'] != identity['email'] or binding['user_email'] != identity['email']):
+            raise ValueError('Access account mapping requires administrator review.')
+        return binding['user_id']
+
     def access_identity(self, identity):
         """Pin a verified Access subject to a person without changing ownership.
 
