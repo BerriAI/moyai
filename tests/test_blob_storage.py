@@ -141,6 +141,28 @@ def test_upload_publication_failure_shadowing_and_snapshots(tmp_path):
     assert (legacy / 'latest.zip').is_symlink()
 
 
+def test_batched_availability_matches_metadata_without_reading_objects(tmp_path):
+    backend = MemoryObjects()
+    store = Store(tmp_path, object_storage=backend)
+    store.artifacts.save('remote.zip', b'remote archive')
+    legacy = tmp_path / 'artifacts'
+    legacy.mkdir(exist_ok=True)
+    (legacy / 'local.zip').write_bytes(b'legacy archive')
+    (legacy / 'directory.zip').mkdir()
+    (legacy / 'linked.zip').symlink_to(legacy / 'local.zip')
+    (legacy / 'linked-directory').symlink_to(legacy, target_is_directory=True)
+    names = ['remote.zip', 'local.zip', 'absent.zip', 'directory.zip',
+             'linked.zip', 'linked-directory/local.zip']
+    before = backend.reads
+    assert store.artifacts.available_names(names) == {
+        name for name in names if store.artifacts.info(name) is not None
+    } == {'remote.zip', 'local.zip'}
+    assert backend.reads == before
+    assert store.artifacts.available_names([]) == set()
+    with pytest.raises(ValueError):
+        store.artifacts.available_names(['../outside.zip'])
+
+
 async def test_checkpoint_restores_remote_manifest_without_copying_payload(tmp_path):
     backend = MemoryObjects()
     settings = Settings(_env_file=None, data_dir=tmp_path / 'original', checkpoint_dir=tmp_path / 'checkpoint')

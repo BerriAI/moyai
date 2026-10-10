@@ -68,7 +68,7 @@ Install the test browser once with `npx playwright install chromium`.
 
 Navigation reads reuse a bounded, in-memory cache in `navigation-cache.js`:
 40 responses, an 8 MiB serialized-data budget, and a 15-second reuse window.
-Conversation snapshots may paint for up to 60 seconds while a fresh request and
+Conversation snapshots may paint for up to five minutes while a fresh request and
 the event stream update them without remounting the composer. Responses are
 copied before controllers mutate them. Nothing is persisted in browser storage.
 Writes invalidate at both request boundaries; account/role changes and access
