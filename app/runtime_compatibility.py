@@ -21,13 +21,14 @@ from .schema_migrations import SCHEMA_REVISION
 # Side-chat snapshots retain complete attributed inputs; workers compose large
 # instruction sources as immutable references using the selected model window.
 # Immutable attachment manifests/parts must be understood by intake and workers.
-API_PROTOCOL_REVISION = 13
+# Publishing workflow files uses explicit per-operation Workflows permission.
+API_PROTOCOL_REVISION = 14
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 13
-BROKER_PROTOCOL_REVISION = 13
-COORDINATOR_PROTOCOL_REVISION = 13
+WORKER_PROTOCOL_REVISION = 14
+BROKER_PROTOCOL_REVISION = 14
+COORDINATOR_PROTOCOL_REVISION = 14
 
 
 def api_fingerprint(settings):

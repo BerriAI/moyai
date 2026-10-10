@@ -25,7 +25,7 @@ from .github_ci import GitHubCI
 
 API = 'https://api.github.com'
 PERMISSIONS = {'contents': 'write', 'pull_requests': 'write', 'metadata': 'read'}
-MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'read'}
+MANIFEST_PERMISSIONS = {**PERMISSIONS, 'administration': 'write', 'checks': 'read', 'statuses': 'read', 'actions': 'read', 'workflows': 'write'}
 REPOSITORY = r'[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*'
 SHA = r'[0-9a-f]{40}'
 
@@ -147,11 +147,11 @@ class Change(Args):
         lower = path.lower()
         if (any(p in {'', '.', '..'} or p.lower() == '.git' for p in parts)
                 or '\\' in path or any(ord(c) < 32 or ord(c) == 127 for c in path)
-                or lower.startswith(('.github/workflows/', '.github/actions/', '.ssh/'))
+                or lower.startswith('.ssh/')
                 or lower in {'.github', '.github/workflows', '.github/actions', '.ssh'}
                 or parts[-1].lower() == 'codeowners' or parts[-1].lower().startswith('.env')
                 or lower.endswith(('.pem', '.key'))):
-            raise ValueError('Unsafe, credential, workflow or access-control path cannot be published.')
+            raise ValueError('Unsafe, credential or access-control path cannot be published.')
         return path
 
     @model_validator(mode='after')
@@ -203,6 +203,11 @@ class Update(Changes):
     title: str = Field(min_length=3, max_length=250, description="Commit message for these follow-up changes.")
 
 
+def workflow_changes(args):
+    """Workflow edits/deletions need extra GitHub scope; composite actions do not."""
+    return any(change.path.lower().startswith('.github/workflows/') for change in args.files)
+
+
 TOOLS = {
     'github_ci_checks': ('github', False, CIChecks, 'Read check runs and commit statuses for an exact PR head SHA from github_pull_request. Follow next_page until null; an empty list does not mean CI passed. No writes.'),
     'github_workflow_runs': ('github', False, WorkflowRuns, 'List GitHub Actions workflow runs, optionally filtered by exact head_sha or branch. Follow next_page until null. Returns run IDs for github_workflow_jobs. No reruns or cancellation.'),
@@ -216,7 +221,7 @@ TOOLS = {
     'github_repository': ('github', False, Repository, 'Read an allowed GitHub repository, its default branch and current commit. Shared organization access; no personal GitHub sign-in is needed.'),
     'github_checkout': ('github', False, Checkout, 'Check out an allowed GitHub repository into the sandbox using read-only Git access. To continue an existing Moyai PR from any chat, pass its number and use a fresh directory. Choose repository explicitly when working on Moyai itself. Never grants a GitHub credential or push access.'),
     'github_pull_request': ('github', False, ReadPullRequest, 'Read the complete pull request description and a page of provider-supplied file patches. Follow next_arguments for every file page at the same head/base revisions. Missing patches and provider file limits are explicit; use github_checkout and verify the head for complete local diffs. Cannot approve, review, merge or enable auto-merge.'),
-    'github_create_pull_request': ('github', True, Publish, 'Publish local text and binary changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change workflows/access controls, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
+    'github_create_pull_request': ('github', True, Publish, 'Publish local text and binary changes to a new Moyai branch and open a normal, ready-for-review pull request in an authorized repository. Workflow files require Workflows write permission on the selected installation. No administrator approval step is required to create the PR. Use github_update_pull_request for later edits. Cannot change credential/access-control files, approve, merge or enable auto-merge. Reuse the same request_key and unchanged arguments only when explicitly recovering an uncertain publication.'),
     'github_update_pull_request': ('github', True, Update, 'Publish follow-up text and binary changes to an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access. Use github_checkout with its number in a fresh directory first. Requires the current PR head as base_sha; refuses stale heads, foreign branches and force pushes. Use a new request_key for each revision; reuse unchanged arguments only to recover an uncertain result. No administrator approval step.'),
     'github_comment_pull_request': ('github', True, Comment, 'Post a conversation comment on an open PR with a confirmed workspace Moyai publication or explicit requester approval for this chat via github_request_pull_request_write_access, including review-bot commands requested by the user. Not a review or approval. Use a unique request_key; reuse the same key and body only to recover an uncertain result. No administrator approval step.'),
     'github_pull_request_comments': ('github', False, Feedback, 'Read paginated PR discussion comments, inline review comments, or review summaries. Follow next_page until null; use this to inspect review-bot feedback.'),
@@ -286,19 +291,28 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             self.remember_repository(items[0], credentials)
         return ', '.join(self.repository_name(i, credentials) for i in self.connected_ids(credentials))
 
-    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False, ci=''):
+    async def installation_token(self, credentials=None, *, repository='', write=False, fresh=False, rules=False, ci='', workflows=False):
         credentials = credentials if credentials is not None else await self.ensure_connection()
         target = self.target(repository, credentials)
         if target not in self.connected_ids(credentials):
             raise ConnectorError('The GitHub installation does not match the configured repository.')
         installation = int(credentials['installation_id'])
         config = self.app_config()
-        key = (config.get('id'), installation, target, write, rules, ci)
+        if workflows and (not write or rules or ci):
+            raise ValueError('Workflow publication requires a repository write token.')
+        key = (config.get('id'), installation, target, write, rules, ci, workflows)
         async with self.token_lock:
             cached = self.tokens.get(key)
             if not fresh and cached and cached[0] > time.time():
                 return cached[1]
             permissions = {'contents': 'write' if write else 'read', 'pull_requests': 'write' if write else 'read'}
+            if workflows:
+                installed = await self.installation(credentials)
+                if not supports_permissions(installed.get('permissions'), {'workflows': 'write'}):
+                    raise ConnectorError('Publishing .github/workflows files requires Workflows: read and write on the organization GitHub App. '
+                        'An organization owner must enable and approve that permission for the installation, then retry. '
+                        'Ordinary code and composite actions still use the existing Contents access.')
+                permissions['workflows'] = 'write'
             if rules:
                 permissions = {'administration': 'write'} if write else {'metadata': 'read'}
             if ci:
@@ -567,8 +581,6 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             return cache[sha]
         for change in changes:
             parts = change.path.split('/')
-            if len(parts) > 25:
-                raise ConnectorError('The file path is too deeply nested.')
             sha, found = tree_sha, None
             for i, part in enumerate(parts):
                 found = (await entries(sha)).get(part) if sha else None
@@ -604,7 +616,7 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
             result = self.receipt(row['result'], target)
             self.record_publication(identity, result, turn_id=run['active_message_id'] or 0)
             return result
-        token = await self.installation_token(repository=target, write=True)
+        token = await self.installation_token(repository=target, write=True, workflows=workflow_changes(args))
         repo = await self.repository(token, target)
         prefix = f'/repositories/{target}'
         commit = row['commit_sha']
@@ -768,7 +780,11 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
         if row['result']:
             return self.receipt(row['result'], target)
         head_target = publication.get('head_repository_id', target)
-        head_token = token if head_target == target else await self.installation_token(repository=self.target(head_target), write=True)
+        # Workflow scope belongs to the repository whose head is being changed,
+        # including a fork. Keep base-PR authorization and ordinary writes narrow.
+        head_token = (token if head_target == target and not workflow_changes(args)
+                      else await self.installation_token(repository=self.target(head_target), write=True,
+                                                         workflows=workflow_changes(args)))
         commit = row['commit_sha']
         if pr['head']['sha'] != args.base_sha and (not commit or pr['head']['sha'] != commit):
             raise ConnectorError('The PR head changed. Check out its current head in a fresh directory and reapply the changes with a new request_key.')
@@ -810,11 +826,14 @@ class GitHub(GitHubCI, GitHubWriteAccess, GitHubRepositories):
         marker = '<!-- moyai-comment:' + row['id'] + ' -->'
         comment = None
         if row['sent']:
-            for page in range(1, 101):
+            page = 1
+            while True:
+                self.ensure_publish_allowed(run, version, tool)
                 comments = await self.request('GET', path, token=token, params={'per_page': 100, 'page': page})
                 comment = next((item for item in comments if item.get('body') == args.body + '\n\n' + marker), None)
                 if comment or len(comments) < 100:
                     break
+                page += 1
             if not comment:
                 raise ConnectorError('The earlier comment was not confirmed. Inspect the PR before choosing a new request_key; it will not be posted again automatically.')
         else:

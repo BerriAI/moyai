@@ -695,3 +695,29 @@ Validation: 66 swarm/file cases passed locally; all five initial-upload cases
 passed on PostgreSQL. The handoff cases cover legacy/multipart files, database
 and simulated object storage, exact child reads, retry, source deletion and
 session isolation. Schema and role protocols remain 13. Nothing was deployed.
+
+## GitHub workflow publication and complete traversal (WP6)
+
+The existing publisher now accepts workflow and composite-action files. Workflow
+edits and deletions request Workflows write only for the actual head repository;
+ordinary code, composite actions, checkout, CI and ruleset operations retain their
+own narrower scopes. Missing installation permission stops before repository
+mutations and explains how an organization owner can enable it. Existing apps
+without that scope keep their ordinary code/PR functionality. External-PR grants,
+exact heads, no force pushes, credential/access-control restrictions and immutable
+write receipts remain in place. Registration and the CI guide explain the flow.
+
+Removed the 25-component file-path cutoff and the 100-page limits on repository
+discovery and uncertain-comment lookup. Recovery still refuses to repost a
+comment whose outcome remains uncertain.
+
+Validation: the initial GitHub regression passed 257 cases with three failures
+in the new token-service fixture, which incorrectly treated write permission as
+not granting reads. The corrected eight workflow cases passed. The final focused
+traversal/schema set passed 14 cases with 39 optional database skips; 76 migration
+and role-compatibility cases then passed with PostgreSQL enabled. The PostgreSQL
+publication/follow-up/access suite passed all 163 cases. Rendered registration
+and documentation were inspected at desktop/mobile widths; the registration
+button is reachable at 1440/768/320. Provider responses are simulated; no GitHub
+App permissions were changed externally. Schema remains 13, role protocols are
+14, and nothing was deployed.
