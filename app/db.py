@@ -889,7 +889,7 @@ class Store:
         keys = ",".join(f"{key}=?" for key in fields)
         self.execute(f"UPDATE runs SET {keys} WHERE id=?", (*fields.values(), run_id), write_scope=run_id)
 
-    def event(self, run_id: str, kind: str, message: str, data=None):
+    def event(self, run_id: str, kind: str, message: str, data=None, *, turn_id=None):
         data = dict(data) if isinstance(data, dict) else {}
         # Publication is a server decision, shared by both web renderers and Slack.
         data.pop('public_update', None)
@@ -914,7 +914,7 @@ class Store:
             # A queued user's creation time can precede the current response.
             # Bind work to the server's claimed turn, never a sandbox-supplied ID.
             active = self.rows('SELECT active_message_id FROM runs WHERE id=?', (run_id,))
-            data['turn_id'] = active[0]['active_message_id'] if active else 0
+            data['turn_id'] = turn_id if turn_id is not None else active[0]['active_message_id'] if active else 0
         # Keep bounded event history even if an agent floods stdout.
         count = self.rows("SELECT COUNT(*) AS n FROM events WHERE run_id=?", (run_id,))[0]["n"]
         if count >= 2000 and kind not in {"result", "error", "artifact", "approval", "status", "chat"}:

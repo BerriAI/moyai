@@ -145,7 +145,7 @@ test('chat rendering mounts inline work and a stale fetch cannot erase streamed 
   function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],querySelector:node,setAttribute(name,value){this[name]=value;},value:'draft kept',innerHTML:''});return nodes.get(selector);}
   const data=run();data.mode='modal';data.messages[0].content='First request';data.messages[1].content='Next request';
   const state={selected:'chat',sending:new Set(),userId:'user',drafts:{chat:'draft kept'}};
-  const context={loadActivity(){},savedFiles:{sync(){},decorate(){}},state,$:node,MoyaiQueue,MoyaiActivity:{sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderChatWorking:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={loadActivity(){},savedFiles:{sync(){},decorate(){}},state,$:node,MoyaiQueue,MoyaiActivity:{...require('../app/static/activity.js'),sync:(box,run)=>renders.push(run)},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderChatWorking:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);loadSkillText(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
     script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(structuredClone(data),true);
@@ -176,7 +176,7 @@ test('steering inputs share the original work timeline and do not invent another
   const script=readFileSync('app/static/app.js','utf8');
   const nodes=new Map();function node(selector){if(!nodes.has(selector))nodes.set(selector,{dataset:{},scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[],querySelector:node,setAttribute(name,value){this[name]=value;},innerHTML:''});return nodes.get(selector);}
   data.messages[0].content='Original objective';
-  const context={loadActivity(){},savedFiles:{sync(){},decorate(){}},state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
+  const context={loadActivity(){},savedFiles:{sync(){},decorate(){}},state:{selected:'chat',sending:new Set(),userId:'user'},$:node,MoyaiQueue,MoyaiActivity:{...require('../app/static/activity.js'),sync:()=>{}},esc:value=>String(value??''),messageAttachments:()=>'',renderMarkdown:value=>value,copyText:()=>{},modelName:()=>'',updateChatStatus:()=>{},renderCredentialRequests:()=>{},renderApprovals:()=>{},renderPrWriteAccess:()=>{},renderSlackContext:()=>{},renderAgentDetails:()=>{}};
   vm.createContext(context);loadSkillText(context);vm.runInContext(script.slice(script.indexOf('function syncChatComposer('),script.indexOf('function updateChatStatus('))+
     script.slice(script.indexOf('function updateChat(run'),script.indexOf('async function copyText')),context);
   context.updateChat(data,true);
@@ -506,4 +506,30 @@ test('legacy streaming removes failed starts while preserving other expanded act
   assert.deepEqual([...nodes.keys()],['2']);assert.equal(nodes.get('2'),retained);assert.equal(retained.open,true);
   events.push(tool(5,'retry','completed'));context.syncEventTimeline(target,events);
   assert.deepEqual([...nodes.keys()],['2','5']);assert.equal(events.length,6);
+});
+
+
+test('failure details belong to the saved answer input and do not expose raw payloads',()=>{
+  const {failureDetails}=require('../app/static/activity.js');
+  const answer={id:3,role:'assistant',status:'failed',response_to_id:1};
+  const data={chat_enabled:true,status:'failed',messages:[answer],events:[
+    {id:1,kind:'error',data:{phase:'broker_failure',turn_id:99,error_code:'cyber_policy'}},
+    {id:2,kind:'error',data:{phase:'sdk_failure',turn_id:1,sdk:'claude-agent-sdk',sdk_error:'invalid_request',
+      http_status:400,broker_request_id:'broker-123',result:'PRIVATE',stderr:'PRIVATE',error_code:'<script>PRIVATE</script>'}},
+  ]};
+  const html=failureDetails(data,answer);
+  assert.match(html,/<summary>Failure details<\/summary>/);assert.match(html,/invalid_request/);assert.match(html,/broker-123/);
+  assert.doesNotMatch(html,/PRIVATE|cyber_policy/);
+  const codex={...data,events:[{id:3,kind:'error',data:{phase:'sdk_failure',turn_id:1,sdk:'codex',
+    code:'responseStreamDisconnected',http_status:200}}]};
+  assert.match(failureDetails(codex,answer),/SDK category<\/dt><dd>responseStreamDisconnected/);
+  assert.match(failureDetails(codex,answer),/HTTP response<\/dt><dd>200/);
+  for(const status of ['completed','save_failed','saving','cancelled','queued',undefined]){
+    assert.equal(failureDetails(data,{...answer,status}), '');
+    assert.equal(failureDetails({...data,chat_enabled:false,status,messages:[],active_message_id:1}), '');
+  }
+  assert.equal(failureDetails(data,{...answer,response_to_id:2}),'');
+  assert.equal(failureDetails(data,{...answer,response_to_id:null}),'');
+  data.messages.push({id:4,role:'user',status:'queued'});
+  assert.equal(failureDetails(data),'');
 });

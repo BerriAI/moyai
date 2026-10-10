@@ -35,7 +35,7 @@ from .user_preferences import UserPreferences
 from .model_preferences import preferred_model, save_model
 from .model_selection import ASTRA_ULTRAFAST, gateway_model
 from .access_logging import configure_access_logging
-from .broker_diagnostics import BrokerDiagnosticsMiddleware, model_gateway_error, upstream_headers
+from .broker_diagnostics import BrokerDiagnosticsMiddleware, model_gateway_error, upstream_headers, model_error, model_stage
 from .workspace_diagnostics import DIAGNOSTIC_TOOL, DiagnosticArgs, inspect_workspace
 from .slack import SlackSessions
 from .spend import Spend, UsageCapture, completion_events
@@ -360,7 +360,7 @@ def _create_app(settings, store):
     app.include_router(github_routes(connectors, security, store, settings))
     app.state.identities = identities
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=[urlparse(settings.public_url).hostname])
-    app.add_middleware(BrokerDiagnosticsMiddleware)
+    app.add_middleware(BrokerDiagnosticsMiddleware, store=store, tracing=tracing)
     app.state.cloudflare_access = CloudflareAccess(settings)
     app.add_middleware(CloudflareAccessMiddleware, access=app.state.cloudflare_access, security=security)
     for key, value in {"store": store, "settings": settings, "security": security, "connectors": connectors, "manager": manager, "slack": slack, "spend": spend, "coordinator": coordinator}.items():
@@ -956,6 +956,9 @@ def _create_app(settings, store):
         if (not run or run['deleted_at'] or run['deletion_requested_at'] or run["mode"] != "modal" or run["status"] not in {"running", "reconnecting", "awaiting_approval"}
                 or not run["token_hash"] or not hmac.compare_digest(run["token_hash"], digest(token))):
             raise HTTPException(401, "Run capability expired or invalid.")
+        observation = request.scope.get('moyai_model_diagnostic')
+        if observation is not None:
+            observation.setdefault('run', dict(run))
         return run
 
     async def broker_body(request, route):
@@ -1221,6 +1224,7 @@ def _create_app(settings, store):
     @app.post("/broker/{run_id}/v1/chat/completions")
     async def model_proxy(run_id: str, request: Request):
         require_run(run_id, request)
+        model_stage(request, 'admission')
         # Reject before reading/charging an inference. Waiting on this server
         # would retain large request bodies and could expire sealed envelopes.
         # The sandbox retries only this explicit, unbilled admission response.
@@ -1228,7 +1232,9 @@ def _create_app(settings, store):
             model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
+        model_stage(request, 'validation')
         prepared = await prepare_model(run_id, request)
+        model_stage(request, 'admission')
         async with model_slots:
             return await forward_model(run_id, request, *prepared)
 
@@ -1265,6 +1271,7 @@ def _create_app(settings, store):
             if field in payload:
                 if type(payload[field]) is not int or payload[field] < 1:
                     raise HTTPException(422, "Invalid output limit")
+        model_stage(request, 'context_preparation')
         try:
             payload, checked_budget = await harness_gateway.live_context.prepare(
                 run, request, payload, '/v1/chat/completions')
@@ -1286,6 +1293,7 @@ def _create_app(settings, store):
         if not admitted:
             raise HTTPException(429, "This run reached its model request limit.")
         request_id = spend.begin(run, selected_model)
+        model_stage(request, 'upstream', request_id=request_id)
         # Keep user/session accounting local. The existing virtual key remains
         # the sole billing credential; sandbox-supplied attribution is ignored.
         payload['metadata'] = {'moyai_request_id': request_id}
@@ -1301,6 +1309,7 @@ def _create_app(settings, store):
         trace_started = time.time_ns()
         trace_response = {}
         gateway_id = ''
+        error = {}
         async with httpx.AsyncClient(timeout=httpx.Timeout(300, connect=30)) as client:
             try:
                 harness_gateway.live_context.require_current(run, request, selected_model)
@@ -1332,19 +1341,24 @@ def _create_app(settings, store):
                     status = 'completed'
                     trace_response = json.loads(raw_response)
             except httpx.HTTPError as exc:
+                error = model_error(exc)
                 raise HTTPException(502, 'Model gateway could not be reached.',
                                     headers=upstream_headers(request_id, error=exc)) from None
-            except asyncio.CancelledError:
-                status = 'interrupted'
+            except BaseException as exc:
+                error = model_error(exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    status = 'interrupted'
                 raise
             finally:
+                if error:
+                    model_stage(request, 'upstream', error=error)
                 # Account before returning any data, including if the sandbox
                 # stopped while the already-submitted inference was completing.
                 spend.finish(request_id, capture, status)
                 if status == 'completed':
                     context_budget.remember(payload, capture.usage, run_id + '/v1/chat/completions')
                 tracing.model(run, request_id, trace_started, body['messages'],
-                              {**trace_response, **capture.response}, status, gateway_id=gateway_id)
+                              {**trace_response, **capture.response}, status, gateway_id=gateway_id, error=error)
                 await checkpoints.flush()
         value = json.loads(raw_response)
         if wants_stream:

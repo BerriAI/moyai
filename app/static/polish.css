@@ -396,3 +396,10 @@ body { color: var(--text); letter-spacing: -0.006em; }
 @media(max-width:850px){.composer .skill-editor-input {font-size:16px;max-height:min(200px,30dvh)}}
 
 .chat-loading{padding:40px;color:var(--muted)}
+
+.failure-details{margin-block:16px;font-size:13px;line-height:1.5}
+.failure-details summary{cursor:pointer;font-weight:500}
+.failure-details p{max-width:65ch;margin-block:12px}
+.failure-details dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:8px 16px}
+.failure-details dd{margin:0;overflow-wrap:anywhere;font-family:monospace}
+.failure-details dt{font-weight:500}

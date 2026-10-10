@@ -9,16 +9,19 @@ from app.security import digest
 from test_workspace import cloud_capability, workspace  # noqa: F401
 
 
-def test_diagnostics_explains_registration_and_policy_without_raw_logs(workspace, monkeypatch):
+@pytest.mark.parametrize('status', [503, 200])
+def test_diagnostics_explains_registration_and_policy_without_raw_logs(workspace, monkeypatch, status):
     app, client = workspace
     run_id, headers = cloud_capability(app, ['github'])
     app.state.store.execute('UPDATE runs SET harness=? WHERE id=?', ('codex', run_id))
     monkeypatch.setenv('RENDER_GIT_COMMIT', 'a' * 40)
     app.state.store.event(run_id, 'error', 'SECRET from raw stderr', {
-        'phase': 'broker_failure', 'route': '/tools', 'http_status': 503,
+        'phase': 'broker_failure', 'route': '/tools', 'http_status': status,
         'request_id': 'known-request-id', 'response_started': False,
         'headers': {'Authorization': 'Bearer SECRET'}, 'error_type': 'SECRET',
-        'response_body': 'SECRET', 'provider_key': 'SECRET'})
+        'response_body': 'SECRET', 'provider_key': 'SECRET', 'stage': 'context_preparation',
+        'error_code': 'cyber_policy', 'sdk_error': 'invalid_request',
+        'request_ids': {'x-request-id': 'provider-123', 'Authorization': 'SECRET'}})
     app.state.store.event(run_id, 'tool', 'SECRET tool output', {'phase': 'completed', 'output': 'SECRET'})
     other, _ = cloud_capability(app, ['github'])
     app.state.store.update_run(other, token_hash=digest('other-capability'))
@@ -36,8 +39,13 @@ def test_diagnostics_explains_registration_and_policy_without_raw_logs(workspace
     github = next(item for item in data['connections'] if item['provider'] == 'github')
     assert github['connected'] and github['selected_for_session'] and github['enabled']
     assert 'github_repositories' in github['available_tools']
-    assert data['recent_failures'][0]['http_status'] == 503
+    assert data['recent_failures'][0]['http_status' if status >= 400 else 'response_status'] == status
+    assert ('http_status' in data['recent_failures'][0]) is (status >= 400)
     assert data['recent_failures'][0]['request_id'] == 'known-request-id'
+    assert data['recent_failures'][0]['error_code'] == 'cyber_policy'
+    assert data['recent_failures'][0]['stage'] == 'context_preparation'
+    assert data['recent_failures'][0]['sdk_error'] == 'invalid_request'
+    assert data['recent_failures'][0]['request_ids'] == {'x-request-id': 'provider-123'}
     assert 'SECRET' not in response.text and 'other-request' not in response.text
     assert 'provider-test-token' not in response.text
     assert client.post(endpoint, headers=headers, json={**body, 'arguments': {'run_id': other}}).status_code == 422

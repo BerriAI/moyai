@@ -12,6 +12,7 @@ from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags
 
 from sandbox.trace_content import private_tool, trace_content
+from sandbox.broker_failure import safe_error, error_summary
 from .native_trace import MODEL_TEXT_LIMIT
 from .slack_mentions import MENTION
 from .trace_outbox import RaindropEventOutbox, TraceOutbox
@@ -233,7 +234,7 @@ class AgentTracing:
                 'braintrust.metadata.environment': self.settings.trace_environment,
                 'braintrust.tags': ['moyai', self.settings.trace_environment],
             })
-        error = self.content(attrs.get('output.value') or attrs.get('moyai.status') or 'Operation failed') if failed else None
+        error = self.content(attrs.get('error.message') or ('Operation ' + str(attrs.get('moyai.status') or 'failed'))) if failed else None
         span = ReadableSpan(
             name=agent_name if root else name, context=context(trace_id, agent_id if root else identifier(span_id, 8)),
             parent=context(trace_id, parent_id) if parent_id else None,
@@ -241,7 +242,7 @@ class AgentTracing:
             start_time=int(start), end_time=max(int(start), int(end)),
             status=Status(StatusCode.ERROR, error) if failed else Status(StatusCode.OK),
             # LangSmith maps exception events to errors; status alone is lost.
-            events=[Event('exception', {'exception.message': error}, timestamp=int(end))] if failed else [],
+            events=[Event('exception', {'exception.message': error, 'exception.type': str(attrs.get('error.type', 'OperationError'))}, timestamp=int(end))] if failed else [],
         )
         if self.processor is not None:
             self.processor.on_end(span)
@@ -264,11 +265,18 @@ class AgentTracing:
         if message:
             inputs += [m['content'] for m in rows(
                 'SELECT content FROM messages WHERE run_id=? AND steering_parent_id=? ORDER BY id', (run_id, message_id))]
+        diagnostic = {}
+        if status not in {'completed', 'steered'}:
+            errors = rows("SELECT data FROM events WHERE run_id=? AND kind='error' "
+                          "AND json_number(data,'turn_id')=? AND json_text(data,'phase')='sdk_failure' "
+                          'ORDER BY id DESC LIMIT 1', (run_id, message_id or 0))
+            if errors:
+                diagnostic = self.error_attributes(json.loads(errors[0]['data']))
         self.emit(run, message_id, 'moyai', '', datetime.fromisoformat(started).timestamp() * 1e9,
                   time.time_ns(), {'gen_ai.operation.name': 'invoke_agent',
                   'openinference.span.kind': 'AGENT', 'input.value': self.content('\n\n'.join(inputs)),
                   'output.value': self.content(output), 'moyai.status': status,
-                  **self.slack_source(run_id, rows)}, root=True,
+                  **self.slack_source(run_id, rows), **diagnostic}, root=True,
                   failed=status not in {'completed', 'steered'}, connection=connection)
 
     def slack_source(self, run_id, rows):
@@ -308,7 +316,7 @@ class AgentTracing:
                    'moyai.status': str(data.get('status', 'completed'))}, failed=data.get('status') == 'error')
 
     @best_effort
-    def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = ''):
+    def model(self, run, request_id, start, messages, response, status, *, gateway_id: str = '', error=None):
         # Keep images, system prompts, loaded skills and private reasoning out of traces.
         inputs = [{'role': 'user', 'content': m.get('content')}
                   for m in messages if isinstance(m, dict) and m.get('role') == 'user'][-5:]
@@ -328,6 +336,8 @@ class AgentTracing:
                  'llm.model_name': run.get('active_model') or run.get('model', ''),
                  'input.value': input_value,
                  'output.value': output_value, 'moyai.status': status}
+        if status != 'completed':
+            attrs.update(self.error_attributes(error or {}))
         model = attrs['gen_ai.request.model']
         provider = model.partition('/')[0] if '/' in model else 'openai'
         attrs.update({'gen_ai.system': provider, 'gen_ai.provider.name': provider,
@@ -367,6 +377,25 @@ class AgentTracing:
         # keys; overriding usage_details with *_tokens breaks inferred costs.
         self.emit(run, run.get('active_message_id'), 'chat ' + attrs['gen_ai.request.model'],
                   request_id, start, time.time_ns(), attrs, failed=status != 'completed')
+
+    @staticmethod
+    def error_attributes(error):
+        error = safe_error(error)
+        attrs = {'error.message': error_summary(error),
+                 'error.type': next((error[key] for key in ('error_code', 'sdk_error', 'code', 'exception_type', 'native_status')
+                                     if error.get(key) not in {None, 'unknown', 'success'}), 'unknown')}
+        for key, value in error.items():
+            if key == 'request_ids':
+                attrs.update({'moyai.error.request_ids.' + name: identifier for name, identifier in value.items()})
+            else:
+                attrs['moyai.error.' + key] = value
+        return attrs
+
+    @best_effort
+    def broker(self, run, request_id, start, error):
+        self.emit(run, run.get('active_message_id'), 'broker ' + error.get('route', 'model'),
+            'broker:' + request_id, start, time.time_ns(),
+            {'openinference.span.kind': 'CHAIN', 'moyai.status': 'failed', **self.error_attributes(error)}, failed=True)
 
     def start(self):
         for outbox in self.exporters():

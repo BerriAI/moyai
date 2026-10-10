@@ -11,14 +11,14 @@ try:
     from .harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from .context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from .native_session import NativeSession, MAX_BYTES
-    from .sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
+    from .sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary, CLAUDE_ERRORS
     from .transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
     from .broker_relay import InputPending
 except ImportError:
     from harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
     from context_recovery import run_with_context_recovery, prepare_context, maintain_context
     from native_session import NativeSession, MAX_BYTES
-    from sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary
+    from sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary, CLAUDE_ERRORS
     from transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
     from broker_relay import InputPending
 
@@ -373,6 +373,7 @@ class ClaudeAgent(HarnessAgent):
                                             recovery_failed = not recovered
                                             if recovered:
                                                 result = None
+                                                failure.pop('sdk_error', None)
                                     if incoming not in ready:
                                         continue
                                     try:
@@ -384,6 +385,10 @@ class ClaudeAgent(HarnessAgent):
                                         if message.parent_tool_use_id is None:
                                             submitted.discard(message.uuid)
                                     elif isinstance(message, AssistantMessage):
+                                        if message.parent_tool_use_id is None:
+                                            failure.pop('sdk_error', None)
+                                            if message.error:
+                                                failure['sdk_error'] = message.error if isinstance(message.error, str) and message.error in CLAUDE_ERRORS else 'unknown'
                                         if not message.error and message.parent_tool_use_id is None:
                                             self.pending_text.extend(block.text for block in message.content if isinstance(block, TextBlock))
                                     elif isinstance(message, SystemMessage) and message.subtype == 'compact_boundary':
@@ -396,6 +401,8 @@ class ClaudeAgent(HarnessAgent):
                                         if self.transcript is not None:
                                             self.transcript.valid = False
                                     elif isinstance(message, ResultMessage):
+                                        if message.subtype not in {'success', 'error_during_execution'}:
+                                            failure.pop('sdk_error', None)
                                         # Match an issued local rejection, not a generic HTTP
                                         # status or count. A later stop/limit remains terminal.
                                         with self.model_lock:
@@ -443,6 +450,7 @@ class ClaudeAgent(HarnessAgent):
                                         if (recovery_failed or deferred is not None or self.recovery_input
                                                 or (recovering and self.context.relay.model_failed)):
                                             continue
+                                        failure.pop('sdk_error', None)
                                         result = message
                                         # During tools, Claude can merge a correction into
                                         # this turn; during a final response it starts a new

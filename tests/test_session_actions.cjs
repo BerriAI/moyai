@@ -170,7 +170,7 @@ function composerHarness(){
   const conversation=node('#conversation');conversation.dataset.messages='[]';conversation.scrollHeight=conversation.scrollTop=conversation.clientHeight=0;
   const state={selected:'one',sending:new Set(),modelDrafts:{},drafts:{one:input.value},config:{},pendingMessages:{},attachments:{ids:()=>[],clear(){},lock:value=>locks.push(value)},messageQueue:{render:run=>queue.push(run.status)},preferences:{}};
   const c={state,$:node,terminal:new Set(['idle','completed','failed','cancelled','interrupted']),document:{},statusLabel:status=>status,crypto:{randomUUID:()=> 'message-one'},toast(){},Event:class{},autoSize(){},refreshChat:async()=>{},refreshRuns:async()=>{},bottom(){},
-    loadActivity(){},MoyaiQueue:{presentation:()=>({transcript:[]})},MoyaiActivity:{sync(){}},savedFiles:{decorate(){},sync(){}},renderMarkdown(){},copyText(){},
+    loadActivity(){},MoyaiQueue:{presentation:()=>({transcript:[]})},MoyaiActivity:{...require('../app/static/activity.js'),sync(){}},savedFiles:{decorate(){},sync(){}},renderMarkdown(){},copyText(){},
     renderChatWorking(){},syncRunSummary(){},renderCredentialRequests(){},renderApprovals(){},renderPrWriteAccess(){},renderSlackContext(){},renderAgentDetails(){}};
   vm.createContext(c);
   const controls=app.indexOf('function syncChatComposer(');

@@ -268,7 +268,7 @@ def test_claude_failure_metadata_replaces_private_result_and_stderr(monkeypatch,
     agent.context = agent.context.__class__(agent.context.spec, agent.context.relay, agent.context.config,
         activity, agent.context.step, agent.context.cwd)
     agent.context.relay.last_failure = {'http_status': 502, 'request_id': 'broker-request-123',
-                                       'body': 'private-broker-body'}
+                                       'body': 'private-broker-body', 'error_code': 'rate_limit_error', 'stage': 'upstream'}
     class Client:
         def __init__(self, **kwargs): pass
         async def __aenter__(self): return self
@@ -289,6 +289,10 @@ def test_claude_failure_metadata_replaces_private_result_and_stderr(monkeypatch,
     failure = result['sdk_failure']
     assert result['failed'] and not result['completed']
     assert failure['broker_request_id'] == 'broker-request-123' and failure['http_status'] == 502
+    if source == 'http':
+        assert failure['error_code'] == 'rate_limit_error' and failure['stage'] == 'upstream'
+    else:
+        assert 'error_code' not in failure
     if source in {'exception', 'cleanup'}:
         assert failure['exception_type'] == 'ProcessError' and failure['exit_code'] == 2
     else:
@@ -698,3 +702,30 @@ def test_claude_recovery_wait_keeps_input_and_cancellation_live(
                 await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('category', ['authentication_failed', 'billing_error', 'rate_limit', 'invalid_request', 'server_error', 'unknown', 'private-category'])
+@pytest.mark.parametrize('outcome', ['failed', 'recovered', 'child'])
+def test_claude_assistant_error_category_is_scoped_and_body_free(monkeypatch, tmp_path, category, outcome):
+    from claude_agent_sdk import AssistantMessage, TextBlock, ResultMessage
+    agent, _ = make_agent(monkeypatch, tmp_path)
+    class Client:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def query(self, prompt): pass
+        async def receive_messages(self):
+            yield AssistantMessage(content=[TextBlock(text='private-error-body')], model='test',
+                error=category, parent_tool_use_id='child' if outcome == 'child' else None)
+            yield ResultMessage(subtype='success', duration_ms=1, duration_api_ms=1,
+                is_error=outcome != 'recovered', num_turns=1, session_id='test', result='Safe answer')
+    monkeypatch.setattr('claude_agent_sdk.ClaudeSDKClient', Client)
+    monkeypatch.setattr(agent, 'validate', lambda: None)
+    result = agent.run_conversation('Read', conversation_history=[], system_message='Moyai')
+    if outcome == 'recovered':
+        assert result['completed'] and 'sdk_failure' not in result
+    elif outcome == 'child':
+        assert 'sdk_error' not in result['sdk_failure']
+    else:
+        assert result['sdk_failure']['sdk_error'] == ('unknown' if category == 'private-category' else category)
+    assert 'private-' not in json.dumps(result)

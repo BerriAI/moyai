@@ -599,3 +599,21 @@ def test_nested_trace_keeps_root_trace_and_direct_parent_span(tmp_path):
     assert identities[2][2] == identities[1][1]
     store.execute("UPDATE agent_groups SET status='completed'")
     assert tracing.identity(store.run(reviewer['id']), store.messages(reviewer['id'])[0]['id']) == identities[2]
+
+
+def test_failed_spans_use_structured_errors_not_model_output(tmp_path):
+    store, tracing, processor, run, message = setup(tmp_path)
+    diagnostic = {'error_code': 'cyber_policy', 'stage': 'upstream', 'http_status': 400,
+                  'sdk_error': 'invalid_request', 'request_id': 'broker-123', 'message': 'private-error-body'}
+    tracing.model(run, 'request-1', time.time_ns(), [], {'choices': []}, 'failed', error=diagnostic)
+    store.event(run['id'], 'error', 'private-event-message', {'phase': 'sdk_failure', **diagnostic})
+    store.finish_message(run['id'], message['id'], 'Public final answer', status='failed')
+    model, root = processor.spans
+    for span in (model, root):
+        assert span.attributes['error.type'] == 'cyber_policy'
+        assert span.status.description == span.events[0].attributes['exception.message']
+        assert 'cybersecurity policy' in span.status.description
+        assert 'HTTP 400' in span.status.description
+    payload = encode_spans(processor.spans).SerializeToString()
+    assert b'private-error-body' not in payload and b'private-event-message' not in payload
+    assert b'cyber_policy' in payload

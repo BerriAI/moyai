@@ -224,7 +224,7 @@ function historyFixture(){
   const requests=[],synced=[],summaries=[];
   const state={selected:runId,pageVersion:1,chatRun:{id:runId,events:[{id:1,kind:'chat'}],deferred_activity:['10','20'],loaded_activity:[]}};
   const context={state,URLSearchParams,$:()=>({}),renderMarkdown:String,copyText(){},savedFiles:{decorate(){}},
-    MoyaiActivity:{sync:(_,run)=>synced.push(run)},renderActivitySummary:run=>summaries.push(run),
+    MoyaiActivity:{...require('../app/static/activity.js'),sync:(_,run)=>synced.push(run)},renderActivitySummary:run=>summaries.push(run),
     api:path=>{const request={path,...deferred()};requests.push(request);return request.promise;}};
   vm.createContext(context);load(context,'async function loadActivity(','function syncEventTimeline(');
   return {context,state,requests,synced,summaries};
@@ -277,7 +277,7 @@ function transcriptFixture(){
   const nodes=new Map(),markdown=[];
   const node=selector=>{if(!nodes.has(selector))nodes.set(selector,{dataset:{},innerHTML:'',scrollHeight:800,scrollTop:400,clientHeight:400,querySelectorAll:()=>[]});return nodes.get(selector);};
   const state={selected:runId};
-  const context={state,$:node,syncChatComposer(){},MoyaiQueue:{presentation:run=>({transcript:run.messages})},MoyaiActivity:{sync(){}},
+  const context={state,$:node,syncChatComposer(){},MoyaiQueue:{presentation:run=>({transcript:run.messages})},MoyaiActivity:{...require('../app/static/activity.js'),sync(){}},
     savedFiles:{sync(){}},esc:String,messageAttachments:()=>'',renderMarkdown:text=>{markdown.push(text);return text;},copyText(){},loadActivity(){},
     modelName:String,updateChatStatus(){},renderCredentialRequests(){},renderApprovals(){},renderPrWriteAccess(){},renderSlackContext(){},renderAgentDetails(){}};
   vm.createContext(context);

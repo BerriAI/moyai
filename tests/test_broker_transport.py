@@ -27,6 +27,21 @@ Fix merged: https://github.com/BerriAI/litellm/pull/38416
 '''
 
 
+@pytest.mark.parametrize('sdk', ['codex', 'claude-agent-sdk'])
+def test_sdk_stream_failure_preserves_success_status_as_response_context(sdk):
+    from types import SimpleNamespace
+    from sandbox.sdk_failure import failure_diagnostic, failure_summary
+    failure = {'http_status': 200, 'request_id': 'request-123'}
+    agent = SimpleNamespace(journal=SimpleNamespace(pending={}),
+                            context=SimpleNamespace(relay=SimpleNamespace(last_failure=failure)))
+    diagnostic = failure_diagnostic(agent, sdk, {'http_status': 200, 'code': 'responseStreamDisconnected'}
+        if sdk == 'codex' else {'http_status': 200, 'sdk_error': 'server_error'})
+    assert diagnostic['response_status'] == 200 and 'http_status' not in diagnostic
+    assert 'HTTP 200' not in failure_summary(diagnostic)
+    assert 'HTTP 200' not in failure_summary({**diagnostic, 'http_status': 200})
+    assert failure['http_status'] == 200, 'The transport/recovery descriptor keeps the actual wire status'
+
+
 @contextmanager
 def diagnostic_relay(handler, *, remote=None):
     server = ThreadingHTTPServer(('127.0.0.1', 0), handler)
@@ -150,12 +165,16 @@ def test_failure_classification_uses_original_upstream_status(status, upstream, 
             if upstream:
                 self.send_header('X-Moyai-Upstream-Status', str(upstream))
             self.send_header('X-Moyai-Model-Request-ID', 'ledger-id')
+            self.send_header('X-Moyai-Error-Code', 'rate_limit_error' if upstream == 429 else 'unknown')
+            self.send_header('X-Moyai-Error-Stage', 'upstream')
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
             self.wfile.write(b'{"detail":"Model gateway rejected the request."}')
     with diagnostic_relay(Edge) as (relay, client, diagnostics):
         assert client.post('/v1/responses', json={}).status_code == status
         assert relay.last_failure['upstream_status'] == upstream
+        assert relay.last_failure['stage'] == 'upstream'
+        assert relay.last_failure['error_code'] == ('rate_limit_error' if upstream == 429 else 'unknown')
         assert relay.last_failure['request_ids']['x-moyai-model-request-id'] == 'ledger-id'
         assert relay.last_failure['transient'] is transient
         assert relay.resume_model(relay.last_failure) is transient

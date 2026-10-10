@@ -5,7 +5,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict
 
-from sandbox.broker_failure import BROKER_ROUTES, safe_id
+from sandbox.broker_failure import BROKER_ROUTES, safe_id, safe_error
 from sandbox.sdk_failure import CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 from .connectors import TOOLS
 
@@ -24,11 +24,7 @@ DIAGNOSTIC_TOOL = {
 
 def failure_record(row):
     data = json.loads(row['data'])
-    result = {'event_id': row['id'], 'recorded_at': row['created_at'], 'phase': data['phase']}
-    for key in ('http_status', 'upstream_status'):
-        value = data.get(key)
-        if type(value) is int and 100 <= value <= 599:
-            result[key] = value
+    result = {**safe_error(data), 'event_id': row['id'], 'recorded_at': row['created_at'], 'phase': data['phase']}
     for key in ('pending_tools', 'model_calls', 'response_bytes'):
         value = data.get(key)
         if type(value) is int and value >= 0:

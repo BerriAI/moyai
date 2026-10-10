@@ -15,7 +15,8 @@ from .spend import UsageCapture
 from .native_trace import NativeModelContent
 from .context_compaction import compaction_payload, private_compaction_payload, compaction_result, SummaryFailure, SUMMARY_ATTEMPTS
 from .context_budget import ContextPressure, provider_context_rejection
-from .broker_diagnostics import model_gateway_error, upstream_headers
+from .broker_diagnostics import model_gateway_error, upstream_headers, model_error, model_stage
+from sandbox.broker_failure import provider_error
 from .model_selection import ASTRA_ULTRAFAST, gateway_payload
 
 
@@ -67,6 +68,7 @@ class NativeUsageCapture(UsageCapture):
         super().__init__(streaming)
         self.route = route
         self.failed = False
+        self.error = {}
         self.content = content
 
     def consume(self, value):
@@ -77,6 +79,7 @@ class NativeUsageCapture(UsageCapture):
         kind = value.get('type')
         if kind in {'error', 'response.failed', 'response.incomplete'} or value.get('status') in {'failed', 'incomplete'}:
             self.failed = True
+            self.error = model_error(stage='stream', code=provider_error(value))
         if kind == 'message_start':
             value = value.get('message', {})
         elif kind in {'response.completed', 'response.failed', 'response.incomplete'}:
@@ -195,6 +198,8 @@ class HarnessGateway:
                     raise HTTPException(409, 'The originating model has changed.')
             return current
         run = current_run()
+        if not compact:
+            model_stage(request, 'admission')
         # Internal private work already has a bounded snapshot. Let it queue
         # behind the foreground request that scheduled it, including capacity 1.
         if self.model_slots.locked() and not private:
@@ -211,12 +216,24 @@ class HarnessGateway:
         status = 'failed'
         started = time.time_ns()
         finished = False
+        error = {}
+        stage = 'validation'
+
+        def observe(value):
+            nonlocal error
+            # A later disconnect cannot erase a provider error already read.
+            error = {**value, **(capture.error if capture and capture.error.get('error_code') not in (None, 'unknown') else {})}
+            if not compact:
+                model_stage(request, stage, error=error)
 
         async def finish():
             nonlocal finished
             if finished:
                 return
             finished = True
+            if status != 'completed' and not error:
+                observe((capture.error if capture and capture.error else {}) or model_error(stage=stage,
+                    code='cancelled' if status == 'interrupted' else 'stream_incomplete' if capture else 'unknown'))
             try:
                 if upstream is not None:
                     await upstream.aclose()
@@ -230,13 +247,15 @@ class HarnessGateway:
                     if content is not None:
                         response = {**response, 'choices': content.choices}
                     self.tracing.model(run, request_id, started, content.messages if content else [],
-                        response, status, gateway_id=gateway_id)
+                        response, status, gateway_id=gateway_id, error=error)
                     await self.checkpoints.flush()
             finally:
                 if slot_acquired:
                     self.model_slots.release()
 
         try:
+            if not compact:
+                model_stage(request, stage)
             try:
                 model = self.settings.resolve_model(fallback=run['active_model'] or run['model'])
             except ValueError as exc:
@@ -260,6 +279,9 @@ class HarnessGateway:
                 if isinstance(items, str):
                     items = [{'role': 'user', 'content': items}]
                 payload[field] = await asyncio.to_thread(self.store.attachments.with_images, run, items, protocol=route)
+            stage = 'context_preparation'
+            if not compact:
+                model_stage(request, stage)
             while True:
                 try:
                     if compact:
@@ -283,6 +305,9 @@ class HarnessGateway:
                     # exactly which records were summarized; the rest stay pending.
                     body = {**body, 'entries': body['entries'][:max(1, len(body['entries']) // 2)]}
                     payload = compaction_payload(body, model, attempt)
+            stage = 'admission'
+            if not compact:
+                model_stage(request, stage)
             current_run()
             await self.model_slots.acquire()
             slot_acquired = True
@@ -297,6 +322,9 @@ class HarnessGateway:
             if not admitted:
                 raise HTTPException(429, 'This run reached its model request limit.')
             request_id = self.spend.begin(run, model)
+            stage = 'upstream'
+            if not compact:
+                model_stage(request, stage, request_id=request_id)
             if self.tracing.enabled and not compact:
                 # A private working summary is model input, never a new public
                 # user message. Trace the original request's user text instead.
@@ -353,6 +381,7 @@ class HarnessGateway:
                 await finish()
                 return result
         except httpx.HTTPError as exc:
+            observe(model_error(exc, stage=stage))
             await finish()
             if compact:
                 error = SummaryFailure('gateway_unreachable', transient=True)
@@ -361,17 +390,21 @@ class HarnessGateway:
             raise HTTPException(502, 'Model gateway could not be reached.',
                                 headers=upstream_headers(request_id, error=exc)) from None
         except SummaryFailure as exc:
+            observe(model_error(exc, stage=stage))
             exc.request_id = request_id
             await finish()
             raise
         except BaseException as exc:
+            observe(model_error(exc, stage=stage))
             if isinstance(exc, asyncio.CancelledError):
                 status = 'interrupted'
             await finish()
             raise
 
         async def stream():
-            nonlocal status
+            nonlocal status, stage
+            stage = 'stream'
+            model_stage(request, stage)
             try:
                 async for chunk in upstream.aiter_bytes():
                     current = self.store.run(run_id)
@@ -383,8 +416,10 @@ class HarnessGateway:
                 capture.finish()
                 if status != 'interrupted':
                     status = 'completed' if capture.done and not capture.failed else 'failed'
-            except asyncio.CancelledError:
-                status = 'interrupted'
+            except BaseException as exc:
+                observe(model_error(exc, stage=stage))
+                if isinstance(exc, asyncio.CancelledError):
+                    status = 'interrupted'
                 raise
             finally:
                 await finish()

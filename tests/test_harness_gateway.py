@@ -9,6 +9,7 @@ from app.harness_gateway import NativeUsageCapture, authorized_payload
 from app.model_slots import ModelSlots
 from app.security import digest
 from test_workspace import workspace
+from test_tracing import Processor
 
 
 @pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
@@ -16,11 +17,13 @@ from test_workspace import workspace
 def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, monkeypatch, caplog, route, upstream_status):
     app, client = workspace
     app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    processor = app.state.tracing.processor = Processor()
+    app.state.tracing.enabled = True
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(lambda req: httpx.Response(upstream_status,
             headers={'x-request-id': 'provider-123', 'x-litellm-call-id': 'gateway-456', 'x-private': 'private-header'},
-            json={'error': {'message': 'private-provider-body'}})), **kw))
+            json={'error': {'code': 'cyber_policy', 'message': 'private-provider-body'}})), **kw))
     run = app.state.store.create_run('private-prompt', '', 'modal', [])
     app.state.store.update_run(run['id'], status='running', token_hash=digest('private-capability'))
     correlation = '1' * 32
@@ -43,6 +46,16 @@ def test_gateway_failure_keeps_status_ledger_and_request_correlation(workspace, 
     assert records[-1]['upstream_status'] == upstream_status
     assert records[-1]['request_ids']['x-moyai-model-request-id'] == row['id']
     assert 'private' not in json.dumps(records)
+    event = next(e for e in app.state.store.events(run['id']) if e['data'].get('phase') == 'broker_failure')
+    assert event['data']['error_code'] == 'cyber_policy'
+    assert event['data']['stage'] == 'upstream'
+    assert response.headers['x-moyai-error-code'] == 'cyber_policy'
+    span, = processor.spans
+    assert span.attributes['moyai.error.error_code'] == 'cyber_policy'
+    assert span.events[0].attributes['exception.message'] == span.status.description
+    assert 'cybersecurity policy' in span.status.description and 'HTTP ' + str(upstream_status) in span.status.description
+    assert 'private-provider-body' not in str(span.attributes)
+    assert 'private' not in str({k: v for k, v in span.attributes.items() if 'error' in k})
 
 
 @pytest.mark.parametrize('raw,reason', [
@@ -152,6 +165,78 @@ async def test_broker_diagnostics_capture_partial_stream_failure(caplog):
     assert 0 <= records[-1]['first_response_body_ms'] <= records[-1]['duration_ms'] + 1
     assert len(records[-1]['request_id']) == 32
     assert 'private' not in json.dumps(records) and 'secret' not in json.dumps(records)
+
+
+@pytest.mark.parametrize('route,phase', [
+    ('messages', 'upstream'), ('responses', 'upstream'), ('chat/completions', 'upstream'),
+    ('messages', 'stream'), ('responses', 'stream'), ('chat/completions', 'stream'),
+    ('messages', 'provider_error'), ('responses', 'provider_error'),
+    ('messages', 'provider_unknown'), ('responses', 'provider_unknown'),
+    ('messages', 'incomplete'), ('responses', 'incomplete'),
+])
+async def test_model_cancellation_keeps_safe_cause(workspace, monkeypatch, route, phase):
+    from app.broker_diagnostics import BrokerDiagnosticsMiddleware
+    from starlette.requests import Request
+    app, _ = workspace
+    app.state.settings.litellm_api_base = 'https://gateway.example/v1'
+    processor = app.state.tracing.processor = Processor()
+    app.state.tracing.enabled = True
+    actual = httpx.AsyncClient
+
+    class Interrupted(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if phase.startswith('provider_'):
+                code = 'overloaded_error' if phase == 'provider_error' else 'unknown'
+                value = ({'type': 'error', 'error': {'type': code, 'message': 'private-body'}}
+                    if route == 'messages' else {'type': 'response.failed', 'response': {'error': {'code': code}}})
+                yield ('data: ' + json.dumps(value) + '\n\n').encode()
+            else:
+                yield b'data: {}\n\n'
+            if phase != 'incomplete':
+                raise asyncio.CancelledError('private-cancel-reason')
+
+    def upstream(request):
+        if phase == 'upstream':
+            raise asyncio.CancelledError('private-cancel-reason')
+        return httpx.Response(200, stream=Interrupted())
+
+    monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
+        transport=httpx.MockTransport(upstream), **kw))
+    run = app.state.store.create_run('cancelled request', '', 'modal', [])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    async def receive():
+        return {'type': 'http.request', 'body': json.dumps({'messages': [], 'input': [],
+            'stream': phase != 'upstream' and route != 'chat/completions'}).encode(), 'more_body': False}
+    replies = []
+    async def send(message):
+        replies.append(message)
+    scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'}, 'method': 'POST',
+             'path': '/broker/' + run['id'] + '/v1/' + route, 'query_string': b'',
+             'headers': [(b'authorization', b'Bearer cap'), (b'content-type', b'application/json'), (b'host', b'127.0.0.1')]}
+    endpoint = next(r.endpoint for r in app.routes if getattr(r, 'path', '') == '/broker/{run_id}/v1/' + route)
+    async def forward(scope, receive, send):
+        response = await endpoint(run['id'], Request(scope, receive=receive))
+        await response(scope, receive, send)
+    cancelled = False
+    try:
+        await BrokerDiagnosticsMiddleware(forward, app.state.store, app.state.tracing)(scope, receive, send)
+    except asyncio.CancelledError:
+        cancelled = True
+    assert processor.spans, replies
+    assert cancelled is (phase != 'incomplete')
+    span, = processor.spans
+    code = 'overloaded_error' if phase == 'provider_error' else 'stream_incomplete' if phase == 'incomplete' else 'cancelled'
+    assert span.attributes['moyai.error.error_code'] == code
+    if phase != 'incomplete':
+        assert span.attributes['moyai.error.exception_type'] == 'CancelledError'
+    assert span.attributes['moyai.error.stage'] == ('stream' if phase != 'upstream' and route != 'chat/completions' else 'upstream')
+    assert span.attributes['moyai.status'] == ('failed' if phase == 'incomplete' else 'interrupted')
+    event, = [e for e in app.state.store.events(run['id']) if e['data'].get('phase') == 'broker_failure']
+    assert event['data']['error_code'] == code and 'http_status' not in event['data']
+    if phase != 'upstream' and route != 'chat/completions':
+        assert replies[0]['status'] == event['data']['response_status'] == 200
+    assert 'HTTP 200' not in event['message'] + span.status.description
+    assert 'private' not in str(span.attributes) + str(span.events)
 
 
 def test_native_gateway_preserves_discovered_tool_references(workspace, monkeypatch):
@@ -466,3 +551,75 @@ def test_native_nonstream_service_tier_policy(workspace, monkeypatch, route, mod
     response = client.post(f"/broker/{run['id']}/v1/{route}", headers={'Authorization': 'Bearer cap'},
                            json={'messages': [], 'input': [], 'stream': False})
     assert response.content == wire
+
+
+@pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
+@pytest.mark.parametrize('boundary', ['validation', 'context_preparation', 'admission', 'unauthorized'])
+def test_pre_admission_diagnostics_do_not_charge_or_bypass_auth(workspace, monkeypatch, route, boundary):
+    app, client = workspace
+    processor = app.state.tracing.processor = Processor()
+    app.state.tracing.enabled = True
+    run = app.state.store.create_run('diagnostic boundary', '', 'modal', [], chat_enabled=True)
+    message = app.state.store.claim_message(run['id'])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    if boundary == 'admission':
+        monkeypatch.setattr(app.state.model_slots, 'locked', lambda: True)
+    if boundary == 'context_preparation':
+        from fastapi import HTTPException
+        async def fail_context(self, *args, **kwargs):
+            raise HTTPException(503, 'private-context-error')
+        monkeypatch.setattr('app.live_context.LiveContext.prepare', fail_context)
+    response = client.post(f"/broker/{run['id']}/v1/{route}",
+        json={'messages': [], 'input': []} if boundary == 'context_preparation' else {},
+        headers={'Authorization': 'Bearer ' + ('wrong' if boundary == 'unauthorized' else 'cap')})
+    assert response.status_code == {'validation': 422, 'context_preparation': 503, 'admission': 429, 'unauthorized': 401}[boundary]
+    assert app.state.store.rows('SELECT * FROM model_requests WHERE run_id=?', (run['id'],)) == []
+    assert app.state.store.run(run['id'])['model_calls'] == 0
+    events = [e for e in app.state.store.events(run['id']) if e['kind'] == 'error']
+    if boundary == 'unauthorized':
+        assert events == processor.spans == []
+    else:
+        event, = events
+        assert event['data']['stage'] == boundary
+        assert response.headers['x-moyai-error-stage'] == boundary
+        assert event['data']['turn_id'] == message['id']
+        span, = processor.spans
+        assert span.name == 'broker /v1/' + route
+        assert span.attributes['moyai.error.http_status'] == response.status_code
+        assert span.attributes['moyai.error.request_id'] == response.headers['x-moyai-request-id']
+
+
+@pytest.mark.parametrize('route,value', [
+    ('/v1/messages', {'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'private-body'}}),
+    ('/v1/responses', {'type': 'response.failed', 'response': {'error': {'code': 'server_error', 'message': 'private-body'}}}),
+    ('/v1/responses', {'type': 'response.incomplete', 'response': {'incomplete_details': {'reason': 'max_output_tokens'}}}),
+])
+def test_native_stream_failure_keeps_safe_code(route, value):
+    capture = NativeUsageCapture(True, route=route)
+    capture.feed(('data: ' + json.dumps(value) + '\n\n').encode())
+    capture.finish()
+    assert capture.failed
+    assert capture.error['stage'] == 'stream'
+    assert capture.error['error_code'] in {'overloaded_error', 'server_error', 'max_output_tokens'}
+    assert 'private' not in json.dumps(capture.error)
+
+
+@pytest.mark.parametrize('route', ['messages', 'responses', 'chat/completions'])
+def test_delayed_failure_keeps_original_turn(workspace, monkeypatch, route):
+    from fastapi import HTTPException
+    app, client = workspace
+    run = app.state.store.create_run('original', '', 'modal', [], chat_enabled=True)
+    original = app.state.store.claim_message(run['id'])
+    app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
+    async def delayed(self, *args, **kwargs):
+        app.state.store.finish_message(run['id'], original['id'], 'Earlier answer')
+        app.state.store.enqueue_message(run['id'], 'Next request', 'next-input')
+        assert app.state.store.claim_message(run['id'])['id'] != original['id']
+        raise HTTPException(503, 'private-context-error')
+    monkeypatch.setattr('app.live_context.LiveContext.prepare', delayed)
+    response = client.post(f"/broker/{run['id']}/v1/{route}", json={'messages': [], 'input': []},
+        headers={'Authorization': 'Bearer cap'})
+    assert response.status_code == 503
+    event, = [e for e in app.state.store.events(run['id']) if e['kind'] == 'error']
+    assert event['data']['turn_id'] == original['id']
+    assert 'private' not in json.dumps(event)

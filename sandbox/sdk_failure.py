@@ -2,23 +2,9 @@
 import re
 
 try:
-    from .broker_failure import safe_id
+    from .broker_failure import safe_id, safe_error, error_summary, CLAUDE_ERRORS, CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 except ImportError:
-    from broker_failure import safe_id
-
-
-CODEX_ERRORS = {
-    'contextWindowExceeded', 'sessionBudgetExceeded', 'usageLimitExceeded',
-    'rateLimitExceeded', 'flexUnavailable', 'serverOverloaded', 'cyberPolicy',
-    'misalignmentPolicyViolation', 'tooManyDenials', 'internalServerError',
-    'unauthorized', 'badRequest', 'threadRollbackFailed', 'sandboxError', 'other',
-    'httpConnectionFailed', 'responseStreamConnectionFailed',
-    'responseStreamDisconnected', 'responseTooManyFailedAttempts',
-}
-CLAUDE_RESULTS = {'success', 'error_during_execution', 'error_max_turns',
-                  'error_max_budget_usd', 'error_max_structured_output_retries'}
-CLAUDE_TERMINAL_REASONS = {'completed', 'max_turns', 'max_budget_usd',
-                          'aborted_streaming', 'aborted_tools', 'error'}
+    from broker_failure import safe_id, safe_error, error_summary, CLAUDE_ERRORS, CODEX_ERRORS, CLAUDE_RESULTS, CLAUDE_TERMINAL_REASONS
 
 
 def status(value):
@@ -83,9 +69,11 @@ def failure_summary(diagnostic):
         reason = diagnostic.get('terminal_reason') or diagnostic.get('native_status')
         if reason in {None, 'success', 'completed'}:
             reason = 'API error' if diagnostic.get('is_error') else 'incomplete turn'
+    if diagnostic.get('error_code') not in {None, 'unknown'} or diagnostic.get('sdk_error'):
+        return error_summary(diagnostic, technical=False) + ' Saved tool receipts are preserved.'
     parts = [reason]
-    if diagnostic.get('http_status') is not None:
-        parts.append('HTTP ' + str(diagnostic['http_status']))
+    if (http := safe_error(diagnostic).get('http_status')) is not None:
+        parts.append('HTTP ' + str(http))
     if diagnostic.get('exit_code') is not None:
         parts.append('exit code ' + str(diagnostic['exit_code']))
     if diagnostic['pending_tools']:
@@ -103,10 +91,15 @@ def failure_diagnostic(agent, sdk, details):
         diagnostic['model_calls'] = agent.model_calls
     broker = getattr(agent.context.relay, 'last_failure', None)
     if isinstance(broker, dict):
+        for key, value in safe_error(broker).items():
+            if (key not in {'request_id', 'http_status'} and details.get('http_status') is not None
+                    and details['http_status'] == broker.get('http_status')):
+                diagnostic.setdefault(key, value)
         if request_id := safe_id(broker.get('request_id')):
             diagnostic['broker_request_id'] = request_id
         if (http := status(broker.get('http_status'))) is not None:
             diagnostic.setdefault('http_status', http)
+    diagnostic.update(safe_error({'http_status': diagnostic.pop('http_status', None)}))
     return diagnostic
 
 
