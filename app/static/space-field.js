@@ -154,7 +154,36 @@
     });
   }
 
-  function mount(canvas, { anchor } = {}) {
+  // This layer represents real delegation only. Decorative stars remain stars;
+  // animated signals indicate active work, not individual unobserved messages.
+  function drawGraph(context, graph, frame, width, height, reducedMotion) {
+    const nodes = graph?.nodes || [];
+    const byId = new Map(nodes.map(node => [node.id, node]));
+    nodes.forEach((node, index) => {
+      const parent = byId.get(node.parentId);
+      if (!parent) return;
+      const source = {x: node.x * width, y: node.y * height - 15};
+      const target = {x: parent.x * width, y: parent.y * height - 15};
+      const bend = index % 2 ? 22 : -22;
+      const active = graph.active && ['running','provisioning','saving','reconnecting','queued','waiting_children'].includes(node.status);
+      context.globalAlpha = active ? .3 : .15;
+      context.strokeStyle = active ? '#b7cdfa' : '#a9bdce';
+      context.lineWidth = .7;
+      context.beginPath();context.moveTo(source.x,source.y);
+      context.quadraticCurveTo((source.x+target.x)/2+bend*1.57,(source.y+target.y)/2,target.x,target.y);
+      context.stroke();
+      if (!active || reducedMotion) return;
+      for (let packet=0;packet<2;packet++) {
+        const progress=(frame*.006+packet*.5+index*.19)%1;
+        const point=pointBetween(source,target,progress,bend);
+        circle(context,point.x,point.y,2,'#d7f0ff',Math.sin(progress*Math.PI)*.85);
+        circle(context,point.x,point.y,7,'#d7f0ff',Math.sin(progress*Math.PI)*.09);
+      }
+    });
+    context.globalAlpha=1;
+  }
+
+  function mount(canvas, { anchor, graph } = {}) {
     if (!canvas || typeof canvas.getContext !== 'function') return NOOP;
     mounts.get(canvas)?.();
     const context = canvas.getContext('2d', { alpha: true });
@@ -200,8 +229,9 @@
       }
       drawStars(context, backgroundStars, frame, true);
       drawStars(context, swarmStars, frame, false);
-      drawClusters(context, frame);
+      if (!graph) drawClusters(context, frame);
       context.restore();
+      if (graph) drawGraph(context, graph(), frame, width, height, reducedMotion.matches);
     }
 
     function cancel() {
@@ -286,6 +316,7 @@
     mounts.set(canvas, cleanup);
     resize();
     if (!document.hidden && !reducedMotion.matches) animation = requestAnimationFrame(tick);
+    cleanup.resize = resize;
     return cleanup;
   }
 

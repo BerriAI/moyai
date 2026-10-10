@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     moyai_database_pool_size: int = Field(default=8, ge=1, le=256)
     moyai_runtime_role: Literal['standalone', 'coordinator', 'worker', 'broker', 'api'] = 'standalone'
     moyai_separate_broker: bool = False
+    moyai_coordinator_handoff: bool = False
     temporal_startup_timeout_seconds: float = Field(default=60, ge=1, le=600)
     temporal_worker_activities: int = Field(default=120, ge=1, le=10000)
     temporal_workflow_cache_size: int = Field(default=200, ge=0, le=100000)
@@ -66,6 +67,9 @@ class Settings(BaseSettings):
                 raise ValueError('Distributed roles require shared object storage and explicit SESSION_SECRET and ENCRYPTION_KEY.')
         if self.moyai_runtime_role == 'api' and (self.moyai_schema_mode != 'verify' or not self.moyai_separate_broker):
             raise ValueError('API replicas require MOYAI_SCHEMA_MODE=verify and MOYAI_SEPARATE_BROKER=true.')
+        if self.moyai_coordinator_handoff and (self.moyai_schema_mode != 'verify'
+                or not self.moyai_separate_broker or not self.temporal_enabled):
+            raise ValueError('Coordinator handoff requires verified schema, Temporal and a separate broker.')
         if self.moyai_runtime_role == 'broker' and not self.moyai_separate_broker:
             raise ValueError('The broker role requires MOYAI_SEPARATE_BROKER=true on every cluster process.')
         if self.moyai_separate_broker and self.moyai_runtime_role == 'standalone':
@@ -85,6 +89,7 @@ class Settings(BaseSettings):
     checkpoint_dir: Path | None = None
     modal_volume_name: str = ""
     trust_modal_proxy: bool = False
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
     # Maintenance commands also need the private service's origin; they don't
     # inherit the environment updates performed inside the server process.
     public_url: str = Field(default='http://127.0.0.1:8787',
@@ -223,6 +228,7 @@ class Settings(BaseSettings):
     max_concurrent_runs: int = Field(default=100, ge=1)
     max_pending_runs: int = Field(default=1000, ge=100)
     max_parallel_agents: int = Field(default=100, ge=1, le=100)
+    swarm_models: str = ''
     # Bound response buffers on the web worker independently of sandbox count.
     max_concurrent_model_requests: int = Field(default=8, ge=1)
     # Zero means no overall response deadline or iteration cap.

@@ -80,7 +80,7 @@ Administrator time, iteration and spending policies still apply. They never
 silently reset when the agent continues. Unrecoverable execution failure saves an
 interruption report; it does not masquerade as a user pause or completed objective.
 
-Follow [schema migration](schema-migrations.md) for schema revision 5. This change
+Follow [schema migration](schema-migrations.md) for schema revision 8. This change
 requires coordinated runtime migration; it is not an API-only mixed-build update.
 
 ## Verification and remaining qualification

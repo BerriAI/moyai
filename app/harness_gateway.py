@@ -224,11 +224,12 @@ class HarnessGateway:
             model_stage(request, 'admission')
         # Internal private work already has a bounded snapshot. Let it queue
         # behind the foreground request that scheduled it, including capacity 1.
-        if self.model_slots.locked() and not private:
+        if not private and await self.model_slots.is_full():
             self.model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
         slot_acquired = False
+        slot_permit = None
         client = None
         upstream = None
         request_id = None
@@ -273,7 +274,7 @@ class HarnessGateway:
                     await self.checkpoints.flush()
             finally:
                 if slot_acquired:
-                    self.model_slots.release()
+                    await self.model_slots.release_async(slot_permit)
 
         try:
             if not compact:
@@ -344,7 +345,7 @@ class HarnessGateway:
             if not compact:
                 model_stage(request, stage)
             current_run()
-            await self.model_slots.acquire()
+            slot_permit = await self.model_slots.acquire()
             slot_acquired = True
             current_run()
             admitted = self.store.execute(

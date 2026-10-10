@@ -210,3 +210,43 @@ def test_concurrent_lanes_preserve_claim_ownership_during_database_yield(slack_a
 
     client.portal.call(scenario)
     assert sum(item.get('text', '').startswith('One durable answer.') for item in slack_app[3]) == 1
+
+
+def test_graceful_coordinator_shutdown_finishes_admitted_send(slack_app, monkeypatch):
+    app, client, run_id = pending_answer(slack_app)
+    chat, store = app.state.slack.chat, app.state.store
+    entered, release = threading.Event(), threading.Event()
+    request = app.state.connectors.request
+    sent = []
+
+    async def blocked_send(method, url, **kwargs):
+        if kwargs.get('json', {}).get('text', '').startswith('One durable answer.'):
+            sent.append(1)
+            entered.set()
+            await asyncio.to_thread(release.wait, 5)
+        return await request(method, url, **kwargs)
+
+    monkeypatch.setattr(app.state.connectors, 'request', blocked_send)
+
+    async def scenario():
+        chat.watcher = asyncio.create_task(chat.watch())
+        shutdown = None
+        try:
+            assert await asyncio.to_thread(entered.wait, 3)
+            shutdown = asyncio.create_task(chat.shutdown(graceful=True))
+            await asyncio.sleep(.05)
+            assert not shutdown.done()
+            assert (await database(store.rows,
+                "SELECT status FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,)))[0]['status'] == 'sending'
+        finally:
+            release.set()
+            if shutdown:
+                await asyncio.wait_for(shutdown, 3)
+            else:
+                await chat.shutdown()
+        assert not chat.watcher.cancelled()
+        assert (await database(store.rows,
+            "SELECT status FROM slack_outbox WHERE run_id=? AND kind='answer'", (run_id,)))[0]['status'] == 'sent'
+        assert len(sent) == 1
+
+    client.portal.call(scenario)

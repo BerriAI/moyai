@@ -101,6 +101,7 @@ class SlackChat:
         self.last_post = {}
         self.delivering: set[int] = set()
         self.delivery_claim = asyncio.Lock()
+        self.closing = False
         self.activity = SlackActivity(owner)
 
 
@@ -583,6 +584,8 @@ class SlackChat:
         # Offloading adds yield points. Serialize both lanes until the durable
         # claim has an in-memory owner, before either can reconcile or send it.
         async with self.delivery_claim:
+            if self.closing:
+                return None
             row = await database(self.next_delivery, media=media)
             if row is None:
                 return None
@@ -702,7 +705,7 @@ class SlackChat:
 
     async def watch(self, *, media=False):
         wake = self.media_wake if media else self.wake
-        while True:
+        while not self.closing:
             try:
                 wake.clear()
                 if not media:
@@ -712,7 +715,7 @@ class SlackChat:
                     await database(self.collect)
                     self.media_wake.set()
                 await self.deliver_one(media=media)
-                if not media:
+                if not media and not self.closing:
                     await self.activity.sync()
                 await self.owner.checkpoints.flush()
             except asyncio.CancelledError:
@@ -740,8 +743,18 @@ class SlackChat:
         if not self.media_watcher or self.media_watcher.done():
             self.media_watcher = asyncio.create_task(self.watch(media=True))
 
-    async def shutdown(self):
+    def begin_drain(self):
+        self.closing = True
+        self.wake.set()
+        self.media_wake.set()
+
+    async def shutdown(self, *, graceful=False):
         tasks = [task for task in (self.watcher, self.media_watcher) if task]
-        for task in tasks:
-            task.cancel()
+        if graceful:
+            # Planned ownership transfer must preserve an admitted external
+            # send and its durable receipt before the successor recovers.
+            self.begin_drain()
+        else:
+            for task in tasks:
+                task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

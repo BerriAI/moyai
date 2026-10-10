@@ -1,6 +1,6 @@
 # Intelligence implementation ledger
 
-Status: in progress on `codex/moyai-intelligence`, based on `da8fd397`.
+Status: in progress on `codex/moyai-intelligence`, integrated with `bb9eba8` from `main`.
 Nothing in this document is a deployment or model-quality claim.
 
 The approved proposal is the scope. This ledger records implementation and
@@ -42,7 +42,9 @@ Composer controls and APIs accept longer messages; the shared contenteditable
 editor recognizes an absent maximum. Steering text is neutral rather than labeling
 every input a correction.
 
-This requires schema revision 8 and API protocol revision 2. Follow the coordinated
+This requires schema revision 8 and API, worker, broker and coordinator protocol
+revision 2. Revisions 1–7 retain main’s published schema history; the journal,
+goals, Slack sources, library changes and artifacts ship together in revision 8. Follow the coordinated
 migration procedure; the change is not an API-only mixed-version deployment.
 
 Validation so far:
@@ -157,7 +159,7 @@ private file-download locations stay in raw source storage and files use stable 
 
 Removed the frozen mention-time view, peer-message exclusions, 16K inbound cut,
 50-message/three-page source cap and bounded attachment-text extraction. Updated
-Slack docs and the existing source panel; schema revision 6 records the migration.
+Slack docs and the existing source panel; the combined release migration is schema revision 8.
 
 Validation: 516 broader Slack/journal cases passed, with four optional PostgreSQL
 pool cases skipped. The remaining failure was an exact old backfill-parameter
@@ -285,3 +287,20 @@ through the same durable turn when a shell/browser/repository tool requires one.
 Measure input receipt → first inference → first useful response/action, with cold
 computer provisioning held. No separate greeter, canned acknowledgment or changed
 model counts as passing this scenario. This runtime change has not landed yet.
+
+## Integration with current main
+
+The October 10 integration preserves AgentSwarm, fast conversation navigation,
+instant queued-message updates and rolling-release ownership. Child handoffs keep
+the new harness/model identities alongside complete answers and frozen artifact
+revisions. The shared swarm artifact contract now supports revision and byte-range
+reads. This schema/protocol change needs the coordinated migration path; it is not
+a compatible rolling or API-only release. Pushing source does not deploy it.
+
+Integration validation: 538 Node tests, 18 browser cases, the UI build and
+typecheck pass. The 225-case focused backend run initially found two obsolete
+limit/ranking expectations; the affected initial-context and swarm suites pass
+all 56 cases after correcting those expectations. PostgreSQL passes 96
+migration/rolling-owner checks and 74 goal/journal/source/library/artifact
+contracts. The full repository regression is still running; provider and
+production rehearsals remain separate release gates.

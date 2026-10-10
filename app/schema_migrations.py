@@ -19,7 +19,10 @@ COMPONENTS = (
     'user_preferences', 'environments', 'infrastructure_costs', 'spend', 'agents',
     'tracing', 'credentials', 'skills', 'memory', 'memory_review', 'lens_feedback',
     'session_titles', 'automations', 'automation_events', 'automation_tools',
-    'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup', 'session_journal', 'goals', 'slack_sources', 'published_artifacts',
+    'model_tools', 'session_folders', 'media_shares', 'computer', 'github_setup', 'swarms', 'swarm_collaboration',
+    'coordinator_handoff',
+    'broker_ownership',
+    'session_journal', 'goals', 'slack_sources', 'published_artifacts',
 )
 
 

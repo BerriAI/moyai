@@ -1,5 +1,10 @@
 # Deploy production
 
+After the complete four-service handoff topology is activated, use
+`release_type: rolling` and follow [compatible rolling deployments](rolling-deploy.md).
+It replaces roles sequentially while active work continues and keeps schema,
+shared contracts and concurrency fixed.
+
 After dedicated API activation, use `release_type: api` and follow
 [compatible API deployments](api-deploy.md). The rest of this page describes
 `release_type: coordinated` for the original two/three-service topology.

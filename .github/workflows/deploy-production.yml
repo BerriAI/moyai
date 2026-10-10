@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: API requires an activated dedicated API and reviewed compatible changes
+        description: Rolling requires the activated four-service handoff topology and reviewed compatible changes
         type: choice
-        options: [coordinated, api]
+        options: [coordinated, api, rolling]
         default: coordinated
       preflight_only:
         description: Only check configuration (no deployment)
@@ -36,12 +36,12 @@ jobs:
       # A later push cannot change this release's tooling or deployment target.
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
-        if: inputs.release_type == 'api'
+        if: inputs.release_type != 'coordinated'
       - name: Install candidate settings dependencies before loading deployment credentials
-        if: inputs.release_type == 'api'
+        if: inputs.release_type != 'coordinated'
         run: uv sync --frozen --python 3.13
       - name: Coordinate app, worker and activated broker deployment
-        if: inputs.release_type != 'api'
+        if: inputs.release_type == 'coordinated'
         env:
           GH_TOKEN: ${{ github.token }}
           RENDER_DEPLOY_API_KEY: ${{ secrets.RENDER_DEPLOY_API_KEY }}
@@ -58,6 +58,15 @@ jobs:
           PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
           MOYAI_API_SERVICE_ID: ${{ vars.MOYAI_API_SERVICE_ID }}
         run: .venv/bin/python -m scripts.release.deploy --release-type api --receipt release-receipt.json
+      - name: Replace compatible roles sequentially while work continues
+        if: inputs.release_type == 'rolling'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RENDER_DEPLOY_API_KEY: ${{ secrets.RENDER_DEPLOY_API_KEY }}
+          RENDER_DEPLOY_SSH_KEY: ${{ secrets.RENDER_DEPLOY_SSH_KEY }}
+          PREFLIGHT_ONLY: ${{ inputs.preflight_only }}
+          MOYAI_API_SERVICE_ID: ${{ vars.MOYAI_API_SERVICE_ID }}
+        run: .venv/bin/python -m scripts.release.deploy --release-type rolling --receipt release-receipt.json
       - name: Save deployment receipt
         if: always()
         uses: actions/upload-artifact@v4

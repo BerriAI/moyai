@@ -24,6 +24,7 @@ from sandbox.startup import StartupUnavailable, REPOSITORY_METADATA_BUDGET
 from sandbox.project_environment import prepare_project
 from sandbox.hermes_compat import apply_hermes_patches
 from sandbox.codex_runtime import RuntimeLease, discard_orphan
+from sandbox.durable_process import DeadlineExpired, execution_timeout
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -37,6 +38,11 @@ def emit(kind, message, data=None, **extra):
 def run(spec):
     global ACTIVITY_INPUT_ID
     ACTIVITY_INPUT_ID = spec.get('activity_input_id')
+    try:
+        spec = {**spec, 'timeout': execution_timeout(spec)}
+    except DeadlineExpired as exc:
+        emit('final', str(exc), completed=False)
+        return 124
     relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting,
         report_error=lambda failure: emit('error', 'Cloud request failed; transport diagnostics saved.',
             {'activity_version': 1, 'phase': 'broker_failure', **failure})).start()
@@ -56,6 +62,9 @@ def run(spec):
     except ContextUnavailable as exc:
         emit('final', str(exc), completed=False)
         return 1
+    except DeadlineExpired as exc:
+        emit('final', str(exc), completed=False)
+        return 124
     finally:
         try:
             if getattr(relay, 'codex_runtime', None):
@@ -153,6 +162,8 @@ def _run_agent(spec, relay):
             (artifacts / 'result.md').write_text(message)
 
     try:
+        # Workspace preparation can consume time after the persisted launch.
+        spec = {**spec, 'timeout': execution_timeout(spec)}
         outcome = run_conversation(
             spec, relay=relay, workspace=workspace, workspace_root=Path('/workspace'),
             session=Path('/session'), config=config, emit=report,

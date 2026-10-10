@@ -27,7 +27,7 @@ from .db import Store, now, database
 from .blob_storage import ObjectStorage
 from .runner import RunManager, TERMINAL, completed_response, response_status
 from .persistence import Checkpoints, restore_checkpoint
-from .security import Security, digest
+from .security import Security, Throttle, digest
 from .cloudflare_access import CloudflareAccess, CloudflareAccessMiddleware
 from .google_sso import GoogleSignIn
 from .user_roles import UserRoles
@@ -66,6 +66,11 @@ Provider = Literal["linear", "slack", "notion", "github"]
 AttachmentId = Annotated[str, Field(pattern=r'^[0-9a-f]{32}$')]
 
 
+class SwarmOptions(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    budget_seconds: int = Field(ge=60, le=86400, strict=True)
+
+
 class NewRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     harness: str | None = Field(default=None, min_length=1, max_length=80)
@@ -80,6 +85,7 @@ class NewRun(BaseModel):
     attachment_ids: list[AttachmentId] = Field(default_factory=list, max_length=MAX_FILES)
     client_id: str | None = Field(default=None, pattern=r'^[A-Za-z0-9_-]{8,80}$')
     side_chat_of: str = Field(default='', pattern=r'^([0-9a-f]{32})?$')
+    swarm: SwarmOptions | None = None
 
     @model_validator(mode='after')
     def require_input(self):
@@ -217,11 +223,21 @@ def _create_app(settings, store):
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
     memory.github = connectors.github
-    from .model_slots import ModelSlots
-    model_slots = ModelSlots(settings.max_concurrent_model_requests)
+    from .model_slots import ModelSlots, PostgresModelSlots
+    overlap_broker = settings.moyai_runtime_role == 'broker' and not store.schema_updates
+    broker_work = None
+    if overlap_broker:
+        from .broker_ownership import BrokerWork
+        broker_work = store.broker_work = BrokerWork(store)
+    model_slots = (PostgresModelSlots(settings.max_concurrent_model_requests, store.database)
+                   if overlap_broker else ModelSlots(settings.max_concurrent_model_requests))
     from .memory_review import MemoryReview
     memory_review = MemoryReview(memory, settings, spend, model_slots)
     memory.reviewer = store.memory_review = memory_review
+    broker_requests = None
+    if overlap_broker:
+        from .broker_ownership import BrokerMaintenance, BrokerRequests
+        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery))
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     memory_review.context_budget = context_budget
@@ -247,9 +263,70 @@ def _create_app(settings, store):
     model_tools = ModelTools(store, settings)
     manager.automations = automations
     slack.automation_events = automations.events
-    login_attempts = []
+    login_attempts, all_login_failures = Throttle(10), Throttle(300)
     owns_inference = settings.moyai_runtime_role == 'broker' or (
         settings.moyai_runtime_role in {'standalone', 'coordinator'} and not settings.moyai_separate_broker)
+
+    handoff = None
+    hook_inbox = None
+    if settings.moyai_runtime_role == 'coordinator' and settings.moyai_coordinator_handoff:
+        from .coordinator_handoff import CoordinatorHandoff, HookInbox
+        handoff = CoordinatorHandoff(store, manager)
+        hook_inbox = HookInbox(store, slack, lambda: missing_cloud())
+
+    @asynccontextmanager
+    async def background_lifespan():
+        watcher = None
+        try:
+            await manager.recover()
+            if handoff:
+                await manager.wait_ready()
+            session_lifecycle.start()
+            await checkpoints.flush()
+            slack.recover()
+            identities.start()
+            environments.start()
+            automations.start()
+            if owns_inference:
+                spend.recovery.start()
+                memory_review.start()
+            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
+            tracing.start()
+            lens_feedback.start()
+            infrastructure.start()
+            session_titles.start()
+            if hook_inbox:
+                hook_inbox.start()
+            yield
+        finally:
+            await close_background(watcher)
+
+    async def close_background(watcher=None):
+        # Stop intake processing before the singleton consumers it wakes.
+        # Attempt every close even if one fails; ownership is retained until
+        # each component has drained its own tasks.
+        errors = []
+        if handoff:
+            slack.chat.begin_drain()
+        closes = ([hook_inbox.close] if hook_inbox else []) + [
+            session_lifecycle.close, memory_review.close, spend.recovery.close,
+            harness_gateway.maintenance.close, harness_gateway.live_context.close,
+            computer.close, session_pull_requests.close, session_titles.close,
+            infrastructure.close, automations.close, environments.close,
+            identities.close, lambda: slack.shutdown(graceful=bool(handoff)), manager.shutdown,
+            manager.modal_clients.close, tracing.close, lens_feedback.close,
+        ]
+        for close in closes:
+            try:
+                await close()
+            except BaseException as exc:
+                errors.append(exc)
+        if watcher:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+        await checkpoints.flush()
+        if errors:
+            raise errors[0]
 
     @asynccontextmanager
     async def lifespan(app):
@@ -281,8 +358,9 @@ def _create_app(settings, store):
             if settings.moyai_runtime_role == 'worker':
                 # Workers consume Temporal work only. They must not interrupt
                 # gateway streams or take over singleton background recovery.
-                await manager.recover()
                 try:
+                    await manager.recover()
+                    await manager.wait_ready()
                     yield
                 finally:
                     await manager.shutdown()
@@ -293,74 +371,54 @@ def _create_app(settings, store):
                 return
             # Only the process holding the inference fence may recover model
             # attempts or compaction. An API restart must leave live calls alone.
-            if owns_inference:
+            if owns_inference and not overlap_broker:
                 store.execute("UPDATE model_requests SET status='interrupted' WHERE status='pending'")
                 harness_gateway.maintenance.recover()
             if settings.moyai_runtime_role == 'broker':
                 try:
                     # External tool writes also live on /broker/*; an API restart
                     # must not mark an in-flight broker action ambiguous.
-                    store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
+                    if not overlap_broker:
+                        store.execute("UPDATE approvals SET status='uncertain' WHERE status='executing'")
                     await manager.recover()
                     await manager.wait_ready()
-                    spend.recovery.start()
-                    memory_review.start()
+                    if broker_requests:
+                        await broker_requests.start()
+                    else:
+                        spend.recovery.start()
+                        memory_review.start()
                     yield
                 finally:
-                    await memory_review.close()
-                    await spend.recovery.close()
-                    await harness_gateway.maintenance.close()
-                    await harness_gateway.live_context.close()
-                    await manager.shutdown()
-                    await manager.modal_clients.close()
-                    await environments.close()
-                    await session_lifecycle.close()
-                    await computer.close()
-                    await session_pull_requests.close()
-                    await tracing.close()
+                    errors = []
+                    closes = ([broker_requests.close] if broker_requests else []) + [
+                        memory_review.close, spend.recovery.close,
+                        harness_gateway.maintenance.close, harness_gateway.live_context.close,
+                        manager.shutdown, manager.modal_clients.close, environments.close,
+                        session_lifecycle.close, computer.close, session_pull_requests.close, tracing.close,
+                    ]
+                    for close in closes:
+                        try:
+                            await close()
+                        except BaseException as exc:
+                            errors.append(exc)
+                    if broker_requests:
+                        await broker_requests.drain()
+                    if errors:
+                        raise errors[0]
                 return
-            await manager.recover()
-            session_lifecycle.start()
-            await checkpoints.flush()
-            slack.recover()
-            identities.start()
-            environments.start()
-            automations.start()
-            if owns_inference:
-                spend.recovery.start()
-                memory_review.start()
-            watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
-            tracing.start()
-            lens_feedback.start()
-            infrastructure.start()
-            session_titles.start()
-            try:
-                yield
-            finally:
-                await session_lifecycle.close()
-                await memory_review.close()
-                await spend.recovery.close()
-                await harness_gateway.maintenance.close()
-                await harness_gateway.live_context.close()
-                await computer.close()
-                await session_pull_requests.close()
-                await session_titles.close()
-                await infrastructure.close()
-                await automations.close()
-                await environments.close()
-                await identities.close()
-                await slack.shutdown()
+            if handoff:
                 try:
-                    await manager.shutdown()
+                    async with handoff.lifespan(background_lifespan):
+                        yield
                 finally:
-                    await manager.modal_clients.close()
-                await tracing.close()
-                await lens_feedback.close()
-                if watcher:
-                    watcher.cancel()
-                    await asyncio.gather(watcher, return_exceptions=True)
-                await checkpoints.flush()
+                    if not handoff.started:
+                        await close_background()
+                return
+            async with background_lifespan():
+                yield
         finally:
+            if overlap_broker:
+                await asyncio.to_thread(model_slots.close)
             await asyncio.to_thread(store.close)
 
     session_lifecycle = SessionLifecycle(store, security, manager, checkpoints)
@@ -375,6 +433,15 @@ def _create_app(settings, store):
     if settings.moyai_runtime_role == 'api':
         from .runtime_coordination import ApiRoleMiddleware
         app.add_middleware(ApiRoleMiddleware)
+    if handoff:
+        from .coordinator_handoff import CoordinatorIngressMiddleware
+        app.add_middleware(CoordinatorIngressMiddleware, ownership=handoff)
+    app.state.coordinator_handoff = handoff
+    app.state.hook_inbox = hook_inbox
+    if broker_requests:
+        from .broker_ownership import BrokerOwnershipMiddleware
+        app.add_middleware(BrokerOwnershipMiddleware, owner=broker_requests)
+    app.state.broker_requests = broker_requests
     app.state.session_lifecycle = session_lifecycle
     app.state.lens_feedback = lens_feedback
     app.state.session_pull_requests = session_pull_requests
@@ -491,11 +558,19 @@ def _create_app(settings, store):
         # The release probe correlates the actual HTTP process with its database
         # owner; an SSH shell may land on either instance during Render overlap.
         headers = {}
-        if settings.moyai_runtime_role == 'api':
+        if store.database and settings.moyai_runtime_role in {'api', 'worker', 'broker', 'coordinator'}:
             headers = {'X-Moyai-Build': settings.moyai_build_sha,
-                       'X-Moyai-API-Release': '1',
                        'X-Moyai-Owner': str(store.database.owner_pid),
-                       'Cache-Control': 'no-store'}
+                       'X-Moyai-Role': settings.moyai_runtime_role,
+                       'X-Moyai-Rolling-Release': '1', 'Cache-Control': 'no-store'}
+        if settings.moyai_runtime_role == 'api':
+            headers['X-Moyai-API-Release'] = '1'
+        if handoff:
+            headers['X-Moyai-Coordinator-State'] = handoff.status
+        if broker_requests:
+            headers['X-Moyai-Broker-Draining'] = str(broker_requests.draining).lower()
+            if broker_requests.draining:
+                raise HTTPException(503, 'Broker ownership is unavailable.', headers=headers)
         if settings.moyai_runtime_role in {'worker', 'broker', 'api'} and not manager.ready.is_set():
             raise HTTPException(503, 'Runtime is connecting to Temporal.', headers=headers)
         if store.database:
@@ -530,15 +605,17 @@ def _create_app(settings, store):
         security.check_origin(request)
         if not settings.password_login_enabled:
             raise HTTPException(403, "Use Google to sign in to this workspace.")
-        login_attempts[:] = [stamp for stamp in login_attempts if stamp > time.monotonic() - 60]
-        if len(login_attempts) >= 10:
+        client = security.client_key(request)
+        # Per-client limit, plus a backstop on total guesses from many addresses.
+        if login_attempts.blocked(client) or all_login_failures.blocked("all"):
             raise HTTPException(429, "Too many sign-in attempts. Wait a minute.")
-        login_attempts.append(time.monotonic())
         if settings.workspace_password and hmac.compare_digest(body.password, settings.workspace_password):
             role = "admin"
         elif settings.workspace_member_password and hmac.compare_digest(body.password, settings.workspace_member_password):
             role = "member"
         else:
+            login_attempts.record(client)
+            all_login_failures.record("all")
             raise HTTPException(401, "Incorrect workspace password.")
         response = JSONResponse({"authenticated": True, "role": role})
         security.new_session(response, role)
@@ -580,7 +657,7 @@ def _create_app(settings, store):
             return preferred_model(conn, settings, actor)
 
     @app.get("/api/config")
-    async def config(request: Request):
+    def config(request: Request):
         security.require(request)
         missing = missing_cloud()
         from .harnesses import choices
@@ -689,8 +766,10 @@ def _create_app(settings, store):
     @app.post("/api/runs", status_code=201)
     async def create(body: NewRun, request: Request):
         await database(security.require, request, mutation=True)
+        if body.swarm and (not settings.temporal_enabled or body.mode != 'modal'):
+            raise HTTPException(422, 'Swarm mode requires the durable cloud runtime.')
         metadata_request = ((body.chat_enabled or settings.temporal_enabled)
-                            and not body.attachment_ids and is_session_id_request(body.prompt))
+                            and not body.swarm and not body.attachment_ids and is_session_id_request(body.prompt))
         if body.side_chat_of:
             parent = await database(store.run, body.side_chat_of)
             if not parent or parent['deleted_at']:
@@ -723,12 +802,17 @@ def _create_app(settings, store):
         user_id = await database(store.identity, session)
         try:
             run = await database(store.create_run, body.prompt, body.repo_url, body.mode, sorted(set(body.plugins)), chat_enabled=body.chat_enabled or settings.temporal_enabled, model=model, user_id=user_id,
-                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request)
+                                   attachment_ids=body.attachment_ids, client_id=body.client_id, environment_id=body.environment_id, side_chat_of=body.side_chat_of, harness=harness, github_repository_id=body.github_repository_id, metadata_request=metadata_request,
+                                   swarm_budget_seconds=body.swarm.budget_seconds if body.swarm else None,
+                                   durable_submit=manager.submit_in if body.swarm else None,
+                                   swarm_bootstrap=manager.swarms.bootstrap_in if body.swarm else None)
         except ValueError as exc:
             raise HTTPException(429 if 'queue' in str(exc) else 409, str(exc))
         await checkpoints.flush()
         if not metadata_request:
-            if settings.temporal_enabled:
+            if body.swarm:
+                pass  # Input, mission and outbox wake committed together.
+            elif settings.temporal_enabled:
                 await database(manager.submit, run)
             else:
                 manager.submit(run)
@@ -763,7 +847,7 @@ def _create_app(settings, store):
         project = environments.context(run)
         actor = store.identity(security.session_info(request))
         messages = skills.message_mentions(messages, actor)
-        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request))
+        feedback_rows = lens_feedback.for_messages(run_id, feedback_author(request, actor))
         messages = [{**message, 'feedback': feedback_rows.get(message['id'])}
                     if message['role'] == 'assistant' else message for message in messages]
         sidebar_id = store.root_id(run_id)
@@ -776,7 +860,7 @@ def _create_app(settings, store):
                 'project_environment': {key: project[key] for key in ('name', 'repository', 'build_id', 'commit_sha') if key in project},
                 "owner": owners[0] if owners else None, "goal": store.goal(run_id),
                 "agents": coordinator.view(run_id, include_costs=security.role(request) == 'admin'),
-                "credential_requests": credentials.pending(run,store.identity(security.session_info(request)),security.role(request)=='admin'),
+                "credential_requests": credentials.pending(run,actor,security.role(request)=='admin'),
                 "slack_mirroring": slack.chat.mirroring(run_id),
                 "active": manager.is_active(run_id), "has_artifact": store.artifacts.info(run_id + '.zip') is not None, "has_captures": bool(captures.listing(settings, run_id, store=store)), "has_published_artifacts": bool(store.rows("SELECT 1 FROM published_artifacts WHERE run_id=? LIMIT 1", (run_id,))), "slack_source": store.slack_source(run_id)}
 
@@ -789,8 +873,9 @@ def _create_app(settings, store):
         summary = session_pull_requests.summaries([run_id])[run_id]
         return {**result, 'pr_summary': summary, 'pull_requests': summary['pull_requests']}
 
-    def feedback_author(request):
-        actor = store.identity(security.session_info(request))
+    def feedback_author(request, actor=None):
+        if actor is None:
+            actor = store.identity(security.session_info(request))
         rows = store.rows('''
             SELECT COALESCE(NULLIF(linked.email,''),NULLIF(users.email,''),linked.name,users.name,'') AS author
             FROM users
@@ -818,7 +903,7 @@ def _create_app(settings, store):
         return {'message_id': message_id, **result}
 
     @app.get('/api/runs/{run_id}/activity')
-    async def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
+    def activity_history(run_id: str, request: Request, message_id: int = Query(gt=0, le=2**63-1),
                                after: int = Query(default=0, ge=0, le=2**63-1),
                                until: int | None = Query(default=None, ge=0, le=2**63-1)):
         security.require(request)
@@ -846,6 +931,18 @@ def _create_app(settings, store):
 
     @app.post("/api/runs/{run_id}/messages", status_code=202)
     async def send_message(run_id: str, body: ChatMessage, request: Request):
+        # Validation and the enqueue transaction stay off the event loop so a
+        # slow database cannot stall other conversations' streams and pages.
+        message, created, metadata_request = await run_in_threadpool(enqueue_follow_up, run_id, body, request)
+        await checkpoints.flush()
+        # Resume even for a duplicate whose first acknowledgement was lost.
+        if not metadata_request:
+            await session_titles.request(run_id)
+            if await run_in_threadpool(store.has_queued_messages, run_id):
+                manager.submit(await run_in_threadpool(store.run, run_id))
+        return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
+
+    def enqueue_follow_up(run_id: str, body: ChatMessage, request: Request):
         security.require(request, mutation=True)
         run = store.run(run_id)
         if not run:
@@ -874,13 +971,7 @@ def _create_app(settings, store):
                                        **({'metadata_request': True} if metadata_request else {}))
         except ValueError as exc:
             raise HTTPException(409, str(exc))
-        await checkpoints.flush()
-        # Resume even for a duplicate whose first acknowledgement was lost.
-        if not metadata_request:
-            await session_titles.request(run_id)
-            if store.has_queued_messages(run_id):
-                manager.submit(store.run(run_id))
-        return {"id": message["id"], "status": message["status"], "model": message['model'], "created": created}
+        return message, created, metadata_request
 
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel(run_id: str, request: Request):
@@ -888,6 +979,20 @@ def _create_app(settings, store):
         if not store.run(run_id):
             raise HTTPException(404, "Task not found")
         await manager.cancel(run_id)
+        return public_run(store.run(run_id))
+
+    @app.post('/api/runs/{run_id}/swarm/{action}')
+    async def swarm_control(run_id: str, action: Literal['pause', 'resume'], request: Request):
+        security.require(request, mutation=True)
+        if not store.run(run_id):
+            raise HTTPException(404, 'Task not found')
+        if not settings.temporal_enabled:
+            raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')
+        try:
+            await getattr(manager.swarms, action)(run_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        await checkpoints.flush()
         return public_run(store.run(run_id))
 
     @app.patch('/api/runs/{run_id}/messages/{message_id}')
@@ -904,10 +1009,25 @@ def _create_app(settings, store):
             manager.submit(store.run(run_id))
         return {'id': result['id'], 'status': result['status'], 'revision': result['revision']}
 
+    def read_event_batch(run_id, cursor):
+        # Each open conversation polls the database. Keep the whole read off
+        # the event loop so a busy database cannot stall navigation in other tabs.
+        row = store.run(run_id)
+        if not row or row['deleted_at']:
+            return None, [], None
+        batch = store.events(run_id, cursor)
+        status = {'status': response_status(row), 'active': manager.is_active(run_id),
+                  'model': row['model'], 'active_model': row['active_model'],
+                  'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'],
+                  'checkpoint_error': row['checkpoint_error'],
+                  'deletion_error': session_lifecycle.deletion_error(run_id),
+                  'slack_mirroring': slack.chat.mirroring(run_id)}
+        return row, batch, status
+
     @app.get("/api/runs/{run_id}/events")
     async def events(run_id: str, request: Request, after: int = 0):
         security.require(request)
-        if not store.run(run_id):
+        if not await run_in_threadpool(store.run, run_id):
             raise HTTPException(404, "Task not found")
         try:
             last_id = int(request.headers.get("last-event-id", "0"))
@@ -917,18 +1037,17 @@ def _create_app(settings, store):
         async def stream():
             cursor = max(after, last_id, 0)
             while not await request.is_disconnected():
-                row = store.run(run_id)
-                if not row or row['deleted_at']:
+                row, batch, status = await run_in_threadpool(read_event_batch, run_id, cursor)
+                if row is None:
                     yield "event: deleted\ndata: {}\n\n"
                     break
-                batch = store.events(run_id, cursor)
                 for event in batch:
                     cursor = event["id"]
                     yield f"id: {cursor}\ndata: {json.dumps(event)}\n\n"
-                if not row["chat_enabled"] and row["status"] in TERMINAL and not manager.is_active(run_id) and len(batch) < 200:
+                if not row["chat_enabled"] and row["status"] in TERMINAL and not status['active'] and len(batch) < 200:
                     yield "event: settled\ndata: {}\n\n"
                     break
-                yield f"event: run-status\ndata: {json.dumps({'status': response_status(row), 'active': manager.is_active(run_id), 'model': row['model'], 'active_model': row['active_model'], 'updated_at': row['updated_at'], 'active_message_id': row['active_message_id'], 'checkpoint_error': row['checkpoint_error'], 'deletion_error': session_lifecycle.deletion_error(run_id), 'slack_mirroring': slack.chat.mirroring(run_id)})}\n\n"
+                yield f"event: run-status\ndata: {json.dumps(status)}\n\n"
                 await asyncio.sleep(0.5)
         return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -1332,10 +1451,14 @@ def _create_app(settings, store):
 
     @app.post('/hooks/slack/interactions')
     async def slack_interactions(request: Request):
+        if hook_inbox:
+            return await hook_inbox.receive_interaction(request)
         return await slack.feedback.receive(request)
 
     @app.post("/hooks/slack/events")
     async def slack_events(request: Request):
+        if hook_inbox:
+            return await hook_inbox.receive_event(request)
         return await slack.receive(request, missing_cloud())
 
     from .harness_gateway import HarnessGateway
@@ -1419,7 +1542,7 @@ def _create_app(settings, store):
         # Reject before reading/charging an inference. Waiting on this server
         # would retain large request bodies and could expire sealed envelopes.
         # The sandbox retries only this explicit, unbilled admission response.
-        if model_slots.locked():
+        if await model_slots.is_full():
             model_slots.record_queue()
             raise HTTPException(429, 'Waiting for a model request slot.',
                                 headers={'X-Moyai-Model-Queue': '1', 'Retry-After': '3'})
@@ -1570,6 +1693,7 @@ def _create_app(settings, store):
 
 def public_messages(run: dict[str, object], messages: list[dict[str, object]]) -> list[dict[str, object]]:
     """Show a durable answer receipt while its canonical turn is still saving."""
+    messages = [{**message, 'source': 'swarm'} if str(message.get('client_id', '')).startswith('swarm:') else message for message in messages]
     raw = run.get('pending_result')
     if not isinstance(raw, str) or not raw:
         return messages
