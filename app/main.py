@@ -1171,6 +1171,9 @@ def _create_app(settings, store):
             observation.setdefault('run', dict(run))
         return run
 
+    from .broker_payloads import BrokerPayloads
+    broker_payloads = BrokerPayloads(store, security)
+
     async def broker_body(request, route):
         # Called only after require_run. The edge carries opaque authenticated
         # data; the application still checks identity, size, schema and tools.
@@ -1183,9 +1186,21 @@ def _create_app(settings, store):
         if len(raw) > body_limit(route):
             raise HTTPException(413, 'Broker request too large.')
         try:
-            return json.loads(raw)
+            body = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise HTTPException(422, 'Invalid broker request JSON.')
+        if isinstance(body, dict) and set(body) == {'moyai_payload'}:
+            caller = await asyncio.to_thread(require_run, request.path_params['run_id'], request)
+            return await asyncio.to_thread(broker_payloads.resolve, caller, route, body)
+        return body
+
+    @app.post('/broker/{run_id}/payloads')
+    async def upload_broker_payload(run_id: str, request: Request):
+        caller = await asyncio.to_thread(require_run, run_id, request)
+        body = await broker_body(request, '/payloads')
+        result = await asyncio.to_thread(broker_payloads.upload, caller, body)
+        await checkpoints.flush()
+        return result
 
     from .github_git import routes as git_routes
     app.include_router(git_routes(connectors.github, require_run))
@@ -1214,15 +1229,28 @@ def _create_app(settings, store):
         target = message_queue.accept_steer(run_id, run['active_message_id'])
         return {'steer_message_id': target}
 
+    from .computer_operations import READ_TOOL as COMPUTER_OPERATION_READ
+    computer_operations = manager.agent_runtime.operations if hasattr(manager, 'agent_runtime') else None
+
     def workspace_catalog(run):
         from .tool_schema_cache import tool_schema
         from .session_journal import READ_TOOL
-        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
+        return [DIAGNOSTIC_TOOL, READ_TOOL, GOAL_TOOL] + ([COMPUTER_OPERATION_READ] if computer_operations else []) + ARTIFACT_TOOLS + ([SLACK_CONTEXT_TOOL, SLACK_PARTICIPATION_TOOL] if store.rows('SELECT 1 FROM slack_threads WHERE run_id=?', (run['id'],)) else []) + media_shares.tools() + session_lifecycle.tools(run) + model_tools.tools(run) + automation_tools.tools(run) + automations.tools(run) + memory.tools(run) + skills.tools(run) + credentials.tools(run) + coordinator.tools(run) + [{"name": name, "description": spec[3], "inputSchema": tool_schema(spec[2]), "annotations": {"readOnlyHint": not spec[1], "idempotentHint": name in RETRY_SAFE_READS}}
                 for name, spec in TOOLS.items() if spec[0] in run["plugins"] and connectors.allowed(name)]
 
     @app.get("/broker/{run_id}/tools")
     def tool_list(run_id: str, request: Request):
         return workspace_catalog(require_run(run_id, request))
+
+    @app.post('/broker/{run_id}/agent-runtime')
+    async def computer_operation(run_id: str, request: Request):
+        run = require_run(run_id, request)
+        if computer_operations is None:
+            raise HTTPException(409, 'An independent runtime requires durable execution.')
+        body = await broker_body(request, '/agent-runtime')
+        result = await asyncio.to_thread(computer_operations.exchange, run, body)
+        await checkpoints.flush()
+        return result
 
     @app.post('/broker/{run_id}/artifacts/transfer')
     async def artifact_transfer(run_id: str, request: Request):
@@ -1241,6 +1269,10 @@ def _create_app(settings, store):
             body = ToolCall.model_validate(await broker_body(request, '/tools/call'))
         except ValidationError:
             raise HTTPException(422, 'Invalid tool request.')
+        if body.name == 'computer_operation_read':
+            if computer_operations is None:
+                raise HTTPException(409, 'Computer operation receipts are unavailable for this runtime.')
+            return await asyncio.to_thread(computer_operations.read, run, body.arguments)
         if body.name in ARTIFACT_SPECS:
             try:
                 return await asyncio.to_thread(published_artifacts.call, run, body.name, body.arguments)

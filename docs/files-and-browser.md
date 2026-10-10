@@ -15,15 +15,13 @@ public updates are clickable, including existing messages such as
 `Created **design.md**` and links to `/workspace/design.md`. Exact workspace paths
 take precedence; a bare filename only resolves to a nested file when unambiguous.
 
-This browses the latest result ZIP already stored on Render, without starting a
-sandbox. It does not expose the server filesystem or require an archive migration.
-New/loose files are available individually; tracked repository edits still appear
-as patches. Existing collection limits and omissions are unchanged. Text previews
-are capped at 128 KiB; original file downloads are capped at the collector's 2 MiB
-file limit. Binary files download without an inline preview. All routes require
-the same organization sign-in as the session. HTML/scripts stay inert, and a newer
-archive causes an older preview/download URL to return a refresh notice rather
-than silently serving different bytes.
+Explicitly published files have immutable, verified revisions and complete
+downloads, without starting a sandbox. Text previews load further ranges on
+request. The recovery ZIP also preserves full collected files and tracked edits;
+files omitted by an older collector cannot be reconstructed from its archive.
+All routes require the session's organization sign-in. HTML/scripts stay inert.
+A replaced recovery archive requests a refresh rather than silently serving
+different bytes; explicit artifact revisions remain independently readable.
 
 ### Files uploaded by users
 
@@ -109,6 +107,10 @@ To verify locally, configure a working transcription endpoint and run `uv run uv
 The input design follows the documented dictation pattern used by [Claude Code](https://code.claude.com/docs/en/voice-dictation), [Codex desktop dictation](https://learn.chatgpt.com/docs/prompting#use-voice-dictation), [Cursor](https://prod.cursor.com/docs/agent/prompting#voice-input), and [Aider](https://aider.chat/docs/usage/voice.html): speech becomes text for the existing agent. [Aider's public implementation](https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/voice.py#L169) uses LiteLLM transcription. Moyai uses the same provider-neutral API pattern, implemented here without copying their source. OpenAI currently recommends `gpt-transcribe` for [new file-transcription integrations](https://developers.openai.com/api/docs/guides/speech-to-text). Live spoken conversation, as offered by [Codex Voice](https://learn.chatgpt.com/docs/features/voice), is a separate capability from accepting recordings and is outside this change.
 
 ## Computer desktop and captures
+
+The opt-in [independent runtime](independent-runtime.md) can answer connected-app
+questions before starting the computer. Computer tools and **Wake up to see
+live** acquire the workspace under the same turn.
 
 The agent's `browser_read` exposes the full text and control directory of one
 observed frame, including open shadow roots. It also lists frames for explicit

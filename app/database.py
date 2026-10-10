@@ -24,7 +24,8 @@ class IntegrityError(DatabaseError):
 RUNTIME_SETTINGS = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
              'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
              'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
-             'moyai_separate_broker', 'moyai_coordinator_handoff', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
+             'moyai_separate_broker', 'moyai_coordinator_handoff', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds',
+             'independent_agent_runtime')
 
 
 def runtime_fingerprint(settings):

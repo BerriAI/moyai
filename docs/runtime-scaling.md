@@ -113,7 +113,7 @@ loops; use scheduling diagnostics to find remaining stalls.
    coordinator. Start with existing budgets, then increase in measured steps.
 5. Replicas of the same build/policy may overlap during worker replacement.
    For the full rolling topology, perform the one-time offline migration to the
-   selected release's schema (currently revision 8), activate dedicated API/edge
+   selected release's schema (currently revision 9), activate dedicated API/edge
    routing, and enable coordinator handoff with the reviewed shared settings.
    Then use the [rolling release procedure](rolling-deploy.md) to replace workers,
    broker, coordinator and API while users continue submitting work. Compatible

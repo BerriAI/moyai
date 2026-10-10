@@ -1,6 +1,6 @@
 # Intelligence implementation ledger
 
-Status: in progress on `codex/moyai-intelligence`, integrated with `bb9eba8` from `main`.
+Status: in progress on `codex/moyai-intelligence`, validated increments are pushed directly to `main`.
 Nothing in this document is a deployment or model-quality claim.
 
 The approved proposal is the scope. This ledger records implementation and
@@ -302,7 +302,10 @@ typecheck pass. The 225-case focused backend run initially found two obsolete
 limit/ranking expectations; the affected initial-context and swarm suites pass
 all 56 cases after correcting those expectations. PostgreSQL passes 96
 migration/rolling-owner checks and 74 goal/journal/source/library/artifact
-contracts. The full repository regression is still running; provider and
+contracts. The broad repository regression completed with 4,970 passes, 94 failures and
+five setup errors. Follow-up contract repairs passed 226 cases, startup/image
+checks passed 75, and the remaining selected contracts passed 334; the final
+evaluation fix passed 36. A fresh full run is still required. Provider and
 production rehearsals remain separate release gates.
 
 ## Shared computer primitives (WP6/WP8 prerequisite)
@@ -345,3 +348,48 @@ typed-replay assertions were corrected and covered by that 52-case rerun. The SD
 tests use simulated inference responses, not live model-quality comparisons.
 Reference availability across future runtime/filesystem changes and typed replay
 qualification beyond Codex remain explicit WP2/WP8 work.
+
+
+## Independent runtime and complete native state (WP2/WP8; opt-in)
+
+Codex on Modal can enter the same shared conversation lifecycle in a separate
+control guest, without repository checkout, desktop preparation or attachment
+download. Broker tools remain available before a full computer is acquired.
+Computer tools use stable operation identities and the existing durable controller;
+UI wake can request the same computer. The model, turn, goal and capability are
+preserved. App-only answers settle without a filesystem snapshot. The feature
+is disabled by default pending staging/provider qualification; see
+[independent runtime](independent-runtime.md).
+
+Preparation, tools and finalization use the existing launch-once supervisor.
+Launch specifications are immutable; segment/generation identities distinguish
+new computer preparation and saves from earlier snapshots. Project interpreters
+and the credential proxy are activated for each tool without restarting project
+services. Worker retry, owner changes and machine loss preserve completed receipts
+and distinguish rejected actions from unknown dispatched effects. Cleanup closes
+pending receipts without claiming that an uncertain write failed or succeeded.
+
+Removed the native-state 2 MB/256-file cutoffs and Claude transcript abandonment
+at that boundary. Large native state and computer requests use one encrypted,
+owner-bound multipart transport. Integrity, destination and execution ownership
+are checked before the original endpoint validates the assembled body. Native
+checkpoint, taint and revocation checks remain. Complete broker read/control
+responses no longer fail at an unrelated 5 MB response cutoff. Stored payload
+parts currently share session retention; storage governance remains operational work.
+
+Validation so far: 314 runtime/context/environment cases and all 24 PostgreSQL
+migration cases pass. The real pinned Codex SDK with synthetic inference reads a
+broker result before computer admission, then writes through the computer bridge
+in the same native thread/model. That test found and corrected a real MCP approval
+configuration mismatch in the read-only control guest. Another 109 transport/
+recovery cases, 330 adapter/configuration cases (11 optional skips), 23
+PostgreSQL operation/payload cases and 11 image checks pass. A Python 3.14
+isolated environment with exactly the declared lightweight image packages imports
+the guest and verifies its pinned Codex dependencies. The operator guide was
+rendered at desktop/mobile widths and local links checked. This is protocol evidence,
+not measured deployed latency or model quality. Broader recovery, other harnesses
+and providers, and live S26 qualification remain open.
+
+Current source requires schema revision 9 and all four role protocol revisions 3.
+The previously pushed foundation remains revision 8; this increment adds computer
+operations and encrypted payload parts. It requires a coordinated migration.

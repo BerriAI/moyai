@@ -23,9 +23,13 @@ REVOKE_POSTGRES = '''CREATE TRIGGER revoke_github_write_access
 
 SQLITE_OCCUPIED_SESSION = """(json_extract(state, '$.phase')
     NOT IN ('idle', 'waiting_children', 'waiting_credential', 'waiting_environment')
-    OR json_type(state, '$.phase') = 'null')"""
+    OR json_type(state, '$.phase') = 'null')
+    AND (json_extract(state, '$.independent_runtime') IS NOT 1
+         OR coalesce(json_extract(state, '$.computer.phase'), 'idle') NOT IN ('idle','waiting_environment'))"""
 POSTGRES_OCCUPIED_SESSION = """((state::jsonb ->> 'phase')
     NOT IN ('idle', 'waiting_children', 'waiting_credential', 'waiting_environment')
-    OR jsonb_typeof(state::jsonb -> 'phase') = 'null')"""
+    OR jsonb_typeof(state::jsonb -> 'phase') = 'null')
+    AND ((state::jsonb ->> 'independent_runtime') IS DISTINCT FROM 'true'
+         OR coalesce(state::jsonb #>> '{computer,phase}', 'idle') NOT IN ('idle','waiting_environment'))"""
 SQLITE_OCCUPIED_INDEX = f'CREATE INDEX idx_durable_sessions_occupied ON durable_sessions(run_id) WHERE {SQLITE_OCCUPIED_SESSION}'
 POSTGRES_OCCUPIED_INDEX = f'CREATE INDEX idx_durable_sessions_occupied ON durable_sessions(run_id) WHERE {POSTGRES_OCCUPIED_SESSION}'

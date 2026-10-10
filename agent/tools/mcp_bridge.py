@@ -101,6 +101,10 @@ MAX_PENDING_PER_LANE = 32
 def call_tool(params, tools):
     name, args = params['name'], params.get('arguments', {})
     try:
+        if os.environ.get('MOYAI_REMOTE_COMPUTER') == '1':
+            from agent.tools import remote_computer
+            if remote_computer.requires_computer(name):
+                return remote_computer.call(name, args, broker)
         if name in {tool['name'] for tool in computer_tools.TOOLS}:
             data = computer_tools.call(name, args, os.environ.get('MOYAI_WORKSPACE', '/workspace'))
         elif name == 'repository_guidance':
