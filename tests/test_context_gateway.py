@@ -709,6 +709,7 @@ def test_late_maintenance_admission_cannot_charge_a_new_turn(workspace, monkeypa
     store.close()
 
 
+@pytest.mark.sqlite_only
 @pytest.mark.parametrize('cancel', [False, True], ids=['checkpoint-failure', 'cancelled-startup'])
 async def test_maintenance_startup_failure_can_retry_without_restart(tmp_path, cancel):
     import asyncio
