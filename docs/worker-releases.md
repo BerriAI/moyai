@@ -6,18 +6,17 @@ consume the same Temporal queue. PostgreSQL session leases still permit only one
 activity to advance a session at a time. This removes the exact-build barrier for
 compatible **worker-only** replacements; users can keep submitting messages.
 
-This does not activate production or add a worker mode to the GitHub deployment
-action. Coordinator and broker builds still match their exact shared policy;
-each remains a singleton. The API-only action remains API-only, and the existing
-coordinated action deliberately rejects a mixed-build background baseline. Do not
-manually change build labels to bypass that check. Automated worker deployment
-and coordinator/broker handoff remain separate rollout work.
+The [rolling deployment action](rolling-deploy.md) combines this worker handoff
+with broker overlap, coordinator leadership transfer and API replacement. This
+page describes the worker stage. The default standalone and auto-schema modes
+retain their existing ownership rules. Initial production activation is separate
+from a compatible rolling release; merging code alone does not activate it.
 
 ## Activation and compatibility
 
 The cluster must use PostgreSQL, Temporal, verified shared object storage,
-`MOYAI_SCHEMA_MODE=verify`, and `MOYAI_SEPARATE_BROKER=true`. Schema revision 5
-adds `runtime_worker_policy`; migrate offline with **all runtime owners stopped**
+`MOYAI_SCHEMA_MODE=verify`, and `MOYAI_SEPARATE_BROKER=true`. Schema revision 7
+adds the background role contracts, broker ownership and coordinator hook inbox; migrate offline with **all runtime owners stopped**
 using the existing [migration procedure](schema-migrations.md). Start the matching
 coordinator first so it publishes the contract. Migration alone does not publish
 worker admission. This initial transition is not an overlapping update.
@@ -25,8 +24,8 @@ worker admission. This initial transition is not an overlapping update.
 `WORKER_PROTOCOL_REVISION` in `app/runtime_compatibility.py` covers durable session
 state, sandbox launch journals and capabilities, Temporal workflow histories and
 activity arguments/results, and the worker's writes consumed by other roles. The
-fingerprint also includes the API protocol, exact schema revision and every shared
-runtime setting except build SHA. The coordinator publishes both API and worker
+fingerprint also includes all background and API protocols, exact schema revision and every shared
+runtime setting except build SHA. The coordinator publishes all enabled role
 contracts atomically with its exact cluster policy after component setup succeeds.
 Workers never publish a policy. Auto-schema and co-located-broker clusters retain
 exact-build worker admission.
@@ -71,8 +70,8 @@ revision for schema changes. Use maintenance when compatibility is uncertain.
 Abrupt process death additionally waits for the existing 30-second session lease
 and Temporal heartbeat/retry. Long database writes and provider uncertainty can
 extend recovery. A failed/ambiguous external action retains its existing durable
-handling; compatibility does not permit replaying it. These mechanisms do not
-make broker restarts, coordinator replacement or schema migrations seamless.
+handling; compatibility does not permit replaying it. Broker and coordinator replacement use their separate overlap protocols.
+Incompatible schema changes still require a maintenance transition.
 
 ## Reproduce locally
 
@@ -80,7 +79,7 @@ Set `MOYAI_TEST_POSTGRES_URL` to a disposable PostgreSQL database:
 
 ```sh
 uv run --frozen --python 3.13 pytest -q tests/test_worker_compatibility.py tests/test_worker_handoff.py
-uv run --frozen --python 3.13 python -m scripts.worker_release_probe --output /tmp/moyai-worker-release
+uv run --frozen --python 3.13 python -m scripts.worker_release_probe --all-roles --output /tmp/moyai-rolling-release
 ```
 
 The process probe uses real PostgreSQL, Temporal and separate coordinator, API,
@@ -88,8 +87,12 @@ broker and worker processes. It copies the source, changes the candidate's demo
 response text, derives distinct build IDs, holds an old activity under its session
 lease, submits HTTP work continuously, and verifies upgrade and rollback produce
 one answer per submission. An incompatible source protocol is rejected before
-readiness. A local native Responses stream completes through the unchanged broker
-with one provider call. Saved Temporal histories are replayed afterwards.
+readiness. With `--all-roles`, the probe then starts a replacement broker while the first
+stream is open, checks global capacity, drains the old stream through SIGTERM,
+and sends another inference through the replacement. A coordinator standby
+accepts signed synthetic hooks before becoming leader; the replacement API
+accepts messages before the old API exits. All roles finish on the candidate
+source. Omit `--all-roles` to isolate just the worker stage. Saved Temporal histories are replayed afterwards.
 
 The integration test separately exercises the real durable sandbox controller
 with a deterministic Modal boundary: the replacement observes the same live

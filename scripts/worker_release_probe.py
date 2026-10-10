@@ -2,7 +2,8 @@
 
 Workers run Moyai's demo mode; the long model stream uses a local HTTP fixture.
 The candidate changes demo response text. No cloud, S3 or paid model is used.
-This is a protocol/handoff rehearsal, not a Render deployment controller.
+Use --all-roles for the complete worker/broker/coordinator/API replacement.
+This is a local protocol rehearsal; Render routing is not exercised.
 """
 import argparse
 import asyncio
@@ -121,7 +122,7 @@ def probe(url, temporal_address, output, all_roles=False):
                 self.wfile.flush()
 
             event('response.output_text.delta', delta='before-worker-upgrade')
-            if not release.wait(120):
+            if not release.wait(240):
                 return
             event('response.output_text.delta', delta='after-worker-rollback')
             event('response.completed', response={'id': 'fixture-response', 'status': 'completed',
@@ -207,7 +208,7 @@ def probe(url, temporal_address, output, all_roles=False):
 
             def consume():
                 try:
-                    with httpx.Client(timeout=130) as client, client.stream('POST', str(broker.base_url).rstrip('/') + route,
+                    with httpx.Client(timeout=250) as client, client.stream('POST', str(broker.base_url).rstrip('/') + route,
                                                                            headers=auth, json=body) as response:
                         assert response.status_code == 200
                         for line in response.iter_lines():
@@ -227,7 +228,7 @@ def probe(url, temporal_address, output, all_roles=False):
                         while not traffic_stop.is_set():
                             count += 1
                             submit(client, f'Continuous submission {count}')
-                            traffic_stop.wait(.2)
+                            traffic_stop.wait(.5)
                 except Exception as exc:
                     failures.append(type(exc).__name__)
 
@@ -250,7 +251,7 @@ def probe(url, temporal_address, output, all_roles=False):
             assert rejected_result.returncode != 0 and 'Worker requires a compatible protocol' in rejected_result.stderr
             record('REJECT Incompatible worker protocol fails before readiness; active stream remains pending.')
             stop(old)
-            assert 'Compatible worker fixture' in wait_for(lambda: answer(old_run), timeout=45)
+            assert 'Compatible worker fixture' in wait_for(lambda: answer(old_run), timeout=90)
             assert store.messages(old_run)[0]['id'] == initial_message
             record('PASS   Old worker exits; candidate resumes its saved activity and publishes one answer.')
             assert store.rows('SELECT status FROM model_requests')[0]['status'] == 'pending'
@@ -259,7 +260,7 @@ def probe(url, temporal_address, output, all_roles=False):
             wait_for(lambda: (root / 'new-worker/held').exists())
             rollback, _ = lifetime.enter_context(worker(environment, root / 'rollback-worker'))
             stop(new)
-            assert 'Demo complete.' in wait_for(lambda: answer(rollback_run), timeout=45)
+            assert 'Demo complete.' in wait_for(lambda: answer(rollback_run), timeout=90)
             record('PASS   Previous build resumes candidate-admitted work; rollback keeps accepting messages.')
             traffic_stop.set()
             traffic.join(timeout=12)
@@ -328,7 +329,7 @@ def probe(url, temporal_address, output, all_roles=False):
                 traffic = threading.Thread(target=new_messages, daemon=True)
                 traffic.start()
                 stop(api_process)
-                final_worker, _ = lifetime.enter_context(worker(candidate, root / 'final-worker'))
+                final_worker, final_worker_http = lifetime.enter_context(worker(candidate, root / 'final-worker'))
                 stop(rollback)
                 final_run = submit(api, 'Final compatible release submission')
                 assert 'Compatible worker fixture' in wait_for(lambda: answer(final_run))
@@ -339,6 +340,23 @@ def probe(url, temporal_address, output, all_roles=False):
                 assert all(sum(m['role'] == 'assistant' for m in store.messages(run_id)) == 1 for run_id in submissions)
                 assert {table: store.rows('SELECT * FROM ' + table) for table in policy_tables} == policies
                 assert all(process.poll() is None for process in (new_control, new_api, new_broker, final_worker))
+                from scripts.release.rolling_probe import snapshot
+                with psycopg.connect(url) as connection:
+                    final_state = snapshot(connection, schema)
+                identities = set()
+                for role, client in (('coordinator', new_control_http), ('api', new_api_http),
+                                     ('broker', new_broker_http), ('worker', final_worker_http)):
+                    health = client.get('/health')
+                    assert health.status_code == 200
+                    assert health.headers['x-moyai-build'] == candidate['MOYAI_BUILD_SHA']
+                    assert health.headers['x-moyai-role'] == role
+                    assert health.headers['x-moyai-rolling-release'] == '1'
+                    owner = health.headers['x-moyai-owner']
+                    matches = [item for item in final_state['owners'] if item.split('@')[0] == owner]
+                    assert len(matches) == 1
+                    identities.update(matches)
+                assert len(identities) == len(final_state['owners']) == 4
+                assert len(final_state['coordinators']) == len(final_state['brokers']) == len(final_state['broker_leaders']) == 1
                 record('PASS   API traffic switches after readiness; all four replacements are live on the candidate build.')
             record(f'PASS   {len(submissions)} HTTP submissions, zero errors, one answer each; one uninterrupted provider call.')
             report.update(status='replay_pending', real_postgres=True, real_temporal=True,
@@ -365,8 +383,8 @@ def probe(url, temporal_address, output, all_roles=False):
         if output:
             output.mkdir(parents=True, exist_ok=True)
             (output / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
-            header = {'version': 2, 'width': 116, 'height': 20, 'timestamp': int(time.time()),
-                      'title': 'Moyai compatible worker upgrade and rollback'}
+            header = {'version': 2, 'width': 116, 'height': 24, 'timestamp': int(time.time()),
+                      'title': 'Moyai compatible rolling release rehearsal'}
             (output / 'worker-release.cast').write_text('\n'.join(json.dumps(e) for e in [header, *events]) + '\n')
     return report
 

@@ -51,7 +51,8 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
 
         def read_only_construction(conn, sql, params=()):
             if not sql.strip().upper().startswith('SELECT') and not any(
-                    table in sql for table in ('runtime_policy', 'runtime_api_policy', 'runtime_worker_policy', 'runtime_broker_policy')):
+                    table in sql for table in ('runtime_policy', 'runtime_api_policy', 'runtime_worker_policy',
+                                              'runtime_broker_policy', 'runtime_coordinator_policy')):
                 pytest.fail('Unexpected runtime constructor write: ' + sql[:80])
             return original(conn, sql, params)
 
