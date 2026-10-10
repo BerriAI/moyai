@@ -123,6 +123,7 @@ def test_new_catalog_models_inherit_provider_default(workspace, monkeypatch, mod
 def test_slack_new_sessions_pair_configured_model(slack_app, thread_chat, model, harness):
     app, client, submitted, _ = slack_app
     use_model_defaults(app.state.settings)
+    app.state.settings.temporal_enabled = True  # Cloud admission requires the default engine's backend.
     app.state.settings.agent_model = model
     app.state.settings.slack_thread_chat_enabled = thread_chat
     response = client.post('/hooks/slack/events', **signed(event()))

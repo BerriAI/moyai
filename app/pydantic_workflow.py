@@ -76,6 +76,12 @@ async def resolve_model(ctx, model_id):
     return BrokerModel(ctx.deps) if model_id == 'moyai' else None
 
 
+def conservative_tokens(text: str) -> int:
+    # Match the broker's text byte bound; the library's default chars/4
+    # heuristic could trigger compaction only after broker admission fails.
+    return len(text.encode('utf-8'))
+
+
 # Unknown app writes must never be repeated automatically. Computer operations
 # have their own durable identities, but this generic bridge can also send mail,
 # create PRs, etc. A lost activity result therefore requires reconciliation.
@@ -118,7 +124,8 @@ agent = Agent(
     name='moyai_pydantic_v1', deps_type=TurnScope, toolsets=[workspace],
     capabilities=[
         ResolveModelId(resolve_model),
-        SummarizingCompaction(max_fraction=.65, keep_messages=4, keep_user_messages=True),
+        SummarizingCompaction(max_fraction=.65, keep_messages=4, keep_user_messages=True,
+                             tokenizer=conservative_tokens),
         TemporalDurability(activity_config={
             'start_to_close_timeout': timedelta(minutes=15),
             'heartbeat_timeout': timedelta(seconds=5),

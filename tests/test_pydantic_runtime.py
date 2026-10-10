@@ -193,13 +193,15 @@ async def test_library_compaction_runs_as_temporal_activity_and_replays(tmp_path
     async def prepare(scope: TurnScope) -> TurnInput:
         history = [ModelRequest(parts=[UserPromptPart('Preserve the original task: build a report.')])]
         for i in range(8):
-            history += [ModelResponse(parts=[TextPart(f'Prior work {i} ' + 'data ' * 1200)]),
+            history += [ModelResponse(parts=[TextPart(f'Prior work {i} ' + 'data ' * 300)]),
                         ModelRequest(parts=[UserPromptPart(f'Continue step {i}.')])]
-        return TurnInput(replace(scope, model='scripted', input_budget=4000), 'Finish the report.',
+        return TurnInput(replace(scope, model='scripted', input_budget=16000), 'Finish the report.',
                          'Follow the user task.', history)
     runtime.prepare = prepare
     async def model(scope, messages, settings, parameters):
         if not parameters.function_tools:
+            from pydantic_ai.messages import ModelMessagesTypeAdapter
+            assert len(ModelMessagesTypeAdapter.dump_json(messages)) < scope.input_budget
             summary_calls.append(messages)
             return ModelResponse(parts=[TextPart('Original task: build a report. Prior work is complete; finish reporting.')],
                                  model_name='scripted')

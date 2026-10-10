@@ -31,6 +31,10 @@ use `<TEMPORAL_TASK_QUEUE>-agents-v1`. These are two pollers in the same worker
 process, so computer-waiting tools cannot consume every controller activity slot.
 A computer is acquired only when needed. Every 50 model requests, the agent yields
 at a completed tool boundary to checkpoint and bound workflow history.
+Library compaction uses a conservative UTF-8 byte counter aligned with broker
+admission, rather than the library's default characters-per-token estimate. The
+broker still rejects oversized requests, including a single input/tool result that
+cannot fit; the framework does not guarantee that every possible input fits a model.
 
 ## Recovery guarantees and limits
 
