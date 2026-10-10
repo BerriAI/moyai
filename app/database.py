@@ -134,10 +134,12 @@ def row_factory(cursor):
 
 
 class PostgresConnection:
-    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy='', api_policy='', schema_updates=True):
+    def __init__(self, raw, schema, owner_pid, *, write_scope=None, policy='', api_policy='', worker_policy='', broker_policy='', schema_updates=True):
         self.raw, self.schema, self.owner_pid = raw, schema, owner_pid
         self.write_scope, self.policy = write_scope, policy
         self.api_policy = api_policy
+        self.worker_policy = worker_policy
+        self.broker_policy = broker_policy
         self.changed = False
         self.write_locked = False
         self.owner_checked = False
@@ -153,7 +155,7 @@ class PostgresConnection:
                 self.raw.execute('SELECT pg_advisory_xact_lock_shared(726941, %s::regnamespace::oid::int)', (self.schema,))
                 key = int.from_bytes(hashlib.sha256((self.schema + ':' + self.write_scope).encode()).digest()[:8], 'big', signed=True)
                 self.raw.execute('SELECT pg_advisory_xact_lock(%s::bigint)', (key,))
-            self.check_owner(lock_api_policy=True)
+            self.check_owner(lock_compatibility=True)
             from .runtime_coordination import held_leases
             for lease in held_leases.get():
                 if lease.schema != self.schema:
@@ -164,7 +166,7 @@ class PostgresConnection:
                     raise DatabaseError('Execution ownership expired. The transaction was not acknowledged.')
             self.write_locked = True
 
-    def check_owner(self, *, lock_api_policy=False):
+    def check_owner(self, *, lock_compatibility=False):
         if self.owner_pid is None:
             self.owner_checked = True
             return
@@ -178,11 +180,23 @@ class PostgresConnection:
         if self.api_policy:
             # Writes hold this row through commit; revocation waits for already
             # admitted writes. Snapshot reads cannot acquire a row lock.
-            lock = ' FOR SHARE' if lock_api_policy else ''
+            lock = ' FOR SHARE' if lock_compatibility else ''
             if not self.raw.execute('''SELECT 1 FROM runtime_api_policy
                 WHERE id=1 AND cluster_fingerprint=%s AND fingerprint=%s''' + lock,
                 (self.policy, self.api_policy)).fetchone():
                 raise DatabaseError('API compatibility changed. Restart with a compatible API release.')
+        if self.worker_policy:
+            lock = ' FOR SHARE' if lock_compatibility else ''
+            if not self.raw.execute('''SELECT 1 FROM runtime_worker_policy
+                WHERE id=1 AND cluster_fingerprint=%s AND fingerprint=%s''' + lock,
+                (self.policy, self.worker_policy)).fetchone():
+                raise DatabaseError('Worker compatibility changed. Restart with a compatible worker release.')
+        if self.broker_policy:
+            lock = ' FOR SHARE' if lock_compatibility else ''
+            if not self.raw.execute('''SELECT 1 FROM runtime_broker_policy
+                WHERE id=1 AND cluster_fingerprint=%s AND fingerprint=%s''' + lock,
+                (self.policy, self.broker_policy)).fetchone():
+                raise DatabaseError('Broker compatibility changed. Restart with a compatible broker release.')
         self.owner_checked = True
 
     def begin_read(self):
@@ -258,6 +272,8 @@ class PostgresDatabase:
         self.schema = schema
         self.runtime_role, self.policy = runtime_role, ''
         self.api_policy = ''
+        self.worker_policy = ''
+        self.broker_policy = ''
         self.broker_owner = False
         self.startup_exclusive = False
         self.pool = None
@@ -329,6 +345,12 @@ class PostgresDatabase:
             self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_api_policy (
                 id INTEGER PRIMARY KEY CHECK(id=1), cluster_fingerprint TEXT NOT NULL,
                 fingerprint TEXT NOT NULL)''')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_worker_policy (
+                id INTEGER PRIMARY KEY CHECK(id=1), cluster_fingerprint TEXT NOT NULL,
+                fingerprint TEXT NOT NULL)''')
+            self.owner.execute('''CREATE TABLE IF NOT EXISTS runtime_broker_policy (
+                id INTEGER PRIMARY KEY CHECK(id=1), cluster_fingerprint TEXT NOT NULL,
+                fingerprint TEXT NOT NULL)''')
             self.owner.execute('''CREATE OR REPLACE FUNCTION unicode_lower(text) RETURNS text
                 LANGUAGE sql IMMUTABLE STRICT AS 'SELECT lower($1)' ''')
             self.owner.execute('''CREATE OR REPLACE FUNCTION json_text(text,text) RETURNS text
@@ -352,7 +374,9 @@ class PostgresDatabase:
                 raise DatabaseError('Postgres ownership connection was lost. Restart this application process.')
             with self.pool.connection() as raw:
                 yield PostgresConnection(raw, self.schema, self.owner_pid, write_scope=write_scope, policy=self.policy,
-                                         api_policy=self.api_policy, schema_updates=self.schema_updates)
+                                         api_policy=self.api_policy, worker_policy=self.worker_policy,
+                                         broker_policy=self.broker_policy,
+                                         schema_updates=self.schema_updates)
         except psycopg.IntegrityError:
             raise IntegrityError('Database constraint rejected the change.') from None
         except psycopg.Error:
@@ -372,6 +396,8 @@ class PostgresDatabase:
             raise DatabaseError('API replicas require a separate inference broker.')
         if self.runtime_role == 'api':
             return self.admit_api(settings)
+        if self.runtime_role == 'worker' and not self.schema_updates and settings.moyai_separate_broker:
+            return self.admit_worker(settings)
         owns_broker = self.runtime_role == 'broker' or (
             self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
         if owns_broker and self.owner_pid is not None and not self.broker_owner:
@@ -379,6 +405,8 @@ class PostgresDatabase:
                                       (self.schema,)).fetchone()[0]:
                 raise DatabaseError('Another inference broker owns this Postgres schema.')
             self.broker_owner = True
+        if self.runtime_role == 'broker' and not self.schema_updates and settings.moyai_separate_broker:
+            return self.admit_broker(settings)
         policy = runtime_fingerprint(settings)
         if self.stored_policy() != policy:
             if self.runtime_role != 'coordinator':
@@ -412,6 +440,38 @@ class PostgresDatabase:
         self.policy, self.api_policy = row[0], fingerprint
         return self.policy
 
+    def admit_worker(self, settings):
+        from .runtime_compatibility import worker_fingerprint
+
+        fingerprint = worker_fingerprint(settings)
+        schema = identifier(self.schema)
+        if not self.owner.execute('SELECT to_regclass(%s)', (f'{schema}.runtime_worker_policy',)).fetchone()[0]:
+            raise DatabaseError('Worker compatibility is unavailable. Migrate offline and start the coordinator first.')
+        # Only the coordinator publishes the contract. Binding it to the exact
+        # cluster policy prevents an old publication admitting a new topology.
+        row = self.owner.execute(f'''SELECT p.fingerprint FROM {schema}.runtime_policy p
+            JOIN {schema}.runtime_worker_policy w ON w.id=p.id AND w.cluster_fingerprint=p.fingerprint
+            WHERE p.id=1 AND w.fingerprint=%s''', (fingerprint,)).fetchone()
+        if not row or (self.policy and self.policy != row[0]) or (self.worker_policy and self.worker_policy != fingerprint):
+            raise DatabaseError('Worker requires a compatible protocol, schema and the same shared runtime configuration as the coordinator.')
+        self.policy, self.worker_policy = row[0], fingerprint
+        return self.policy
+
+    def admit_broker(self, settings):
+        from .runtime_compatibility import broker_fingerprint
+
+        fingerprint = broker_fingerprint(settings)
+        schema = identifier(self.schema)
+        if not self.owner.execute('SELECT to_regclass(%s)', (f'{schema}.runtime_broker_policy',)).fetchone()[0]:
+            raise DatabaseError('Broker compatibility is unavailable. Migrate offline and start the coordinator first.')
+        row = self.owner.execute(f'''SELECT p.fingerprint FROM {schema}.runtime_policy p
+            JOIN {schema}.runtime_broker_policy b ON b.id=p.id AND b.cluster_fingerprint=p.fingerprint
+            WHERE p.id=1 AND b.fingerprint=%s''', (fingerprint,)).fetchone()
+        if not row or (self.policy and self.policy != row[0]) or (self.broker_policy and self.broker_policy != fingerprint):
+            raise DatabaseError('Broker requires a compatible protocol, schema and the same shared runtime configuration as the coordinator.')
+        self.policy, self.broker_policy = row[0], fingerprint
+        return self.policy
+
     def configure_runtime(self, settings):
         if self.runtime_role == 'standalone':
             return
@@ -421,12 +481,20 @@ class PostgresDatabase:
                 if self.runtime_role == 'coordinator':
                     conn.execute('INSERT INTO runtime_policy VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint', (policy,))
                     if not self.schema_updates and settings.moyai_separate_broker:
-                        from .runtime_compatibility import api_fingerprint
+                        from .runtime_compatibility import api_fingerprint, worker_fingerprint, broker_fingerprint
                         conn.execute('''INSERT INTO runtime_api_policy VALUES(1,?,?) ON CONFLICT(id)
                             DO UPDATE SET cluster_fingerprint=excluded.cluster_fingerprint,fingerprint=excluded.fingerprint''',
                             (policy, api_fingerprint(settings)))
+                        conn.execute('''INSERT INTO runtime_worker_policy VALUES(1,?,?) ON CONFLICT(id)
+                            DO UPDATE SET cluster_fingerprint=excluded.cluster_fingerprint,fingerprint=excluded.fingerprint''',
+                            (policy, worker_fingerprint(settings)))
+                        conn.execute('''INSERT INTO runtime_broker_policy VALUES(1,?,?) ON CONFLICT(id)
+                            DO UPDATE SET cluster_fingerprint=excluded.cluster_fingerprint,fingerprint=excluded.fingerprint''',
+                            (policy, broker_fingerprint(settings)))
                     else:
                         conn.execute('DELETE FROM runtime_api_policy')
+                        conn.execute('DELETE FROM runtime_worker_policy')
+                        conn.execute('DELETE FROM runtime_broker_policy')
                 elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
                     raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
             self.policy = policy
@@ -437,7 +505,10 @@ class PostgresDatabase:
 
     def acquire_lease(self, name, token, ttl):
         with self.connect() as conn:
-            conn.check_owner()
+            # These writes bypass execute()/begin_write() to retain their
+            # non-blocking lease semantics. Still hold the admission contract
+            # through commit so revocation cannot pass an in-flight claim.
+            conn.check_owner(lock_compatibility=True)
             # Serialize contenders without waiting, including when the row is
             # not visible yet because another acquisition has not committed.
             key = int.from_bytes(hashlib.sha256((self.schema + ':lease:' + name).encode()).digest()[:8], 'big', signed=True)
@@ -456,13 +527,13 @@ class PostgresDatabase:
 
     def renew_lease(self, name, token, ttl):
         with self.connect() as conn:
-            conn.check_owner()
+            conn.check_owner(lock_compatibility=True)
             return bool(conn.raw.execute('''UPDATE runtime_leases SET expires_at=clock_timestamp()+%s*interval '1 second'
                 WHERE name=%s AND token=%s AND expires_at>clock_timestamp() RETURNING token''', (ttl, name, token)).fetchone())
 
     def release_lease(self, name, token):
         with self.connect() as conn:
-            conn.check_owner()
+            conn.check_owner(lock_compatibility=True)
             conn.raw.execute('DELETE FROM runtime_leases WHERE name=%s AND token=%s', (name, token))
 
     def close(self):

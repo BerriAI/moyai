@@ -99,13 +99,15 @@ def test_api_start_requires_coordinator_publication_and_never_writes_it(split_se
         coordinator.state.store.close()
 
 
-@pytest.mark.parametrize('role', ['worker', 'broker'])
-def test_contract_does_not_admit_other_mixed_build_roles(cluster, role):
+def test_api_contract_does_not_admit_broker_without_its_own_contract(cluster):
     _, settings = cluster
+    execute(settings, 'DELETE FROM runtime_broker_policy')
     before = policies(settings)
     with pytest.raises(DatabaseError, match='same shared runtime configuration'):
-        main.create_app(settings.model_copy(update={'moyai_runtime_role': role, 'moyai_build_sha': 'b' * 40}))
+        main.create_app(settings.model_copy(update={'moyai_runtime_role': 'broker', 'moyai_build_sha': 'b' * 40}))
     assert policies(settings) == before
+    api = main.create_app(settings.model_copy(update={'moyai_build_sha': 'b' * 40}))
+    api.state.store.close()
 
 
 def test_api_owner_still_blocks_coordinator_upgrade_and_migration(cluster):

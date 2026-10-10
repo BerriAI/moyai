@@ -279,8 +279,9 @@ def _create_app(settings, store):
             if settings.moyai_runtime_role == 'worker':
                 # Workers consume Temporal work only. They must not interrupt
                 # gateway streams or take over singleton background recovery.
-                await manager.recover()
                 try:
+                    await manager.recover()
+                    await manager.wait_ready()
                     yield
                 finally:
                     await manager.shutdown()

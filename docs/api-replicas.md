@@ -8,8 +8,9 @@ singleton coordinator keeps webhook processing, wake dispatch, Slack delivery,
 schedulers, identity/environment jobs, trace export, session titles and deletion
 cleanup.
 
-This is an opt-in prerequisite for seamless API releases. Coordinator/broker/worker
-builds must still match, and coordinator/broker replacements still require their singleton
+This is an opt-in prerequisite for seamless API releases. Coordinator/broker
+builds still match; [compatible workers](worker-releases.md) may overlap independently.
+Coordinator/broker replacements still require their singleton
 owner to exit. No production service, edge route, or deployment workflow is
 changed automatically. The production GitHub Action has a separate `api` release mode; follow
 [API deployment activation](api-deploy.md) before adding this service or selecting
@@ -19,7 +20,7 @@ that mode. Coordinated mode refuses the activated four-service topology.
 
 - PostgreSQL, Temporal, verified shared object storage and explicit stable keys.
 - `MOYAI_SEPARATE_BROKER=true` and `MOYAI_SCHEMA_MODE=verify` on all roles.
-- Offline schema migration to revision 3. Revision 2 adds the durable session-title
+- Offline schema migration to the revision required by the selected release (currently 5). Revision 2 adds the durable session-title
   inbox and a partial index for pending deletion scans; revision 3 adds the API
   compatibility policy. These preserve saved
   sessions, keys and runtime policy. Follow

@@ -50,8 +50,9 @@ updates and does not enable multiple coordinators.
 
 All roles must use the same PostgreSQL schema, encryption/session keys, shared
 object destination, public URL, Temporal target/namespace/task queue, global
-budgets. Coordinator/broker/worker builds must match; set the same full
-`MOYAI_BUILD_SHA` on those processes. API replicas may use a different build only
+budgets. Coordinator and broker builds must match; set their actual full
+`MOYAI_BUILD_SHA`. Workers use the same build by default; verified-schema,
+separate-broker clusters can admit [reviewed compatible worker releases](worker-releases.md). API replicas may use a different build only
 under the [reviewed API compatibility contract](api-replicas.md#compatibility-contract-and-review).
 A stored fingerprint rejects mismatches. Pool sizes and per-worker concurrency
 may differ. Keep other runtime/provider settings aligned too: the fingerprint
@@ -102,12 +103,14 @@ loops; use scheduling diagnostics to find remaining stalls.
    cancellation and recovery when a worker stops. Keep the API only on the
    coordinator. Start with existing budgets, then increase in measured steps.
 5. Replicas of the same build/policy may overlap during worker replacement.
-   For build/policy changes, drain and stop old workers and the separate broker
+   With the worker compatibility contract activated, reviewed worker-only build
+   changes can overlap too. For coordinator or shared-policy changes, drain and
+   stop old workers and the separate broker
    before changing the coordinator; restart them with the new configuration.
    The replacement coordinator refuses startup while any old runtime owner
-   remains, preserving its shared policy and active work. Schema upgrades still
-   occur at startup: incompatible code/schema upgrades require a coordinated
-   maintenance window.
+   remains, preserving its shared policy and active work. Auto-schema deployments still migrate
+   at startup; verified-schema deployments use the explicit offline migrator.
+   Incompatible code/schema upgrades require coordinated maintenance.
 
 Use a direct database connection or session-preserving proxy, not transaction-mode
 pooling. Budget worst-case connections as `sum(pool_size + 1)` across all processes,
