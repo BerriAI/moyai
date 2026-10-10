@@ -15,13 +15,14 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
+from .static_assets import versioned_index
 from .connectors import Connectors, ConnectorError, TOOLS, RETRY_SAFE_READS
 from .db import Store, now, database
 from .blob_storage import ObjectStorage
@@ -1685,9 +1686,11 @@ def _create_app(settings, store):
             return StreamingResponse(relay(), media_type='text/event-stream', headers=upstream_headers(request_id, upstream))
         return JSONResponse(value, headers=upstream_headers(request_id, upstream))
 
+    index_html = versioned_index(STATIC)
+
     @app.get("/")
     async def index():
-        return FileResponse(STATIC / "index.html")
+        return HTMLResponse(index_html, headers={'Cache-Control': 'no-store'})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
