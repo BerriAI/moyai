@@ -416,8 +416,8 @@ remains in these delegation contracts. Configured workspace capacity still appli
 use the same authenticated multipart transport as native state and computer calls.
 
 Validation: 389 broader delegation, swarm, steering, goal, MCP and broker checks
-pass; 68 database-dependent role checks were skipped in that invocation and are
-being run separately. Another 76 new-contract cases and 96 source/fallback cases
+pass; all 68 database-dependent role checks also pass in a separate PostgreSQL
+invocation. Another 76 new-contract cases and 96 source/fallback cases
 pass. Forty-two delegation/board/transport cases pass against PostgreSQL. The
 AgentSwarm guide was rendered at desktop/mobile widths and inspected. This is
 local protocol and behavioral evidence with simulated workers, not a live
