@@ -682,3 +682,16 @@ admission fence instead of sleeping one second; its focused real SDK case passes
 
 Schema is revision 13; all role protocols are 13. Earlier schema digests are
 preserved. Release roles together after the offline migration; nothing was deployed.
+
+## Attachment handoff to initial swarm workers (WP6/WP7)
+
+Initial workers copy the complete attachment manifest and its immutable parts
+inside the same transaction as their scoped message, session and dispatch intent.
+Database parts are copied in SQL; object references stay shared and immutable.
+Parent deletion cannot remove a child's manifest, and unrelated sessions cannot
+read it. Storage admission and deduplicated bootstrap still apply.
+
+Validation: 66 swarm/file cases passed locally; all five initial-upload cases
+passed on PostgreSQL. The handoff cases cover legacy/multipart files, database
+and simulated object storage, exact child reads, retry, source deletion and
+session isolation. Schema and role protocols remain 13. Nothing was deployed.
