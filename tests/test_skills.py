@@ -137,23 +137,23 @@ def test_sharing_changes_require_owner_and_org_admin(workspace):
 
 
 @pytest.mark.parametrize('scope,capacity', [('personal', 50), ('organization', 200)])
-def test_library_capacity_allows_retries_edits_and_counts_archived(workspace, scope, capacity):
+def test_library_exceeds_old_capacity_and_preserves_retry_and_archive_identity(workspace, scope, capacity):
     app,client=workspace
     sign_in(app,client)
     for i in range(capacity):
         response=create(client,scope,name=f'workflow-{i}',client_id=f'workflow-{i}')
         assert response.status_code==201
     skill=response.json()['id']
-    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==201
     retry=create(client,scope,name=f'workflow-{capacity-1}',client_id=f'workflow-{capacity-1}')
     assert retry.status_code==201 and retry.json()['id']==skill
     assert edit(client,skill,description='Updated at capacity').status_code==200
     assert client.post('/api/skills/'+skill+'/archive',json={'archived':True,'revision':2}).status_code==200
-    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==409
-    assert len(client.get('/api/skills?archived=true').json()['skills'])==capacity
+    assert create(client,scope,name=f'workflow-{capacity}',client_id=f'workflow-{capacity}').status_code==201
+    assert len(client.get('/api/skills?archived=true').json()['skills'])==capacity+1
 
 
-def test_sharing_into_organization_uses_the_200_skill_capacity(workspace):
+def test_sharing_into_organization_has_no_old_count_cap(workspace):
     app,client=workspace
     sign_in(app,client)
     for i in range(199):
@@ -161,8 +161,8 @@ def test_sharing_into_organization_uses_the_200_skill_capacity(workspace):
     shared=create(client,name='share-last-slot',client_id='share-last-slot').json()['id']
     overflow=create(client,name='share-overflow',client_id='share-overflow').json()['id']
     assert edit(client,shared,scope='organization').status_code==200
-    assert edit(client,overflow,scope='organization').status_code==409
-    assert client.get('/api/skills/'+overflow).json()['scope']=='personal'
+    assert edit(client,overflow,scope='organization').status_code==200
+    assert client.get('/api/skills/'+overflow).json()['scope']=='organization'
     assert edit(client,shared,description='Organization edit at capacity').status_code==200
 
 
@@ -309,12 +309,12 @@ def test_search_keeps_gateway_prompt_bounded_and_returns_only_references(workspa
     assert len(initial['available']) == 12 and initial['omitted'] == 0
     assert not initial['matches'] and not initial['loaded'] and not initial['unavailable']
     response=search(client,run,'coverage')
-    assert response.status_code==200 and len(response.json()['matches'])==5
+    assert response.status_code==200 and len(response.json()['matches'])==12
     assert all(set(m)=={'reference','revision'} for m in response.json()['matches'])
     assert 'Review benchmark coverage and results.' not in response.text and MARKER not in response.text
     assert client.post(url,headers=headers,json={'messages':[]}).status_code==200
     context=json.loads(captured[-1][0]['content'].split('\n',1)[1])
-    assert len(context['matches'])==5 and not context['loaded'] and len(context['available'])==7
+    assert len(context['matches'])==12 and not context['loaded'] and not context['available']
     assert context['matches'][0]['description']=='Review benchmark coverage and results.'
     assert MARKER not in json.dumps(captured) and not app.state.store.rows('SELECT * FROM skill_uses')
     assert 'Review benchmark coverage and results.' not in client.get('/api/runs/'+run['id']).text
@@ -329,11 +329,11 @@ def test_search_ranks_exact_references_replaces_matches_and_never_scans_bodies(w
     run=active(app)
     result=search(client,run,'ORG:BENCHMARK-REVIEW').json()
     assert result['matches'][0]['reference']=='org:benchmark-review'
-    assert len(result['matches'])==5
+    assert len(result['matches'])==8
     result=search(client,run,'BENCHMARK-REVIEW').json()
     assert {m['reference'] for m in result['matches'][:2]}=={'personal:benchmark-review','org:benchmark-review'}
     selected=app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')
-    for query in ['', '   ', 'x'*201]:
+    for query in [None, [], {}]:
         invalid=search(client,run,query)
         assert invalid.status_code==200 and 'Invalid skill arguments' in invalid.json()['error']
         assert app.state.store.rows('SELECT * FROM skill_searches ORDER BY position')==selected

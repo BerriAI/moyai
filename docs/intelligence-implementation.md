@@ -42,7 +42,7 @@ Composer controls and APIs accept longer messages; the shared contenteditable
 editor recognizes an absent maximum. Steering text is neutral rather than labeling
 every input a correction.
 
-This requires schema revision 6 and API protocol revision 2. Follow the coordinated
+This requires schema revision 7 and API protocol revision 2. Follow the coordinated
 migration procedure; the change is not an API-only mixed-version deployment.
 
 Validation so far:
@@ -167,3 +167,37 @@ Three browser cases pass at 1440/768/320, with the mobile screenshot inspected;
 the UI bundle builds. These are local contract/fixture tests, not a live Slack
 behavioral parity benchmark. Raw event retention/operational quotas, large source
 view efficiency and the non-durable adapter context path remain release concerns.
+
+## Memory, skills, and scoped guidance (WP5; not deployed)
+
+Private libraries now preserve complete note bodies, skill instructions, supporting
+files, and every file-read receipt. Empty-query enumeration and revision-bound
+cursors expose the full authorized catalog. Exact revision/range reads recover
+large bodies; there are no fixed library counts, body sizes, five-result search
+caps, or four-excerpt retention caps. The inference compositor fits whole records
+or explicit retrieval references to allocations derived from the actual model
+input window; normal context admission still checks the complete request.
+
+Standing preferences and task-relevant notes are recalled automatically. Other
+notes remain discoverable with repository labels. A verified connected GitHub
+repository ID can scope memory with an empty picker; connection access is checked
+again at use. Private bodies and catalog metadata taint native checkpoints and
+remain bound to the active requester and turn. Ambient Slack observations do not
+become personal-memory or skill-selection authority.
+
+The background memory reviewer processes complete original sources in model-sized
+pages and may update only note bodies it saw. Malformed or duplicate proposals in
+one response reject the review; later-source corrections can supersede earlier
+pages. A thin orientation prompt points to seven public, content-versioned
+procedures and one workspace-scoped AGENTS.md resolver. Public procedures work
+on non-chat, automation, and child execution surfaces. New skills default to
+Personal; organization publishing still requires explicit intent and an admin.
+
+Validation: 387 library/gateway regression cases passed. Eleven discovery, large
+range, revision, repository-access, and execution-surface contracts passed on
+PostgreSQL. Revision 7 migration tests previously passed all 20 PostgreSQL cases.
+Three synthetic browser cases verify complete note save/edit and large skill
+imports at 1440/768/320; screenshots were inspected. The editors scroll long
+bodies within the dialog. The UI build and 22 focused Node checks pass. Retrieval uses keyword
+ranking with complete discovery/read access, not embeddings. Oversized initial
+repository guidance and adapter qualification remain in WP2.

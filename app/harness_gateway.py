@@ -121,6 +121,16 @@ class HarnessGateway:
         from .live_context import LiveContext
         self.live_context = LiveContext(self)
 
+    async def library_context(self, run, model, budget=None):
+        from .library_views import fit_context
+        budget = budget or await self.context_budget.measure({'model': model, 'messages': []})
+        # This is a view allocation, derived from the actual input window. A
+        # byte per token is conservative; final admission still counts the wire.
+        allocation = max(1, budget.input_budget // 8)
+        contexts = await asyncio.gather(asyncio.to_thread(self.skills.context, run),
+                                       asyncio.to_thread(self.memory.context, run))
+        return [fit_context(context, allocation) for context in contexts]
+
     async def context_window(self, run_id, request):
         run = self.require_run(run_id, request)
         try:
@@ -128,7 +138,7 @@ class HarnessGateway:
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from None
         budget = await self.context_budget.measure({'model': model, 'messages': []})
-        context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+        context = '\n\n'.join(x for x in await self.library_context(run, model) if x)
         # The SDK cannot see broker-injected context. Reserve its byte bound as
         # well as room for a new tool result before the next native compact.
         window = max(1, budget.input_budget - len(context.encode()) - 4096)
@@ -297,7 +307,7 @@ class HarnessGateway:
             else:
                 if self.native_sessions is not None:
                     self.native_sessions.observe_scope(run)
-                context = '\n\n'.join(x for x in [self.skills.context(run), self.memory.context(run)] if x)
+                context = '\n\n'.join(x for x in await self.library_context(run, model) if x)
                 payload = authorized_payload(body, route, model, context)
                 field = 'messages' if route == '/v1/messages' else 'input'
                 items = payload[field]

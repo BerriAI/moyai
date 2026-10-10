@@ -216,6 +216,7 @@ def _create_app(settings, store):
     connectors.github_requester_match = credentials.same_requester
     skills = Skills(store, security, credentials.same_requester)
     memory = Memory(store, security, credentials.same_requester, checkpoints)
+    memory.github = connectors.github
     from .model_slots import ModelSlots
     model_slots = ModelSlots(settings.max_concurrent_model_requests)
     from .memory_review import MemoryReview
@@ -223,6 +224,7 @@ def _create_app(settings, store):
     memory.reviewer = store.memory_review = memory_review
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
+    memory_review.context_budget = context_budget
     lens_feedback = LensFeedback(store, settings)
     credentials.slots = model_slots
     manager.persist = checkpoints.flush
@@ -1415,12 +1417,11 @@ def _create_app(settings, store):
         payload = {key: value for key, value in body.items() if key in allowed}
         native_sessions.observe_scope(run)
         payload['messages'] = await asyncio.to_thread(store.attachments.with_images, run, scrub_memory_history(payload['messages']))
-        memory_context = memory.context(run)
+        skill_context, memory_context = await harness_gateway.library_context(run, selected_model)
         if memory_context:
             # Resolve references for the current requester on every inference.
             # No retrieved note body goes into sandbox history or tool output.
             payload['messages'] = [{'role':'system','content':memory_context}, *payload['messages']]
-        skill_context = skills.context(run)
         if skill_context:
             # The original platform system instructions stay last and take
             # precedence. Skill definitions never enter sandbox tool results,

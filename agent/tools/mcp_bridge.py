@@ -20,6 +20,7 @@ if __package__ in {None, ''}:
 from agent.tools import github_tools
 from sandbox import computer
 from agent.tools import credential_tools
+from agent.repository_guidance import TOOL as GUIDANCE_TOOL, resolve as repository_guidance
 
 BROKER = os.environ.get("WORKSPACE_BROKER_URL", "")
 TOKEN = os.environ.get("WORKSPACE_RUN_TOKEN", "")
@@ -73,7 +74,9 @@ MAX_PENDING_PER_LANE = 32
 def call_tool(params, tools):
     name, args = params['name'], params.get('arguments', {})
     try:
-        if name == 'credentials_run':
+        if name == 'repository_guidance':
+            data = repository_guidance(workspace=os.environ.get('MOYAI_WORKSPACE', '/workspace'), **{'paths': [], **args})
+        elif name == 'credentials_run':
             available = broker('/tools')
             if name not in {tool['name'] for tool in available}:
                 raise github_tools.GitHubToolError('Credential commands are not enabled for this session.')
@@ -147,7 +150,7 @@ def serve():
                 elif method == 'ping':
                     result = {}
                 elif method == 'tools/list':
-                    tools = github_tools.advertised_tools(broker('/tools')) + BROWSER_TOOLS
+                    tools = github_tools.advertised_tools(broker('/tools')) + BROWSER_TOOLS + [GUIDANCE_TOOL]
                     result = {'tools': tools}
                 elif method == 'tools/call':
                     executor, slots = (reads, read_slots) if params['name'] in CONCURRENT_READS else (ordered, ordered_slots)

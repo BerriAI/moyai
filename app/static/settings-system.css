@@ -277,6 +277,7 @@
 .settings-view [data-slot="dialog-content"] :is(.credential-actions,.role-actions,.environment-dialog-actions) { gap: 12px; margin-block-start: 24px; padding-block-start: 20px; border-top: 1px solid var(--settings-line); }
 .settings-view [data-slot="dialog-content"] [type=submit] { background: var(--settings-accent); color: var(--settings-accent-foreground); border-color: var(--settings-accent); }
 .settings-view [data-slot="dialog-content"] .field :is(input,select,textarea) { width: 100%; }
+.settings-view [data-slot="dialog-content"] :is(.memory-editor,.skill-editor) textarea { max-height: 40dvh; overflow-y: auto; }
 .settings-view .settings-load-error { max-width: 65ch !important; }
 .settings-view .settings-load-error>div { margin-block: 24px; }
 @media (hover:hover) {
