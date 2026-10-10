@@ -17,7 +17,8 @@ Set `MOYAI_SEPARATE_BROKER=true` on **every** process:
 | `worker` | Temporal execution activities and `/health` only, as before. |
 
 The broker has an exclusive PostgreSQL ownership lock, separate from the
-coordinator lock. A second broker is refused before inference recovery runs.
+coordinator lock. A second broker is refused before schema setup or inference
+recovery runs.
 The shared policy includes the split setting; a process configured for the wrong
 topology, keys, storage, limits, prepared-pool settings or build is refused. Only
 execution workers maintain prepared sandboxes; the broker never starts the pool
@@ -25,6 +26,12 @@ or subscribes to execution wake notifications. An API restart no longer
 interrupts pending model requests, running compaction or executing tool receipts.
 Restarting the broker still performs that recovery, because its old connections
 have ended. Do not overlap broker instances or turn off the ownership checks.
+
+A build or shared-policy change requires all old workers and the broker to stop
+before the new coordinator starts. The coordinator checks this before schema
+writes, keeps joining instances out until component setup finishes, and only
+then publishes the new policy. Matching same-build restarts remain supported;
+this startup fence does not make mixed-build rollouts compatible.
 
 Chat inference, context maintenance, credential inference and memory review keep
 one shared `MAX_CONCURRENT_MODEL_REQUESTS` gate on the broker. Session titles and

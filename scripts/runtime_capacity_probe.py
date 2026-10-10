@@ -28,7 +28,8 @@ def open_store(settings):
     store = Store(settings.data_dir, database_url=settings.moyai_database_url,
         database_schema=settings.moyai_database_schema, database_initialize=True,
         application_instance=True, runtime_role=settings.moyai_runtime_role,
-        database_pool_size=settings.moyai_database_pool_size, max_pending_runs=settings.max_pending_runs)
+        database_pool_size=settings.moyai_database_pool_size, max_pending_runs=settings.max_pending_runs,
+        runtime_settings=settings)
     store.database.configure_runtime(settings)
     return store
 

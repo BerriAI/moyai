@@ -71,7 +71,7 @@ class Store:
                              'created_at', 'updated_at', 'active_message_id',
                              'deletion_requested_at', 'deleted_at', 'pending_result')
 
-    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone'):
+    def __init__(self, directory: Path, default_model: str = '', *, auto_link_identities=False, max_pending_runs=1000, object_storage=None, database_url='', database_schema='moyai', database_initialize=False, application_instance=False, database_pool_size=8, runtime_role='standalone', runtime_settings=None):
         self.auto_link_identities = auto_link_identities
         self.max_pending_runs = max_pending_runs
         self.generation = 0
@@ -81,7 +81,8 @@ class Store:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = directory / "workspace.db"
         self.database = PostgresDatabase(database_url, database_schema, initialize=database_initialize,
-            application_instance=application_instance, pool_size=database_pool_size, runtime_role=runtime_role) if database_url else None
+            application_instance=application_instance, pool_size=database_pool_size, runtime_role=runtime_role,
+            runtime_settings=runtime_settings) if database_url else None
         try:
             self._initialize(directory, default_model, object_storage)
         except BaseException:

@@ -31,7 +31,7 @@ def admissions(request, tmp_path):
         config = settings.model_copy(update={'moyai_runtime_role': role})
         store = Store(tmp_path, database_url=config.moyai_database_url,
             database_schema=config.moyai_database_schema, database_initialize=True,
-            application_instance=True, runtime_role=role)
+            application_instance=True, runtime_role=role, runtime_settings=config)
         stores.append(store)
         if store.database:
             store.database.configure_runtime(config)

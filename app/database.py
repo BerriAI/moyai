@@ -21,6 +21,14 @@ class IntegrityError(DatabaseError):
     pass
 
 
+def runtime_fingerprint(settings):
+    names = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
+             'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
+             'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
+             'moyai_separate_broker', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
+    return hashlib.sha256(json.dumps({name: getattr(settings, name) for name in names}, sort_keys=True).encode()).hexdigest()
+
+
 INTEGRITY_ERRORS = (sqlite3.IntegrityError, IntegrityError)
 
 # Quoted strings/identifiers and comments must not be rewritten as parameters or
@@ -226,7 +234,7 @@ class PostgresConnection:
 
 
 class PostgresDatabase:
-    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone'):
+    def __init__(self, url, schema, *, initialize=False, application_instance=False, pool_size=8, runtime_role='standalone', runtime_settings=None):
         import psycopg
         from psycopg_pool import ConnectionPool
 
@@ -234,7 +242,10 @@ class PostgresDatabase:
         self.schema = schema
         self.runtime_role, self.policy = runtime_role, ''
         self.broker_owner = False
+        self.startup_exclusive = False
         self.pool = None
+        if application_instance and runtime_role != 'standalone' and runtime_settings is None:
+            raise DatabaseError('Distributed application startup requires its runtime configuration before schema setup.')
         try:
             # A session lock prevents a second process from running global
             # startup recovery. Keep this connection for the Store's lifetime.
@@ -255,6 +266,10 @@ class PostgresDatabase:
                 if runtime_role == 'coordinator' and not self.owner.execute(
                         'SELECT pg_try_advisory_lock(726943, %s::regnamespace::oid::int)', (schema,)).fetchone()[0]:
                     raise DatabaseError('Another coordinator owns this Postgres schema.')
+                if runtime_settings is not None and runtime_role != 'standalone':
+                    # Reject incompatible builds/keys and duplicate brokers before
+                    # even CREATE IF NOT EXISTS or legacy data backfills can run.
+                    self.admit_runtime(runtime_settings)
             with self.owner.transaction():
                 self.owner.execute('SELECT pg_advisory_xact_lock(726941, %s::regnamespace::oid::int)', (schema,))
                 self.owner.execute(f'SET LOCAL search_path TO {identifier(schema)}, pg_catalog')
@@ -308,11 +323,16 @@ class PostgresDatabase:
         except psycopg.Error:
             raise DatabaseError('Postgres operation failed; the transaction was not acknowledged.') from None
 
-    def configure_runtime(self, settings):
-        if self.runtime_role == 'standalone':
-            return
-        # Exactly one process owns live inference and its startup recovery.
-        # The coordinator retains this ownership in the original topology.
+    def stored_policy(self):
+        if not self.owner.execute('SELECT to_regclass(%s)',
+                                  (f'{identifier(self.schema)}.runtime_policy',)).fetchone()[0]:
+            return None
+        row = self.owner.execute(f'SELECT fingerprint FROM {identifier(self.schema)}.runtime_policy WHERE id=1').fetchone()
+        return row[0] if row else None
+
+    def admit_runtime(self, settings):
+        if settings.moyai_runtime_role != self.runtime_role:
+            raise DatabaseError('Runtime role does not match the database owner.')
         owns_broker = self.runtime_role == 'broker' or (
             self.runtime_role == 'coordinator' and not settings.moyai_separate_broker)
         if owns_broker and self.owner_pid is not None and not self.broker_owner:
@@ -320,19 +340,37 @@ class PostgresDatabase:
                                       (self.schema,)).fetchone()[0]:
                 raise DatabaseError('Another inference broker owns this Postgres schema.')
             self.broker_owner = True
-        # Store only a fingerprint. Different signing keys, storage destinations,
-        # task queues or workspace limits must never silently form one cluster.
-        names = ('session_secret', 'encryption_key', 'object_storage_bucket', 'object_storage_endpoint',
-                 'object_storage_prefix', 'public_url', 'temporal_address', 'temporal_namespace', 'temporal_task_queue',
-                 'max_concurrent_runs', 'max_pending_runs', 'max_concurrent_model_requests', 'moyai_build_sha',
-                 'moyai_separate_broker', 'sandbox_prepared_pool_size', 'sandbox_prepared_idle_seconds')
-        policy = hashlib.sha256(json.dumps({name: getattr(settings, name) for name in names}, sort_keys=True).encode()).hexdigest()
-        with self.connect() as conn:
-            if self.runtime_role == 'coordinator':
-                conn.execute('INSERT INTO runtime_policy VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint', (policy,))
-            elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
+        policy = runtime_fingerprint(settings)
+        if self.stored_policy() != policy:
+            if self.runtime_role != 'coordinator':
                 raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
-        self.policy = policy
+            if not self.startup_exclusive:
+                # Upgrade our shared runtime lock without waiting. This both
+                # proves old workers/brokers have exited and prevents new ones
+                # from joining while the replacement constructs its schema.
+                if not self.owner.execute('SELECT pg_try_advisory_lock(726940, %s::regnamespace::oid::int)',
+                                          (self.schema,)).fetchone()[0]:
+                    raise DatabaseError('Drain and stop other runtime owners before changing the shared runtime configuration.')
+                self.startup_exclusive = True
+        elif not self.policy:
+            self.policy = policy
+        return policy
+
+    def configure_runtime(self, settings):
+        if self.runtime_role == 'standalone':
+            return
+        policy = self.admit_runtime(settings)
+        try:
+            with self.connect() as conn:
+                if self.runtime_role == 'coordinator':
+                    conn.execute('INSERT INTO runtime_policy VALUES(1,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint', (policy,))
+                elif not conn.execute('SELECT 1 FROM runtime_policy WHERE id=1 AND fingerprint=?', (policy,)).fetchone():
+                    raise DatabaseError('Start the coordinator first, with the same shared runtime configuration.')
+            self.policy = policy
+        finally:
+            if self.startup_exclusive:
+                self.owner.execute('SELECT pg_advisory_unlock(726940, %s::regnamespace::oid::int)', (self.schema,))
+                self.startup_exclusive = False
 
     def acquire_lease(self, name, token, ttl):
         with self.connect() as conn:

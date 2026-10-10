@@ -40,7 +40,7 @@ def cluster(tmp_path, target):
         store = Store(options.data_dir, database_url=url, database_schema=schema,
                       database_initialize=True, application_instance=True, runtime_role=role,
                       database_pool_size=options.moyai_database_pool_size,
-                      max_pending_runs=options.max_pending_runs)
+                      max_pending_runs=options.max_pending_runs, runtime_settings=options)
         stores.append(store)
         store.database.configure_runtime(options)
         return store, options
@@ -79,9 +79,9 @@ def test_multiple_workers_share_one_coordinator_and_reject_configuration_drift(c
         open_store('standalone')
     with pytest.raises(DatabaseError, match='same shared runtime configuration'):
         open_store(max_concurrent_runs=3000)
-    coordinator.database.configure_runtime(settings.model_copy(update={'max_concurrent_runs': 4}))
-    with pytest.raises(DatabaseError, match='configuration changed'):
-        first.rows('SELECT 1')
+    with pytest.raises(DatabaseError, match='Drain and stop'):
+        coordinator.database.configure_runtime(settings.model_copy(update={'max_concurrent_runs': 4}))
+    assert first.rows('SELECT 1 AS value') == [{'value': 1}]
 
 
 async def test_execution_lease_is_exclusive_and_renewed_without_holding_pool_connections(cluster):
@@ -213,13 +213,15 @@ def test_killed_process_releases_ownership_after_database_lease_expiry(cluster):
     script = '''
 import sys,time
 from app.database import PostgresDatabase
-db=PostgresDatabase(sys.argv[1],sys.argv[2],application_instance=True,runtime_role='worker')
+from app.config import Settings
+settings=Settings.model_validate_json(sys.argv[3]).model_copy(update={'moyai_runtime_role':'worker'})
+db=PostgresDatabase(sys.argv[1],sys.argv[2],application_instance=True,runtime_role='worker',runtime_settings=settings)
 assert db.acquire_lease('crash-probe','old-process',.5)
 print('owned',flush=True)
 time.sleep(30)
 '''
     process = subprocess.Popen([sys.executable, '-c', script, settings.moyai_database_url,
-                                settings.moyai_database_schema], stdout=subprocess.PIPE, text=True)
+                                settings.moyai_database_schema, settings.model_dump_json()], stdout=subprocess.PIPE, text=True)
     try:
         assert process.stdout.readline().strip() == 'owned'
         assert not coordinator.database.acquire_lease('crash-probe', 'replacement', 30)

@@ -171,14 +171,18 @@ def create_app(settings: Settings | None = None):
                   max_pending_runs=settings.max_pending_runs, object_storage=ObjectStorage(settings),
                   database_url=settings.moyai_database_url, database_schema=settings.moyai_database_schema,
                   database_initialize=settings.moyai_database_initialize, application_instance=True,
-                  database_pool_size=settings.moyai_database_pool_size, runtime_role=settings.moyai_runtime_role)
+                  database_pool_size=settings.moyai_database_pool_size, runtime_role=settings.moyai_runtime_role,
+                  runtime_settings=settings)
     try:
         if settings.moyai_runtime_role != 'standalone':
             from .runtime_coordination import require_shared_artifacts
             require_shared_artifacts(store)
+        app = _create_app(settings, store)
         if store.database:
+            # Publish a changed policy only after every component has completed
+            # schema setup; joining workers remain fenced until this succeeds.
             store.database.configure_runtime(settings)
-        return _create_app(settings, store)
+        return app
     except BaseException:
         store.close()
         raise
