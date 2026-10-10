@@ -2,7 +2,8 @@
 
 `MOYAI_COORDINATOR_HANDOFF=true` opts a verified PostgreSQL cluster into standby
 coordinators. Keep it false until the dedicated API and broker routes are active,
-all roles run the same compatible contracts, and the new schema is migrated.
+all roles run the same compatible contracts, and the selected release's schema
+(currently revision 7) is migrated offline. See [rolling deployment](rolling-deploy.md).
 The flag belongs to the shared runtime settings on every role. This is an
 application protocol; it does not remove Render disk or shutdown restrictions.
 
@@ -33,7 +34,9 @@ This protocol does not promise exactly-once effects at arbitrary external APIs.
 
 A compatible successor joins the published `runtime_coordinator_policy` without
 changing the baseline `runtime_policy` or any API/worker/broker contract. Shared
-settings, schema, and source-owned protocol revisions must match. Changing these
+settings and the exact schema must match. Each background-role fingerprint covers
+the source-owned API, worker, broker and coordinator protocol revisions; changing
+any of these declares that the existing cluster contract is incompatible. Changing these
 contracts requires a separately reviewed migration; supplying a different build
 SHA or changing environment variables cannot declare compatibility.
 
