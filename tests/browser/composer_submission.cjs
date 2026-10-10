@@ -1,0 +1,7 @@
+const assert=require('node:assert/strict');
+const {test}=require('node:test');
+const {chromium}=require('playwright');
+const base=process.env.SESSION_UI_URL||'http://127.0.0.1:8830';
+async function setup(t){const browser=await chromium.launch({headless:true,args:['--no-sandbox']});t.after(()=>browser.close());const page=await browser.newPage();await page.goto(base+'/demo/login');await page.locator('#prompt').waitFor();return page;}
+for(const action of ['Enter','button'])test(`Whitespace-only ${action} preserves composer without a request`,async t=>{const p=await setup(t);let posts=0;p.on('request',r=>{if(r.method()==='POST'&&r.url().endsWith('/api/runs'))posts++;});await p.locator('#prompt').fill('   \n ');if(action==='Enter')await p.locator('#prompt').press('Enter');else await p.locator('#task-form button[type=submit]').click();await p.waitForTimeout(300);assert.equal(posts,0);assert.equal(await p.locator('#prompt').evaluate(el=>el.value),'   \n ');assert.match(await p.locator('#toast').innerText(),/message|attach/i);});
+test('Keyboard submission focuses follow-up and accepts immediate typing',async t=>{const p=await setup(t);await p.locator('#prompt').fill('Create a release checklist');await p.locator('#prompt').press('Enter');await p.locator('#followup').waitFor();await p.waitForTimeout(300);assert.equal(await p.evaluate(()=>document.activeElement?.id),'followup');await p.keyboard.type('Include rollback steps');assert.equal(await p.locator('#followup').evaluate(el=>el.value),'Include rollback steps');});
