@@ -117,6 +117,27 @@ def test_broker_http_readiness_is_required_even_when_render_deploy_is_live(split
     assert not render.worker_running
 
 
+@pytest.mark.parametrize('counter', ['owners', 'brokers', 'model_requests', 'live_leases'])
+def test_new_broker_aggregate_fence_blocks_worker_resume_even_with_healthy_http(split_setup, counter):
+    release, render, _ = split_setup
+    probe = render.probe
+    def inconsistent_ownership(service):
+        state = probe(service)
+        if render.broker_running and not render.worker_running and render.live[BROKER]['commit']['id'] == NEW:
+            state[counter] += 1
+            assert state['ok'] is True
+        return state
+    release.probe = inconsistent_ownership
+    with pytest.raises(ReleaseError, match='Broker runtime checks failed'):
+        release.run()
+    assert render.live[BROKER]['commit']['id'] == NEW
+    assert render.live[COORDINATOR]['commit']['id'] == NEW
+    assert render.env[WORKER]['RENDER_MIGRATION_STAGE'] == 'true'
+    assert not render.worker_running
+    assert [call for call in render.calls if call[0] == 'POST' and call[1] == WORKER] == [
+        ('POST', WORKER, OLD, 'false'), ('POST', WORKER, NEW, 'true')]
+
+
 def test_broker_dashboard_edits_stop_release_without_overwriting_them(split_setup):
     release, render, _ = split_setup
     probe = render.probe
