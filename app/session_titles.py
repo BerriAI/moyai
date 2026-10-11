@@ -163,7 +163,7 @@ class SessionTitles:
 
     async def request(self, run_id):
         # Keep database waits off the request loop; queue operations stay on it.
-        if private_run(self.store, run_id):
+        if await database(private_run, self.store, run_id):
             return
         if await database(self.save_request, run_id) and self.settings.moyai_runtime_role != 'api':
             self.enqueue(run_id)

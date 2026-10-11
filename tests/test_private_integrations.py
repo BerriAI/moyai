@@ -74,6 +74,21 @@ def test_private_feedback_cannot_export_comments(users_app):
     assert not app.state.store.rows('SELECT * FROM lens_feedback')
 
 
+def test_private_pr_receipts_are_excluded_from_shared_summaries(users_app):
+    from test_slack_chat import publication
+    app, client = users_app
+    sign_as(app, client, 'alice@berri.ai')
+    store = app.state.store
+    private, _ = active_private(store, 'google:alice')
+    shared, _ = active_private(store, 'google:alice', private=False)
+    # Model restored publication data, which must never be re-exported.
+    publication(app, private['id'], 100, 'Private PR canary')
+    publication(app, shared['id'], 101, 'Shared PR')
+    receipts = app.state.session_pull_requests.receipts([private['id'], shared['id']])
+    assert [receipt.number for _, receipt in receipts] == [101]
+    assert app.state.session_pull_requests.receipts([private['id']]) == []
+
+
 def test_personal_slack_constructor_does_not_attempt_ddl_in_verify_mode():
     from types import SimpleNamespace
     from app.personal_slack import PersonalSlack

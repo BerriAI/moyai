@@ -6,7 +6,7 @@
     "dev": "vite build --watch",
     "preview": "node scripts/settings_ui_preview.cjs",
     "test": "node --test tests/*.cjs",
-    "test:ui": "node --test tests/browser/personal_slack.cjs tests/browser/shadcn_ui.cjs tests/browser/navigation_loading.cjs tests/browser/message_history.cjs tests/browser/long_conversation.cjs tests/browser/swarm_time.cjs tests/browser/swarm_chat.cjs tests/browser/performance.cjs",
+    "test:ui": "node --test --test-concurrency=1 tests/browser/personal_slack.cjs tests/browser/shadcn_ui.cjs tests/browser/navigation_loading.cjs tests/browser/message_history.cjs tests/browser/long_conversation.cjs tests/browser/swarm_time.cjs tests/browser/swarm_chat.cjs tests/browser/performance.cjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

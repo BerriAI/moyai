@@ -110,9 +110,8 @@ class SlackChat:
         return f"<{self.settings.public_url.rstrip('/')}/#run={run_id}|Open session>"
 
     def mirroring(self, run_id):
-        if private_run(self.store, run_id):
-            return None
-        rows = self.store.rows('SELECT paused,team_id FROM slack_threads WHERE run_id=?', (run_id,))
+        rows = self.store.rows('''SELECT t.paused,t.team_id FROM slack_threads t
+            JOIN runs r ON r.id=t.run_id WHERE t.run_id=? AND r.private_owner_id='' ''', (run_id,))
         if not rows or not self.settings.slack_thread_chat_enabled or not self.owner.status()['enabled']:
             return None
         if rows[0]['team_id'] != self.owner.connectors.slack_installation().get('team_id'):

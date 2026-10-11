@@ -1035,7 +1035,7 @@ def _create_app(settings, store):
         received_at = now()
         # Validation and the enqueue transaction stay off the event loop so a
         # slow database cannot stall other conversations' streams and pages.
-        security.require(request, mutation=True)
+        await run_in_threadpool(security.require, request, mutation=True)
         run = await run_in_threadpool(store.run, run_id)
         if run and run.get('swarm') and not settings.temporal_enabled:
             raise HTTPException(409, 'Swarm mode requires the durable cloud runtime.')

@@ -137,15 +137,12 @@ class SessionPullRequests:
             marks = ','.join('?' for _ in batch)
             rows.extend(self.store.rows(f'''SELECT p.result,r.id,a.ancestor_id FROM github_publications p
                 JOIN runs r ON r.id=p.run_id JOIN run_ancestry a ON a.run_id=r.id
-                WHERE r.deleted_at='' AND a.ancestor_id IN ({marks})
+                WHERE r.deleted_at='' AND r.private_owner_id='' AND a.ancestor_id IN ({marks})
                 AND NOT EXISTS(SELECT 1 FROM run_ancestry parents JOIN runs parent ON parent.id=parents.ancestor_id
-                    WHERE parents.run_id=r.id AND parent.deleted_at!='')
+                    WHERE parents.run_id=r.id AND (parent.deleted_at!='' OR parent.private_owner_id!=''))
                 ORDER BY p.created_at,p.id''', batch))
         parsed = []
         for row in rows:
-            from .private_sinks import private_run
-            if private_run(self.store, row['id']) or private_run(self.store, row['ancestor_id']):
-                continue
             try:
                 receipt = Receipt.model_validate_json(row['result'])
             except ValidationError:
