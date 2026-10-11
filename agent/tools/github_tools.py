@@ -143,8 +143,8 @@ def collect(directory, title, body, request_key):
         if (any(p in {'', '.', '..'} or p.lower() in {'.git', '.ssh', 'codeowners'} or p.lower().startswith('.env') for p in parts)
                 or '\\' in name or any(ord(c) < 32 or ord(c) == 127 for c in name)
                 or lower in {'.github', '.github/workflows', '.github/actions'}
-                or lower.startswith(('.github/workflows/', '.github/actions/')) or lower.endswith(('.pem', '.key'))):
-            raise GitHubToolError('Remove credential, workflow or access-control files from the change before publishing.')
+                or lower.endswith(('.pem', '.key'))):
+            raise GitHubToolError('Remove credential or access-control files from the change before publishing.')
         path = target / name
         for ancestor in [path, *path.parents]:
             if ancestor == target:

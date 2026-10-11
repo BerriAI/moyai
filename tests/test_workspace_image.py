@@ -60,7 +60,7 @@ async def test_deploy_prebuild_waits_for_the_same_workspace_image_and_closes_cli
     monkeypatch, failure: str | None
 ) -> None:
     settings = Settings(
-        _env_file=None, modal_token_id="test-id", modal_token_secret="test-secret"
+        _env_file=None, modal_token_id="test-id", modal_token_secret="test-secret", independent_agent_runtime=False
     )
     connection = SimpleNamespace(__aexit__=AsyncMock())
     client = AsyncMock(return_value=connection)

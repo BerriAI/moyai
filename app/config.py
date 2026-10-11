@@ -238,7 +238,7 @@ class Settings(BaseSettings):
     sandbox_rotation_seconds: int = Field(default=82800, ge=60, le=82800)
     sandbox_idle_seconds: int = Field(default=300, ge=0, le=3600)
     codex_runtime_reuse: bool = True
-    independent_agent_runtime: bool = False
+    independent_agent_runtime: bool = True
     temporal_enabled: bool = False
     maintenance_drain: bool = False
     temporal_address: str = "localhost:7233"

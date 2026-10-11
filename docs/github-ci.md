@@ -1,7 +1,7 @@
 # PR milestones and CI inspection
 
-Confirmed PR creation is announced in the conversation immediately, outside the
-two-update narration allowance. The announcement and publication receipt commit
+Confirmed PR creation is announced in the conversation immediately, independently
+of agent commentary. The announcement and publication receipt commit
 together and are deduplicated on readback/retry. A later turn failure preserves the
 PR link; creation alone does not imply successful CI or completed review.
 
@@ -54,6 +54,24 @@ Activity formatting supports JSON schemas whose `type` value is an object or a
 list. Other detail-formatting exceptions produce an omission notice without raw
 payloads, preserving the actual tool result and completion. Durable journal/event
 write failures still surface; this change does not blindly retry external writes.
+
+## Publish CI changes
+
+Use `github_create_pull_request` or `github_update_pull_request` to propose
+workflow and composite-action changes alongside code. Files under
+`.github/workflows/` require **Workflows: read and write** on the organization
+GitHub App. New app registrations request it. For an existing app, an organization
+owner opens **GitHub → Organization settings → Developer settings → GitHub Apps
+→ your app → Permissions & events**, enables Workflows write, saves, and approves
+the updated installation permissions. Retry the same unchanged publication after
+approval. A missing permission is reported before any repository write.
+
+Ordinary code and composite actions under `.github/actions/` keep using Contents
+and Pull requests access. Workflow scope applies only to the repository receiving
+the commit, including an enabled fork. Requester approval for an external PR,
+current-head checks and the prohibition on force pushes still apply. Agent
+credentials remain on the server. A confirmed PR link proves publication; use
+the CI tools above to check that commit's results.
 
 ## Local demonstration
 

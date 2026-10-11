@@ -124,8 +124,13 @@ def run(spec, *, relay, workspace: Path, session: Path, config, emit, workspace_
         relay.on_context_ready = start_execution
         if not definition.durable_context or goal.control_reply:
             start_execution()
-        system_message = system_prompt(spec, workspace=workspace_root or workspace, session=session)
         try:
+            # Goal controls can settle without model metadata or inference. For
+            # model work, size optional instructions against the selected window
+            # before an oversized system message becomes an unrecoverable input.
+            window = relay.context_window() if not goal.control_reply and hasattr(relay, 'context_window') else {}
+            system_message = system_prompt(spec, workspace=workspace_root or workspace, session=session,
+                                           input_budget=window.get('input_budget'))
             if context_store is not None and goal.control_reply:
                 # Goal controls answer without entering a runtime/TurnJournal.
                 context_store.append({'role': 'user', 'content': prompt})

@@ -124,7 +124,7 @@ class GitHubAPI:
 
 
 @pytest.mark.parametrize('path', ['../a', '/a', 'a//b', 'a/./b', 'a\\b', '.git/config', '.GIT/config',
-    '.github', '.github/workflows', '.github/workflows/check.yml', '.github/actions', '.ssh', '.ssh/config',
+    '.github', '.github/workflows', '.github/actions', '.ssh', '.ssh/config',
     'CODEOWNERS', 'nested/codeowners', '.env.local', 'a/private.pem', 'a/key.key', 'a\nb'])
 def test_protected_paths(path):
     with pytest.raises(ValidationError):
@@ -177,7 +177,7 @@ def test_no_implicit_directory_deletion_or_special_file_changes(workspace, monke
     github = app.state.connectors.github
     api = GitHubAPI(github, monkeypatch)
     api.tree = [entry]
-    with pytest.raises(ConnectorError, match='regular text'):
+    with pytest.raises(ConnectorError, match='regular files'):
         asyncio.run(github.publish(app.state.store.run(run_id), Publish.model_validate(PAYLOAD)))
     assert not any(c[0] == 'POST' for c in api.calls)
 

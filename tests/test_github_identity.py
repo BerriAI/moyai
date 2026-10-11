@@ -146,14 +146,15 @@ def test_picker_is_admin_only_persists_ids_and_does_not_select_discovered_repos(
     assert client.post('/api/connections/github/repositories', json={'repository_ids': [101]}).status_code == 403
 
 
-def test_discovery_paginates_and_never_changes_selection(identity):
+@pytest.mark.parametrize('full_pages', [1, 101])
+def test_discovery_paginates_and_never_changes_selection(identity, full_pages):
     _, _, _, _, github, provider = identity
-    provider.metadata_pages = [[{**repository_data('BerriAI/litellm'), 'id': i, 'full_name': f'BerriAI/repo-{i}'} for i in range(1000, 1100)],
+    provider.metadata_pages = [[{**repository_data('BerriAI/litellm'), 'id': i, 'full_name': f'BerriAI/repo-{i}'} for i in range(1000, 1100)]] * full_pages + [
                                [{**repository_data('BerriAI/moyai'), 'id': 1100}]]
     result = asyncio.run(github.discover_repositories(10))
     assert len(result['repository_ids']) == 101 and result['repository_ids'][-1] == 1100
     assert github.saved_credentials()['repository_ids'] == [101]
-    assert sum(path == '/installation/repositories' for _, path, _ in provider.calls) == 2
+    assert sum(path == '/installation/repositories' for _, path, _ in provider.calls) == full_pages + 1
 
 
 def test_ambiguous_old_name_requires_an_id(identity):
