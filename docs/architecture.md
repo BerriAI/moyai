@@ -258,11 +258,11 @@ matching the verified production configuration.
 
 The same rollout moved 27 existing sessions, 13 user profiles, all three encrypted organization connections, and 25 result archives into **Organization for Litellm → Litellm** on Render. Google SSO and all three provider health checks passed on the new origin. Slack's verified event endpoint and Slack/Notion OAuth callback configuration use the new origin. The existing gateway key and spend ledger were preserved. A follow-up in the existing #bot-spam thread restored its prior marker and file value `24` and posted one answer with a link to the new origin.
 
-`MAX_CONCURRENT_RUNS=100` is a workspace-wide ceiling on active and warm
-sandboxes, including delegated workers. It does not pre-provision 100 machines.
+`MAX_CONCURRENT_RUNS` is an optional workspace-wide ceiling on active and warm
+sandboxes, including delegated workers. The default `0` means no ceiling. A ceiling never pre-provisions machines.
 Ten executing agents need about ten sandboxes, plus recent chats within their
 five-minute idle window. Each completed response saves its filesystem immediately.
-Idle sandboxes incur compute charges and are reclaimed oldest-first when another
+Idle sandboxes incur compute charges and, with a ceiling, are reclaimed oldest-first when another
 session needs capacity; a sandbox with queued work is protected. Follow-ups reuse
 a warm machine or restore a new sandbox from the snapshot after release. Provisioning/cleanup and Modal quotas
 can temporarily change the observed count; capacity above the ceiling queues.
@@ -315,10 +315,10 @@ organization totals. Only the parent session mirrors its final answer to Slack.
 The Render process still hosts one shared Temporal worker and SQLite disk.
 `max_concurrent_activities` scales with the sandbox ceiling, but this does not
 horizontally autoscale Render workers. Running multiple control-plane replicas
-requires a shared database and artifact store first. Model response buffering is
-separately bounded by `MAX_CONCURRENT_MODEL_REQUESTS=32` on the deployed 1 CPU /
-2 GB Render instance (the local default remains 8); other agents can continue running sandbox commands while model calls
-queue. The worker pool size and Modal sandbox count are separate concepts.
+requires a shared database and artifact store first. Model calls are not
+queued by default (`MAX_CONCURRENT_MODEL_REQUESTS=0`). Set a positive value to
+bound response buffering on a small instance; other agents can continue running
+sandbox commands while model calls queue. The worker pool size and Modal sandbox count are separate concepts.
 Queued model calls retry in the sandbox only after an explicit unbilled
 admission response; each attempt refreshes its short-lived transport envelope.
 Gateway errors and uncertain network failures are not retried by this queue.
