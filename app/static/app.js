@@ -313,28 +313,23 @@ function renderPrWriteAccess(run){
   const signature=JSON.stringify([run.id,run.pr_write_access]);
   if(area.dataset.signature===signature)return;
   area.dataset.signature=signature;
-  MoyaiUI.render(area, (run.pr_write_access||[]).map(a=>`<section class="approval" aria-label="PR write access">
+  MoyaiUI.render(area, (run.pr_write_access||[]).filter(a=>a.status==='pending').map(a=>`<section class="approval" aria-label="PR write access">
     <h3>${esc(a.repository)} #${a.number} · ${esc(a.status)}</h3>
-    <p>Allow repeated code changes and comments to this PR for you in this saved chat only.</p>
-    <div class="approval-actions">${a.status==='pending'?`<button class="primary small" data-pr-access="${a.id}" data-decision="approve">Allow for this chat</button><button class="small" data-pr-access="${a.id}" data-decision="deny">Deny</button>`:a.status==='approved'?`<button class="small" data-pr-access="${a.id}" data-decision="revoke">Revoke access</button><button class="primary small" data-pr-continue="${a.number}">Continue in chat</button>`:''}</div>
+    <p>Allow code changes and comments on this PR for this session. Approving continues the work.</p>
+    <div class="approval-actions"><button class="primary small" data-pr-access="${a.id}" data-decision="approve">Approve</button><button class="small" data-pr-access="${a.id}" data-decision="deny">Not Approve</button></div>
     <details><summary>PR details and write limits</summary><p>${esc(a.title)}</p>
       <p>Head repository ${a.head_repository_id}, branch ${esc(a.branch)} · Base ${esc(a.base_branch)}</p>
       <p>Other chats and requesters get no access. Code changes require the head repository to be independently enabled for writes.</p>
-      ${a.status==='approved'?'<p>Approval does not execute a write. Send a follow-up to continue the saved work.</p>':''}
     </details>
   </section>`).join(''));
   area.querySelectorAll('[data-pr-access]').forEach(button=>button.onclick=async()=>{
-    const id=run.id,version=state.pageVersion;button.disabled=true;
+    const id=run.id,version=state.pageVersion;
+    const actions=area.querySelectorAll('[data-pr-access]');actions.forEach(action=>action.disabled=true);
     try{
-      await api(`/api/runs/${id}/pr-write-access/${button.dataset.prAccess}`,{method:'POST',body:JSON.stringify({decision:button.dataset.decision})});
+      await api(`/api/runs/${id}/pr-write-access/${button.dataset.prAccess}`,{method:'POST',body:JSON.stringify({decision:button.dataset.decision,resume:button.dataset.decision==='approve'})});
       const updated=await api(`/api/runs/${id}`);
       if(state.selected===id&&state.pageVersion===version)renderPrWriteAccess(updated);
-    }catch(error){toast(error.message);button.disabled=false;}
-  });
-  area.querySelectorAll('[data-pr-continue]').forEach(button=>button.onclick=()=>{
-    const input=$('#followup');if(!input)return;
-    if(!input.value)input.value=`I approved access to PR #${button.dataset.prContinue} for this chat. Check the approval and continue the requested work.`;
-    input.focus();input.dispatchEvent(new Event('input',{bubbles:true}));
+    }catch(error){toast(error.message);actions.forEach(action=>action.disabled=false);}
   });
 }
 

@@ -29,13 +29,15 @@ billable Modal compute during its idle window. Set `SANDBOX_IDLE_SECONDS=0` or
 
 Worker restarts preserve the saved idle deadline. Pending follow-ups can reuse
 the guest without extending its absolute machine lifetime. Stop, expiry, a
-different requester/model/build, or disabling reuse releases it. A missing guest
-can be replaced before launch; a lost active execution is never silently replayed.
+different requester/model/build, removing the saved model, or disabling reuse
+releases it. Removing a model preserves completed answers; fresh turns still
+require an enabled model. A missing guest can be replaced before launch; a lost
+active execution is never silently replayed.
 Child and credential waits release the guest. Explicitly waking Computer while
 the agent is idle releases the control guest and follows normal computer admission.
 
-This lifecycle change requires matching role protocol revision **16** and schema
-revision **17** from current main. Older workers interpret a warm sandbox as a full
+This lifecycle change requires matching role protocol revision **17** and schema
+revision **18** from current main. Older workers interpret a warm sandbox as a full
 workspace computer, so this is a coordinated release boundary. It does not change
 the independent-runtime production setting or deploy any role. Deep Agents runs
 on resident workers and does not use this Codex control-sandbox reuse path.
@@ -43,10 +45,10 @@ on resident workers and does not use this Codex control-sandbox reuse path.
 ## Qualify a deployment
 
 Use a staging deployment with the existing Modal connection, model gateway,
-durable runtime and connected apps. This release requires schema revision **17**
-and API, worker, broker and coordinator protocol revision **16**. Follow the
+durable runtime and connected apps. This release requires schema revision **18**
+and API, worker, broker and coordinator protocol revision **17**. Follow the
 [coordinated migration procedure](schema-migrations.md); it is not an API-only
-or compatible rolling update from revision 8.
+or compatible rolling update from protocol revision 16.
 
 1. Set the following shared setting on every role in the target release:
 

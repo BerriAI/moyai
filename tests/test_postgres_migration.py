@@ -60,7 +60,8 @@ def test_plan_is_read_only_and_requires_no_destination(source, monkeypatch):
     monkeypatch.setattr(psycopg, 'connect', lambda *a, **kw: pytest.fail('plan must not contact Postgres'))
     report = migration.plan(store.path.parent)
     assert report['objects']['table'] >= 81
-    assert report['objects']['view'] == 2 and report['objects']['trigger'] == 1
+    from app.database_schema import SESSION_EVENT_TRIGGERS
+    assert report['objects']['view'] == 2 and report['objects']['trigger'] == 1 + len(SESSION_EVENT_TRIGGERS)
     assert report['tables']['connections']['rows'] == 1
     assert report['source_preserved'] and not report['runtime_cutover']
     assert hashlib.sha256(store.path.read_bytes()).hexdigest() == before

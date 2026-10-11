@@ -9,7 +9,7 @@ import hashlib
 import json
 
 from .database import RUNTIME_SETTINGS
-from .schema_migrations import SCHEMA_REVISION
+from .schema_migrations import SCHEMA_COMPATIBILITY_REVISION
 
 # Unlimited swarms persist budget_seconds=0 and ends_at=''. Older roles parse
 # every deadline as a timestamp and cannot safely read or execute these rows.
@@ -23,21 +23,22 @@ from .schema_migrations import SCHEMA_REVISION
 # Immutable attachment manifests/parts must be understood by intake and workers.
 # Publishing workflow files uses explicit per-operation Workflows permission.
 # Snapshotless workers wait for shared preparation; restored services are verified.
+# GitHub coding capabilities and shared environment-template publication policy.
 # Independent control guests can now be warm. Older workers would resume these
 # as full workspace computers, so adoption/rollback requires matching roles.
-API_PROTOCOL_REVISION = 16
+API_PROTOCOL_REVISION = 17
 # Bump for incompatible durable session state, Temporal workflow histories or
 # activity payloads, sandbox journals/capabilities, and worker/broker writes.
 # Matching revisions require a reviewed cross-release handoff and rollback.
-WORKER_PROTOCOL_REVISION = 16
-BROKER_PROTOCOL_REVISION = 16
-COORDINATOR_PROTOCOL_REVISION = 16
+WORKER_PROTOCOL_REVISION = 17
+BROKER_PROTOCOL_REVISION = 17
+COORDINATOR_PROTOCOL_REVISION = 17
 
 
 def api_fingerprint(settings):
     return hashlib.sha256(json.dumps({
         'protocol': API_PROTOCOL_REVISION,
-        'schema': SCHEMA_REVISION,
+        'schema': SCHEMA_COMPATIBILITY_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
     }, sort_keys=True).encode()).hexdigest()
 
@@ -58,7 +59,7 @@ def background_fingerprint(settings, role):
         'broker_protocol': BROKER_PROTOCOL_REVISION,
         'coordinator_protocol': COORDINATOR_PROTOCOL_REVISION,
         'api_protocol': API_PROTOCOL_REVISION,
-        'schema': SCHEMA_REVISION,
+        'schema': SCHEMA_COMPATIBILITY_REVISION,
         'settings': {name: getattr(settings, name) for name in RUNTIME_SETTINGS if name != 'moyai_build_sha'},
     }, sort_keys=True).encode()).hexdigest()
 

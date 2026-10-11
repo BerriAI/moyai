@@ -423,7 +423,7 @@ class RunManager:
         from .workspace_image import workspace_image
         return workspace_image(self.settings)
 
-    def is_active(self, run_id):
+    def is_active(self, run_id, *, run=None):
         return run_id in self.jobs
 
     def spec(self, run):
