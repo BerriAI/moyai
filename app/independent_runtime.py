@@ -43,8 +43,15 @@ class IndependentRuntime:
                 r.settings.resolve_model(fallback=run['active_model'] or run['model']), r.prepared.build]
 
     def reusable(self, run, state):
-        return (self.supports(run) and run['harness'] == 'codex'
-                and state.get('runtime_scope') == self.scope(run))
+        if not self.supports(run):
+            return False
+        try:
+            scope = self.scope(run)
+        except ValueError:
+            # A removed model ends reuse, not the successfully completed turn.
+            # Fresh provisioning still validates through scope() directly.
+            return False
+        return state.get('runtime_scope') == scope
 
     def provider(self):
         backend = ModalProvider(self.runner.settings, self.runner.modal_clients)

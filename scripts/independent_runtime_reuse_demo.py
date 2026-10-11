@@ -13,7 +13,7 @@ warnings.filterwarnings('ignore', message='Using .*starlette.testclient.*')
 
 from pytest import MonkeyPatch
 from agent.harnesses.codex_harness import CodexAgent
-from app.config import Settings
+from app.config import MODEL_CATALOG, Settings
 from app.db import Store
 from app.temporal_runtime import TemporalRunManager
 from sandbox.codex_runtime import RuntimeLease
@@ -21,7 +21,7 @@ from test_codex_tool_readiness import readiness_case
 from test_durable import Cloud, drive
 
 
-async def demonstrate(output):
+async def demonstrate(output, *, disable_model=False):
     output.mkdir(parents=True, exist_ok=True)
     print('Actual Moyai controller + SQLite + pinned Codex SDK + MCP.', flush=True)
     print('Modal allocation and model responses are local fixtures; no production traffic.', flush=True)
@@ -31,7 +31,8 @@ async def demonstrate(output):
         settings = Settings(_env_file=None, data_dir=root / 'data', session_secret='local-demo-only',
             agent_model='openai/gpt-6-astra', independent_agent_runtime=True, sandbox_idle_seconds=300)
         store = Store(settings.data_dir)
-        run = store.create_run('Read the connected source.', '', 'modal', [], chat_enabled=True, harness='codex')
+        run = store.create_run('Read the connected source.', '', 'modal', [], chat_enabled=True,
+                               harness='codex', model=settings.agent_model)
         cloud = Cloud(patch, store, run['id'])
         manager = cloud.attach(TemporalRunManager(store, settings))
         manager.submit(run)
@@ -93,16 +94,27 @@ async def demonstrate(output):
             print(f'PASS: same control guest and Codex process {proofs[1]["pid"]}; no second allocation.', flush=True)
             print('PASS: fresh thread, rotated access token, current tools and saved conversation.', flush=True)
 
-            print('3. Stopping the idle chat…', flush=True)
-            await manager.cancel(run['id'])
+            if disable_model:
+                print('3. Removing the saved model while the chat is idle…', flush=True)
+                patch.delitem(MODEL_CATALOG, settings.agent_model)
+                settings.agent_model = 'openai/gpt-6.1-sol'
+            else:
+                print('3. Stopping the idle chat…', flush=True)
+                await manager.cancel(run['id'])
             await drive(manager, run['id'])
             assert not cloud.machines[0].alive and manager.state(run['id'])['phase'] == 'idle'
             print('PASS: retained guest released; both answers remain saved exactly once.', flush=True)
             assert len([m for m in manager.store.messages(run['id']) if m['role'] == 'assistant']) == 2
+            if disable_model:
+                assert manager.store.run(run['id'])['status'] == 'idle'
+                assert all(m['status'] == 'completed' for m in manager.store.messages(run['id']))
+                assert await manager.advance(run['id']) is False
+                print('PASS: chat stays idle, both turns completed; no failure or retry loop.', flush=True)
             report = {'scope': 'Local simulated Modal/model, actual controller/SQLite/Codex/MCP',
                 'control_allocations': len(cloud.machines), 'turns': len(cloud.launches),
                 'full_computers': 0, 'same_native_process': True, 'fresh_capability': True,
-                'worker_restart': True, 'stop_released_guest': True, 'proofs': proofs}
+                'worker_restart': True, 'stop_released_guest': not disable_model,
+                'disabled_model_released_guest': disable_model, 'proofs': proofs}
             (output / 'warm-runtime-proof.json').write_text(json.dumps(report, indent=2) + '\n')
             print('VERIFIED: two turns, one control guest, one native process, zero full computers.', flush=True)
         finally:
@@ -120,4 +132,6 @@ async def demonstrate(output):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
-    asyncio.run(demonstrate(parser.parse_args().output))
+    parser.add_argument('--disable-model', action='store_true', help='Release by removing the saved model instead of Stop.')
+    args = parser.parse_args()
+    asyncio.run(demonstrate(args.output, disable_model=args.disable_model))

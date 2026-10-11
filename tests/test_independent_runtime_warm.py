@@ -114,6 +114,48 @@ async def test_disabling_reuse_releases_an_existing_idle_guest(warm_runtime, set
     assert manager.state(run_id)['phase'] == 'idle' and not cloud.machines[0].alive
 
 
+@pytest.mark.parametrize('phase', ['checkpointed', 'warm'])
+@pytest.mark.parametrize('queued_followup', [False, True])
+async def test_disabled_saved_model_releases_guest_without_failing_answer(warm_runtime, phase, queued_followup):
+    manager, cloud, run_id, _ = warm_runtime
+    manager.store.execute('UPDATE runs SET model=? WHERE id=?', ('test-model', run_id))
+    manager.store.execute('UPDATE messages SET model=? WHERE run_id=?', ('test-model', run_id))
+    await drive(manager, run_id, phase=phase)
+    assert manager.state(run_id)['runtime_scope'][2] == 'test-model'
+
+    # Changing a custom gateway default removes the previous model from the allowlist.
+    manager.settings.agent_model = 'replacement-model'
+    assert 'test-model' not in manager.settings.allowed_models()
+    if queued_followup:
+        manager.store.enqueue_message(run_id, 'Use the enabled model', 'second', model='replacement-model')
+        await drive(manager, run_id, phase='monitor')
+        assert len(cloud.machines) == len(cloud.launches) == 2
+        assert cloud.machines[1].spec['model'] == 'replacement-model'
+        await drive(manager, run_id, phase='warm')
+    else:
+        await drive(manager, run_id)
+        assert await manager.advance(run_id) is False
+        assert len(cloud.machines) == len(cloud.launches) == 1
+    assert not cloud.machines[0].alive
+    assert cloud.terminations == [cloud.machines[0].object_id]
+    assert manager.store.run(run_id)['status'] == 'idle'
+    assert not manager.store.run(run_id)['token_hash']
+    assert all(m['status'] == 'completed' for m in manager.store.messages(run_id))
+    assert [m['content'] for m in answers(manager, run_id)] == ['Saved answer'] * (2 if queued_followup else 1)
+
+
+async def test_disabled_model_still_rejects_fresh_runtime_provisioning(warm_runtime):
+    manager, cloud, run_id, _ = warm_runtime
+    manager.store.execute('UPDATE runs SET model=? WHERE id=?', ('test-model', run_id))
+    manager.store.execute('UPDATE messages SET model=? WHERE run_id=?', ('test-model', run_id))
+    await drive(manager, run_id, phase='provision')
+    manager.settings.agent_model = 'replacement-model'
+    await drive(manager, run_id)
+    assert manager.store.run(run_id)['status'] == 'failed'
+    assert manager.store.messages(run_id)[0]['status'] == 'failed'
+    assert not cloud.machines and not cloud.launches
+
+
 @pytest.mark.parametrize('phase', ['finish', 'warm'])
 async def test_stop_releases_control_guest_without_duplicate_answer(warm_runtime, phase):
     manager, cloud, run_id, _ = warm_runtime
