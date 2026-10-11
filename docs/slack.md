@@ -35,8 +35,22 @@ Each event is durably deduplicated. Preparation failures retry up to three times
 if a message send has an uncertain outcome, it is not replayed on restart. The
 answer remains available in Moyai. Notification failures never stop agent work.
 
+Session state changes enter a shared transactional lifecycle inbox. The shared
+`SessionEvents` component resolves response-ready, approval, access, failure and
+interruption states; the Slack adapter owns eligibility, message formatting and
+delivery. This is automatic application behavior, with no new model tool or
+skill requirement. Existing skills still use `slack_send` for requested messages.
+
+The worker processes changed sessions in bounded batches. Commits wake the local
+worker; PostgreSQL `LISTEN/NOTIFY` also wakes it for other processes. Notifications
+are wakeup hints: durable inbox entries and a 30-second inbox reconciliation cover
+restarts or lost connections without rescanning session history. Each new consumer
+gets one initial snapshot for migration from polling. Subsequent starts resume its
+inbox. Changes coalesce per session so requests resolved before handling stay quiet;
+queue insertion and inbox acknowledgment commit together.
+
 PostgreSQL deployments using explicit migrations must run the offline schema
-migration before starting this release (schema revision 16).
+migration before starting this release (schema revision 18).
 
 ## Chat with Moyai in Slack
 

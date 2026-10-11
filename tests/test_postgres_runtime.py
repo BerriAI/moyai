@@ -148,6 +148,38 @@ def test_read_projection_keeps_one_snapshot_while_writes_continue(store):
     assert len(store.events(run['id'])) == before + 1
 
 
+@pytest.mark.parametrize('lock', ['FOR UPDATE', 'FOR NO KEY UPDATE', 'FOR /* row lock */\n UPDATE', 'FOR SHARE', 'FOR KEY SHARE'])
+@pytest.mark.parametrize('present', [False, True])
+def test_locking_reads_keep_ownership_without_publishing_changes(store, lock, present):
+    run = store.create_run('Lock without writing', '', 'demo', [])
+    generation, commits = store.generation, []
+    store.commit_listeners.add(lambda: commits.append('changed'))
+    with store.connect() as conn:
+        row = conn.execute('SELECT id FROM runs WHERE id=? ' + lock,
+                           (run['id'] if present else 'missing',)).fetchone()
+        assert bool(row) == present
+        assert conn.write_locked  # Retain the advisory lock and ownership fence.
+    assert store.generation == generation
+    assert commits == []
+
+
+def test_locking_read_does_not_hide_cte_or_prior_writes(store):
+    run = store.create_run('Write with a locking read', '', 'demo', [])
+    generation, commits = store.generation, []
+    store.commit_listeners.add(lambda: commits.append('changed'))
+    with store.connect() as conn:
+        row = conn.execute('''WITH locked AS (SELECT id FROM runs WHERE id=? FOR UPDATE),
+            changed AS (UPDATE runs SET summary='CTE write' WHERE id IN (SELECT id FROM locked) RETURNING id)
+            SELECT id FROM changed''', (run['id'],)).fetchone()
+        assert row['id'] == run['id']
+    assert store.run(run['id'])['summary'] == 'CTE write'
+    assert store.generation == generation + 1 and commits == ['changed']
+    with store.connect() as conn:
+        conn.execute("UPDATE runs SET summary='Prior write' WHERE id=?", (run['id'],))
+        conn.execute('SELECT id FROM runs WHERE id=? FOR NO KEY UPDATE', (run['id'],)).fetchone()
+    assert store.generation == generation + 2 and commits == ['changed', 'changed']
+
+
 def test_second_instance_cannot_run_startup_recovery(store, target, tmp_path):
     url, schema = target
     run = store.create_run('Running work', '', 'demo', [], chat_enabled=True)
