@@ -114,6 +114,108 @@ def test_preflight_and_noop_make_no_writes(setup, preflight):
     assert release.record['status'] == ('preflight_passed' if preflight else 'success')
 
 
+def probe_sequence(release, outcomes, *, preflight=False):
+    original, attempts = release.probe, []
+    def probe(service):
+        if (service.id == COORDINATOR and release.selected == (None if preflight else WORKER)
+                and len(attempts) < len(outcomes)):
+            value = outcomes[len(attempts)]
+            attempts.append(service.role)
+            return value(original(service)) if callable(value) else deepcopy(value)
+        return original(service)
+    release.probe = probe
+    return attempts
+
+
+@pytest.mark.parametrize('reason', ['ssh_timeout', 'ssh_connection_lost', 'database_unavailable'])
+@pytest.mark.parametrize('preflight', [True, False])
+def test_transient_read_only_probes_recover_without_repeating_writes(setup, reason, preflight):
+    release, render, _ = setup
+    attempts = probe_sequence(release, [{'ok': False, 'reason': reason}] * 2 + [lambda state: state],
+                              preflight=preflight)
+    release.run()
+    assert len(attempts) == 3 and release.record['status'] == 'success'
+    assert release.record['probe_failures'] == [
+        {'role': 'coordinator', 'reason': reason, 'attempt': attempt} for attempt in (1, 2)]
+    assert [call[1] for call in render.calls if call[0] == 'PUT'] == [WORKER, BROKER, COORDINATOR, API_ID]
+    assert [call[1] for call in render.calls if call[0] == 'POST'] == [WORKER, BROKER, COORDINATOR, API_ID]
+
+
+def test_exhausted_read_only_probe_stops_before_any_mutation(setup):
+    release, render, _ = setup
+    attempts = probe_sequence(release, [{'ok': False, 'reason': 'ssh_timeout'}] * 4)
+    with pytest.raises(ReleaseError, match='coordinator probe failed.*after 3 attempt'):
+        release.run()
+    assert len(attempts) == 3 and not render.calls
+    assert release.record['changes'] == release.record['deploys'] == []
+
+
+@pytest.mark.parametrize('value', [None, [], {'ok': False}, {'ok': 'yes'},
+    {'ok': False, 'reason': 'private-diagnostic'},
+    {'ok': False, 'reason': 'ssh_timeout', 'extra': 'private-diagnostic'},
+    {'ok': False, 'reason': 'ssh_timeout', 'stage': 'environment'},
+    {'ok': False, 'reason': 'runtime_validation_failed', 'stage': 'private-diagnostic'},
+    {'ok': False, 'reason': 'runtime_validation_failed', 'stage': []},
+    *[{'ok': False, 'reason': reason} for reason in (
+        'ssh_failed', 'runtime_validation_failed', 'database_error', 'health_unavailable', 'probe_output_invalid')],
+])
+def test_unclassified_or_terminal_failures_never_retry_or_expose_details(setup, value):
+    release, render, _ = setup
+    attempts = probe_sequence(release, [value, lambda state: state])
+    with pytest.raises(ReleaseError, match='after 1 attempt'):
+        release.run()
+    assert len(attempts) == 1 and not render.calls
+    assert 'private-diagnostic' not in release.receipt.read_text()
+
+
+@pytest.mark.parametrize('stage', ['environment', 'configuration', 'snapshot', 'contracts', 'health_identity'])
+def test_fixed_validation_stage_is_reported_without_retry(setup, stage):
+    release, render, _ = setup
+    attempts = probe_sequence(release, [{'ok': False, 'reason': 'runtime_validation_failed', 'stage': stage}])
+    with pytest.raises(ReleaseError, match=f'runtime_validation_failed:{stage}'):
+        release.run()
+    assert len(attempts) == 1 and not render.calls
+    assert release.record['probe_failures'] == [
+        {'role': 'coordinator', 'reason': 'runtime_validation_failed', 'stage': stage, 'attempt': 1}]
+
+
+@pytest.mark.parametrize('change', ['policy', 'contracts', 'schema', 'owners', 'identity', 'ready', 'schema_support'])
+def test_recovered_probe_drift_is_fatal_on_that_sample(setup, change):
+    release, render, _ = setup
+    def changed(state):
+        if change == 'policy': state['policy'] = '0' * 64
+        elif change == 'contracts': state['contracts']['worker'] = '0' * 64
+        elif change == 'schema': state['schema'] += 1
+        elif change == 'owners': state['owners'].append(state['owners'][0])
+        elif change == 'identity': state['identity'] = '77@external'
+        elif change == 'ready': state['ready'] = False
+        else: state['schema_support'] = {'protocol': 1, 'required': 999, 'compatibility': 999}
+        return state
+    attempts = probe_sequence(release, [{'ok': False, 'reason': 'ssh_timeout'}, changed, lambda state: state])
+    with pytest.raises(ReleaseError): release.run()
+    assert len(attempts) == 2 and not render.calls
+
+
+def test_dashboard_change_during_retry_is_checked_before_another_probe_or_write(setup):
+    release, render, _ = setup
+    attempts = probe_sequence(release, [{'ok': False, 'reason': 'ssh_timeout'}, lambda state: state])
+    sleep = release.sleep
+    def edited(seconds):
+        sleep(seconds)
+        render.env[BROKER]['ENCRYPTION_KEY'] = 'private-external-edit'
+    release.sleep = edited
+    with pytest.raises(ReleaseError, match='environment changed outside'):
+        release.run()
+    assert len(attempts) == 1 and not render.calls
+    assert 'private-external-edit' not in release.receipt.read_text()
+
+
+def test_unverified_probe_is_not_reported_as_confirmed_cluster_drift(setup):
+    release, _, _ = setup
+    with pytest.raises(ReleaseError, match='probe did not return verified state'):
+        release.check_state({'ok': False})
+
+
 @pytest.mark.parametrize('sid', [WORKER, COORDINATOR])
 @pytest.mark.parametrize('command', [None, '', WORKSPACE_IMAGE_PREDEPLOY])
 def test_optional_image_build_hook_is_preserved_through_release(setup, sid, command):

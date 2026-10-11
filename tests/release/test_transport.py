@@ -1,6 +1,7 @@
 """Secret-safe API transport and authenticated read-only SSH invocation."""
 import io
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import urllib.error
@@ -60,3 +61,37 @@ def test_ssh_uses_pinned_host_and_only_sends_read_only_probe(monkeypatch):
         return SimpleNamespace(returncode=0, stdout='MOYAI_RELEASE_PROBE=' + json.dumps({'ok': True}))
     monkeypatch.setattr('scripts.release.deploy.subprocess.run', subprocess_run)
     assert SSHProbe(Path('/synthetic/key'))(service) == {'ok': True}
+
+
+@pytest.mark.parametrize('outcome,reason', [
+    ('timeout', 'ssh_timeout'), ('reset', 'ssh_connection_lost'),
+    ('refused', 'ssh_connection_lost'), ('closed', 'ssh_connection_lost'),
+    ('auth', 'ssh_failed'), ('host_key', 'ssh_failed'), ('unknown', 'ssh_failed'),
+    ('malformed', 'probe_output_invalid'), ('missing', 'probe_output_invalid'),
+    ('duplicate', 'probe_output_invalid'), ('array', 'probe_output_invalid'),
+    ('null', 'probe_output_invalid'), ('os_error', 'ssh_failed'),
+])
+def test_ssh_failure_codes_are_safe_and_transport_remains_single_shot(monkeypatch, capsys, outcome, reason):
+    env, calls = Render().env[WORKER], []
+    service = Service(WORKER, 'worker', env, dict(env), OLD, 'dep-synthetic')
+    def run(*args, **kwargs):
+        calls.append(args)
+        if outcome == 'timeout':
+            raise subprocess.TimeoutExpired('ssh', 50, output='private-output', stderr='private-error')
+        if outcome == 'os_error':
+            raise OSError('private-error')
+        errors = {'reset': 'Connection reset by peer', 'refused': 'Connection refused',
+                  'closed': 'Connection closed by remote host', 'auth': 'Permission denied\nConnection closed by host',
+                  'host_key': 'Host key verification failed\nConnection closed by host', 'unknown': 'unknown exit'}
+        output = 'MOYAI_RELEASE_PROBE={"ok":true}'
+        if outcome == 'malformed': output = 'MOYAI_RELEASE_PROBE={private-output'
+        elif outcome == 'missing': output = 'private-output'
+        elif outcome == 'duplicate': output += '\n' + output
+        elif outcome == 'array': output = 'MOYAI_RELEASE_PROBE=[]'
+        elif outcome == 'null': output = 'MOYAI_RELEASE_PROBE=null'
+        return SimpleNamespace(returncode=255 if outcome in errors else 0, stdout=output,
+                               stderr=errors.get(outcome, '') + ' private-error')
+    monkeypatch.setattr(subprocess, 'run', run)
+    result = SSHProbe(Path('/synthetic/key'))(service)
+    assert result == {'ok': False, 'reason': reason} and len(calls) == 1
+    assert 'private-' not in json.dumps(result) and capsys.readouterr() == ('', '')
