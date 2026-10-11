@@ -24,7 +24,7 @@ worker admission. This initial transition is not an overlapping update.
 `WORKER_PROTOCOL_REVISION` in `app/runtime_compatibility.py` covers durable session
 state, sandbox launch journals and capabilities, Temporal workflow histories and
 activity arguments/results, and the worker's writes consumed by other roles. The
-fingerprint also includes all background and API protocols, exact schema revision and every shared
+fingerprint also includes all background and API protocols, schema compatibility revision and every shared
 runtime setting except build SHA. The coordinator publishes all enabled role
 contracts atomically with its exact cluster policy after component setup succeeds.
 Workers never publish a policy. Auto-schema and co-located-broker clusters retain
@@ -44,7 +44,9 @@ workers must understand candidate writes and workflow histories during overlap
 and rollback. Keep provider, harness, feature and security settings aligned too;
 the fingerprint is not an exhaustive settings validator. Replay saved workflow
 histories. Bump the worker protocol for incompatible changes; bump the schema
-revision for schema changes. Use maintenance when compatibility is uncertain.
+revision for schema changes. Reviewed additive migrations retain the compatibility
+revision and require the [migration bridge](schema-migrations.md#reviewed-online-expansions)
+on every role first. Use maintenance when compatibility is uncertain.
 
 ## Replacement and rollback semantics
 

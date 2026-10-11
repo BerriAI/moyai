@@ -126,13 +126,15 @@ loops; use scheduling diagnostics to find remaining stalls.
    coordinator. Start with existing budgets, then increase in measured steps.
 5. Replicas of the same build/policy may overlap during worker replacement.
    For the full rolling topology, perform the one-time offline migration to the
-   selected release's schema (currently revision 15), activate dedicated API/edge
+   selected release's schema (currently revision 17), activate dedicated API/edge
    routing, and enable coordinator handoff with the reviewed shared settings.
    Then use the [rolling release procedure](rolling-deploy.md) to replace workers,
    broker, coordinator and API while users continue submitting work. Compatible
    releases preserve the baseline cluster policy. A changed shared setting,
-   protocol or schema still requires a coordinated maintenance transition;
-   overlapping deployments do not make arbitrary schema migrations online.
+   protocol or breaking schema change still requires a coordinated maintenance
+   transition. Once every role runs the migration bridge, explicitly reviewed
+   additive schema steps can run in that same rolling action; see
+   [online schema migrations](schema-migrations.md#reviewed-online-expansions).
 
 Use a direct database connection or session-preserving proxy, not transaction-mode
 pooling. Budget `sum(pool_size + 1)` across all processes, plus one model-slot

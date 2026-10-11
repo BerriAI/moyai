@@ -59,7 +59,7 @@ def test_compatible_workers_overlap_without_changing_coordinator_policy(cluster,
 
 
 @pytest.mark.parametrize('contract', ['WORKER_PROTOCOL_REVISION', 'BROKER_PROTOCOL_REVISION',
-                                    'COORDINATOR_PROTOCOL_REVISION', 'API_PROTOCOL_REVISION', 'SCHEMA_REVISION'])
+                                    'COORDINATOR_PROTOCOL_REVISION', 'API_PROTOCOL_REVISION', 'SCHEMA_COMPATIBILITY_REVISION'])
 def test_incompatible_worker_contract_rejected_before_components(cluster, monkeypatch, contract):
     _, settings = cluster
     before = policies(settings)

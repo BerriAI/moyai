@@ -12,6 +12,9 @@ import json
 from .database import DatabaseError, identifier
 
 SCHEMA_REVISION = 17
+# Physical additive expansions can keep this contract after a reviewed online
+# manifest step. Incompatible changes advance it and require maintenance.
+SCHEMA_COMPATIBILITY_REVISION = 17
 # Dependency order; optional features are prepared even when disabled at runtime.
 COMPONENTS = (
     'user_roles', 'sandbox_settings', 'github_repositories', 'github_write_access',
@@ -36,7 +39,8 @@ def prepare_schema(owner, schema, mode):
             raise DatabaseError('This schema uses explicit migrations. Set MOYAI_SCHEMA_MODE=verify.')
         return
     if mode == 'verify':
-        if state != (SCHEMA_REVISION, 0):
+        from .online_migrations import schema_is_compatible
+        if not schema_is_compatible(owner, schema, SCHEMA_REVISION, SCHEMA_COMPATIBILITY_REVISION):
             raise DatabaseError('Schema is missing, incomplete, or incompatible. Run the offline migration command before starting Moyai.')
         return
     if state and state[0] > SCHEMA_REVISION:

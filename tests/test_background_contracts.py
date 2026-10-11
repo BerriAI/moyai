@@ -11,7 +11,7 @@ from test_separate_broker import split_settings  # noqa: F401
 
 @pytest.mark.parametrize('role', ['worker', 'broker'])
 @pytest.mark.parametrize('revision', ['API_PROTOCOL_REVISION', 'WORKER_PROTOCOL_REVISION',
-                                    'BROKER_PROTOCOL_REVISION', 'COORDINATOR_PROTOCOL_REVISION', 'SCHEMA_REVISION'])
+                                    'BROKER_PROTOCOL_REVISION', 'COORDINATOR_PROTOCOL_REVISION', 'SCHEMA_COMPATIBILITY_REVISION'])
 def test_each_background_role_checks_all_reviewed_protocols_before_components(cluster, monkeypatch, role, revision):
     _, settings = cluster
     before = execute(settings, 'SELECT * FROM runtime_policy')

@@ -1,19 +1,22 @@
 # Explicit PostgreSQL schema migrations
 
 Explicit schema verification is the database prerequisite for
-[compatible rolling releases](rolling-deploy.md). The selected release currently
-requires revision 15, including the conversation journal, goal/source records,
-computer operations, complete broker payloads, shared swarm chat and scoped
-automation grants, repository context and skill-learning drafts. Verified roles can overlap only
-under their reviewed protocols and shared settings; schema changes themselves
-remain offline. Production is not opted in by merging code.
+[compatible rolling releases](rolling-deploy.md). This bridge release requires
+revision **17**. Verified roles can overlap under their reviewed protocols and
+shared settings. After every role runs the bridge, future explicitly reviewed
+additive revisions can use the rolling action; initial activation and breaking
+changes still require maintenance. Production is not opted in by merging code.
 
 `MOYAI_SCHEMA_MODE=auto` remains the default for existing installations and SQLite.
 For an explicitly migrated PostgreSQL schema, use `MOYAI_SCHEMA_MODE=verify` on
-**every role**. Constructors then verify the code-owned schema revision and skip
+**every role**. Constructors then verify the code-owned schema requirement and skip
 all component schema setup, legacy backfills and default insertion. Normal
 application data writes and runtime-policy publication still work. Startup also
 rejects accidental DDL through the application database adapter.
+An exact clean revision is admitted directly. An older bridge can also admit a
+newer physical revision only when a complete committed receipt chain proves
+compatible additive steps from its own known schema digest. A newer number alone
+is insufficient.
 
 ## First activation (coordinated maintenance)
 
@@ -30,7 +33,7 @@ rejects accidental DDL through the application database adapter.
    python -m app.schema_migrations --apply
    ```
 
-   It prints `{"schema_revision": 15, "status": "ready"}` on success. An empty
+   It prints `{"schema_revision": 17, "status": "ready"}` on success. An empty
    schema must already exist, and requires `MOYAI_DATABASE_INITIALIZE=true`.
    Existing schemas do not need that flag. No credentials are printed.
 4. Set `MOYAI_SCHEMA_MODE=verify` on every role, including the dedicated API.
@@ -42,11 +45,60 @@ rejects accidental DDL through the application database adapter.
 The API-only and rolling release modes do **not** perform this first migration
 or topology activation. Complete the separately coordinated maintenance
 transition before enabling them. A normal pre-deploy hook that runs while the old
-app is live will be rejected. Future compatible application releases keep the
-verified schema and shared contracts unchanged; a schema bump requires a new
-maintenance transition.
+app is live will be rejected. Once this activation is complete, deploy the bridge
+at the same schema revision to all four roles before using online expansions.
+An installation still on an earlier revision, such as revision 14, first needs
+the one-time maintenance adoption of revision 17; the empty online registry
+does not provide a migration path for it.
 
-## Failure and rollback
+## Reviewed online expansions
+
+Keep `MOYAI_SCHEMA_MODE=verify`. Use the usual **Deploy production** action with
+**rolling** selected. The controller computes the plan from the immutable
+candidate checkout, verifies every live role's installed protocol support, and
+applies the plan before replacing any service. `preflight_only` validates the
+entire plan and records it while making no database or service writes.
+
+`app/online_schema_migrations.json` is the explicit reviewed registry. Each step
+names its source and target revision, their digests from `schema_versions.json`,
+the unchanged compatibility revision, and a list of declarative operations.
+Steps must be contiguous. The bridge initially has an empty registry and retains
+compatibility revision 17, preserving the existing role fingerprints.
+
+Protocol 1 accepts only:
+
+- New tables with explicit columns, fixed supported data types and optional
+  primary keys.
+- Nullable columns without defaults on existing tables.
+- Plain indexes on tables created in the same migration step.
+
+There is no arbitrary SQL, table/column removal or rename, type replacement,
+new required column on an existing table, default expression, foreign key,
+existing-table index build, or data backfill. A revision needing any of these
+must use a separately reviewed maintenance transition. Structural admission does
+not replace application review: old and new readers/writers must tolerate the
+expanded shape and preserve their shared runtime contracts.
+
+The installed engine validates the plan and its source against a local schema
+digest or verified receipt chain. A dedicated online migration lock prevents two
+plans running together, while a shared runtime lock excludes the offline
+migrator without excluding active application owners. DDL, durable step receipts
+and the new schema revision commit in one transaction. The lock timeout is
+250 ms, the statement timeout is five seconds, and the transaction budget is
+20 seconds. PostgreSQL 17 and newer enforce that total at the server; the engine
+also checks a monotonic deadline between operations. Statement or validation
+failures inside the transaction roll the whole plan back. A lost commit
+acknowledgement remains uncertain and does not imply rollback. No background
+jobs, provider clients or schema initializers are started by this path.
+
+After commit, all four existing service identities must still be healthy with
+the same policy/contracts and the target schema before replacement begins. An
+uncertain response stops the release without retry or rollback. Inspect the
+receipt and database state; a fresh action can observe a complete compatible
+target and resume replacements without executing the plan again. A partial
+receipt chain, dirty state or unknown schema drift is rejected.
+
+## Maintenance migration failure and rollback
 
 The exclusive database ownership connection lasts through all schema functions,
 backfills and the final receipt. The migrator commits a dirty marker before any
@@ -62,8 +114,10 @@ large atomic database rollback. Do not clear the dirty marker manually.
 
 A migrator refuses schemas with a newer revision. After the first explicit
 migration, auto mode refuses the schema: keep verify mode for rollbacks to a
-release supporting the same revision. A pre-feature release or an older schema
-revision requires a separately reviewed database restore/rollback procedure.
+release supporting the same revision or a verified compatible expansion. A
+pre-feature release or a breaking schema downgrade requires a separately
+reviewed database restore/rollback procedure. Do not drop the online ledger to
+force admission by an older binary.
 
 ## Changing the schema
 
@@ -75,8 +129,26 @@ Do not place DDL, migration backfills or seed writes in ordinary constructors.
 Increment `SCHEMA_REVISION` when any initializer changes and **append**, never
 rewrite, that revision's digest in `app/schema_versions.json`. The manifest test
 prints the expected normalized source digest. CI also checks that every component
-initializer is registered. Revisions must be contiguous. Compatibility across
-different schema revisions is deliberately not assumed.
+initializer is registered. Revisions must be contiguous. For an online expansion,
+also append the reviewed declarative step and keep `SCHEMA_COMPATIBILITY_REVISION`
+unchanged only after verifying mixed-version reads/writes. Missing declarations
+fail closed. A breaking change advances the compatibility revision and uses the
+maintenance procedure; compatibility across revisions is never inferred.
+
+For example, a reviewed future step can add one optional field without rewriting
+existing rows. Its `operations` entry would be:
+
+```json
+{"kind": "add_column", "table": "runs", "name": "optional_note", "type": "TEXT", "nullable": true}
+```
+
+Wrap operations in a step with `from_revision`, `to_revision`, `compatibility`,
+`source_digest`, and `target_digest`, using the actual entries from
+`schema_versions.json`. The plan digest is computed by the planner, not entered
+manually. Types describe PostgreSQL directly: use `BIGINT` for a column whose
+SQLite initializer says `INTEGER`. Each schema PR must test its declared DDL
+against the target initializer, as well as old/new reads and writes; the source
+digest binds the declaration to that revision but does not prove DDL equivalence.
 
 ## Local proof
 
@@ -85,9 +157,19 @@ Point `MOYAI_TEST_POSTGRES_URL` at a disposable PostgreSQL database, then run:
 ```sh
 python -m pytest -q tests/test_schema_migrations.py
 python -m scripts.schema_migration_probe --output /tmp/moyai-schema-proof
+python -m pytest -q tests/test_online_migrations.py tests/release
+python -m scripts.online_migration_probe --output /tmp/moyai-online-migration
 ```
 
 The probe creates/drops only its own randomly named test schema. It records real
 migration and constructor results in JSON and a terminal cast. It does not run
 Temporal, inference, or external provider requests; it proves schema admission
 and restart behavior, not production traffic handoff.
+
+The online probe keeps a separate worker process writing and renewing its lease
+through a synthetic future expansion. It reconnects an old-source reader, kills
+a migration process after real uncommitted DDL, and verifies rollback and an
+explicit inspected retry. The required production release rehearsal runs these
+checks and saves their receipts. This remains a local PostgreSQL proof; a real
+Render deployment with an active session is still required for production
+continuity qualification.
