@@ -15,13 +15,14 @@ function setup(status='pending'){
  const run={id:'chat',pr_write_access:[{id:'scope',repository:'org/repo',number:7,title:'<img onerror=alert(1)>',head_repository_id:9,branch:'<script>',base_branch:'main',status}]};
  return {context,area,input,run,buttons,continuations};
 }
-test('consent identifies scope, escapes metadata and exposes only allowed transitions',()=>{
+test('only pending consent is shown with two decisions and escaped scope',()=>{
  for(const status of ['pending','approved','denied','revoked']){
   const {context,area,run}=setup(status);context.renderPrWriteAccess(run);
-  assert.match(area.innerHTML,/org\/repo #7/);assert.match(area.innerHTML,/saved chat only/);
+  if(status!=='pending'){assert.equal(area.innerHTML,'');continue;}
+  assert.match(area.innerHTML,/org\/repo #7/);assert.match(area.innerHTML,/this session/);
   assert.doesNotMatch(area.innerHTML,/<img|<script>/);
-  assert.equal(area.innerHTML.includes('Allow for this chat'),status==='pending');
-  assert.equal(area.innerHTML.includes('Revoke access'),status==='approved');
+  assert.match(area.innerHTML,/>Approve</);assert.match(area.innerHTML,/>Not Approve</);
+  assert.doesNotMatch(area.innerHTML,/Continue in chat|Revoke access/);
  }
 });
 test('approval responses cannot replace a newly opened chat',async()=>{
@@ -31,8 +32,21 @@ test('approval responses cannot replace a newly opened chat',async()=>{
  area.innerHTML='other chat';resolve({status:'approved'});await pending;
  assert.equal(area.innerHTML,'other chat');
 });
-test('continue prepares an editable follow-up without sending or replacing a draft',()=>{
- const {context,run,input,continuations}=setup('approved');continuations.push({dataset:{prContinue:'7'}});
- context.renderPrWriteAccess(run);continuations[0].onclick();assert.match(input.value,/PR #7/);assert.equal(input.focused,true);
- input.value='my draft';continuations[0].onclick();assert.equal(input.value,'my draft');
+for(const decision of ['approve','deny'])test(`${decision} dismisses the card without touching the draft`,async()=>{
+ const {context,area,run,input,buttons}=setup();
+ buttons.push({dataset:{prAccess:'scope',decision}}, {dataset:{prAccess:'scope',decision:'deny'}});
+ input.value='My unsent draft';const calls=[];
+ context.api=async(path,options)=>{calls.push([path,options]);return {...run,pr_write_access:[{...run.pr_write_access[0],status:decision==='approve'?'approved':'denied'}]};};
+ context.renderPrWriteAccess(run);const pending=buttons[0].onclick();
+ assert.ok(buttons.every(button=>button.disabled));await pending;
+ assert.deepEqual(JSON.parse(calls[0][1].body),{decision,resume:decision==='approve'});
+ assert.equal(area.innerHTML,'');assert.equal(input.value,'My unsent draft');
+});
+test('failed decision keeps both actions available for retry',async()=>{
+ const {context,area,run,buttons}=setup();let message;
+ buttons.push({dataset:{prAccess:'scope',decision:'approve'}},{dataset:{prAccess:'scope',decision:'deny'}});
+ context.api=async()=>{throw Error('Unable to save approval');};context.toast=value=>message=value;
+ context.renderPrWriteAccess(run);await buttons[0].onclick();
+ assert.ok(buttons.every(button=>!button.disabled));assert.match(area.innerHTML,/>Approve</);
+ assert.equal(message,'Unable to save approval');
 });
