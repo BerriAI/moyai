@@ -426,9 +426,60 @@ def pr_response(number=100, **changes):
 
 async def refreshed(service, run_ids):
     import asyncio
-    service.summaries(run_ids)
+    await service.summaries(run_ids)
     await asyncio.gather(*list(service.pending.values()))
-    return service.summaries(run_ids)
+    return await service.summaries(run_ids)
+
+
+async def test_empty_pr_summaries_skip_connection_reads(workspace, monkeypatch):
+    app, _ = workspace
+    run_id = app.state.store.create_run('No pull requests', '', 'demo', [])['id']
+    service = app.state.session_pull_requests
+
+    def unexpected_context():
+        raise AssertionError('Sessions without receipts do not need GitHub connection reads')
+
+    monkeypatch.setattr(service, 'context', unexpected_context)
+    summary = (await service.summaries([run_id]))[run_id]
+    assert summary['pull_requests'] == [] and summary['unknown'] == 0
+    assert not service.pending
+
+
+async def test_pr_summary_restores_shared_observation_once_and_rechecks_revocation(workspace, monkeypatch):
+    app, _ = workspace
+    store = app.state.store
+    runs = [store.create_run('Same PR in two sessions', '', 'demo', [])['id'] for _ in range(2)]
+    for run_id in runs:
+        publication(app, run_id, 100)
+    service, _, responses = sidebar_github(app, monkeypatch)
+    responses[100] = pr_response()
+    await refreshed(service, runs)
+    service.cache.clear()  # Restore the persisted observation as after a restart.
+    restored = service.restored
+    reads = []
+
+    def counted(key):
+        reads.append(key)
+        return restored(key)
+
+    monkeypatch.setattr(service, 'restored', counted)
+    summary = await service.summaries(runs)
+    assert all(row['open'] == 1 and row['stale'] for row in summary.values())
+    assert len(reads) == 1  # Scheduling must not repeat the database read.
+    await service.close()
+    service = type(service)(service.github)
+    restored = service.restored
+
+    def revoked(key):
+        observation = restored(key)
+        store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0) ON CONFLICT(provider) DO UPDATE SET enabled=0")
+        return observation
+
+    monkeypatch.setattr(service, 'restored', revoked)
+    summary = await service.summaries(runs)
+    assert all(row['unknown'] == 1 and row['open'] == 0 for row in summary.values())
+    assert not service.pending
+    await service.close()
 
 
 async def test_sidebar_pr_family_deduplicates_receipts_and_never_counts_answer_links(workspace, monkeypatch):
@@ -444,7 +495,7 @@ async def test_sidebar_pr_family_deduplicates_receipts_and_never_counts_answer_l
     store.execute('UPDATE runs SET summary=? WHERE id=?', ('PR is ready https://github.com/BerriAI/moyai/pull/999', parent))
     service, calls, responses = sidebar_github(app, monkeypatch)
     responses.update({n: pr_response(n) for n in (100, 101, 102)})
-    first = service.summaries([parent])[parent]
+    first = (await service.summaries([parent]))[parent]
     assert first['unknown'] == 3 and first['label'] == ''
     result = await refreshed(service, [parent, child, deleted])
     assert result[parent]['open'] == 3 and result[parent]['label'] == 'PR is ready'
@@ -470,7 +521,7 @@ async def test_sidebar_pr_states_refresh_and_partial_or_stale_facts_suppress_rea
     responses[101] = ConnectorError('Temporary outage')
     for cached in service.cache.values():
         cached.fresh_until = cached.retry_at = 0
-    pending = service.summaries([run_id])[run_id]
+    pending = (await service.summaries([run_id]))[run_id]
     assert pending['stale'] and not pending['label']
     state = (await refreshed(service, [run_id]))[run_id]
     assert (state['open'], state['merged'], state['closed']) == (1, 2, 1)
@@ -499,23 +550,23 @@ async def test_sidebar_pr_rechecks_connection_policy_selection_and_inflight_rota
     responses[100] = pr_response()
     assert (await refreshed(service, [run_id]))[run_id]['open'] == 1
     store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0) ON CONFLICT(provider) DO UPDATE SET enabled=0")
-    assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert (await service.summaries([run_id]))[run_id]['unknown'] == 1
     assert len(calls) == 1 and not service.pending
     store.execute("UPDATE connection_policies SET enabled=1,read_only=1 WHERE provider='github'")
-    assert service.summaries([run_id])[run_id]['open'] == 1  # Read-only still allows status reads.
+    assert (await service.summaries([run_id]))[run_id]['open'] == 1  # Read-only still allows status reads.
     select(app, (101,))
-    assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert (await service.summaries([run_id]))[run_id]['unknown'] == 1
     assert not service.pending
     select(app, (202,))
     # Old authorization-key cache entries cannot publish into the new scope.
-    assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert (await service.summaries([run_id]))[run_id]['unknown'] == 1
     saved = store.rows('SELECT * FROM github_pr_snapshots')
     async def rotate(method, path, **kwargs):
         select(app, (101,))
         return pr_response()
     monkeypatch.setattr(service.github, 'request', rotate)
     await refreshed(service, [run_id])
-    assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert (await service.summaries([run_id]))[run_id]['unknown'] == 1
     assert store.rows('SELECT * FROM github_pr_snapshots') == saved
     await service.close()
 
@@ -529,24 +580,27 @@ async def test_sidebar_pr_refreshes_are_bounded_coalesced_and_cancellable(worksp
     service, _, _ = sidebar_github(app, monkeypatch)
     service.MAX_PENDING = 5
     started = []
+    full = asyncio.Event()
     blocked = asyncio.Event()
     async def request(method, path, **kwargs):
         started.append(path)
+        if len(started) == 4:
+            full.set()
         await blocked.wait()
         return pr_response(int(path.rsplit('/', 1)[1]))
     monkeypatch.setattr(service.github, 'request', request)
     for _ in range(10):
-        service.summaries([run_id])
+        await service.summaries([run_id])
     assert len(service.pending) == 5
-    await asyncio.sleep(0)
+    await asyncio.wait_for(full.wait(), 2)
     assert len(started) == 4
     await service.close()
     assert not service.pending and not service.cache
-    service.summaries([run_id])
+    await service.summaries([run_id])
     assert not service.pending
     # Cancellation before the coroutine's first step also releases its key.
     fresh, _, _ = sidebar_github(app, monkeypatch)
-    fresh.summaries([run_id])
+    await fresh.summaries([run_id])
     for task in list(fresh.pending.values()):
         task.cancel()
     await asyncio.gather(*list(fresh.pending.values()), return_exceptions=True)
@@ -616,7 +670,7 @@ async def test_pr_status_restores_verified_dates_stale_and_keeps_current_authori
     assert result['merged'] == 1 and result['stale']
     assert result['pull_requests'][0]['merged_at'] == pr['merged_at']
     for _ in range(3):
-        restored.summaries([run_id])
+        await restored.summaries([run_id])
     assert len(calls) == 2 and not restored.pending
     assert reopened.rows('SELECT * FROM github_pr_snapshots') == saved
 
@@ -624,7 +678,7 @@ async def test_pr_status_restores_verified_dates_stale_and_keeps_current_authori
     assert restored.status(receipt, restored.context()) == (None, None, None)
     reopened.execute("UPDATE connection_policies SET enabled=1 WHERE provider='github'")
     select(app, (101,))
-    assert restored.summaries([run_id])[run_id]['unknown'] == 1
+    assert (await restored.summaries([run_id]))[run_id]['unknown'] == 1
     select(app, (202,))
     assert restored.status(receipt, restored.context())[2] is None
     await restored.close()
@@ -684,9 +738,9 @@ async def test_sidebar_pr_lookup_batches_large_pinned_lists_and_tolerates_bad_co
     assert len(sizes) >= 3
     for config in ['not JSON', '[]', '{"kind":"github_app","repository_ids":[202]}']:
         store.execute("UPDATE connections SET encrypted=? WHERE provider='github'", (app.state.security.encrypt(config),))
-        assert service.summaries([run_id])[run_id]['unknown'] == 1
+        assert (await service.summaries([run_id]))[run_id]['unknown'] == 1
     store.execute("UPDATE connections SET encrypted='broken encryption' WHERE provider='github'")
-    assert service.summaries([run_id])[run_id]['unknown'] == 1
+    assert (await service.summaries([run_id]))[run_id]['unknown'] == 1
     await service.close()
 
 
@@ -747,9 +801,9 @@ async def test_sidebar_pr_mixed_legacy_receipts_share_identity_when_alias_is_mis
     assert calls == [('GET', '/repositories/202/pulls/100')]
     # Neither receipt ordering nor disabling the connection splits that identity.
     store.execute("UPDATE github_publications SET created_at='0000' WHERE run_id=?", (child,))
-    assert service.summaries([parent])[parent]['open'] == 1
+    assert (await service.summaries([parent]))[parent]['open'] == 1
     store.execute("INSERT INTO connection_policies(provider,enabled) VALUES('github',0) ON CONFLICT(provider) DO UPDATE SET enabled=0")
-    summary = service.summaries([parent])[parent]
+    summary = (await service.summaries([parent]))[parent]
     assert summary['unknown'] == 1 and not summary['label'] and len(calls) == 1
     await service.close()
 
@@ -777,7 +831,7 @@ async def test_sidebar_pr_legacy_identity_does_not_join_conflicting_ids_or_other
     # A reused repository name can refer to two permanent IDs. With no alias
     # resolution, the legacy receipt must remain unknown instead of picking one.
     store.execute('UPDATE runs SET parent_run_id=? WHERE id IN (?,?)', (legacy, identified, conflicting))
-    summary = service.summaries([legacy])[legacy]
+    summary = (await service.summaries([legacy]))[legacy]
     assert (summary['open'], summary['unknown'], summary['label']) == (1, 2, '')
     assert len(summary['pull_requests']) == 3
     assert calls == [('GET', '/repositories/202/pulls/100')] and not service.pending
