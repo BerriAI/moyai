@@ -24,6 +24,7 @@ from sandbox.startup import StartupUnavailable, REPOSITORY_METADATA_BUDGET
 from sandbox.project_environment import prepare_project
 from sandbox.hermes_compat import apply_hermes_patches
 from sandbox.codex_runtime import RuntimeLease, discard_orphan
+from sandbox.durable_process import DeadlineExpired, execution_timeout
 LOCK = threading.Lock()
 ACTIVITY_INPUT_ID = None
 
@@ -34,9 +35,19 @@ def emit(kind, message, data=None, **extra):
               "data": {**(data or {}), "activity_id": uuid.uuid4().hex, "input_id": ACTIVITY_INPUT_ID}, **extra}), flush=True)
 
 
+def on_input(input_id):
+    global ACTIVITY_INPUT_ID
+    ACTIVITY_INPUT_ID = input_id
+
+
 def run(spec):
     global ACTIVITY_INPUT_ID
     ACTIVITY_INPUT_ID = spec.get('activity_input_id')
+    try:
+        spec = {**spec, 'timeout': execution_timeout(spec)}
+    except DeadlineExpired as exc:
+        emit('final', str(exc), completed=False)
+        return 124
     relay = BrokerRelay(spec['broker_url'], os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting,
         report_error=lambda failure: emit('error', 'Cloud request failed; transport diagnostics saved.',
             {'activity_version': 1, 'phase': 'broker_failure', **failure})).start()
@@ -56,6 +67,9 @@ def run(spec):
     except ContextUnavailable as exc:
         emit('final', str(exc), completed=False)
         return 1
+    except DeadlineExpired as exc:
+        emit('final', str(exc), completed=False)
+        return 124
     finally:
         try:
             if getattr(relay, 'codex_runtime', None):
@@ -83,7 +97,7 @@ def hermes_config(spec, broker_url, workspace):
         "mcp_servers": {"workspace": {"command": "/usr/local/bin/python", "args": ["/opt/workspace-runner/agent/tools/mcp_bridge.py"],
                                       # SDKs may sanitize env or serialize it to argv.
                                       # Keep edge secrets in the relay process only.
-                                      "env": {"WORKSPACE_BROKER_URL": broker_url, "WORKSPACE_GIT_BROKER_URL": broker_url,
+                                      "env": {"MOYAI_WORKSPACE": str(workspace), "WORKSPACE_BROKER_URL": broker_url, "WORKSPACE_GIT_BROKER_URL": broker_url,
                                               "WORKSPACE_RUN_TOKEN": os.environ["WORKSPACE_RUN_TOKEN"],
                                               "WORKSPACE_ACCESS_ORIGIN": "", "WORKSPACE_ACCESS_CLIENT_ID": "",
                                               "WORKSPACE_ACCESS_CLIENT_SECRET": ""}, "timeout": 930}},
@@ -91,14 +105,23 @@ def hermes_config(spec, broker_url, workspace):
 
 
 def run_agent(spec, relay):
-    with native_storage(Path('/session/.native-sdk'), Path('/root'), Path('/tmp')):
-        return _run_agent(spec, relay)
+    original = os.getcwd()
+    try:
+        with native_storage(Path('/session/.native-sdk'), Path('/root'), Path('/tmp')):
+            if spec.get('independent_runtime'):
+                from sandbox.agent_runtime import run as run_runtime
+                return run_runtime(spec, relay, emit)
+            return _run_agent(spec, relay)
+    finally:
+        os.chdir(original)
 
 
-def _run_agent(spec, relay):
-    harness = spec.get('harness', 'hermes')
-    if harness == 'hermes':
-        apply_hermes_patches()
+class ProjectUnavailable(RuntimeError):
+    pass
+
+
+def prepare_workspace(spec, relay):
+    """Prepare computer files/services without constructing a model runtime."""
     workspace = Path("/workspace")
     workspace.mkdir(exist_ok=True)
     prepare_attachments(spec, os.environ['WORKSPACE_RUN_TOKEN'], notify=reconnecting)
@@ -132,8 +155,19 @@ def _run_agent(spec, relay):
     try:
         prepare_project(spec, emit)
     except Exception:
-        emit('final', 'The prepared project services did not start successfully. Your workspace is preserved. '
-             'Ask an administrator to check the environment startup command before continuing.', completed=False)
+        raise ProjectUnavailable('The prepared project services did not start successfully. Your workspace is preserved. '
+             'Ask an administrator to check the environment startup command before continuing.') from None
+    return workspace, artifacts
+
+
+def _run_agent(spec, relay):
+    harness = spec.get('harness', 'hermes')
+    if harness == 'hermes':
+        apply_hermes_patches()
+    try:
+        workspace, artifacts = prepare_workspace(spec, relay)
+    except ProjectUnavailable as exc:
+        emit('final', str(exc), completed=False)
         return 1
     os.chdir(workspace)
     config = hermes_config(spec, relay.url, workspace)
@@ -143,16 +177,14 @@ def _run_agent(spec, relay):
         (home / "config.yaml").write_text(json.dumps(config))  # JSON is valid YAML.
         os.environ["OPENAI_API_KEY"] = os.environ["WORKSPACE_RUN_TOKEN"]
         os.environ["OPENAI_BASE_URL"] = relay.url + "/v1"
-    def on_input(input_id):
-        global ACTIVITY_INPUT_ID
-        ACTIVITY_INPUT_ID = input_id
-
     def report(kind, message, data=None, **extra):
         emit(kind, message, data, **extra)
         if kind == 'final':
             (artifacts / 'result.md').write_text(message)
 
     try:
+        # Workspace preparation can consume time after the persisted launch.
+        spec = {**spec, 'timeout': execution_timeout(spec)}
         outcome = run_conversation(
             spec, relay=relay, workspace=workspace, workspace_root=Path('/workspace'),
             session=Path('/session'), config=config, emit=report,

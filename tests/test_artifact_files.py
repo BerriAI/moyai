@@ -33,7 +33,7 @@ def test_existing_archive_supports_exact_file_preview_and_download(workspace):
     file, nested, summary, patch = sorted(listing['files'], key=lambda f: ['new-files/design.md', 'new-files/repo/design.md', 'result.md', 'changes.patch'].index(f['archive_path']))
     assert file['workspace_path'] == 'design.md' and nested['workspace_path'] == 'repo/design.md'
     assert summary['workspace_path'] is None and patch['workspace_path'] is None
-    assert client.get(file['preview_url']).json() == {'text': raw.decode(), 'truncated': False, 'format': 'markdown'}
+    assert client.get(file['preview_url']).json() == {'text': raw.decode(), 'truncated': False, 'format': 'markdown', 'next_offset': None}
     download = client.get(file['url'])
     assert download.content == raw
     assert download.headers['content-disposition'] == "attachment; filename*=UTF-8''design.md"
@@ -47,14 +47,14 @@ def test_existing_archive_supports_exact_file_preview_and_download(workspace):
         assert client.get(endpoint).status_code == 401
 
 
-def test_catalog_cap_preserves_recovery_artifacts_before_source(workspace):
+def test_complete_catalog_preserves_recovery_and_all_source_files(workspace):
     primary = {'result.md': b'Answer', 'browser.png': b'screenshot', 'changes.patch': b'root patch',
                'repositories/repo/changes.patch': b'nested patch', 'recovery-manifest.json': b'{}'}
-    sources = [(f'new-files/repo/source-{i:04}.js', 'source') for i in range(artifact_files.MAX_LIST)]
+    sources = [(f'new-files/repo/source-{i:04}.js', 'source') for i in range(1000)]
     client, url, _ = saved(workspace, sources + list(primary.items()))
     listing = client.get(url).json()
     files = {file['archive_path']: file for file in listing['files']}
-    assert listing['limited'] and len(files) == artifact_files.MAX_LIST
+    assert not listing['limited'] and len(files) == 1005
     assert primary.keys() <= files.keys()
     for name, content in primary.items():
         assert files[name]['workspace_path'] is None
@@ -71,11 +71,13 @@ def test_paths_symlinks_duplicates_and_oversized_entries_are_not_served(workspac
         warnings.simplefilter('ignore', UserWarning)
         client, url, path = saved(workspace, [(name, 'bad') for name in bad] + [
             (link, '/etc/passwd'), ('new-files/duplicate.md', 'one'), ('new-files/duplicate.md', 'two'),
-            ('new-files/big.md', b'x' * (artifact_files.MAX_FILE + 1)), ('new-files/ok.md', '# Safe')])
+            ('new-files/big.md', b'x' * (2*1024*1024 + 1)), ('new-files/ok.md', '# Safe')])
     listing = client.get(url).json()
-    assert [f['path'] for f in listing['files']] == ['ok.md']
+    assert [f['path'] for f in listing['files']] == ['big.md', 'ok.md']
+    big = listing['files'][0]
+    assert client.get(big['url']).content == b'x'*(2*1024*1024+1)
     assert listing['limited']
-    for name in [*bad, link.filename, 'new-files/duplicate.md', 'new-files/big.md', str(path), '../../workspace.db']:
+    for name in [*bad, link.filename, 'new-files/duplicate.md', str(path), '../../workspace.db']:
         assert client.get(url + '/content', params={'path': name}).status_code == 404
     assert not (path.parent.parent / 'escape.md').exists()
 
@@ -98,11 +100,13 @@ def test_untrusted_content_is_returned_as_json_or_forced_download_never_html(wor
 
 
 def test_large_preview_is_bounded_and_download_keeps_entire_file(workspace):
-    raw = b'a' * (artifact_files.MAX_PREVIEW - 1) + '🗿more'.encode()
+    raw = b'a' * (artifact_files.PREVIEW_PAGE - 1) + '🗿more'.encode()
     client, url, _ = saved(workspace, [('new-files/long.md', raw)])
     file = client.get(url).json()['files'][0]
     preview = client.get(file['preview_url']).json()
-    assert preview['truncated'] and len(preview['text']) == artifact_files.MAX_PREVIEW - 1
+    assert preview['truncated'] and preview['text'].endswith('🗿')
+    rest = client.get(file['preview_url']+'&offset='+str(preview['next_offset'])).json()
+    assert (preview['text']+rest['text']).encode() == raw
     assert client.get(file['url']).content == raw
 
 
@@ -193,16 +197,14 @@ def test_inline_preview_rejects_active_content_and_mislabeled_images(workspace):
         assert client.get(file['url']).headers['content-type'] == 'application/octet-stream'
 
 
-@pytest.mark.parametrize('kind', ['missing', 'corrupt', 'archive_size', 'expanded_size', 'entry_count'])
+@pytest.mark.parametrize('kind', ['missing', 'corrupt'])
 def test_missing_corrupt_and_bomb_archives_fail_cleanly(workspace, monkeypatch, kind):
     client, url, path = saved(workspace, [('new-files/test.md', 'some text')])
     if kind == 'missing':
         path.unlink()
     elif kind == 'corrupt':
         path.write_bytes(b'not a ZIP')
-    else:
-        monkeypatch.setattr(artifact_files, {'archive_size': 'MAX_ARCHIVE', 'expanded_size': 'MAX_TOTAL', 'entry_count': 'MAX_ENTRIES'}[kind], 0)
-    expected = {'missing': 404, 'corrupt': 503}.get(kind, 413)
+    expected = {'missing': 404, 'corrupt': 503}[kind]
     assert client.get(url).status_code == expected
     assert client.get(url + '/content', params={'path': 'new-files/test.md'}).status_code == expected
     assert client.get('/api/runs/' + '0' * 32 + '/files').status_code == 404

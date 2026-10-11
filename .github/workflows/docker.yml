@@ -8,7 +8,7 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -19,11 +19,11 @@ jobs:
       - name: Test Cloudflare identity gate and sandbox transport
         run: uv run --python 3.13 pytest -q --tb=line tests/test_cloudflare_access.py tests/test_cloudflare_login.py tests/test_access_transport.py
       - name: Test personal memory ownership, capture and privacy
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py tests/test_initial_context.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_memory.py tests/test_memory_review.py tests/test_initial_context.py tests/test_skills.py tests/test_bundled_skills.py
       - name: Test Slack requester identity and DM delivery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_slack_sender.py tests/test_identities.py
       - name: Test instant session metadata and chat routing
-        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
+        run: uv run --python 3.13 pytest -q --tb=line tests/test_session_metadata.py tests/test_sessions.py tests/test_conversation_responsiveness.py tests/test_slack_chat.py tests/test_slack_feedback.py tests/test_slack_web_mirror.py tests/test_side_chats.py tests/test_session_titles.py tests/test_agent_sidebar.py tests/test_session_folders.py tests/test_session_list_performance.py
       - name: Test private storage, migration and legacy file compatibility
         run: uv run --python 3.13 pytest -q --tb=line tests/test_blob_storage.py tests/test_storage_maintenance.py tests/test_attachments.py tests/test_audio.py tests/test_slack_files.py tests/test_skill_saving.py tests/test_artifact_files.py tests/test_agents.py tests/test_persistence.py tests/test_capture_release.py
       - uses: actions/setup-node@v4
@@ -55,6 +55,8 @@ jobs:
         run: uv run --python 3.13 pytest -q tests/test_context_store.py tests/test_context_gateway.py tests/test_context_budget.py tests/test_context_recovery.py tests/test_context_lifecycle.py tests/test_claude_sdk_transport.py tests/test_claude_message_buffer.py tests/test_claude_native_compaction.py tests/test_harnesses.py tests/test_harness_gateway.py tests/test_spend.py tests/test_goals.py tests/test_continuation.py
       - name: Test cloud diagnostics and durable recovery
         run: uv run --python 3.13 pytest -q --tb=line tests/test_broker_transport.py tests/test_startup_recovery.py tests/test_startup_overlap.py tests/test_durable.py tests/test_temporal_integration.py tests/test_redeploy_recovery.py tests/test_scheduling_diagnostics.py
+      - name: Test durable swarm mode and mixed-harness delegation
+        run: uv run --frozen --python 3.13 pytest -q --tb=short tests/test_swarms.py tests/test_agents.py tests/test_execution_deadline.py tests/test_swarm_client.py tests/test_swarm_types.py tests/test_swarm_mission.py tests/test_swarm_planning.py tests/test_swarm_backend.py tests/test_swarm_collaboration.py tests/test_swarm_timing.py tests/test_swarm_time_controls.py tests/test_swarm_time_runtime.py tests/test_swarm_broker_timing.py tests/test_swarm_chat.py
       - name: Build production image
         run: docker build -t moyai-docker-smoke .
       - name: Exercise mounted disk migration and restart

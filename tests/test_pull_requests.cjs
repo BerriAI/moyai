@@ -408,7 +408,7 @@ test('native diffs show source line numbers, missing patches and truncation with
   const f=await initialPR({...details,files_truncated:true,files:[{...details.files[0],filename:'<script>.js',patch:'+<img onerror=x>',patch_truncated:true},details.files[1]]});
   assert.match(f.node('[data-content]').textContent,/<script>\.js/);assert.match(f.node('.pr-diff').textContent,/<img onerror=x>/);
   assert.equal(f.node('img'),null);assert.equal(f.node('script'),null);
-  assert.match(f.node('[data-content]').textContent,/first 100 files/);assert.match(f.node('[data-content]').textContent,/diff is truncated/);
+  assert.match(f.node('[data-content]').textContent,/files loaded/);assert.match(f.node('[data-content]').textContent,/diff is truncated/);
   toggleFile(f,1,true);assert.match(f.node('[data-content]').textContent,/did not provide a text diff/);
 });
 test('native PR refresh keeps prior data on temporary failure and retries successfully',async()=>{
@@ -497,10 +497,11 @@ function agentToolbox(){
   const card=host(),pullsSection=host(),agentsSection=host(),agentTab=host(),classes=new Set(),toggle={hidden:true};
   const ctx={disposed:false,run:{id:'parent'},agents:[],agentSignature:'',pullRequests:[],card,pullsSection,agentsSection,
     tabs:new Map([['agents',{kind:'agents',element:agentTab}]]),
-    document:{activeElement:null,querySelector:()=>toggle},ico:()=>'',
+    document:{activeElement:null,querySelector:()=>toggle,querySelectorAll:()=>[]},ico:()=>'',
     esc:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),
     layout:{classList:{toggle:(key,value)=>value?classes.add(key):classes.delete(key)}}};
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('app/static/icons.js','utf8'),ctx);
   const app=fs.readFileSync('app/static/app.js','utf8');
   vm.runInContext(app.slice(app.indexOf('function sessionStatus('),app.indexOf('function sessionRepository(')),ctx);
   ctx.statusFor=ctx.sessionStatus;

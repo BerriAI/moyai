@@ -13,7 +13,8 @@ def test_new_write_tool_needs_no_approval_exception(workspace, monkeypatch, rest
     run_id, headers = cloud_capability(app, ['slack'])
     calls = []
 
-    async def call(tool, arguments):
+    async def call(tool, arguments, *, run=None):
+        assert run['id'] == run_id
         calls.append((tool, arguments))
         return {'ok': True}
 
@@ -43,7 +44,11 @@ def test_new_write_tool_needs_no_approval_exception(workspace, monkeypatch, rest
     response = client.post(f'/broker/{run_id}/tools/call', headers=headers,
                            json={'name': name, 'arguments': {}})
     if restriction:
-        assert response.status_code in {401, 403}
+        if restriction in {'read_only', 'disabled', 'disconnect'}:
+            assert response.status_code == 200
+            assert response.json()['outcome'] == 'rejected' and response.json()['dispatched'] is False
+        else:
+            assert response.status_code in {401, 403}
         assert not calls
     else:
         assert response.status_code == 200 and response.json() == {'ok': True}

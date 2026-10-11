@@ -1,7 +1,5 @@
 """Tool bindings for the in-process harnesses, still inside the Modal sandbox."""
-import asyncio
 import json
-from pathlib import Path
 
 
 def tools_for(cwd, config):
@@ -52,36 +50,33 @@ def tools_for(cwd, config):
                                 'Use workspace_tools to discover available tools.'}]})
                 return (await client.call_tool(name, arguments)).model_dump_json(by_alias=True)
 
-    def resolve(path):
-        root = Path(cwd).resolve()
-        target = (root / path).resolve()
-        if not target.is_relative_to(root):
-            raise ValueError('Path must stay inside the workspace')
-        return target
+    async def computer(name, arguments):
+        # Same schemas and implementation as the MCP bridge. In an independent
+        # runtime, workspace_call forwards the action to its leased computer.
+        return await invoke(name, arguments)
 
-    def read_file(path: str) -> str:
-        """Read a UTF-8 file within the workspace, up to 100KB."""
-        with resolve(path).open() as stream:
-            return stream.read(100000)
+    async def read_file(path: str, offset: int = 0, length: int = 65536) -> str:
+        """Read a complete workspace file page; follow next_offset, with exact base64 bytes."""
+        return await computer('computer_read_file', {'path': path, 'offset': offset, 'length': length})
 
-    def write_file(path: str, content: str) -> str:
-        """Write a UTF-8 file within the workspace."""
-        target = resolve(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-        return 'File written: ' + str(target)
+    async def write_file(path: str, content: str) -> str:
+        """Write complete UTF-8 contents to a workspace file."""
+        return await computer('computer_write_file', {'path': path, 'text': content, 'overwrite': True})
 
-    async def terminal(command: str) -> str:
-        """Run a shell command in the isolated workspace, with a 120 second limit."""
-        from litellm.harness.sandbox.local import filtered_environ
-        proc = await asyncio.create_subprocess_exec('/bin/bash', '-lc', command, cwd=cwd, env=filtered_environ(),
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        try:
-            output, _ = await asyncio.wait_for(proc.communicate(), 120)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            return 'Command timed out; not replayed.'
-        return json.dumps({'exit_code': proc.returncode, 'output': output.decode(errors='replace')[:100000]})
+    async def terminal(command: str, yield_ms: int = 1000, request_key: str = '') -> str:
+        """Start a command and return its process handle. Long commands continue; use terminal_read."""
+        return await computer('computer_terminal', {'command': command, 'yield_ms': yield_ms,
+                                                   **({'request_key': request_key} if request_key else {})})
 
-    return [workspace_tools, workspace_call, read_file, write_file, terminal]
+    async def terminal_read(process_id: str, offset: int = 0, length: int = 65536, yield_ms: int = 1000) -> str:
+        """Read command progress and complete output pages without terminating the command."""
+        return await computer('computer_terminal_read', {'process_id': process_id, 'offset': offset, 'length': length, 'yield_ms': yield_ms})
+
+    async def terminal_input(process_id: str, text: str = '', eof: bool = False, stop: bool = False, data_base64: str = '') -> str:
+        """Send input/EOF or explicitly stop a command. Never retry unconfirmed input automatically."""
+        if text and data_base64:
+            return json.dumps({'error': 'Choose text or data_base64 for command input.'})
+        return await computer('computer_terminal_input', {'process_id': process_id, 'eof': eof, 'stop': stop,
+            **({'data_base64': data_base64} if data_base64 else {'text': text})})
+
+    return [workspace_tools, workspace_call, read_file, write_file, terminal, terminal_read, terminal_input]

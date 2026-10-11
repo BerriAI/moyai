@@ -28,7 +28,8 @@ def read_with_reconnect(request, reader, **options):
 
 def _read_with_reconnect(request, reader, *, stage, notify=None, budget=45, attempt_timeout=10,
                          opener=None, clock=None, sleep=None):
-    # Callers must establish read-only semantics before entering this loop.
+    # Callers must establish immutable reads or server-enforced idempotency
+    # before entering this loop. Never use it for arbitrary tool writes.
     opener, clock, sleep = opener or urllib.request.urlopen, clock or time.monotonic, sleep or time.sleep
     deadline, attempt = clock() + budget, 0
     while True:

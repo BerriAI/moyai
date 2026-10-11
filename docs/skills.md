@@ -14,11 +14,11 @@ feedback, and evidence-backed PR handoff. The Moyai runbook applies only to
 
 The release installs these templates at application startup using the existing
 encrypted, versioned library. No model call, sandbox startup or network lookup is
-needed. They use the same bounded initial directory and on-demand instructions
-and reference files described below. Simply having a skill does not invoke it.
+needed. Their initial directory fits the shared model budget; instructions and reference
+files load on demand as described below. Simply having a skill does not invoke it.
 
 Admins can edit or archive them in Settings. Template upgrades preserve edits,
-renames, archives, existing names and library limits. Only unmodified, active
+renames, archives and existing names. Only unmodified, active
 templates receive a higher bundled source version; restarting an older release
 does not downgrade them. Set `BUNDLED_SKILLS_ENABLED=false` to stop future
 installation/upgrades; archive installed entries to remove them from discovery.
@@ -33,11 +33,9 @@ You can also ask Moyai in chat to “save this as a personal skill” or, as an 
 files; `skills_save` copies the originals by attachment ID into the encrypted
 library. It can also write instructions directly, update an existing skill, add
 or replace references, and explicitly remove files. Only sent attachments in the
-current session through the executing message can be imported. If you have not
-specified Personal or Organization, Moyai asks which you want and waits before
-saving. A `skills_save` call with no scope returns `scope_required` and writes
-nothing. The library's Add skill form also requires a choice instead of
-preselecting Personal; editing preserves the existing selection. Keep API keys in
+current session through the executing message can be imported. New skills default
+to Personal in chat and in the Add skill form. Organization publishing requires
+an explicit request and an admin; editing preserves the existing selection. Keep API keys in
 **Secrets**, not in skill text.
 
 - **Personal:** only the owner can view, edit, or use the skill. The current
@@ -55,17 +53,18 @@ rest of your draft. Escape closes the menu and Shift+Enter still adds a new line
 Write `/personal:benchmark-review`, `/org:benchmark-review`, or `/skill benchmark-review`
 to invoke a workflow; existing `$personal:benchmark-review` and `$org:benchmark-review`
 references still work. Slash references inside code, URLs, and file paths are not
-automatically loaded. The first model call also receives a directory of up to
-12 authorized skill references, descriptions and revisions, bounded to 6,000
-serialized characters. Task keyword matches rank first, then personal skills,
+automatically loaded. The first model call also receives an authorized directory,
+fitted to the selected model's input window. Task keyword matches rank first, then personal skills,
 then name; only the current requester's message and acknowledged steering supply
 ranking keywords. No model call or embedding lookup is needed to build it.
 Moyai can call `skills_load` directly for a relevant entry. Full instructions
 enter context only when explicitly invoked or loaded.
 
 The directory reports an omitted count. `skills_search` searches the full
-authorized library when the directory is insufficient, returning up to five
-matches. Search uses names and descriptions, never instruction bodies. Search
+authorized library when the directory is insufficient. An empty query lists every
+authorized entry; follow `next` with `cursor` until it is null. `page_size` controls
+transport, with no total result cap. Catalog changes reject a stale cursor so a
+caller can restart enumeration. Search uses names and descriptions, never instruction bodies. Search
 results and loaded skills take priority and are not repeated in the directory.
 The full library remains available in the Skills page and composer picker.
 Unqualified `/benchmark-review` or `$benchmark-review` prefers a personal skill over the same name in
@@ -85,15 +84,17 @@ later turns use the latest revision. Permissions and archive status are checked
 again on every model call. There is no per-turn skill-count limit; explicitly
 requested and tool-loaded skills remain available for that turn. The model's
 context budget still applies to the full request, including skill instructions.
-Library limits are 32,000 instruction characters per skill, 50 personal skills per user and 200 shared skills
-(including archived entries). Skills cannot bypass tool permissions, provide
+There are no fixed skill-count or instruction-length quotas. An omitted body is
+explicitly marked and remains readable by range. Skills cannot bypass tool permissions, provide
 credentials, or approve writes. Personal skills do not make shared session
 outputs private; generated results keep the session's existing sharing.
 
-Each skill supports up to 20 UTF-8 supporting files, 1 MiB each and 4 MiB total.
-`skills_load` returns a file manifest; `skills_read_file` privately loads bounded
-excerpts (up to 24,000 characters, with optional text search). Only the four most
-recent excerpts stay in inference context. File contents never appear in broker
+Skills support complete UTF-8 supporting files, subject to ordinary transport and
+storage availability. `skills_load` returns a file manifest; `skills_read_file`
+privately reads `SKILL.md` or supporting-file ranges using `offset` and `limit`
+(16,000 characters by default). Follow `next_offset` to reconstruct a file.
+Every read receipt is retained; the inference view prioritizes recent requested
+ranges and exposes omissions. File contents never appear in broker
 tool results. References are versioned alongside instructions and retain the
 loaded revision through restarts. Editing in the library preserves supporting
 files, which can be downloaded from the editor by authorized users. Saving a
@@ -107,3 +108,15 @@ Expected skill-tool rejections (such as unavailable skills, invalid content or
 revision conflicts) return an error receipt so the agent can correct or report
 the problem and continue. Authentication, server and checkpoint failures still
 stop the request.
+
+Public procedures shipped with the agent are listed in the initial context with
+content revisions. `bundled_skill_read` reads their full instructions or ranges
+on chat, automation, and delegated surfaces. They are independent of a user's
+private library. The shared `repository_guidance` tool resolves workspace
+`AGENTS.md` files from root to the directory being edited, with scopes, hashes,
+and complete range reads. Native duplicate guidance loading is disabled.
+
+The editable coding templates are stored in `agent/skill_templates/` and installed
+by `app/skill_templates.py`. Public build-pinned procedures in `agent/skills/`
+keep their separate `bundled_skill_read` path; template edits, archives and disabled
+installation never expose a duplicate template through that public catalog.

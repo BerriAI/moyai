@@ -15,7 +15,7 @@ function loadingFixture(hash='#run='+runId){
   const context={state,URLSearchParams,AbortController,clearTimeout,location:{hash,search:''},$:node,document:{hidden:true,querySelector:()=>null,querySelectorAll:()=>[],modelContext:{registerTool:(tool,options)=>registrations.push({tool,options})}},
     window:{addEventListener:(type,handler)=>{if(type==='pagehide')pagehide.push(handler);}},computer:{close(){}},savedFiles:{reset(){}},toast(){},
     history:{replaceState:(_,__,value)=>context.location.hash=value},settingsViews:new Set(['settings']),
-    api:path=>{const request={path,...deferred()};requests.push(request);return request.promise;},
+    api:(path,options={})=>{const request={path,options,...deferred()};requests.push(request);return request.promise;},
     applyUserSession:session=>{state.authenticated=session.authenticated;state.csrf=session.csrf;},restoreSessionFolderView:()=>{state.folderViewRestored=true;},renderSidebar(){},setView(){},
     showError:error=>errors.push(error),sessionRows:rows=>rows,sessionTitle:run=>run.display_title||'Session',esc:String,
     renderChat:run=>{state.chatRun=run;rendered.push(run.id);},
@@ -106,6 +106,48 @@ test('a recent conversation renders before the network settles and refreshes wit
   assert.deepEqual(updates[0].messages,['new']);
 });
 
+for(const age of [120000,299999])test(`a ${age}ms-old same-tab conversation paints immediately and still revalidates`,async()=>{
+  const f=loadingFixture();f.state.runs=[{id:runId}];
+  vm.runInContext(readFileSync('app/static/navigation-cache.js','utf8'),f.context);
+  let now=0;const cache=f.state.navigationCache=f.context.MoyaiNavigationCache.create({now:()=>now});
+  const path='/api/runs/'+runId+'?activity=summary';
+  cache.put(path,{id:runId,chat_enabled:true,messages:['saved']});now=age;
+  const updates=[];f.context.updateChat=run=>updates.push(run);
+  const opening=f.context.openRun(runId);
+  assert.deepEqual(f.rendered,[runId],'a return visit does not wait for Render');
+  assert.equal(f.request(path).options.recent,false,'the preview always requests current data');
+  assert.deepEqual(Array.from(f.state.chatRun.messages),['saved']);
+  f.request(path).resolve({id:runId,chat_enabled:true,messages:['latest']});await opening;
+  assert.deepEqual(f.rendered,[runId],'the mounted composer survives revalidation');
+  assert.deepEqual(updates[0].messages,['latest']);
+});
+
+test('conversation previews expire after five minutes and never cross cache invalidation',async()=>{
+  for(const invalidate of [false,true]){
+    const f=loadingFixture();f.state.runs=[{id:runId}];
+    vm.runInContext(readFileSync('app/static/navigation-cache.js','utf8'),f.context);
+    let now=0;const cache=f.state.navigationCache=f.context.MoyaiNavigationCache.create({now:()=>now});
+    const path='/api/runs/'+runId+'?activity=summary';
+    cache.put(path,{id:runId,chat_enabled:true,messages:['saved']});
+    if(invalidate){now=120000;cache.clear();}else now=300000;
+    const opening=f.context.openRun(runId);
+    assert.deepEqual(f.rendered,[]);assert.match(f.node('#content').innerHTML,/Loading conversation/);
+    f.request(path).resolve({id:runId,chat_enabled:true,messages:['current']});await opening;
+    assert.deepEqual(f.rendered,[runId]);assert.deepEqual(f.state.chatRun.messages,['current']);
+  }
+});
+
+for(const status of [401,403,404])test(`a cached conversation is removed after HTTP ${status} revalidation`,async()=>{
+  const f=loadingFixture();f.state.runs=[{id:runId}];
+  f.state.navigationCache={get:()=>({id:runId,chat_enabled:true}),forget(){}};
+  const opening=f.context.openRun(runId);
+  assert.deepEqual(f.rendered,[runId]);
+  f.request('/api/runs/'+runId+'?activity=summary').reject(Object.assign(Error('Unavailable'),{status}));
+  if(status===404){await opening;assert.deepEqual(f.navigations,['tasks']);}
+  else {await assert.rejects(opening,/Unavailable/);assert.equal(f.state.chatRun,null);}
+  assert.match(f.node('#content').innerHTML,status===404?/no longer available/:/Could not load this conversation/);
+});
+
 test('a cached conversation refresh cannot overwrite a newer stream refresh or route',async()=>{
   for(const supersede of ['stream','route']){
     const f=loadingFixture();f.state.runs=[{id:runId}];
@@ -194,7 +236,7 @@ test('a delayed list for a replaced route requests the missing current focus and
 });
 
 function installHome(f){
-  f.state.newDraft={};Object.assign(f.context,{modelPreferenceSave:Promise.resolve(),environmentOptions:()=>'',harnessPicker:()=>'',modelPicker:()=>'',providerNames:{},submitTask(){},bindHarnessPicker(){},bindComposer(){},Event});
+  f.state.newDraft={};Object.assign(f.context,{MoyaiSwarm:{...require('../app/static/swarm-space.js'),bindBudget(){}},modelPreferenceSave:Promise.resolve(),environmentOptions:()=>'',harnessPicker:()=>'',modelPicker:()=>'',providerNames:{},submitTask(){},bindHarnessPicker(){},bindComposer(){},Event});
   load(f.context,'async function navigate(','async function refreshRuns(');load(f.context,'async function renderHome(','async function submitTask(');
 }
 test('real home startup reuses shared config and renders while the sole sidebar and organization requests remain pending',async()=>{
@@ -285,6 +327,30 @@ function transcriptFixture(){
   load(context,'function updateChat(run','function renderLiveWork(');
   return {context,state,markdown,node};
 }
+
+test('detail updates render activity once with the complete latest transcript and status',()=>{
+  const f=transcriptFixture(),activity=[];
+  f.context.terminal=new Set(['completed','idle']);
+  f.context.statusLabel=String;
+  f.context.renderChatWorking=()=>{};f.context.syncRunSummary=()=>{};
+  f.context.savedFiles.decorate=()=>{};
+  f.context.MoyaiActivity.sync=(box,run)=>{
+    activity.push({status:run.status,messages:run.messages.map(message=>message.content)});
+    assert.match(box.innerHTML,new RegExp(run.messages.at(-1).content));
+  };
+  f.context.$=selector=>Object.assign(f.node(selector),{setAttribute(){}});
+  load(f.context,'function syncSwarmControls(','function renderChatWorking(');
+  const run={id:runId,mode:'demo',status:'running',events:[],messages:[{id:1,role:'user',status:'running',content:'Question'}]};
+  f.context.updateChat(structuredClone(run),true);
+  assert.deepEqual(activity,[{status:'running',messages:['Question']}]);
+  assert.equal(f.node('#swarm-pause').hidden,true,'ordinary conversations keep swarm controls hidden');
+  run.status='completed';run.messages[0].status='completed';
+  run.messages.push({id:2,role:'assistant',status:'completed',content:'Answer'});
+  f.context.updateChat(structuredClone(run));
+  f.context.updateChat(structuredClone(run));
+  assert.deepEqual(activity,[{status:'running',messages:['Question']},
+    {status:'completed',messages:['Question','Answer']},{status:'completed',messages:['Question','Answer']}]);
+});
 
 test('appending a message reuses existing Markdown templates and active turn history stays loaded after completion',()=>{
   const f=transcriptFixture();

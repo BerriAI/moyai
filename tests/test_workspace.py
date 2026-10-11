@@ -17,7 +17,7 @@ from app.security import digest
 @pytest.fixture
 def workspace(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, agent_harness='hermes', data_dir=tmp_path, public_url="http://127.0.0.1:8787", litellm_api_key="",
-                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, bundled_skills_enabled=False)
+                        modal_token_id="", modal_token_secret="", demo_step_seconds=0.01, repository_context_enabled=False, bundled_skills_enabled=False)
     app = create_app(settings)
     # Existing endpoint tests use synthetic providers. Keep the real budget
     # check, but supply fixture limits/counting instead of external metadata.
@@ -91,22 +91,23 @@ def test_every_broker_tool_has_an_audited_replay_classification(workspace, recov
     response = client.get(f"/broker/{run['id']}/tools", headers={'Authorization': 'Bearer capability'})
     assert response.status_code == 200
     catalogs.append(response.json())
-    safe = set('''agents_results agents_read_artifact automation_environments automation_webhook_info
+    safe = set('''swarm_board agents_results agents_read_artifact automation_environments automation_webhook_info automation_history automation_self_read
         credentials_list github_rulesets github_ruleset github_repositories github_repository github_checkout
         github_pull_request github_pull_request_comments github_ci_checks github_workflow_runs github_workflow_jobs github_job_logs
         linear_my_issues linear_teams linear_search linear_issue
-        slack_search slack_thread slack_me notion_search notion_page media_list sessions_search sessions_read model_list
-        workspace_diagnostics'''.split())
+        slack_search slack_thread slack_channel slack_me notion_search notion_page media_list sessions_search sessions_read model_list
+        workspace_diagnostics history_read bundled_skill_read artifacts_list artifact_read'''.split())
     # Read hints describe presentation, not replay safety: these mutate context
     # selection or reconcile remote schedules and must remain one-shot.
-    read_effects = set('''automation_list memory_search skills_search skills_load skills_read_file'''.split())
-    writes = set('''agents_fanout agents_retry agents_cancel automation_webhook_setup automation_create
-        automation_update automation_enable automation_pause automation_claim_item credentials_resolve
+    read_effects = set('''automation_list memory_search memory_read skills_search skills_load skills_read_file
+        repository_context_search repository_context_read'''.split())
+    writes = set('''swarm_start swarm_claim_lead swarm_publish swarm_assign agents_fanout agents_retry agents_cancel agents_send agents_wait automation_webhook_setup automation_create
+        automation_update automation_enable automation_pause automation_grant automation_self_update automation_claim_item credentials_resolve
         credentials_request credentials_run credentials_report_failure credentials_http_request
         github_request_pull_request_write_access github_update_ruleset_reviewers github_create_pull_request
         github_update_pull_request github_comment_pull_request linear_comment linear_create_issue
         linear_update_issue slack_send notion_append media_share media_revoke model_switch memory_save
-        memory_forget skills_save'''.split())
+        memory_forget skills_save goal artifact_publish artifact_fetch'''.split())
     assert not (safe & read_effects or safe & writes or read_effects & writes)
     assert {tool['name'] for catalog in catalogs for tool in catalog} == safe | read_effects | writes
     assert safe <= {tool['name'] for tool in recovery_catalog}
@@ -241,7 +242,9 @@ def test_scope_denial_and_bad_arguments_never_reach_provider(workspace, monkeypa
         pytest.fail("Provider must not be called")
     monkeypatch.setattr(app.state.connectors, "call", fail)
     assert client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "slack_send", "arguments": {}}).status_code == 403
-    assert client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "linear_issue", "arguments": {"issue_id": "../../secrets"}}).status_code == 422
+    rejected = client.post(f"/broker/{run_id}/tools/call", headers=headers, json={"name": "linear_issue", "arguments": {"issue_id": "../../secrets"}})
+    assert rejected.status_code == 200 and rejected.json()['code'] == 'invalid_arguments'
+    assert rejected.json()['dispatched'] is False
     assert client.get(f"/broker/{run_id}/tools", headers={"Authorization": "Bearer wrong"}).status_code == 401
 
 
@@ -249,7 +252,7 @@ def test_uncertain_write_is_not_retried(workspace, monkeypatch):
     app, client = workspace
     run_id, headers = cloud_capability(app, ["linear"])
     calls = []
-    async def fail(*args):
+    async def fail(*args, **kwargs):
         calls.append(1)
         raise ConnectorError("The connection dropped after sending.")
     monkeypatch.setattr(app.state.connectors, "call", fail)
@@ -301,14 +304,16 @@ def test_org_policy_blocks_direct_tool_calls_and_survives_reconnection(workspace
     assert client.patch("/api/connections/linear/policy", json={"enabled": True, "read_only": True}).status_code == 200
     app.state.connectors.save("linear", {"access_token": "replacement-token", "kind": "oauth"}, "Team")
     names = {x["name"] for x in client.get(f"/broker/{run_id}/tools", headers=headers).json()}
-    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics"}
+    builtins = {"media_list", "media_share", "media_revoke", "workspace_diagnostics", "bundled_skill_read", "history_read", "goal", "artifact_publish", "artifact_fetch", "artifact_read", "artifacts_list"}
     assert names == {"linear_teams", "linear_search", "linear_issue", "linear_my_issues"} | builtins
-    assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
-                       json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).status_code == 403
+    denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
+                       json={"name": "linear_comment", "arguments": {"issue_id": "LIT-1", "body": "Blocked"}}).json()
+    assert denied['code'] == 'access_denied' and denied['dispatched'] is False
     client.patch("/api/connections/linear/policy", json={"enabled": False, "read_only": True})
     assert {tool["name"] for tool in client.get(f"/broker/{run_id}/tools", headers=headers).json()} == builtins
-    assert client.post(f"/broker/{run_id}/tools/call", headers=headers,
-                       json={"name": "linear_search", "arguments": {"query": "MCP"}}).status_code == 403
+    denied = client.post(f"/broker/{run_id}/tools/call", headers=headers,
+                       json={"name": "linear_search", "arguments": {"query": "MCP"}}).json()
+    assert denied['code'] == 'access_denied' and denied['dispatched'] is False
     assert not app.state.store.approvals(run_id)
     assert len(client.get("/api/organization").json()["activity"]) == 2
 

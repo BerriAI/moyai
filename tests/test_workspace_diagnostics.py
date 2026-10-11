@@ -71,7 +71,8 @@ def test_mcp_diagnostics_distinguishes_last_catalog_from_current_broker(monkeypa
     reply = json.loads(capsys.readouterr().out.splitlines()[-1])['result']
     data = json.loads(reply['content'][0]['text'])
     assert data['broker_catalog']['names'] == ['new_tool']
-    assert data['mcp_catalog']['names'] == (sorted(['old_tool', *[tool['name'] for tool in mcp_bridge.BROWSER_TOOLS]]) if list_first else None)
+    local = [*mcp_bridge.BROWSER_TOOLS, mcp_bridge.GUIDANCE_TOOL, *mcp_bridge.computer_tools.TOOLS]
+    assert data['mcp_catalog']['names'] == (sorted(['old_tool', *[tool['name'] for tool in local]]) if list_first else None)
     assert 'not the model request catalog' in data['mcp_catalog']['scope']
 
 

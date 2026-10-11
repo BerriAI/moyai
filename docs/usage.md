@@ -59,8 +59,12 @@ expanded, and reopened; their layout and side-chat drafts are saved per user and
 session in that browser. Hiding or leaving the Computer tab releases human
 control and stops preview polling. Closing a tab does not stop its agent.
 
-Side chats are independent durable sessions. They start with a bounded snapshot
-of the original conversation and use a separate workspace, message queue, and
+Side chats are independent durable sessions. They start with a complete snapshot
+of the original task, latest result and undeleted messages, including queued
+messages with their status and author. The snapshot remains fixed as the main
+conversation continues. Large snapshots stay retrievable from session files;
+the model receives a reference when the text exceeds its input allocation.
+Side chats use a separate workspace, message queue, and
 billing attribution for the person who sends the message. They do not steer the
 main agent, share its live browser/files, or mirror into its Slack thread. They
 remain available in the add-tab menu and session list after closing the tab.

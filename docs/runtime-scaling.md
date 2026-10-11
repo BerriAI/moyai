@@ -1,18 +1,20 @@
 # Capacity and execution worker scaling
 
-Moyai can use one coordinator and multiple Temporal execution workers with
-PostgreSQL and shared object storage. The default remains `standalone`, with
-100 occupied sandboxes, 1,000 unfinished sessions and 8 model requests. Higher
+Moyai can use one elected background coordinator and multiple Temporal execution
+workers with PostgreSQL and shared object storage. The opt-in
+[rolling deployment topology](rolling-deploy.md) also permits overlapping API,
+broker and coordinator instances during compatible releases. The default remains `standalone`, with
+1,000 unfinished sessions and no limit on occupied sandboxes or concurrent model requests. Higher
 budgets are now configurable; this does not provision provider quota or replicas.
 
 ## What each limit controls
 
 | Setting | Default | Meaning |
 | --- | ---: | --- |
-| `MAX_CONCURRENT_RUNS` | 100 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. |
+| `MAX_CONCURRENT_RUNS` | 0 | Global occupied sandbox reservations, including provisioning, cleanup and retained warm machines. 0 means unlimited: warm machines are not evicted to free capacity, but idle timeout and normal cleanup still apply. |
 | `MAX_PENDING_RUNS` | 1,000 | Unfinished sessions, including active work and queued work; this is not just the waiting queue. |
-| `MAX_CONCURRENT_MODEL_REQUESTS` | 8 | Concurrent requests through the coordinator's model gate. Full foreground requests receive the existing explicit, unbilled queue response. |
-| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one separate process-ownership connection. Range 1–256. |
+| `MAX_CONCURRENT_MODEL_REQUESTS` | 0 | Concurrent requests through the inference model gate. 0 means unlimited. A positive value is shared across overlapping verified brokers, and full foreground requests over it receive the existing explicit, unbilled queue response. |
+| `MOYAI_DATABASE_POOL_SIZE` | 8 | Connections per process, plus one process-ownership connection. A verified broker also holds one model-slot health/ownership connection, including in unlimited mode. Range 1–256. |
 | `TEMPORAL_WORKER_ACTIVITIES` | 120 | Activities executing per worker process. An activity can observe a live sandbox for about 20 seconds. |
 | `TEMPORAL_WORKFLOW_CACHE_SIZE` | 200 | Cached workflows per worker; eviction causes replay, not session loss. |
 | `TEMPORAL_DISPATCH_BATCH_SIZE` | 200 | Maximum wake-outbox entries processed in each coordinator batch. |
@@ -22,7 +24,20 @@ The three global budget settings have no artificial upper ceiling. They remain
 admission controls: 3,000 active sandboxes do not require 3,000 simultaneous model
 calls or database connections. Sandbox CPUs affect work inside a sandbox. Add
 execution workers when Temporal activity queue latency is the bottleneck; increase
-model capacity only with upstream RPM/TPM and measured coordinator headroom.
+model capacity only with upstream RPM/TPM and measured inference-owner headroom.
+
+Existing deployments keep their explicit environment values: deploying this
+default change does not replace a configured `32` model limit or `100` sandbox
+limit. Set both `MAX_CONCURRENT_MODEL_REQUESTS=0` and `MAX_CONCURRENT_RUNS=0` on
+every role to remove those two app ceilings. This does not remove
+`MAX_PENDING_RUNS`, `MAX_PARALLEL_AGENTS`, worker activity limits, provider quotas
+or resource constraints. Idle timeout and normal sandbox cleanup still apply.
+
+In the verified rolling topology these settings participate in the shared
+configuration fingerprints. A capacity change requires the documented shared
+policy transition; it cannot be mixed into a compatible rolling code replacement
+while old owners retain a different policy. Do not overwrite fingerprints or
+bypass ownership checks to activate unlimited mode.
 
 ## Supported topology
 
@@ -32,26 +47,34 @@ model capacity only with upstream RPM/TPM and measured coordinator headroom.
   singleton recovery/background jobs. It does not consume Temporal activities.
 - `MOYAI_RUNTIME_ROLE=worker`: consumes the same Temporal task queue, skips global
   startup recovery/background jobs, and serves readiness at `/health` only.
-  Application HTTP and WebSocket traffic is rejected. Route all browsers,
-  sandboxes and webhooks to the coordinator's public URL.
+  Application HTTP and WebSocket traffic is rejected. In the base topology,
+  route browsers, sandboxes and webhooks to the coordinator; split routes by role
+  after activating the dedicated API and broker.
 
 Run one server process per container. A worker can be replicated independently.
-There must still be exactly one coordinator; a second coordinator is refused.
-This base topology does not support arbitrary API replicas or uninterrupted coordinator
-deployments. The opt-in [API role](api-replicas.md) adds compatible API build overlap
-under an independent singleton coordinator. The single API/model broker remains a capacity and availability
-boundary that must be measured before a 3,000-live-session production commitment.
+The default coordinator ownership remains exclusive. The opt-in
+[API role](api-replicas.md) supports compatible API build overlap. With
+`MOYAI_COORDINATOR_HANDOFF=true`, a verified coordinator replacement accepts
+durable hooks while waiting for the old background owner to drain; exactly one
+process runs singleton jobs at a time. See [coordinator handoff](coordinator-handoff.md).
+Measure the API and inference services before a 3,000-live-session commitment;
+release overlap itself does not establish production capacity.
 
 The opt-in [separate broker topology](separate-broker.md) moves sandbox inference
-and tools into one `broker` process. Set `MOYAI_SEPARATE_BROKER=true` on every role
+and tools into a dedicated `broker` service. Set `MOYAI_SEPARATE_BROKER=true` on every role
 and route `/broker/*` directly to it at the edge. It preserves model connections
-across same-build coordinator restarts; it still requires coordinated build
-updates and does not enable multiple coordinators.
+across coordinator restarts. Auto-schema brokers remain exclusive. Verified-schema
+brokers use [shared model capacity and owner-scoped recovery](broker-overlap.md)
+so compatible broker replacements can overlap without rewriting live receipts.
 
 All roles must use the same PostgreSQL schema, encryption/session keys, shared
 object destination, public URL, Temporal target/namespace/task queue, global
-budgets. Coordinator/broker/worker builds must match; set the same full
-`MOYAI_BUILD_SHA` on those processes. API replicas may use a different build only
+budgets. Set each process's actual full `MOYAI_BUILD_SHA`; never copy an old SHA
+to bypass admission. Default auto-schema deployments require matching builds.
+Verified-schema, separate-broker clusters admit [compatible workers](worker-releases.md)
+and brokers; coordinators also need the handoff flag. Background contracts cover
+all role protocol revisions, the exact schema and shared settings. Compatible
+successors retain the original cluster policy. API replicas may use a different build only
 under the [reviewed API compatibility contract](api-replicas.md#compatibility-contract-and-review).
 A stored fingerprint rejects mismatches. Pool sizes and per-worker concurrency
 may differ. Keep other runtime/provider settings aligned too: the fingerprint
@@ -102,18 +125,22 @@ loops; use scheduling diagnostics to find remaining stalls.
    cancellation and recovery when a worker stops. Keep the API only on the
    coordinator. Start with existing budgets, then increase in measured steps.
 5. Replicas of the same build/policy may overlap during worker replacement.
-   For build/policy changes, drain and stop old workers and the separate broker
-   before changing the coordinator; restart them with the new configuration.
-   The replacement coordinator refuses startup while any old runtime owner
-   remains, preserving its shared policy and active work. Schema upgrades still
-   occur at startup: incompatible code/schema upgrades require a coordinated
-   maintenance window.
+   For the full rolling topology, perform the one-time offline migration to the
+   selected release's schema (currently revision 9), activate dedicated API/edge
+   routing, and enable coordinator handoff with the reviewed shared settings.
+   Then use the [rolling release procedure](rolling-deploy.md) to replace workers,
+   broker, coordinator and API while users continue submitting work. Compatible
+   releases preserve the baseline cluster policy. A changed shared setting,
+   protocol or schema still requires a coordinated maintenance transition;
+   overlapping deployments do not make arbitrary schema migrations online.
 
 Use a direct database connection or session-preserving proxy, not transaction-mode
-pooling. Budget worst-case connections as `sum(pool_size + 1)` across all processes,
-including overlapping replacement workers, plus administration and provider
-reserve. Larger pools can worsen database contention. For example, one coordinator
-and four workers with pools of 16 need up to 85 connections before reserves.
+pooling. Budget `sum(pool_size + 1)` across all processes, plus one model-slot
+ownership connection per verified broker, the active coordinator's wake listener,
+and administration/provider reserve. Include every overlapping replacement. Larger pools can worsen database contention. For example, one coordinator
+and four workers with pools of 16 need up to 86 connections including the wake
+listener, before reserves. Add the dedicated API/broker and their replacements
+when sizing the rolling topology.
 
 An **illustrative staging capacity target**, not production sizing evidence:
 
@@ -251,13 +278,14 @@ uv run --frozen --python 3.13 pytest -q tests/test_runtime_performance.py tests/
    [#330](https://github.com/BerriAI/moyai/pull/330) before
    starting distributed workers. Verify archives, browser captures and frozen
    handoffs from an empty replacement disk, with identical keys and object
-   destination. All user/sandbox traffic still requires one coordinator.
+   destination. Route traffic according to the activated topology; a dedicated
+   API and broker must receive their own routes before coordinator handoff.
 3. Start staging at 100 occupied sandboxes, two workers, 120 activity slots per
    worker, pools of 8, and the currently configured production model budget.
    Preserve explicit overrides (for example, 32 model requests) rather than
    resetting them to the default of 8. Keep dispatch batch
    200/concurrency 10 initially: the artificial batch pauses are already removed.
-   Two workers plus one coordinator use at most 27 DB connections; budget 36
+   Two workers plus one coordinator and its wake listener use at most 28 DB connections; budget 37
    during one overlapping replacement, plus administration/reserve. Four-slot
    pools passed admission tests, but mixed execution/provider traffic still
    needs measurement before reducing the default eight.
@@ -272,9 +300,9 @@ For a 3,000-session staging trial, explicitly set `MAX_CONCURRENT_RUNS=3000`
 and `MAX_PENDING_RUNS=10000`; the unchanged 1,000 pending default would reject
 the larger workload. Consider workflow caches of 512 per worker after measuring
 replay and memory; cache eviction is safe but adds replay work. Change shared
-budgets/builds through the coordinated drain described above, since #328 fences
-workers with a different policy. This is separate from scaling replicas of the
-same build. Infrastructure autoscaling is still external: use sustained Temporal
+budgets through a coordinated configuration change. Reviewed compatible build
+updates may use the rolling procedure once its contracts and routing are active.
+This is separate from scaling replicas or increasing model capacity. Infrastructure autoscaling is still external: use sustained Temporal
 queue delay and occupied slots to request another replica, bounded by DB and
 provider budgets, and drain a worker before scale-down.
 
@@ -291,9 +319,9 @@ At 70% planned utilization, use `ceil(active_sessions / (slots_per_worker * .7))
 
 Those larger counts are arithmetic targets, not tested production sizing. To
 retain the same 30% headroom after losing one worker, add another worker. With
-17 workers at pool 8 and one coordinator at pool 16, budget 170 connections;
+17 workers at pool 8 and one coordinator at pool 16, budget 171 connections including the wake listener;
 two overlapping replacement workers and 20 reserved connections bring that to
-208. A 256-connection database leaves margin for that topology only if other
+209. A 256-connection database leaves margin for that topology only if other
 clients fit within the remaining budget. More connections do not create more
 database CPU or I/O capacity. Keep session-preserving connections for ownership.
 

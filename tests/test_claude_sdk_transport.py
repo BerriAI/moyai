@@ -4,6 +4,7 @@ No provider calls or generated shell commands. Tools read and echo synthetic dat
 """
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sys
@@ -376,8 +377,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
                     assert 'sdk-transport-ok' in text
             inspect_file = resumed is True or (resumed == 'pending' and not done)
             if inspect_file and receipt is None:
+                reference = re.search(r'(/[^\s"\\]+/\.moyai-history-[0-9a-f]{64}\.jsonl)', json.dumps(data['messages']))
                 block = {'type': 'tool_use', 'id': 'history_read', 'name': 'Read', 'input': {
-                    'file_path': str(workspace / 'note.txt' if resumed == 'pending' else session / '.moyai-history.jsonl'),
+                    'file_path': str(workspace / 'note.txt') if resumed == 'pending' else reference[1],
                     'offset': 1, 'limit': 1}}
             else:
                 if inspect_file:
@@ -415,7 +417,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
     url = f'http://127.0.0.1:{server.server_port}'
     monkeypatch.setenv('WORKSPACE_RUN_TOKEN', 'fixture-capability')
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'claude-config'))
-    relay = SimpleNamespace(url=url)
+    # Production obtains this through the authenticated gateway. The fixture
+    # provider rejects 100 KB prompts, so give the adapter its actual window.
+    relay = SimpleNamespace(url=url, context_window=lambda: {'input_budget': 20000})
     native_sessions, native_prompts = [], []
     if native_case:
         from app.security import digest
@@ -524,7 +528,9 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
             if resumed == 'pending':
                 assert store.pending == {'history_read'}
                 assert (workspace / 'note.txt').read_text() == 'already edited\n'
-            store.compact(relay.compact)
+            # Exercise a compacted cold restore even when this fixture's
+            # current history already fits its advertised model window.
+            store.compact(relay.compact, force=True)
             cursor = store.state()['cursor']
             assert cursor > 0
             agent.close()
@@ -593,9 +599,10 @@ def test_real_sdk_executes_mcp_and_preserves_receipt(tmp_path, monkeypatch, resu
         else:
             assert result['messages'][:len(history)] == history
         if resumed is True:
-            saved = [json.loads(line) for line in (session / '.moyai-history.jsonl').read_text().splitlines()]
+            reference = re.search(r'(/[^\s"\\]+/\.moyai-history-[0-9a-f]{64}\.jsonl)', json.dumps(requests[0]['messages']))
+            saved = [json.loads(line) for line in Path(reference[1]).read_text().splitlines()]
             assert saved == history
-            assert not (workspace / '.moyai-history.jsonl').exists()
+            assert not list(workspace.glob('.moyai-history-*.jsonl'))
     finally:
         agent.close()
         if store is not None:
@@ -701,10 +708,13 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
     if delay_continuation or late_blocked_result:
         query, receive, before_model = ClaudeSDKClient.query, ClaudeSDKClient.receive_messages, relay.before_model
         continued = asyncio.Event()
+        automatic_blocked = threading.Event()
         async def delayed_query(client, prompt, **kwargs):
             continuation = isinstance(prompt, str) and 'Recovery input:' in prompt
             if continuation and delay_continuation:
-                await asyncio.sleep(1)
+                # Synchronize on the race being exercised. A fixed sleep can
+                # pass without observing the stale request on a busy machine.
+                assert await asyncio.to_thread(automatic_blocked.wait, 10), 'The automatic turn never reached its admission fence'
             result = await query(client, prompt, **kwargs)
             if continuation:
                 continued.set()
@@ -725,6 +735,7 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
                 return before_model(request)
             except InputPending:
                 state['blocked'] += 1
+                automatic_blocked.set()
                 raise
         monkeypatch.setattr(ClaudeSDKClient, 'query', delayed_query)
         monkeypatch.setattr(ClaudeSDKClient, 'receive_messages', delayed_receive)
@@ -752,7 +763,7 @@ def live_recovery_case(tmp_path, monkeypatch, *, outage_seconds=3, progress=prin
             assert state['late_result'], 'The outage-time rejection must arrive after recovery has finished'
         assert len(diagnostics) == 1 and diagnostics[0]['http_status'] == 502
         assert not agent.journal.pending and not store.pending
-        assert sum(m.get('content') == '[User correction to the current task]\n' + correction for m in agent.journal.messages) == 1
+        assert sum(m.get('content') == '[New authenticated user message; interpret its intent in context]\n' + correction for m in agent.journal.messages) == 1
         assert [e['data']['phase'] for e in events if e['data'].get('stage') == 'model_transport'] == ['reconnecting', 'recovered']
         assert len([m for m in agent.journal.messages if m.get('tool_calls') and m['tool_calls'][0]['id'] == 'original_command']) == 1
         return {'completed': True, 'native_sessions': len(native_sessions), 'original_command_executions': len(pids),

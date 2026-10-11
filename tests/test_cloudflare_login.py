@@ -1,5 +1,9 @@
+import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -46,6 +50,114 @@ def test_access_opens_existing_account_without_google_round_trip(login):
     assert client.get('/api/admin/users').status_code == 200
     assert client.get('/api/session').json()['csrf'] == session['csrf']
     assert not client.get('/api/session').headers.get('set-cookie')
+
+
+async def test_slow_access_account_check_does_not_block_another_request(login, access_key, monkeypatch):
+    app, _ = login
+    original = app.state.security.access_session
+    loop_thread = threading.get_ident()
+    started, release = threading.Event(), threading.Event()
+
+    def delayed(request, identity):
+        if identity['sub'] == 'access-tin':
+            started.set()
+            assert threading.get_ident() != loop_thread
+            assert release.wait(5), 'Test did not release the account check'
+        return original(request, identity)
+
+    monkeypatch.setattr(app.state.security, 'access_session', delayed)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                base_url=app.state.settings.public_url) as client:
+        pending = asyncio.create_task(client.get('/api/session', headers={
+            'Cf-Access-Jwt-Assertion': assertion(access_key[0], sub='access-tin', email='tin@berri.ai')}))
+        try:
+            assert await asyncio.to_thread(started.wait, 2)
+            other = await asyncio.wait_for(client.get('/api/session', headers={
+                'Cf-Access-Jwt-Assertion': assertion(access_key[0], sub='access-bob', email='bob@berri.ai')}), 2)
+            assert other.status_code == 200
+            assert other.json()['identity']['email'] == 'bob@berri.ai'
+            assert other.json()['role'] == 'member'
+            assert not pending.done(), 'The other request must finish while the account check is held'
+        finally:
+            release.set()
+            response = await pending
+    assert response.status_code == 200
+    assert response.json()['user_id'] == 'google:original-google-tin'
+    assert response.json()['role'] == 'admin'
+    assert 'workspace_session=' in response.headers['set-cookie']
+
+
+def test_conversation_reads_reuse_fresh_access_actor_without_identity_writes(login, monkeypatch):
+    app, client = login
+    store = app.state.store
+    owner = 'google:original-google-tin'
+    run = store.create_run('Open my conversation', '', 'demo', [], chat_enabled=True, user_id=owner)
+    original = store.access_identity
+    enrollments = []
+
+    def enroll(identity):
+        enrollments.append(identity['sub'])
+        return original(identity)
+
+    def unexpected_identity_write(info):
+        raise AssertionError('Conversation reads must reuse the freshly verified Access actor')
+
+    monkeypatch.setattr(store, 'access_identity', enroll)
+    monkeypatch.setattr(store, 'identity', unexpected_identity_write)
+    path = f"/api/runs/{run['id']}?activity=summary"
+    first = client.get(path)
+    assert first.status_code == 200
+    assert first.json()['owner']['id'] == owner
+    assert first.json()['can_delete'] is True
+    assert enrollments == ['access-tin']
+    seen = store.rows('SELECT updated_at FROM users WHERE id=?', (owner,))[0]['updated_at']
+    cookie = app.state.security.signer.loads(client.cookies['workspace_session'])
+    assert set(cookie) == {'sid', 'method', 'identity', 'audience'}
+    second = client.get(path)
+    assert second.status_code == 200
+    assert second.json() == first.json()
+    assert not second.headers.get('set-cookie')
+    assert enrollments == ['access-tin']
+    assert store.rows('SELECT updated_at FROM users WHERE id=?', (owner,))[0]['updated_at'] == seen
+
+
+def test_enrolled_conversation_read_does_not_wait_for_database_writer(login):
+    app, client = login
+    store = app.state.store
+    run = store.create_run('Open while another session writes', '', 'demo', [], chat_enabled=True,
+                           user_id='google:original-google-tin')
+    path = f"/api/runs/{run['id']}?activity=summary"
+    assert client.get(path).status_code == 200
+    # In PostgreSQL this holds the schema's exclusive advisory write lock.
+    # SQLite holds its writer lock while WAL readers remain available.
+    with ThreadPoolExecutor(max_workers=1) as requests, store.connect() as writer:
+        writer.begin_write()
+        response = requests.submit(client.get, path).result(timeout=2)
+        assert response.status_code == 200
+        assert response.json()['messages'][0]['content'] == 'Open while another session writes'
+
+
+@pytest.mark.parametrize('change', [
+    "UPDATE access_identities SET email='reassigned@berri.ai'",
+    "UPDATE users SET email='reassigned@berri.ai' WHERE id='google:original-google-tin'",
+    "UPDATE users SET kind='shared' WHERE id='google:original-google-tin'",
+])
+def test_conversation_access_mapping_is_revalidated_without_enrollment_fallback(login, monkeypatch, change):
+    app, client = login
+    store = app.state.store
+    run = store.create_run('Check current access', '', 'demo', [], chat_enabled=True,
+                           user_id='google:original-google-tin')
+    path = f"/api/runs/{run['id']}?activity=summary"
+    assert client.get(path).status_code == 200
+    store.execute(change)
+
+    def unexpected_enrollment(identity):
+        raise AssertionError('An invalid pinned mapping must fail closed')
+
+    monkeypatch.setattr(store, 'access_identity', unexpected_enrollment)
+    response = client.get(path)
+    assert response.status_code == 401
+    assert response.json()['detail'] == 'Cloudflare Access authentication required.'
 
 
 def test_cookie_never_overrides_access_account_and_csrf_rotates(login, access_key):

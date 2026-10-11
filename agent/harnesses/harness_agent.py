@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import json
+from agent.inputs import attributed_input
 import threading
 from uuid import uuid4
 
@@ -59,10 +60,10 @@ class HarnessInputs:
                 return False
             if item['id'] in self.accepted:
                 return True
-            text = '[User correction to the current task]\n' + item['content']
+            text = attributed_input(item['content'], item.get('kind', 'user'), item.get('source'))
             try:
                 with self.journal.lock:
-                    self.journal.append({'role': 'user', 'content': text})
+                    self.journal.append({'role': 'user', 'content': text, 'input_kind': item.get('kind', 'user'), 'source': item.get('source', {}), 'input_id': item['id']})
             except Exception:
                 return False  # Persistence must succeed before a delivery receipt.
             self.items.append(text)
@@ -129,11 +130,9 @@ class TurnJournal:
                 self.completed_tools += 1
             self.pending.discard(call_id)
 
-    def finish(self, text):
+    def finish(self, text, *, phase=None):
         with self.lock:
-            self.append({'role': 'assistant', 'content': text})
+            self.append({'role': 'assistant', 'content': text, **({'phase': phase} if phase else {})})
 
     def prompt(self, current, history, *, cwd):
-        if self.context_store is not None:
-            return '\n'.join(m['content'] for m in history) + '\n\nCURRENT REQUEST:\n' + current
         return history_prompt(current, history, cwd=cwd)

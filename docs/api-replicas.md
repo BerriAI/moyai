@@ -4,14 +4,15 @@
 jobs or execution workers. Multiple API instances with the **same declared API
 protocol, schema and shared configuration** may overlap even when build SHAs
 differ. Inference stays on the separate broker; the existing
-singleton coordinator keeps webhook processing, wake dispatch, Slack delivery,
+elected coordinator keeps webhook processing, wake dispatch, Slack delivery,
 schedulers, identity/environment jobs, trace export, session titles and deletion
 cleanup.
 
-This is an opt-in prerequisite for seamless API releases. Coordinator/broker/worker
-builds must still match, and coordinator/broker replacements still require their singleton
-owner to exit. No production service, edge route, or deployment workflow is
-changed automatically. The production GitHub Action has a separate `api` release mode; follow
+This is the API prerequisite for compatible releases. [Workers](worker-releases.md),
+[brokers](broker-overlap.md) and an opt-in [coordinator handoff](coordinator-handoff.md)
+can also overlap under their reviewed contracts. The full
+[rolling release procedure](rolling-deploy.md) coordinates these replacements.
+No production service, edge route or deployment setting changes automatically. The production GitHub Action has a separate `api` release mode; follow
 [API deployment activation](api-deploy.md) before adding this service or selecting
 that mode. Coordinated mode refuses the activated four-service topology.
 
@@ -19,7 +20,7 @@ that mode. Coordinated mode refuses the activated four-service topology.
 
 - PostgreSQL, Temporal, verified shared object storage and explicit stable keys.
 - `MOYAI_SEPARATE_BROKER=true` and `MOYAI_SCHEMA_MODE=verify` on all roles.
-- Offline schema migration to revision 3. Revision 2 adds the durable session-title
+- Offline schema migration to the revision required by the selected release (currently 8). Revision 2 adds the durable session-title
   inbox and a partial index for pending deletion scans; revision 3 adds the API
   compatibility policy. These preserve saved
   sessions, keys and runtime policy. Follow
@@ -44,14 +45,15 @@ Keep the public hostname and existing Cloudflare Access policies. Ordered routes
 | Path | Destination |
 | --- | --- |
 | `^/broker(/.*)?$` | Existing private inference broker |
-| `^/hooks(/.*)?$` | Singleton coordinator |
+| `^/hooks(/.*)?$` | Coordinator service (leader or inbox-ready standby) |
 | All remaining workspace traffic | Ready API instance(s) |
 
 The API rejects `/hooks` and `/hooks/*` with 503, including signed Slack and
 automation events. It also rejects broker requests. The edge must route these
 directly to their owner, not forward them through an API process. Keep the tunnel
-connector independent of API deployments. The coordinator still serves APIs for
-compatibility, but should receive only hooks after the routing cutover.
+connector independent of application deployments. The default coordinator still
+serves APIs for compatibility, but should receive only hooks after the routing
+cutover. With coordinator handoff enabled, it rejects workspace API traffic.
 
 API startup connects to Temporal and verifies database ownership before Uvicorn
 binds its TCP port. An unsuccessful startup exits after
@@ -83,8 +85,10 @@ Every API transaction checks both policies. Contract revocation rejects subseque
 reads/writes and makes `/health` fail. Writes lock the contract row through commit;
 revocation waits for writes already admitted. Read-only projections retain their
 consistent transaction snapshot. Runtime owners still hold the shared database
-ownership lock, so changing the coordinator build/config or migrating the schema
-requires draining **all** owners, including APIs.
+ownership lock. A compatible coordinator successor preserves the original policy
+and may take over singleton work after the old leader drains. Changing shared
+configuration/protocols or migrating the schema still requires stopping **all**
+owners, including APIs.
 
 Equal protocol numbers are a **reviewed compatibility declaration**, not an automatic
 proof that arbitrary source changes are safe. Before retaining the revision:
@@ -101,10 +105,12 @@ proof that arbitrary source changes are safe. Before retaining the revision:
   release before routing traffic. Bump `API_PROTOCOL_REVISION` for an incompatible
   change; use maintenance deployment when compatibility is uncertain.
 
-This change does not add Temporal build routing, coordinator ownership transfer,
-broker stream handoff or rolling schema migration. Initial activation from revision
-2 requires an offline migration and a contract-publishing coordinator. Revision-2
-API processes cannot participate in this first transition.
+This API contract does not add Temporal build routing or rolling schema migration.
+Initial activation of the full rolling topology requires the selected release's
+offline schema migration (currently revision 9) and a contract-publishing
+coordinator. Old processes without those contracts cannot participate in that
+one-time transition. Later compatible releases use coordinator ownership transfer
+and broker request drain; they do not move a live stream between processes.
 
 ## Compatible API replacement rehearsal
 
@@ -122,9 +128,10 @@ API processes cannot participate in this first transition.
 
 For an incompatible protocol, changed shared config or schema revision, use a
 coordinated maintenance transition that includes every API owner. Do not bypass
-the fingerprint. Remaining release work includes coordinator ownership transfer,
-broker draining and a production continuity rehearsal with real sessions.
-The API-only workflow does not make background-service or schema upgrades seamless.
+the fingerprint. Use the full rolling workflow for background-service updates,
+and validate it in a production continuity rehearsal with real sessions before
+claiming that deployment is seamless. The API-only workflow remains limited to
+API changes; all drains have platform deadlines.
 
 ## Local verification
 

@@ -4,7 +4,6 @@ on:
     paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/runtime_compatibility.py', 'app/schema_migrations.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
   push:
     branches: [main]
-    paths: ['scripts/release/**', 'tests/release/**', 'app/config.py', 'app/database.py', 'app/runtime_compatibility.py', 'app/schema_migrations.py', 'app/main.py', 'render_start.py', '.github/workflows/deploy-production.yml', '.github/workflows/production-release-tests.yml']
 permissions:
   contents: read
 jobs:

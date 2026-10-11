@@ -273,14 +273,24 @@ class Filesystem:
         return SimpleNamespace(**await self.sandbox.request('/file/stat', {'path': path}))
 
     @operation
+    async def copy_to_local(self, path, destination):
+        offset = 0
+        with open(destination, 'wb') as stream:
+            while True:
+                value = await self.sandbox.request('/file/read', {'path': path, 'offset': offset})
+                data = base64.b64decode(value['data'], validate=True)
+                if not data:
+                    break
+                stream.write(data)
+                offset += len(data)
+
+    @operation
     async def read_bytes(self, path):
         result = bytearray()
         while True:
             value = await self.sandbox.request('/file/read', {'path': path, 'offset': len(result)})
             data = base64.b64decode(value['data'], validate=True)
             result.extend(data)
-            if len(result) > 24 * 1024 * 1024:
-                raise ValueError('Sandbox download exceeds 24 MiB')
             if not data:
                 return bytes(result)
 

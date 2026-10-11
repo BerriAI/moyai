@@ -6,7 +6,7 @@ import modal
 
 from app.config import Settings
 from app.modal_clients import ModalClients
-from app.workspace_image import workspace_image
+from app.workspace_image import workspace_image, agent_runtime_image
 
 
 async def build_workspace_image(settings: Settings) -> modal.Image:
@@ -21,7 +21,16 @@ async def build_workspace_image(settings: Settings) -> modal.Image:
             settings.modal_app_name, create_if_missing=True, client=client
         )
         image = workspace_image(settings)
-        await image.build.aio(app)
+        builds = [asyncio.create_task(image.build.aio(app))]
+        if settings.independent_agent_runtime:
+            builds.append(asyncio.create_task(agent_runtime_image().build.aio(app)))
+        try:
+            await asyncio.gather(*builds)
+        finally:
+            for task in builds:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*builds, return_exceptions=True)
         return image
     finally:
         await clients.close()

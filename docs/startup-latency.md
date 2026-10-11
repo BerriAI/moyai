@@ -79,7 +79,7 @@ described in [Agent startup separation](agent-startup.md).
 ## Optional prepared workspaces
 
 `SANDBOX_PREPARED_POOL_SIZE` defaults to **0**. Leave it at 0 for the first rollout.
-Enabling it requires Temporal, Modal, and a size smaller than `MAX_CONCURRENT_RUNS`.
+Enabling it requires Temporal, Modal, and, when `MAX_CONCURRENT_RUNS` is set above 0, a size smaller than it.
 `SANDBOX_PREPARED_IDLE_SECONDS` defaults to 300 (30–3600).
 
 The pool creates clean Modal machines and syncs the runtime, without a task, agent

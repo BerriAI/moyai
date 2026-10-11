@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from agent.harnesses.harness_agent import HarnessAgent, HarnessContext, HarnessInputs, TurnJournal
 from agent.context_recovery import run_with_context_recovery, prepare_context, maintain_context
-from agent.harnesses.native_session import NativeSession, MAX_BYTES
+from agent.harnesses.native_session import NativeSession
 from agent.harnesses.sdk_failure import claude_details, exception_details, failure_diagnostic, failure_summary, CLAUDE_ERRORS
 from agent.transport_recovery import MAX_TRANSPORT_ATTEMPTS, retryable_failure
 from sandbox.broker_relay import InputPending
@@ -58,9 +58,6 @@ class ClaudeTranscript:
                 if identity:
                     positions[identity] = len(previous)
                 previous.append(entry)
-        if len(json.dumps(self.payload()).encode()) > MAX_BYTES:
-            self.valid = False
-            self.records.clear()
 
     async def load(self, key):
         return self.records.get(json.dumps(key, sort_keys=True))

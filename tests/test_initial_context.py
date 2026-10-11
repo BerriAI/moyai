@@ -4,8 +4,7 @@ import json
 import httpx
 import pytest
 
-from app.memory import MAX_AUTOMATIC_CONTEXT, MAX_CONTEXT
-from app.skills import MAX_INDEX_CONTEXT, MAX_INDEX_SKILLS
+from app.library_views import fit_context
 from test_memory import create as memory, source, call as memory_call
 from test_skills import create as skill, edit, skill_context, search
 from test_spend import active, sign_in
@@ -60,7 +59,7 @@ def test_first_inference_gets_private_context_and_loads_skill_on_demand(workspac
     assert 'PRIVATE_' not in json.dumps(captured[-1])
 
 
-def test_directory_bounds_ranks_metadata_and_preserves_search(workspace):
+def test_directory_ranks_complete_metadata_and_preserves_search(workspace):
     app, client = workspace
     sign_in(app, client)
     for i in range(16):
@@ -71,10 +70,9 @@ def test_directory_bounds_ranks_metadata_and_preserves_search(workspace):
     source(app, run, 'Investigate sqlite replication durability')
     context = skill_context(app, run)
     assert context['available'][0]['reference'] == 'personal:zebra'
-    assert len(context['available']) == MAX_INDEX_SKILLS and context['omitted'] == 5
-    assert len(json.dumps(context['available'], ensure_ascii=False)) <= MAX_INDEX_CONTEXT
+    assert len(context['available']) == 17 and context['omitted'] == 0
     assert not context['loaded'] and not context['matches']
-    # An omitted workflow remains searchable; search wins over automatic ranking.
+    # Exact search wins over automatic ranking.
     assert search(client, run, 'personal:workflow-9').json()['matches'][0]['reference'] == 'personal:workflow-9'
     context = skill_context(app, run)
     references = [s['reference'] for s in context['matches'] + context['available']]
@@ -106,9 +104,13 @@ def test_directory_budget_counts_json_escaping(workspace):
         skill_id = skill(client, name=f'workflow-{i}', client_id=f'workflow-{i}').json()['id']
         edit(client, skill_id, description='"'*320)
     context = skill_context(app, active(app))
-    assert 0 < len(context['available']) < MAX_INDEX_SKILLS
-    assert len(json.dumps(context['available'], ensure_ascii=False)) <= MAX_INDEX_CONTEXT
-    assert len(context['available']) + context['omitted'] == 12
+    assert len(context['available']) == 12 and context['omitted'] == 0
+    raw = 'Skills\n' + json.dumps(context, ensure_ascii=False)
+    view = fit_context(raw, 2500)
+    limited = json.loads(view.split('\n', 1)[1])
+    assert len(view.encode()) <= 2500
+    assert len(limited['available']) + limited['view']['omitted']['available'] == 12
+    assert all(item['description'] == '"'*320 for item in limited['available'])
 
 
 def test_automatic_ranking_uses_only_delivered_requester_messages(workspace):
@@ -127,7 +129,7 @@ def test_automatic_ranking_uses_only_delivered_requester_messages(workspace):
     assert [n['id'] for n in memory_context(app, run)['notes']] == [special]
 
 
-def test_automatic_memory_bounds_relevance_and_explicit_priority(workspace):
+def test_automatic_memory_preserves_all_relevant_notes_and_explicit_priority(workspace):
     app, client = workspace
     sign_in(app, client)
     for i in range(8):
@@ -139,12 +141,12 @@ def test_automatic_memory_bounds_relevance_and_explicit_priority(workspace):
     run = active(app)
     source(app, run, 'Investigate sqlite replication durability')
     notes = memory_context(app, run)['notes']
-    assert notes[0]['id'] == matched and irrelevant not in {n['id'] for n in notes}
-    assert len(notes) <= 3 and len(json.dumps(notes, ensure_ascii=False)) <= MAX_AUTOMATIC_CONTEXT
+    assert matched in {n['id'] for n in notes} and irrelevant not in {n['id'] for n in notes}
+    assert len(notes) == 9
+    assert all(len(n['content']) > 1050 for n in notes if n['id'] != matched)
     assert memory_call(client, run, 'memory_search', query='orchid').json()['loaded'] == 1
     notes = memory_context(app, run)['notes']
-    assert notes[0]['id'] == irrelevant and len(notes) <= 5
-    assert len(json.dumps(notes, ensure_ascii=False)) <= MAX_CONTEXT
+    assert notes[0]['id'] == irrelevant and len(notes) == 10
     assert len({n['id'] for n in notes}) == len(notes)
 
 

@@ -51,7 +51,8 @@ def test_complete_offline_schema_and_no_runtime_constructor_writes(split_setting
 
         def read_only_construction(conn, sql, params=()):
             if not sql.strip().upper().startswith('SELECT') and not any(
-                    table in sql for table in ('runtime_policy', 'runtime_api_policy')):
+                    table in sql for table in ('runtime_policy', 'runtime_api_policy', 'runtime_worker_policy',
+                                              'runtime_broker_policy', 'runtime_coordinator_policy')):
                 pytest.fail('Unexpected runtime constructor write: ' + sql[:80])
             return original(conn, sql, params)
 
@@ -243,6 +244,67 @@ def test_postgres_login_state_upgrade_requires_migration_and_preserves_login(spl
         api.state.store.close()
 
 
+def test_postgres_revision_four_adds_swarms_without_losing_sessions_or_logins(split_settings):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        store = api.state.store
+        run = store.create_run('Existing revision-four session', '', 'modal', [])
+        saved_run = store.rows('SELECT * FROM runs WHERE id=?', (run['id'],))
+    finally:
+        api.state.store.close()
+
+    # Upstream revision four already has per-client login limits but predates
+    # swarm persistence. It must not pass the new runtime readiness check.
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE swarm_missions')
+        conn.execute('''INSERT INTO login_states
+            (state_hash,browser_hash,nonce,verifier,return_path,expires,client)
+            VALUES('state','browser','nonce','verifier','/',123,'browser-client')''')
+        conn.execute('UPDATE schema_state SET revision=4')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+
+    ready(split_settings)
+    assert execute(settings, 'SELECT * FROM swarm_missions') == []
+    assert execute(settings, 'SELECT client,nonce,expires FROM login_states') == [
+        ('browser-client', 'nonce', 123)]
+    assert execute(settings, "SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND indexname='login_states_client'") == [
+        ('login_states_client',)]
+    api = main.create_app(settings)
+    try:
+        assert api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],)) == saved_run
+        assert api.state.store.run(run['id'])['prompt'] == 'Existing revision-four session'
+    finally:
+        api.state.store.close()
+
+
+def test_revision_five_adds_shared_boards_without_changing_saved_work(split_settings):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        run = api.state.store.create_run('Existing revision-five session', '', 'modal', [])
+        saved = api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],))
+    finally:
+        api.state.store.close()
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE swarm_posts')
+        conn.execute('DROP TABLE swarm_teams')
+        conn.execute('UPDATE schema_state SET revision=5')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+    ready(split_settings)
+    assert execute(settings, 'SELECT * FROM swarm_teams') == []
+    assert execute(settings, 'SELECT * FROM swarm_posts') == []
+    api = main.create_app(settings)
+    try:
+        assert api.state.store.rows('SELECT * FROM runs WHERE id=?', (run['id'],)) == saved
+    finally:
+        api.state.store.close()
+
+
 def test_schema_initializers_have_a_versioned_manifest():
     # A schema edit without a new revision must fail CI, including optional
     # components and backend-specific functions/triggers used by the migrator.
@@ -313,3 +375,26 @@ def test_revision_one_upgrades_without_changing_saved_sessions(split_settings):
         assert app.state.store.run(run['id'])['prompt'] == 'Saved before API split'
     finally:
         app.state.store.close()
+
+
+def test_revision_nine_upgrade_adds_chat_projection_without_rewriting_saved_messages(split_settings):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        run = api.state.store.create_run('Saved conversation before the delivery projection.', '', 'modal', [])
+        messages = api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],))
+    finally:
+        api.state.store.close()
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        conn.execute('DROP TABLE swarm_chat_entries')
+        conn.execute('UPDATE schema_state SET revision=9')
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+    ready(split_settings)
+    assert execute(settings, 'SELECT * FROM swarm_chat_entries') == []
+    api = main.create_app(settings)
+    try:
+        assert api.state.store.rows('SELECT * FROM messages WHERE run_id=?', (run['id'],)) == messages
+    finally:
+        api.state.store.close()

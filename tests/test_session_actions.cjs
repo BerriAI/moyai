@@ -294,3 +294,14 @@ test('legacy task streams also close on the terminal deletion marker',async()=>{
   assert.equal(source.closed,true);assert.equal(state.selected,null);
   assert.match(content.innerHTML,/no longer available/);
 });
+
+test('swarm cleanup retains the draft until saved, then paused conversations can continue',async()=>{
+ const b=composerHarness();b.c.MoyaiSwarm=require('../app/static/swarm-space.js');b.c.esc=String;b.c.sessionStatus=run=>run.status;
+ b.refresh('stopping');b.state.chatRun.swarm={status:'paused',ends_at:new Date(Date.now()+60000).toISOString(),round:2};
+ b.c.updateChatStatus({status:'stopping',active:false});
+ assert.equal(b.send.disabled,true);assert.equal(b.now.disabled,true);assert.equal(b.form.inert,false);assert.equal(b.input.contentEditable,'true');
+ let sent=0;b.c.api=async()=>{sent++;};const submit=b.bindSubmit();await submit();
+ assert.equal(sent,0);assert.equal(b.input.value,'Keep this draft');
+ b.c.updateChatStatus({status:'cancelled',active:false});
+ assert.equal(b.send.disabled,false);await submit();assert.equal(sent,1);assert.equal(b.input.value,'');
+});

@@ -30,6 +30,40 @@ async function click(page,selector,ready){
     document.querySelector(selector).click();check();
   }),{selector,ready});
 }
+for(const width of [1440,768,320])test(`a two-minute-old conversation paints before revalidation at ${width}px`,async t=>{
+  const page=await browser.newPage({viewport:{width,height:1000},reducedMotion:'reduce'}),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  t.after(async()=>{await page.close();assert.deepEqual(errors,[]);});
+  const id='a'.repeat(32),start=Date.parse('2026-01-01T00:00:00Z');
+  await page.clock.setFixedTime(start);
+  await page.goto(`${base}/?fixture=feedback#run=${id}`);
+  await page.locator('#followup').waitFor();
+  await page.evaluate(()=>navigate('tasks'));await page.locator('#prompt').waitFor();
+  await page.clock.setFixedTime(start+120000);
+  let release;const held=new Promise(resolve=>release=resolve);t.after(()=>release());
+  let reads=0;
+  await page.route(url=>url.pathname===`/api/runs/${id}`,async route=>{
+    reads++;const response=await route.fetch(),run=await response.json();
+    run.messages[1].content='Fresh response after revalidation';
+    await held;await route.fulfill({response,json:run});
+  });
+  const ms=await page.evaluate(id=>new Promise(resolve=>{
+    const start=performance.now();window.reopening=openRun(id);
+    requestAnimationFrame(()=>resolve(performance.now()-start));
+  }),id);
+  assert.equal(await page.locator('#followup').count(),1,'cached transcript must mount before the held response');
+  assert(ms<250,`cached conversation took ${ms}ms`);
+  const composer=await page.locator('#followup').elementHandle();
+  await page.locator('#followup').fill('Keep this unsent draft');
+  assert.match(await page.locator('.chat-message.assistant').innerText(),/The change looks good/);
+  release();await page.evaluate(()=>window.reopening);
+  assert.equal(reads,1,'a cached preview must still revalidate');
+  assert.equal(await composer.evaluate(el=>el.isConnected),true,'fresh data must retain the composer');
+  assert.equal(await page.locator('#followup').evaluate(el=>el.value),'Keep this unsent draft');
+  assert.match(await page.locator('.chat-message.assistant').innerText(),/Fresh response after revalidation/);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+  t.diagnostic(`two-minute-old conversation painted in ${Math.round(ms)}ms at ${width}px with network held`);
+});
 test('returning to Settings and Users uses recent data; a settings write invalidates it',async t=>{
   const {page,reads}=await setup(t);
   await click(page,'a[href="#users"]','#user-search');

@@ -1,5 +1,5 @@
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import json
 from decimal import Decimal
 from pathlib import Path
@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from app.agents import AgentCoordinator, Artifact, Fanout, Retry
 from app.config import Settings
-from app.db import Store
+from app.db import Store, now
 from app.spend import Spend
 from app.temporal_runtime import TemporalRunManager
 from agent.continuation import AgentWait
@@ -71,6 +71,7 @@ async def test_fanout_is_atomic_idempotent_and_inherits_identity_files_model_per
     for child in children:
         assert child['owner_id'] == child['active_user_id'] == 'google:tin'
         assert child['model'] == 'test-model'
+        assert child['harness'] == manager.store.run(run_id)['harness']
         assert child['plugins'] == '[]'
         assert child['snapshot_id'] == 'im-1'
         assert manager.store.rows('SELECT revision FROM durable_sessions WHERE run_id=?', (child['id'],))[0]['revision'] == 1
@@ -80,6 +81,178 @@ async def test_fanout_is_atomic_idempotent_and_inherits_identity_files_model_per
         await coordinator.fanout(manager.store.run(run_id), args.model_copy(update={'workers': 3}))
     with pytest.raises(ValueError, match='enabled'):
         await coordinator.fanout(manager.store.run(run_id), args.model_copy(update={'model': 'unapproved'}))
+
+
+async def test_fanout_resolves_mixed_runtimes_and_shared_defaults(durable):
+    manager, cloud, root = durable
+    coordinator = attach(manager)
+    cloud.saving_before_answer = False
+    await drive(manager, root, phase='monitor')
+    result = await coordinator.fanout(manager.store.run(root), Fanout(
+        request_key='mixed-runtimes', harness='opencode', model='opus', tasks=[
+            {'label': 'Research', 'prompt': 'Research the task.', 'harness': 'codex', 'model': 'sol'},
+            {'label': 'Review', 'prompt': 'Review the task.'},
+            {'label': 'Synthesis', 'prompt': 'Synthesize the task.', 'harness': 'claude-agent-sdk'},
+        ]))
+    children = {child['agent_label']: child for child in coordinator.children(result['group_id'])}
+    expected = {'Research': ('codex', 'openai/gpt-6.1-sol'),
+                'Review': ('opencode', 'anthropic/claude-opus-5-5'),
+                'Synthesis': ('claude-agent-sdk', 'anthropic/claude-opus-5-5')}
+    for label, child in children.items():
+        assert (child['harness'], child['model']) == expected[label]
+        assert child['active_model'] == child['model']
+        assert manager.store.messages(child['id'])[0]['model'] == child['model']
+        assert manager.spec(manager.store.run(child['id']))['harness'] == child['harness']
+    nodes = coordinator.view(root, include_costs=False)['groups'][0]['children']
+    assert {node['agent_label']: (node['harness'], node['model']) for node in nodes} == expected
+
+
+@pytest.mark.parametrize('invalid', [
+    {'harness': 'missing-harness'}, {'model': 'disabled-model'},
+    {'harness': 'opencode', 'model': 'astra-ultrafast'},
+])
+async def test_invalid_second_assignment_rejects_entire_group_before_snapshot(durable, invalid):
+    manager, cloud, root = durable
+    coordinator = attach(manager)
+    await drive(manager, root, phase='monitor')
+    before = cloud.snapshots
+    with pytest.raises(ValueError):
+        await coordinator.fanout(manager.store.run(root), Fanout(request_key='invalid-second', tasks=[
+            {'label': 'Valid', 'prompt': 'Do the valid task.', 'harness': 'codex', 'model': 'sol'},
+            {'label': 'Invalid', 'prompt': 'Do the invalid task.', **invalid},
+        ]))
+    assert not manager.store.rows('SELECT * FROM agent_groups WHERE parent_id=?', (root,))
+    assert not manager.store.rows('SELECT id FROM runs WHERE parent_run_id=?', (root,))
+    assert cloud.snapshots == before
+
+
+async def test_preparing_group_pins_runtime_identity_across_restart_and_parent_changes(durable, monkeypatch):
+    manager, cloud, root = durable
+    coordinator = attach(manager)
+    cloud.saving_before_answer = False
+    await drive(manager, root, phase='monitor')
+    args = Fanout(request_key='resume-preparing', tasks=[{'label': 'Worker', 'prompt': 'Do the assigned task.'}])
+    async def failed_snapshot(run):
+        raise RuntimeError('Snapshot temporarily unavailable')
+    monkeypatch.setattr(manager, 'snapshot_for_children', failed_snapshot)
+    with pytest.raises(RuntimeError, match='Snapshot temporarily'):
+        await coordinator.fanout(manager.store.run(root), args)
+    group = manager.store.rows('SELECT * FROM agent_groups WHERE parent_id=?', (root,))[0]
+    pinned = json.loads(group['runtime_assignments'])[0]
+    assert (pinned['harness'], pinned['model']) == ('hermes', 'test-model')
+    assert not coordinator.children(group['id'])
+    manager.store.execute("UPDATE runs SET harness='codex',model='openai/gpt-6.1-sol',active_model='openai/gpt-6.1-sol' WHERE id=?", (root,))
+    manager = cloud.attach(TemporalRunManager(Store(manager.settings.data_dir), manager.settings))
+    coordinator = attach(manager)
+    result = await coordinator.fanout(manager.store.run(root), args)
+    assert result['group_id'] == group['id']
+    child = coordinator.children(group['id'])[0]
+    assert (child['id'], child['harness'], child['model']) == (pinned['id'], 'hermes', 'test-model')
+
+
+async def test_legacy_fanout_payload_remains_idempotent(durable):
+    manager, cloud, root = durable
+    coordinator, result, args = await launch(durable, count=1)
+    legacy = args.model_dump()
+    legacy.pop('harness')
+    manager.store.execute("UPDATE agent_groups SET payload=?,runtime_assignments='' WHERE id=?",
+                          (json.dumps(legacy), result['group_id']))
+    repeated = await coordinator.fanout(manager.store.run(root), args)
+    assert repeated['group_id'] == result['group_id']
+    assert len(coordinator.children(result['group_id'])) == 1
+    assert cloud.snapshots == 1
+
+
+async def test_explicit_retry_keeps_original_worker_runtime_after_model_preference_change(durable):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    child = coordinator.children(result['group_id'])[0]
+    manager.store.execute("UPDATE messages SET status='failed' WHERE run_id=?", (child['id'],))
+    manager.store.execute("UPDATE runs SET status='failed',model='openai/gpt-6.1-sol' WHERE id=?", (child['id'],))
+    args = Retry(group_id=result['group_id'], request_key='retry-original-runtime',
+                 child_ids=[child['id']], instructions='Inspect prior work before retrying.')
+    await coordinator.retry(manager.store.run(root), args)
+    await coordinator.retry(manager.store.run(root), args)
+    messages = manager.store.messages(child['id'])
+    assert len(messages) == 2
+    assert messages[-1]['model'] == 'test-model'
+    assert manager.store.run(child['id'])['harness'] == child['harness']
+
+
+async def test_nested_graph_and_frozen_handoff_keep_actual_runtime_metadata(durable):
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    child = coordinator.children(result['group_id'])[0]
+    await pause_parent(manager, root, result['group_id'])
+    await drive(manager, child['id'], phase='monitor')
+    nested = await coordinator.fanout(manager.store.run(child['id']), Fanout(request_key='nested-runtime', tasks=[
+        {'label': 'Nested reviewer', 'prompt': 'Review the inherited work.', 'harness': 'opencode', 'model': 'opus'},
+    ]))
+    grandchild = coordinator.children(nested['group_id'])[0]
+    view = coordinator.view(root, include_costs=False)
+    node = view['groups'][0]['children'][0]['children'][0]
+    assert (node['id'], node['harness'], node['model']) == (grandchild['id'], 'opencode', 'anthropic/claude-opus-5-5')
+    manager.store.execute("UPDATE messages SET status='completed' WHERE run_id=?", (grandchild['id'],))
+    manager.store.update_run(grandchild['id'], status='idle', summary='Public worker answer')
+    assert coordinator.handoff(child['id'], nested['group_id'])
+    manager.store.execute("UPDATE runs SET model='openai/gpt-6.1-sol',summary='Later answer' WHERE id=?", (grandchild['id'],))
+    frozen = coordinator.results(child['id'], nested['group_id'])['children'][0]
+    assert frozen['model'] == 'anthropic/claude-opus-5-5'
+    assert frozen['harness'] == 'opencode'
+    assert frozen['summary'] == 'Public worker answer'
+
+
+@pytest.mark.parametrize('status,expired', [('paused', False), ('stopped', False), ('active', True)])
+async def test_inactive_ancestor_mission_rejects_nested_fanout_and_retry(durable, status, expired):
+    from app.db import now
+    from app.swarms import create_in
+
+    manager, cloud, root = durable
+    coordinator, result, _ = await launch(durable, count=1)
+    child = coordinator.children(result['group_id'])[0]
+    await pause_parent(manager, root, result['group_id'])
+    await drive(manager, child['id'], phase='monitor')
+    with manager.store.connect() as conn:
+        conn.begin_write()
+        create_in(conn, root, 300, '2000-01-01T00:00:00+00:00' if expired else now())
+        conn.execute('UPDATE swarm_missions SET status=? WHERE run_id=?', (status, root))
+    with pytest.raises(ValueError, match='swarm is not active'):
+        await coordinator.fanout(manager.store.run(child['id']), Fanout(request_key='too-late', tasks=[
+            {'label': 'Late worker', 'prompt': 'Should not start.'},
+        ]))
+    assert not manager.store.rows('SELECT id FROM agent_groups WHERE parent_id=?', (child['id'],))
+    manager.store.update_run(root, status='running')
+    manager.store.update_run(child['id'], status='failed')
+    manager.store.execute("UPDATE messages SET status='failed' WHERE run_id=?", (child['id'],))
+    with pytest.raises(ValueError, match='swarm is not active'):
+        await coordinator.retry(manager.store.run(root), Retry(group_id=result['group_id'],
+            request_key='too-late-retry', child_ids=[child['id']], instructions='Should not restart.'))
+    assert len(manager.store.messages(child['id'])) == 1
+
+
+async def test_mission_expiring_during_snapshot_cannot_create_children(durable, monkeypatch):
+    from app.db import now
+    from app.swarms import create_in
+
+    manager, cloud, root = durable
+    coordinator = attach(manager)
+    cloud.saving_before_answer = False
+    await drive(manager, root, phase='monitor')
+    with manager.store.connect() as conn:
+        conn.begin_write()
+        create_in(conn, root, 300, now())
+    snapshot = manager.snapshot_for_children
+    async def expire_during_snapshot(run):
+        result = await snapshot(run)
+        manager.store.execute("UPDATE swarm_missions SET ends_at='2000-01-01T00:00:00+00:00' WHERE run_id=?", (root,))
+        return result
+    monkeypatch.setattr(manager, 'snapshot_for_children', expire_during_snapshot)
+    with pytest.raises(ValueError, match='time budget has ended'):
+        await coordinator.fanout(manager.store.run(root), Fanout(request_key='deadline-race', tasks=[
+            {'label': 'Late worker', 'prompt': 'Should not start.'},
+        ]))
+    assert cloud.snapshots == 1
+    assert not manager.store.rows('SELECT id FROM runs WHERE parent_run_id=?', (root,))
 
 
 async def test_parent_releases_capacity_and_resumes_after_children_across_restart(durable):
@@ -309,7 +482,7 @@ async def test_failed_workers_are_not_replayed_and_explicit_retry_is_idempotent(
     assert not coordinator.settled(root, result['group_id'])
 
 
-async def test_worker_artifacts_are_bounded_read_only_and_run_scoped(durable, tmp_path):
+async def test_worker_artifacts_have_complete_ranges_and_parent_scope(durable, tmp_path):
     manager, cloud, root = durable
     coordinator, result, _ = await launch(durable, count=1)
     child = coordinator.children(result['group_id'])[0]
@@ -320,9 +493,11 @@ async def test_worker_artifacts_are_bounded_read_only_and_run_scoped(durable, tm
         archive.writestr('large.txt', 'x' * (128 * 1024 + 1))
     assert coordinator.read_artifact(root, Artifact(child_id=child['id']))['files'][0]['path'] == 'new-files/results.json'
     assert 'passed' in coordinator.read_artifact(root, Artifact(child_id=child['id'], path='new-files/results.json'))['content']
-    for path in ['../secret', '/secret', 'large.txt']:
+    for path in ['../secret', '/secret']:
         with pytest.raises(ValueError):
             coordinator.read_artifact(root, Artifact(child_id=child['id'], path=path))
+    large = coordinator.read_artifact(root, Artifact(child_id=child['id'], path='large.txt', length=200000))
+    assert len(large['content']) == 128*1024+1 and large['next_offset'] is None
     with pytest.raises(ValueError, match='belong'):
         coordinator.read_artifact('unrelated-parent', Artifact(child_id=child['id']))
 
@@ -369,6 +544,72 @@ async def test_child_cost_rollup_does_not_duplicate_global_spend(durable):
     assert {c['cost']['spend'] for c in view['groups'][0]['children']} == {'0.2', '0.3'}
     assert coordinator.view(root, include_costs=False)['spend'] is None
     assert all('cost' not in c for c in coordinator.view(root, include_costs=False)['groups'][0]['children'])
+
+
+def test_chat_agent_view_batches_large_trees_and_preserves_latest_status(tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    store = Store(tmp_path)
+    coordinator = AgentCoordinator(store, settings, None)
+    root = store.create_run('Parent conversation', '', 'demo', [])['id']
+    stamp = now()
+    children = []
+    with store.connect() as conn:
+        for group_index in range(12):
+            group_id = f'group-{group_index:02}'
+            conn.execute('''INSERT INTO agent_groups(id,parent_id,message_id,request_key,payload,status,created_at,result_snapshot)
+                VALUES(?,?,1,?,'{}',?,?,?)''',
+                (group_id, root, group_id, 'preparing' if group_index == 0 else 'completed', stamp,
+                 'Large saved group result. ' * 10000))
+            for index in range(5):
+                child_id = f'{group_index * 5 + index + 1:032x}'
+                children.append(child_id)
+                conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,
+                    parent_run_id,agent_group_id,agent_label,summary,side_chat_context)
+                    VALUES(?,'Worker','','demo','idle','[]',?,?,?,?,?,?,?)''',
+                    (child_id, stamp, stamp, root, group_id, 'Worker', 'Saved answer. ' * 10000, 'Saved context. ' * 10000))
+        # A terminal direct child can still be waiting on an injected descendant.
+        grandchild = 'f' * 32
+        conn.execute('''INSERT INTO runs(id,prompt,repo_url,mode,status,plugins,created_at,updated_at,parent_run_id)
+            VALUES(?,'Nested worker','','demo','idle','[]',?,?,?)''', (grandchild, stamp, stamp, children[5]))
+        conn.execute("INSERT INTO messages(run_id,role,content,status,created_at) VALUES(?,'user','Queued continuation','injected',?)",
+                     (grandchild, stamp))
+        conn.execute('UPDATE runs SET deletion_requested_at=? WHERE id=?', (stamp, children[10]))
+    legacy = tmp_path / 'artifacts'
+    legacy.mkdir(exist_ok=True)
+    (legacy / (children[0] + '.zip')).write_bytes(b'legacy archive')
+    queries = []
+    connect = store.connect
+
+    @contextmanager
+    def counted(*args, **kwargs):
+        with connect(*args, **kwargs) as conn:
+            if store.database:
+                execute = conn.raw.execute
+                def traced(sql, *args, **kwargs):
+                    queries.append(sql)
+                    return execute(sql, *args, **kwargs)
+                with monkeypatch.context() as tracing:
+                    tracing.setattr(conn.raw, 'execute', traced)
+                    yield conn
+            else:
+                conn.set_trace_callback(queries.append)
+                yield conn
+
+    monkeypatch.setattr(store, 'connect', counted)
+    view = coordinator.view(root, include_costs=False)
+    assert len(queries) <= 8  # Three data reads, plus Postgres transaction setup.
+    assert not any('summary' in sql or 'result_snapshot' in sql or 'r.*' in sql for sql in queries)
+    assert len(json.dumps(view)) < 50_000
+    assert len(view['groups']) == 12 and all(group['total'] == 5 for group in view['groups'])
+    assert view['groups'][0]['settled'] is False
+    assert view['groups'][1]['settled'] is False
+    assert all(group['settled'] for group in view['groups'][2:])
+    assert view['groups'][2]['completed'] == 5
+    assert view['groups'][2]['children'][0]['status'] == 'deleting'
+    assert view['groups'][0]['children'][0]['has_artifact'] is True
+    assert view['groups'][0]['children'][1]['has_artifact'] is False
+    assert view['groups'][1]['children'][0]['children'][0]['id'] == grandchild
+    assert all('summary' not in child and 'cost' not in child for group in view['groups'] for child in group['children'])
 
 
 async def test_agent_billing_states_match_spend_and_stay_hidden_from_members(
@@ -426,11 +667,11 @@ def test_broker_hides_delegation_without_temporal_and_keeps_run_scope(workspace)
 
 
 @pytest.mark.parametrize('name', ['max_concurrent_runs', 'max_concurrent_model_requests'])
-def test_capacity_configuration_supports_explicit_scale_but_requires_positive_budgets(name):
+def test_capacity_configuration_supports_explicit_scale_and_zero_as_unlimited(name):
     assert getattr(Settings(_env_file=None, **{name: 3000}), name) == 3000
-    for invalid in (0, -1):
-        with pytest.raises(ValidationError):
-            Settings(_env_file=None, **{name: invalid})
+    assert getattr(Settings(_env_file=None), name) == 0
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{name: -1})
 
 
 async def test_direct_child_chat_joins_pending_work_and_keeps_sender_and_model(durable):
@@ -463,8 +704,8 @@ async def test_handoff_rechecks_followup_arriving_during_capacity_wait(durable, 
     await drive(manager, child)
     admission = manager.admission
     @asynccontextmanager
-    async def admit(run_id):
-        async with admission(run_id) as available:
+    async def admit(run_id, **options):
+        async with admission(run_id, **options) as available:
             coordinator.enqueue_child(child, 'Check one more case', 'during-admission', None, 'google:bob')
             yield available
     monkeypatch.setattr(manager, 'admission', admit)
@@ -505,8 +746,8 @@ async def test_post_handoff_chat_preserves_answers_and_files_across_restart(dura
     with zipfile.ZipFile(content, 'w') as z:
         z.writestr('results.json', '{"passed":21}')
     async def stat(_): return SimpleNamespace(size=len(content.getvalue()))
-    async def read(_): return content.getvalue()
-    sandbox = SimpleNamespace(filesystem=SimpleNamespace(stat=aio(stat), read_bytes=aio(read)))
+    async def copy(_, target): Path(target).write_bytes(content.getvalue())
+    sandbox = SimpleNamespace(filesystem=SimpleNamespace(stat=aio(stat), copy_to_local=aio(copy)))
     await RunManager.save_artifact(manager, sandbox, child)
     if storage == 'mixed':
         frozen = json.loads(coordinator.group(root, result['group_id'])['result_snapshot'])[0]['artifact_name']

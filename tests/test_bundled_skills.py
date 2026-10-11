@@ -1,13 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-import json
 
 import pytest
 
-from app.bundled_skills import install_pack, load_pack
+from app.skill_templates import install_pack, load_pack
 from app.config import Settings
 from app.main import create_app
-from app.skills import LIBRARY_LIMITS, MAX_INDEX_CONTEXT, Skills
+from app.skills import Skills
 from test_skills import create, edit, skill_context
 from test_spend import active, sign_in
 from test_workspace import workspace
@@ -36,10 +35,9 @@ def test_discovery_load_and_reference_use_existing_private_broker_path(workspace
     context = skill_context(app, run)
     assert context['available'][0]['reference'] == 'org:pr-feedback-loop'
     assert context['loaded'] == []
-    assert len(json.dumps(context['available'], ensure_ascii=False)) <= MAX_INDEX_CONTEXT
     assert all(set(row) == {'reference', 'description', 'revision'} for row in context['available'])
     # Discovery and loading never re-read bundled files after startup.
-    monkeypatch.setattr('app.bundled_skills.load_pack', lambda: pytest.fail('pack read on inference path'))
+    monkeypatch.setattr('app.skill_templates.load_pack', lambda: pytest.fail('pack read on inference path'))
     headers = {'Authorization': 'Bearer capability'}
     loaded = client.post(f"/broker/{run['id']}/tools/call", headers=headers,
                          json={'name': 'skills_load', 'arguments': {'name': 'org:pr-feedback-loop'}})
@@ -67,6 +65,29 @@ def test_restart_and_concurrent_install_are_idempotent(workspace):
     assert len(app.state.store.rows('SELECT * FROM skills')) == 3
     assert len(app.state.store.rows('SELECT * FROM skill_audit')) == 3
     assert len(app.state.store.rows('SELECT * FROM skill_bundles')) == 3
+
+
+def test_templates_and_public_procedures_keep_separate_discovery_and_reads(workspace):
+    from agent.skills import catalog, read
+
+    app, client = workspace
+    sign_in(app, client)
+    install_pack(app.state.skills)
+    templates = {template.name for template in load_pack()}
+    public = {item['name']: item for item in catalog()}
+    assert templates.isdisjoint(public)
+    run = active(app)
+    headers = {'Authorization': 'Bearer capability'}
+    response = client.post(f"/broker/{run['id']}/tools/call", headers=headers,
+        json={'name': 'bundled_skill_read', 'arguments': {
+            'name': 'coding', 'revision': public['coding']['revision']}})
+    assert response.status_code == 200 and response.json()['content']
+    template = load_pack()[0]
+    assert client.post('/api/skills/' + template.id + '/archive',
+        json={'archived': True, 'revision': 1}).status_code == 200
+    assert template.name not in {row['name'] for row in app.state.skills.rows_for('google:alice')}
+    with pytest.raises(ValueError, match='not found'):
+        read(template.name, public['coding']['revision'])
 
 
 def test_upgrade_pins_loaded_body_and_references_and_never_downgrades(workspace):
@@ -143,13 +164,14 @@ def test_members_cannot_modify_templates_and_archive_removes_discovery(workspace
     assert app.state.skills.rows_for('google:bob') == []
 
 
-def test_full_library_is_preserved(workspace, monkeypatch):
+def test_install_preserves_existing_library_entries(workspace):
     app, client = workspace
     sign_in(app, client)
-    create(client, scope='organization')
-    monkeypatch.setitem(LIBRARY_LIMITS, 'organization', 1)
-    assert len(install_pack(app.state.skills)['preserved']) == 3
-    assert len(app.state.store.rows('SELECT * FROM skills')) == 1
+    saved = create(client, scope='organization').json()['id']
+    before = app.state.skills.get(saved, 'google:alice')
+    assert len(install_pack(app.state.skills)['installed']) == 3
+    assert app.state.skills.get(saved, 'google:alice') == before
+    assert len(app.state.store.rows('SELECT * FROM skills')) == 4
 
 
 def test_disabled_startup_has_no_templates(tmp_path):
