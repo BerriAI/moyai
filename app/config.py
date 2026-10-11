@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     braintrust_api_key: str = ""
     braintrust_parent: str = "project_name:moyai"
     agent_model: str = ""
-    agent_harness: str = 'pydantic-ai'
+    agent_harness: str = 'deepagents-temporal'
     sandbox_provider: Literal['modal', 'substrate', 'lambda'] = 'modal'
     lambda_region: str = 'us-east-1'
     lambda_image: str = ''
@@ -444,7 +444,7 @@ class Settings(BaseSettings):
     def default_harness(self, value: str | None = None) -> str:
         """All new model selections use the durable engine by default."""
         model = self.resolve_model(value)
-        if model == ASTRA_ULTRAFAST and self.agent_harness != 'pydantic-ai':
+        if model == ASTRA_ULTRAFAST and self.agent_harness != 'deepagents-temporal':
             return 'codex'  # Compatibility for explicitly configured legacy harnesses.
         return self.agent_harness
 
@@ -547,6 +547,6 @@ class Settings(BaseSettings):
     def missing_cloud(self, provider=None) -> list[str]:
         required = {'LITELLM_API_BASE': self.litellm_api_base, 'LITELLM_API_KEY': self.litellm_api_key,
                     'AGENT_MODEL': self.agent_model}
-        if self.default_harness() == 'pydantic-ai':
+        if self.default_harness() == 'deepagents-temporal':
             required['TEMPORAL_ENABLED'] = self.temporal_enabled
         return self.missing_sandbox(provider) + [key for key, value in required.items() if not value]

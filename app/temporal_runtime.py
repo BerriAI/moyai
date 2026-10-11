@@ -10,11 +10,11 @@ from temporalio import activity
 from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.converter import DataConverter, DefaultFailureConverterWithEncodedAttributes
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from .pydantic_context import RuntimeInterceptor
-from .pydantic_execution import PydanticExecution
-from .pydantic_runtime import PydanticRuntime
-from .pydantic_workflow import PydanticTurnWorkflow
+from temporalio.deepagents import DeepAgentsPlugin
+from .deepagents_context import RuntimeInterceptor, deepagents_plugin
+from .deepagents_execution import DeepAgentsExecution
+from .deepagents_runtime import DeepAgentsRuntime
+from .deepagents_workflow import DeepAgentsTurnWorkflow
 from .temporal_payloads import PrivatePayloads, PrivatePayloadCodec
 
 from .db import database
@@ -30,8 +30,8 @@ class TemporalRunManager(DurableRunner):
     def __init__(self, store, settings):
         super().__init__(store, settings)
         self.payloads = PrivatePayloads(store, settings)
-        self.pydantic_runtime = PydanticRuntime(self, self.payloads)
-        self.pydantic_execution = PydanticExecution(self, self.payloads)
+        self.deepagents_runtime = DeepAgentsRuntime(self, self.payloads)
+        self.deepagents_execution = DeepAgentsExecution(self, self.payloads)
         self.temporal = None
         self.worker = None
         self.worker_task = None
@@ -147,7 +147,7 @@ class TemporalRunManager(DurableRunner):
         return await Client.connect(
             self.settings.temporal_address, namespace=self.settings.temporal_namespace,
             api_key=self.settings.temporal_api_key or None, tls=self.settings.temporal_tls,
-            identity=self.identity, plugins=[PydanticAIPlugin()],
+            identity=self.identity, plugins=[deepagents_plugin()],
             data_converter=DataConverter(payload_codec=PrivatePayloadCodec(self.payloads),
                 failure_converter_class=DefaultFailureConverterWithEncodedAttributes),
         )
@@ -176,11 +176,11 @@ class TemporalRunManager(DurableRunner):
     def make_agent_worker(self, client):
         # Tool activities can wait for computer capacity/receipts. Keep their
         # slots separate from the controller that must dispatch those actions.
-        plugins = [] if any(isinstance(p, PydanticAIPlugin) for p in client.config().get('plugins', [])) else [PydanticAIPlugin()]
+        plugins = [] if any(isinstance(p, DeepAgentsPlugin) for p in client.config().get('plugins', [])) else [deepagents_plugin()]
         return Worker(client, task_queue=self.settings.temporal_task_queue + '-agents-v1',
-                      workflows=[PydanticTurnWorkflow],
-                      activities=[self.pydantic_runtime.prepare, self.pydantic_runtime.boundary, self.pydantic_runtime.publish],
-                      plugins=plugins, interceptors=[RuntimeInterceptor(self.pydantic_runtime)],
+                      workflows=[DeepAgentsTurnWorkflow],
+                      activities=[self.deepagents_runtime.prepare, self.deepagents_runtime.boundary, self.deepagents_runtime.publish],
+                      plugins=plugins, interceptors=[RuntimeInterceptor(self.deepagents_runtime)],
                       max_concurrent_activities=self.settings.temporal_worker_activities,
                       max_cached_workflows=self.settings.temporal_workflow_cache_size,
                       graceful_shutdown_timeout=timedelta(seconds=1))

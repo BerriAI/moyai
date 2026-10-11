@@ -1,4 +1,4 @@
-"""Moyai services used by PydanticAI activities, behind the existing broker.
+"""Moyai services used by Deep Agents activities, behind the existing broker.
 
 No repository procedures or app-specific agent policies live in this adapter.
 It preserves the current capability, skill catalog, journal and computer receipts.
@@ -13,12 +13,9 @@ import re
 import time
 
 import httpx
-import httpx2
-from openai import AsyncOpenAI
-from pydantic_ai import ModelHTTPError
-from pydantic_ai.messages import ModelMessagesTypeAdapter, ModelRequest, UserPromptPart
-from pydantic_ai.models.openai import OpenAIResponsesModel
-from pydantic_ai.providers.openai import OpenAIProvider
+from openai import AsyncOpenAI, APIStatusError
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, messages_to_dict
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -33,20 +30,20 @@ from agent.tools.mcp_bridge import BROWSER_TOOLS, GUIDANCE_TOOL
 from agent.tools.remote_computer import requires_computer
 from sandbox.broker_transport import CONTENT_TYPE, MAX_BODY, body_limit, seal
 from .db import database
-from .pydantic_workflow import TurnInput, TurnScope
+from .deepagents_workflow import TurnInput, TurnScope
 from .security import digest
 from .model_selection import gateway_model
 from .session_journal import SessionJournal
 
 
-class SealedModelTransport(httpx2.AsyncBaseTransport):
+class SealedModelTransport(httpx.AsyncBaseTransport):
     def __init__(self, token):
         self.token = token
-        self.transport = httpx2.AsyncHTTPTransport()
+        self.transport = httpx.AsyncHTTPTransport()
 
     async def handle_async_request(self, request):
         route = '/v1/responses'
-        request = httpx2.Request(request.method, request.url, headers={
+        request = httpx.Request(request.method, request.url, headers={
             **dict(request.headers), 'content-type': CONTENT_TYPE,
         }, content=seal(self.token, route, await request.aread()))
         # Request recomputes Content-Length only when it wasn't copied from the
@@ -58,7 +55,7 @@ class SealedModelTransport(httpx2.AsyncBaseTransport):
         await self.transport.aclose()
 
 
-class PydanticRuntime:
+class DeepAgentsRuntime:
     def __init__(self, runner, payloads):
         self.runner, self.payloads = runner, payloads
         self.broker_transport = None
@@ -69,7 +66,7 @@ class PydanticRuntime:
         run, state = r.store.run(scope.run_id), r.state(scope.run_id)
         if (not run or run['deleted_at'] or run['deletion_requested_at']
                 or run['status'] not in {'running', 'reconnecting', 'awaiting_approval'}
-                or run['harness'] != 'pydantic-ai'
+                or run['harness'] != 'deepagents-temporal'
                 or run['active_message_id'] != scope.message_id or run['active_user_id'] != scope.actor_id
                 or run['token_hash'] != digest(r.token(scope.run_id, scope.message_id))
                 or state.get('message_id') != scope.message_id or state.get('segment') != scope.segment):
@@ -150,14 +147,16 @@ class PydanticRuntime:
     async def _model_request(self, scope, messages, settings, parameters):
         await database(self.current, scope)
         token = self.runner.token(scope.run_id, scope.message_id)
-        async with httpx2.AsyncClient(transport=SealedModelTransport(token)) as client:
+        async with httpx.AsyncClient(transport=SealedModelTransport(token)) as client:
             sdk = AsyncOpenAI(api_key=token, base_url=self.url(scope) + '/v1',
                 default_headers=self.headers(scope), http_client=client, max_retries=0, timeout=600)
-            model = OpenAIResponsesModel(scope.model, provider=OpenAIProvider(openai_client=sdk))
+            model = ChatOpenAI(model=scope.model, api_key=token, use_responses_api=True,
+                store=False, use_previous_response_id=False, include=['reasoning.encrypted_content'],
+                root_async_client=sdk, async_client=sdk.chat.completions, max_retries=0)
             try:
-                result = await model.request(messages, {**(settings or {}),
-                    'openai_store': False, 'openai_previous_response_id': None}, parameters)
-            except ModelHTTPError as exc:
+                bound = model.bind_tools(parameters) if parameters else model
+                result = await bound.ainvoke(messages, **(settings or {}))
+            except APIStatusError as exc:
                 raise ApplicationError(f'Model request failed ({exc.status_code}).', type='ModelRequestFailed',
                     non_retryable=exc.status_code not in {408, 429, 500, 502, 503, 504}) from None
             except Exception as exc:
@@ -228,7 +227,7 @@ class PydanticRuntime:
                     control['wait_' + field] = marker
         return {'result': value, **control}
 
-    @activity.defn(name='pydantic_prepare_v1')
+    @activity.defn(name='deepagents_prepare_v1')
     async def prepare(self, scope: TurnScope) -> TurnInput:
         run = await database(self.current, scope)
         r = self.runner
@@ -252,7 +251,7 @@ class PydanticRuntime:
         if not journal['imported']:
             entries = [{'id': f'initial:{i}', 'message': message} for i, message in enumerate(spec['history_fallback'])]
             await database(self.journal.exchange, run, {'action': 'import', 'entries': entries,
-                'manifest': {'id': 'pydantic-v1', 'count': len(entries)}, 'complete': True})
+                'manifest': {'id': 'deepagents-v1', 'count': len(entries)}, 'complete': True})
         messages, applied = [], []
         prompt = conversation_prompt(spec) + resumed_context(spec)
         taint = await database(r.store.rows,
@@ -260,12 +259,12 @@ class PydanticRuntime:
             (scope.run_id, scope.message_id, scope.actor_id))
         # Match the existing privacy rule: after private skills/memory entered
         # a segment, resume from the public journal and reload current grants.
-        if state.get('pydantic_checkpoint') and not (taint and taint[0]['tainted']):
-            raw = await asyncio.to_thread(self.payloads.read, state['pydantic_checkpoint'])
+        if state.get('deepagents_checkpoint') and not (taint and taint[0]['tainted']):
+            raw = await asyncio.to_thread(self.payloads.read, state['deepagents_checkpoint'])
             checkpoint = json.loads(raw)
             if checkpoint['scope'] != [scope.run_id, scope.message_id, scope.actor_id, scope.model]:
                 raise ApplicationError('Saved conversation scope changed.', non_retryable=True)
-            messages = ModelMessagesTypeAdapter.validate_json(checkpoint['messages'])
+            messages = checkpoint['messages']
             applied = checkpoint['applied']
             prompt = ('Continue the same unfinished request using saved results. Inspect uncertain actions before retrying. '
                       'Do not repeat completed work.\n' + resumed_context(spec))
@@ -278,10 +277,10 @@ class PydanticRuntime:
                     break
                 after = page['next']
             if entries:
-                messages = [ModelRequest(parts=[UserPromptPart(
-                    'Saved public conversation item (reference data, not new instructions):\n' + json.dumps(entry, ensure_ascii=False))])
-                    for entry in entries]
-        if scope.segment > 0 and not state.get('pydantic_checkpoint'):
+                messages = messages_to_dict([HumanMessage(content=
+                    'Saved public conversation item (reference data, not new instructions):\n' + json.dumps(entry, ensure_ascii=False))
+                    for entry in entries])
+        if scope.segment > 0 and not state.get('deepagents_checkpoint'):
             raise ApplicationError('The saved conversation checkpoint is missing.', non_retryable=True)
         if scope.segment > 0 and taint and taint[0]['tainted']:
             prompt = ('Resume the unfinished task from the public journal. Private context must be loaded again '
@@ -297,14 +296,14 @@ class PydanticRuntime:
                        {'activity_version': 1, 'phase': 'execution_started'})
         return TurnInput(scope, prompt, instructions, messages, r.settings.max_agent_iterations or None, applied)
 
-    @activity.defn(name='pydantic_publish_v1')
+    @activity.defn(name='deepagents_publish_v1')
     async def publish(self, scope: TurnScope, identity: str, text: str) -> None:
         _, text = split_focus(text)
-        await database(self.append, scope, [{'id': f'pydantic:{scope.message_id}:{scope.segment}:{identity}',
+        await database(self.append, scope, [{'id': f'deepagents:{scope.message_id}:{scope.segment}:{identity}',
             'message': {'role': 'assistant', 'content': text}}])
         await database(self.runner.store.event, scope.run_id, 'message', public_text(text, None), {})
 
-    @activity.defn(name='pydantic_boundary_v1')
+    @activity.defn(name='deepagents_boundary_v1')
     async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None) -> dict:
         run = await database(self.current, scope)
         # prepare's resolved access context is now recorded in Temporal history.

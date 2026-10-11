@@ -71,17 +71,17 @@ def test_slack_harness_with_initial_task(slack_app, harness):
 
 def use_model_defaults(settings):
     # The shared fixtures explicitly opt into Hermes for historical assertions.
-    settings.agent_harness = 'pydantic-ai'
+    settings.agent_harness = 'deepagents-temporal'
     settings.model_fields_set.discard('agent_harness')
 
 
-@pytest.mark.parametrize(('model', 'harness'), [('astra', 'pydantic-ai'), ('sol', 'pydantic-ai'), ('opus', 'pydantic-ai'), ('glm', 'pydantic-ai')])
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'deepagents-temporal'), ('sol', 'deepagents-temporal'), ('opus', 'deepagents-temporal'), ('glm', 'deepagents-temporal')])
 def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspace, monkeypatch, model, harness):
     app, client = workspace
     use_model_defaults(app.state.settings)
     monkeypatch.setattr(app.state.manager, 'submit', lambda run: None)
     catalog = client.get('/api/config').json()
-    assert catalog['harness'] == 'pydantic-ai'
+    assert catalog['harness'] == 'deepagents-temporal'
     canonical = app.state.settings.resolve_model(model)
     assert next(item for item in catalog['models'] if item['id'] == canonical)['default_harness'] == harness
     response = client.post('/api/runs', json={'prompt': 'Use the model default', 'model': model})
@@ -99,9 +99,9 @@ def test_web_new_session_pairs_model_once_and_exposes_effective_defaults(workspa
 
 
 @pytest.mark.parametrize(('model', 'harness'), [
-    ('openai/future-model', 'pydantic-ai'),
-    ('anthropic/future-model', 'pydantic-ai'),
-    ('other/future-model', 'pydantic-ai'),
+    ('openai/future-model', 'deepagents-temporal'),
+    ('anthropic/future-model', 'deepagents-temporal'),
+    ('other/future-model', 'deepagents-temporal'),
 ])
 def test_new_catalog_models_inherit_provider_default(workspace, monkeypatch, model, harness):
     app, client = workspace
@@ -119,7 +119,7 @@ def test_new_catalog_models_inherit_provider_default(workspace, monkeypatch, mod
 
 
 @pytest.mark.parametrize('thread_chat', [True, False])
-@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'pydantic-ai'), ('openai/gpt-6.1-sol', 'pydantic-ai'), (OPUS, 'pydantic-ai')])
+@pytest.mark.parametrize(('model', 'harness'), [('openai/gpt-6-astra', 'deepagents-temporal'), ('openai/gpt-6.1-sol', 'deepagents-temporal'), (OPUS, 'deepagents-temporal')])
 def test_slack_new_sessions_pair_configured_model(slack_app, thread_chat, model, harness):
     app, client, submitted, _ = slack_app
     use_model_defaults(app.state.settings)
@@ -139,13 +139,13 @@ def test_slack_selected_model_pairs_only_new_thread(slack_app, model):
     response = client.post('/hooks/slack/events', **signed(event(text=f'<@U99999999> model {model}')))
     assert response.status_code == 200, response.text
     run = app.state.store.rows('SELECT * FROM runs')[0]
-    assert (run['model'], run['harness']) == (app.state.settings.resolve_model(model), 'pydantic-ai')
+    assert (run['model'], run['harness']) == (app.state.settings.resolve_model(model), 'deepagents-temporal')
     send(client, 1, '<@U99999999> model opus')
     current = app.state.store.run(run['id'])
-    assert (current['model'], current['harness']) == (OPUS, 'pydantic-ai')
+    assert (current['model'], current['harness']) == (OPUS, 'deepagents-temporal')
 
 
-@pytest.mark.parametrize(('model', 'harness'), [('astra', 'pydantic-ai'), ('sol', 'pydantic-ai'), ('opus', 'pydantic-ai')])
+@pytest.mark.parametrize(('model', 'harness'), [('astra', 'deepagents-temporal'), ('sol', 'deepagents-temporal'), ('opus', 'deepagents-temporal')])
 def test_new_automation_default_persists_across_edits_and_launches(workspace, monkeypatch, model, harness):
     app, client = workspace
     use_model_defaults(app.state.settings)

@@ -119,7 +119,7 @@ async def test_computer_input_acknowledges_before_cloud_commit_and_keeps_activit
     pending = None
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=app.state.settings.public_url,
-                                    cookies=client.cookies, headers=client.headers) as browser:
+                                    cookies=client.cookies.jar, headers=client.headers) as browser:
             response = await asyncio.wait_for(browser.post(url, json={'action': 'input', 'args': {'events': []}}), 1)
             assert response.status_code == 200 and not commits
             touched = hub.touched(run['id'])

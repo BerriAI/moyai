@@ -1,4 +1,4 @@
-"""Local recovery proof: real Temporal/PydanticAI, scripted model, real file write.
+"""Local recovery proof: real Temporal/Deep Agents, scripted model, real file write.
 
 No production endpoints or credentials. The output includes a live progress record
 for recording the actual run, plus a verifiable final receipt.
@@ -15,8 +15,7 @@ import time
 from types import SimpleNamespace
 
 from cryptography.fernet import Fernet
-from pydantic_ai.durable_exec.temporal import PydanticAIPlugin
-from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, messages_from_dict, messages_to_dict
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.converter import DataConverter, DefaultFailureConverterWithEncodedAttributes
@@ -24,8 +23,8 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker, Replayer
 
 from app.blob_storage import ObjectStorage
-from app.pydantic_context import RuntimeInterceptor
-from app.pydantic_workflow import PydanticTurnWorkflow, TurnInput, TurnScope
+from app.deepagents_context import RuntimeInterceptor, deepagents_plugin
+from app.deepagents_workflow import DeepAgentsTurnWorkflow, TurnInput, TurnScope
 from app.temporal_payloads import PrivatePayloads, PrivatePayloadCodec
 
 
@@ -47,16 +46,16 @@ class Proof:
         temporary.write_text(json.dumps(value))
         temporary.replace(self.output / 'progress.json')
 
-    @activity.defn(name='pydantic_prepare_v1')
+    @activity.defn(name='deepagents_prepare_v1')
     async def prepare(self, scope: TurnScope) -> TurnInput:
         return TurnInput(replace(scope, model='local-scripted-provider', input_budget=10000),
             'Write one line to note.txt, then report completion.', 'Use the workspace tool boundary.')
 
-    @activity.defn(name='pydantic_boundary_v1')
+    @activity.defn(name='deepagents_boundary_v1')
     async def boundary(self, scope: TurnScope, applied: list[int], elapsed: float, answer: str | None) -> dict:
         return {}
 
-    @activity.defn(name='pydantic_publish_v1')
+    @activity.defn(name='deepagents_publish_v1')
     async def publish(self, scope: TurnScope, identity: str, text: str) -> None:
         self.record('Agent response: ' + text)
 
@@ -64,12 +63,11 @@ class Proof:
         return [{'name': 'write_note', 'inputSchema': {'type': 'object'}}]
 
     async def model_request(self, scope, messages, settings, parameters):
-        if any(isinstance(p, ToolReturnPart) for m in messages for p in m.parts):
+        if any(isinstance(m, ToolMessage) for m in messages):
             self.after_write.set()
             await self.release.wait()
-            return ModelResponse(parts=[TextPart('The file is saved. The write ran exactly once.')], model_name=scope.model)
-        return ModelResponse(parts=[ToolCallPart('workspace_call',
-            {'name': 'write_note', 'arguments_json': '{}'}, tool_call_id='proof-write')], model_name=scope.model)
+            return AIMessage(content='The file is saved. The write ran exactly once.')
+        return AIMessage(content='', tool_calls=[{'name': 'workspace_call', 'args': {'name': 'write_note', 'arguments_json': '{}'}, 'id': 'proof-write'}])
 
     async def call_tool(self, scope, call_id, name, arguments):
         assert name == 'write_note'
@@ -80,7 +78,7 @@ class Proof:
         return {'result': {'saved': True}}
 
     def worker(self, client):
-        return Worker(client, task_queue='moyai-local-proof', workflows=[PydanticTurnWorkflow],
+        return Worker(client, task_queue='moyai-local-proof', workflows=[DeepAgentsTurnWorkflow],
             activities=[self.prepare, self.boundary, self.publish], interceptors=[RuntimeInterceptor(self)],
             graceful_shutdown_timeout=timedelta(seconds=.1))
 
@@ -90,7 +88,7 @@ async def demonstrate(output, pause):
     if (output / 'note.txt').exists():
         raise ValueError('Use a fresh output directory so the write count is independently verifiable.')
     proof = Proof(output)
-    proof.record('Starting local proof: real Temporal and PydanticAI; scripted provider.')
+    proof.record('Starting local proof: real Temporal and Deep Agents; scripted provider.')
     with tempfile.TemporaryDirectory(prefix='moyai-proof-') as data:
         payloads = PrivatePayloads(SimpleNamespace(objects=ObjectStorage()),
             SimpleNamespace(data_dir=Path(data), encryption_key=Fernet.generate_key().decode()))
@@ -98,11 +96,11 @@ async def demonstrate(output, pause):
                                    failure_converter_class=DefaultFailureConverterWithEncodedAttributes)
         async with await WorkflowEnvironment.start_local(dev_server_log_level='error') as env:
             config = env.client.config()
-            config.update(data_converter=conversion, plugins=[PydanticAIPlugin()])
+            config.update(data_converter=conversion, plugins=[deepagents_plugin()])
             client = Client(**config)
             first = proof.worker(client)
             task = asyncio.create_task(first.run())
-            handle = await client.start_workflow(PydanticTurnWorkflow.run, TurnScope('local-proof', 1),
+            handle = await client.start_workflow(DeepAgentsTurnWorkflow.run, TurnScope('local-proof', 1),
                 id='moyai-local-recovery-proof', task_queue='moyai-local-proof')
             try:
                 await asyncio.wait_for(proof.after_write.wait(), 30)
@@ -122,8 +120,8 @@ async def demonstrate(output, pause):
             assert raw.count(b'\n') == 1
             history = await handle.fetch_history()
             assert 'Write one line' not in history.to_json()
-            await Replayer(workflows=[PydanticTurnWorkflow], data_converter=client.data_converter,
-                           plugins=[PydanticAIPlugin()]).replay_workflow(history)
+            await Replayer(workflows=[DeepAgentsTurnWorkflow], data_converter=client.data_converter,
+                           plugins=[deepagents_plugin()]).replay_workflow(history)
             proof.record('Verified: one write, resumed final answer, deterministic replay, private history.')
             (output / 'receipt.json').write_text(json.dumps({
                 'completed': True, 'file_writes': proof.calls, 'file_sha256': hashlib.sha256(raw).hexdigest(),

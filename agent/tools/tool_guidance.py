@@ -2,7 +2,7 @@
 
 
 def tool_guidance(harness):
-    if harness == 'pydantic-ai':
+    if harness == 'deepagents-temporal':
         discovery = ('Use workspace_tools to discover authorized names and input schemas, then workspace_call '
                      'with the exact name and a JSON arguments object. Load bundled_skill_read or personal skills '
                      'only when relevant. Computer tools own files, terminals and browsers. ')

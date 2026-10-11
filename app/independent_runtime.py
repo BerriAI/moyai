@@ -28,7 +28,7 @@ class IndependentRuntime:
         self.operations = ComputerOperations(runner.store, runner.submit_in)
 
     def supports(self, run):
-        if run['harness'] == 'pydantic-ai':
+        if run['harness'] == 'deepagents-temporal':
             return run['mode'] == 'modal'
         return (self.runner.settings.independent_agent_runtime and run['mode'] == 'modal'
                 and run['harness'] == 'codex'

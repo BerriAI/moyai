@@ -34,7 +34,7 @@ class HarnessDefinition:
 
 # Keep the persisted Claude ID stable for sessions created before this refactor.
 HARNESSES = {
-    'pydantic-ai': HarnessDefinition('pydantic-ai', 'PydanticAI + Temporal', '', '', live_steering=True, server_owned=True),
+    'deepagents-temporal': HarnessDefinition('deepagents-temporal', 'Deep Agents + Temporal', '', '', live_steering=True, server_owned=True),
     'hermes': HarnessDefinition('hermes', 'Hermes', 'hermes_harness', 'HermesAgent', live_steering=True),
     'claude-agent-sdk': HarnessDefinition('claude-agent-sdk', 'Claude Agent SDK',
         'claude_harness', 'ClaudeAgent', live_steering=True, durable_context=True),

@@ -23,7 +23,7 @@ from .schema_migrations import SCHEMA_REVISION
 # Immutable attachment manifests/parts must be understood by intake and workers.
 # Publishing workflow files uses explicit per-operation Workflows permission.
 # Snapshotless workers wait for shared preparation; restored services are verified.
-# The default PydanticAI engine, separate activity queue and encrypted payload
+# The default Deep Agents engine, separate activity queue and encrypted payload
 # codec require a coordinated upgrade of all execution and broker roles.
 API_PROTOCOL_REVISION = 16
 # Bump for incompatible durable session state, Temporal workflow histories or

@@ -782,10 +782,10 @@ class DurableRunner(RunManager):
     async def _step(self, run_id, state):
         phase = state['phase']
         run = await database(self.store.run, run_id)
-        if run['harness'] == 'pydantic-ai' and phase in {'provision', 'install', 'launch', 'monitor'}:
-            if not hasattr(self, 'pydantic_execution'):
-                raise ValueError('PydanticAI requires Temporal execution.')
-            return await self.pydantic_execution.step(run_id, state)
+        if run['harness'] == 'deepagents-temporal' and phase in {'provision', 'install', 'launch', 'monitor'}:
+            if not hasattr(self, 'deepagents_execution'):
+                raise ValueError('Deep Agents requires Temporal execution.')
+            return await self.deepagents_execution.step(run_id, state)
         if phase in {'waiting_children', 'waiting_credential'}:
             control = self.message_queue.live_control(run_id, state['message_id'], [], checkpointed=True)
             if control.get('handoff'):
@@ -1078,7 +1078,7 @@ class DurableRunner(RunManager):
                                  {'group_id': state['wait_group']})
                 await database(self.save, run_id, state)
             elif continuing:
-                if run['harness'] == 'pydantic-ai':
+                if run['harness'] == 'deepagents-temporal':
                     state['phase'] = 'provision'
                 elif time.time() - state['machine_started'] >= self.rotation_seconds(state):
                     await self.cleanup(state, run_id)
@@ -1184,8 +1184,8 @@ class DurableRunner(RunManager):
 
     async def cleanup(self, state, run_id, *, save=None):
         if state.get('independent_runtime'):
-            if state.get('pydantic_workflow_id'):
-                await self.pydantic_execution.cancel(state)
+            if state.get('deepagents_workflow_id'):
+                await self.deepagents_execution.cancel(state)
             return await self.agent_runtime.cleanup(run_id, state)
         save = save or self.save
         name = state.get('sandbox_name')

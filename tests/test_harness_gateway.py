@@ -12,7 +12,7 @@ from test_workspace import workspace
 from test_tracing import Processor
 
 
-def test_pydantic_single_oversized_input_is_rejected_before_inference(workspace, monkeypatch):
+def test_deepagents_single_oversized_input_is_rejected_before_inference(workspace, monkeypatch):
     from app.context_budget import ModelContextLimits
     app, client = workspace
     model = app.state.settings.resolve_model()
@@ -30,7 +30,7 @@ def test_pydantic_single_oversized_input_is_rejected_before_inference(workspace,
     actual = httpx.AsyncClient
     monkeypatch.setattr('app.harness_gateway.httpx.AsyncClient', lambda **kw: actual(
         transport=httpx.MockTransport(upstream), **kw))
-    run = app.state.store.create_run('Context test', '', 'modal', [], harness='pydantic-ai', model=model)
+    run = app.state.store.create_run('Context test', '', 'modal', [], harness='deepagents-temporal', model=model)
     app.state.store.update_run(run['id'], status='running', token_hash=digest('cap'))
     def post(content):
         return client.post(f"/broker/{run['id']}/v1/responses", headers={'Authorization': 'Bearer cap'},

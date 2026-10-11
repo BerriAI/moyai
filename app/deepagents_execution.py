@@ -4,19 +4,18 @@ from datetime import timedelta
 import json
 import time
 
-from pydantic_ai.messages import ModelMessagesTypeAdapter
 from temporalio.client import WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.common import WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
 from .db import database
-from .pydantic_workflow import PydanticTurnWorkflow, TurnScope, TurnResult
+from .deepagents_workflow import DeepAgentsTurnWorkflow, TurnScope, TurnResult
 from .security import digest
 from .model_selection import gateway_model
 
 
-class PydanticExecution:
+class DeepAgentsExecution:
     def __init__(self, runner, payloads):
         self.runner, self.payloads = runner, payloads
 
@@ -31,8 +30,8 @@ class PydanticExecution:
             if not await database(r.running_status, run_id, 'running', digest(r.token(run_id, state['message_id']))):
                 return True
             scope = TurnScope(run_id, state['message_id'], state['segment'], run['active_user_id'])
-            identity = f'moyai-pydantic-{run_id}-{scope.message_id}-{scope.segment}'
-            state.update(pydantic_workflow_id=identity, machine_started=state['turn_started'])
+            identity = f'moyai-deepagents-{run_id}-{scope.message_id}-{scope.segment}'
+            state.update(deepagents_workflow_id=identity, machine_started=state['turn_started'])
             await database(r.save, run_id, state)  # Same ID even after a lost start ACK.
             remaining = (r.settings.run_timeout_seconds - (time.time() - state['turn_started'])
                          if r.settings.run_timeout_seconds else None)
@@ -40,7 +39,7 @@ class PydanticExecution:
                 await database(r.fail, run_id, state, 'This response reached its configured time limit.')
                 return True
             try:
-                await r.temporal.start_workflow(PydanticTurnWorkflow.run, scope, id=identity,
+                await r.temporal.start_workflow(DeepAgentsTurnWorkflow.run, scope, id=identity,
                     task_queue=r.settings.temporal_task_queue + '-agents-v1',
                     id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
                     id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
@@ -55,7 +54,7 @@ class PydanticExecution:
             await database(r.fail, run_id, state, 'This response reached its configured time limit.')
             return True
         await r.agent_runtime.computer_step(run_id, state)
-        handle = r.temporal.get_workflow_handle(state['pydantic_workflow_id'], result_type=TurnResult)
+        handle = r.temporal.get_workflow_handle(state['deepagents_workflow_id'], result_type=TurnResult)
         description = await handle.describe()
         if description.status == WorkflowExecutionStatus.RUNNING:
             return {'retry_seconds': 1}
@@ -68,18 +67,18 @@ class PydanticExecution:
             return True
         scope = [run_id, state['message_id'], run['active_user_id'],
                  gateway_model(r.settings.resolve_model(fallback=run['active_model'] or run['model']))]
-        checkpoint = json.dumps({'scope': scope, 'messages': ModelMessagesTypeAdapter.dump_json(completed.messages).decode(),
+        checkpoint = json.dumps({'scope': scope, 'messages': completed.messages,
                                  'applied': completed.applied}).encode()
         pointer = await asyncio.to_thread(self.payloads.put, checkpoint)
         result = {**completed.result, 'message_id': state['message_id']}
         await database(r.message_queue.acknowledge, run_id, state['message_id'], completed.applied)
         await database(r.receive_result, run_id, result)
-        state.update(phase='save', pydantic_checkpoint=pointer, result=result, exit_code=0)
+        state.update(phase='save', deepagents_checkpoint=pointer, result=result, exit_code=0)
         await database(r.save, run_id, state)
         return True
 
     async def cancel(self, state):
-        if identity := state.get('pydantic_workflow_id'):
+        if identity := state.get('deepagents_workflow_id'):
             try:
                 await self.runner.temporal.get_workflow_handle(identity).cancel()
             except RPCError as exc:

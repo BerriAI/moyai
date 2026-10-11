@@ -1,6 +1,6 @@
 # Agent responses before computer startup
 
-The default [PydanticAI + Temporal engine](pydantic-temporal.md) uses this computer
+The default [Deep Agents + Temporal engine](deepagents-temporal.md) uses this computer
 operation boundary without a separate agent-control VM and without an opt-in flag.
 The Codex-specific setting and control-VM procedure below apply to the legacy path.
 

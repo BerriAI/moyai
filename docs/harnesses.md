@@ -1,7 +1,7 @@
 # Agent harnesses
 
-New web sessions, Slack threads and saved automations default to **PydanticAI +
-Temporal** (`pydantic-ai`) for every model. See [the durable engine contract](pydantic-temporal.md)
+New web sessions, Slack threads and saved automations default to **Deep Agents +
+Temporal** (`deepagents-temporal`) for every model. See [the durable engine contract](deepagents-temporal.md)
 for architecture, recovery guarantees and release requirements. Skills still load
 on demand through the existing broker. Claude and OpenAI remain model choices;
 the default path no longer launches their native agent SDKs.
@@ -334,7 +334,7 @@ reserved inside that limit. Missing/invalid limits pause inference with a
 configuration error. Configure verified limits for private model aliases; model
 names such as Astra and GLM do not imply Claude's context window.
 
-Moyai's gateway owns background model-input compaction for PydanticAI, Codex, Claude
+Moyai's gateway owns background model-input compaction for Deep Agents, Codex, Claude
 Agent SDK, Hermes, OpenCode, Deep Agents, Tool Loop and Pi. At 75% of the verified input
 budget it snapshots an older, closed prefix and starts tool-free summarization.
 Fitting model requests continue using the existing history while that summary

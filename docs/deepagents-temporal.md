@@ -1,7 +1,7 @@
 # Default durable agent engine
 
-New sessions use **PydanticAI + Temporal** for every configured model. The Python
-settings default and Render blueprint both select `pydantic-ai`; there is no pilot
+New sessions use **Deep Agents + Temporal** for every configured model. The Python
+settings default and Render blueprint both select `deepagents-temporal`; there is no pilot
 or opt-in flag. Claude and OpenAI models still run through the existing LiteLLM
 broker. Their native agent SDK subprocesses are not used on this path.
 
@@ -12,14 +12,14 @@ Only the catalog is in the initial prompt. Relevant instructions load on demand.
 
 | Owner | Responsibility |
 | --- | --- |
-| PydanticAI | Typed model/tool protocol, tool validation, cancellation snapshots and conversation execution |
+| Deep Agents | Library-owned model/tool graph, typed messages and tool validation |
 | Temporal | Persisted model/tool activity outcomes, bounded retries, workflow replay and worker recovery |
 | Moyai broker | Background input compaction, model pinning, budgets, spend, permissions, skill/memory scope, approvals and tool authorization |
 | Moyai session controller | Input ownership, Stop, child/credential waits, goals, answer settlement and computer lifecycle |
 | Moyai computer receipts | Stable operation identities, launch reconciliation and unknown-write outcomes |
 
-`PydanticTurnV1` runs on trusted workers. Temporal credentials and provider keys
-never enter the sandbox. Model calls use PydanticAI's official OpenAI Responses
+`DeepAgentsTurnV1` runs on trusted workers. Temporal credentials and provider keys
+never enter the sandbox. Model calls use LangChain's OpenAI Responses
 adapter against the sealed, run-scoped Moyai broker. LiteLLM handles provider
 translation. A selected model must support Responses and tool calls on that gateway;
 local scripted-provider tests do not establish live provider compatibility.
@@ -37,9 +37,11 @@ and tools continue. Later requests adopt a valid summary plus every item appende
 since the snapshot. Instructions, first/latest user requests, unresolved tool groups
 and opaque media stay in order. Only a request that no longer fits waits for
 compaction, before acquiring a model slot; foreground work can preempt maintenance.
-The blocking PydanticAI Harness compactor is deliberately not installed.
+Deep Agents' built-in summarization middleware is excluded through its public
+`HarnessProfile` API. Filesystem result eviction is disabled as well, so the
+broker is the only component that rewrites model input.
 
-Compaction projects the provider input without rewriting PydanticAI's typed history.
+Compaction projects the provider input without rewriting Deep Agents' typed history.
 Summary failure preserves the original history and the last valid projection.
 The private summary cache is bounded and local to the gateway process, not a Temporal
 activity/checkpoint: a gateway restart may regenerate a summary from the preserved
@@ -58,8 +60,10 @@ with an explicit reconciliation message rather than automatically repeating an
 external action. Existing broker outboxes and computer receipts remain authoritative.
 Temporal is not an exactly-once guarantee for external services.
 
-User steering is checked at model/tool boundaries. PydanticAI cancellation and
-message repair close unexecuted calls before applying a correction. Requester/model
+User steering is checked by Deep Agents middleware at model/tool boundaries.
+Cancelled calls receive paired tool results before a correction enters the graph.
+External actions in a parallel tool batch execute sequentially; a wait or new
+input cancels the remaining unexecuted actions. Requester/model
 changes yield to the existing capability handoff. Stop revokes the capability and
 cancels the workflow; five-second activity heartbeats carry cancellation to workers.
 An already-dispatched external action may still finish and must be reconciled.
@@ -82,13 +86,40 @@ Ephemeral hosts using `CHECKPOINT_DIR` require shared object storage and explici
 encryption/session keys. Periodic SQLite/volume snapshots cannot durably acknowledge
 each Temporal payload, so this configuration fails at startup without those settings.
 
+## Library configuration
+
+The implementation uses the official `temporalio-deepagents==0.0.1` integration:
+`create_temporal_deep_agent`, `DeepAgentsPlugin`, and `tool_as_activity`. Model
+calls and I/O tools are individual activities; the graph executes in the workflow.
+It does not wrap an entire agent run in one retryable activity.
+
+The integration is **experimental**. Deep Agents is pinned to **0.7.15**, the
+compatible release for the integration's LangSmith constraint; the lockfile pins
+the full set. Upgrades require replay and recovery qualification. The current
+upstream stack emits deserialization deprecation warnings and can emit coroutine
+cleanup warnings when a worker evicts a running graph. Restart, cancellation and
+replay are covered locally; production memory/lifecycle qualification remains a
+release requirement.
+
+Only the authorized `workspace_tools` and `workspace_call` bridge is advertised.
+Moyai's existing catalog provides files, shell, planning, skills, memory and child
+agents. Native Deep Agents filesystem/subagent tools are disabled to avoid a
+second permission/computer lifecycle. Scope and operation IDs are injected by
+trusted middleware, never accepted from model arguments. Task procedures remain
+in skills; the workflow contains no repository-specific instructions.
+
+The new harness ID is `deepagents-temporal`. The older `deepagents` sandbox
+adapter is retained for saved sessions. PR development versions that used
+`pydantic-ai` are not a supported in-flight upgrade: drain those test workflows
+before switching. No released native session is silently rewritten.
+
 ## Release requirements
 
 This is a code change with runtime configuration requirements, not a deployment
 performed by the PR. It requires a reachable Temporal service, stable
 `ENCRYPTION_KEY`/`SESSION_SECRET`, the existing broker, and durable payload storage.
 Distributed roles already require shared object storage. Local setup must set
-`TEMPORAL_ENABLED=true`; there is no nondurable/native fallback for `pydantic-ai`.
+`TEMPORAL_ENABLED=true`; there is no nondurable/native fallback for `deepagents-temporal`.
 
 Schema revision remains 13 (inherited from main). API, broker, worker and
 coordinator protocol revisions advance to 16 because old roles cannot execute the
@@ -97,7 +128,7 @@ payloads. Drain and coordinate the upgrade of all roles using the existing relea
 procedure. Preserve current credentials and storage. Verify the default with both
 Claude and OpenAI on the deployment's gateway before reopening traffic. The Render
 blueprint sets the new default; installations with explicit legacy `AGENT_HARNESS`
-settings must replace them with `pydantic-ai` as part of the same release.
+settings must replace them with `deepagents-temporal` as part of the same release.
 
 Persisted native harness IDs and their adapters remain for existing sessions and
 explicit legacy configurations. They are not silently migrated mid-turn. Existing
@@ -110,11 +141,11 @@ are changed by running the local proof.
 
 ```sh
 uv sync --frozen --python 3.13
-uv run --frozen --python 3.13 pytest -q tests/test_pydantic_runtime.py
-uv run --frozen --python 3.13 python -m scripts.pydantic_temporal_probe --output /tmp/moyai-durable-proof
+uv run --frozen --python 3.13 pytest -q tests/test_deepagents_runtime.py
+uv run --frozen --python 3.13 python -m scripts.deepagents_temporal_probe --output /tmp/moyai-durable-proof
 ```
 
-The tests use a real local Temporal server and PydanticAI graph. They cover worker
+The tests use a real local Temporal server and Deep Agents graph. They cover worker
 restart without repeating a completed write, uncertain writes, replay, background compaction,
 steering, Stop, scope fencing, private payload storage, the real skill broker and
 answer settlement. The provider-transport test exercises the installed official SDK
@@ -123,10 +154,10 @@ are controlled test fixtures; live model quality and cloud-provider behavior req
 deployment qualification.
 
 The focused compaction proof uses the installed Responses SDK, sealed transport,
-real broker, PydanticAI graph and a local Temporal server. It holds a scripted
+real broker, Deep Agents graph and a local Temporal server. It holds a scripted
 summary open while two model/tool steps complete, verifies only an oversized third
 request waits, then restarts the worker and checks exact tail adoption and replay:
 
 ```sh
-uv run --frozen --python 3.13 pytest -q -s tests/test_pydantic_runtime.py::test_background_compaction_keeps_working_preserves_tail_and_replays
+uv run --frozen --python 3.13 pytest -q -s tests/test_deepagents_runtime.py::test_background_compaction_keeps_working_preserves_tail_and_replays
 ```
