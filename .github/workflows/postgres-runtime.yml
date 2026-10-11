@@ -128,8 +128,8 @@ jobs:
           uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_finish_tracing.py tests/test_tracing.py
       - name: Verify Slack polling responsiveness and delivery ownership
         run: |
-          uv run --frozen --python 3.13 pytest -q tests/test_slack_polling.py tests/test_slack_notifications.py
-          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py
+          uv run --frozen --python 3.13 pytest -q tests/test_slack_polling.py tests/test_slack_notifications.py tests/test_session_events.py
+          uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_slack_polling.py tests/test_slack_activity.py tests/test_slack_notifications.py tests/test_session_events.py
       - name: Verify chat snapshots reuse PostgreSQL pool connections
         run: uv run --frozen --python 3.13 pytest --postgres-backend -q tests/test_message_snapshot_pool.py tests/test_slack_mentions.py tests/test_attachments.py
       - name: Verify agent handoffs, warm workspaces and admission on PostgreSQL

@@ -78,7 +78,7 @@ class UserPreferences:
                 conn.execute('UPDATE user_preferences SET slack_notifications_since=? WHERE user_id=?', (now(), user_id))
             if (self.notifications and 'slack_notifications' in changes
                     and was_enabled != changes['slack_notifications']):
-                self.notifications.preferences_changed_in(conn, user_id, changes['slack_notifications'])
+                self.notifications.preferences_changed_in(conn, user_id)
 
 
 def initialize_schema(store):
