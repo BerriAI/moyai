@@ -359,7 +359,8 @@ class Release:
 
     @staticmethod
     def settled(state, owners, *, drained=False, brokers=None):
-        keys = ('owners', 'coordinators', 'brokers', 'unsafe_sessions', 'legacy_active_sessions', 'model_requests', 'live_leases')
+        keys = ('owners', 'coordinators', 'brokers', 'unsafe_sessions', 'executing_sessions',
+                'legacy_active_sessions', 'model_requests', 'live_leases')
         if not state.get('ok') or any(type(state.get(key)) is not int for key in keys):
             return False
         # Legacy combined builds predate the broker lock. New combined builds
@@ -370,11 +371,13 @@ class Release:
 
     @classmethod
     def execution_stopped(cls, state, *, brokers=None):
-        # Drain session state while workers can still complete it. After staging,
-        # a new Stop request needs the replacement worker to finish; it must not
-        # block the ownership handoff. Still fence actual workers and execution.
-        return (cls.settled(state, 1 + (brokers or 0), brokers=brokers) and state['model_requests'] == 0
-                and state['live_leases'] == 0)
+        # Worker shutdown only detaches observation; the sandbox can keep using
+        # the broker between requests without a worker owner or execution lease.
+        # Require its persisted phase to be a saved boundary too. A late Stop
+        # at such a boundary can still wait for the replacement worker.
+        return (cls.settled(state, 1 + (brokers or 0), brokers=brokers)
+                and all(state[key] == 0 for key in ('executing_sessions', 'legacy_active_sessions',
+                                                   'model_requests', 'live_leases')))
 
     def run(self):
         try:

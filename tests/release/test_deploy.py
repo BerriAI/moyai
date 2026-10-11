@@ -259,14 +259,14 @@ def test_stop_requested_after_worker_staging_does_not_block_release(setup):
     assert render.env[COORDINATOR]['MOYAI_BUILD_SHA'] == NEW
 
 
-@pytest.mark.parametrize('counter', ['owners', 'model_requests', 'live_leases'])
+@pytest.mark.parametrize('counter', ['owners', 'model_requests', 'live_leases', 'executing_sessions', 'legacy_active_sessions'])
 def test_staged_wait_still_blocks_active_execution(setup, counter):
     release, render, _ = setup
     probe = render.probe
     def still_active(service):
         state = probe(service)
         if not render.worker_running and service.id == COORDINATOR:
-            state[counter] += 1
+            state[counter] = state.get(counter, 0) + 1
             state['unsafe_sessions'] = 1
         return state
     release.probe = still_active
@@ -275,6 +275,24 @@ def test_staged_wait_still_blocks_active_execution(setup, counter):
     assert render.env[COORDINATOR]['MOYAI_BUILD_SHA'] == OLD
     assert render.env[WORKER]['RENDER_MIGRATION_STAGE'] == 'true'
     assert all(c[1] == WORKER for c in render.calls)
+
+
+@pytest.mark.parametrize('executing', [1, None, False, -1])
+def test_detached_or_unknown_execution_never_stages_broker(split_setup, executing):
+    release, render, _ = split_setup
+    probe = render.probe
+    def detached_execution(service):
+        state = probe(service)
+        if not render.worker_running and service.id == COORDINATOR:
+            state['executing_sessions'] = executing
+            state['unsafe_sessions'] = 1
+        return state
+    release.probe = detached_execution
+    with pytest.raises(ReleaseError, match='Old worker ownership did not clear'):
+        release.run()
+    assert render.broker_running
+    assert render.env[BROKER]['RENDER_MIGRATION_STAGE'] == 'false'
+    assert not [call for call in render.calls if call[1] in {BROKER, COORDINATOR}]
 
 
 def test_ambiguous_post_is_recorded_and_never_retried(setup):
