@@ -977,6 +977,15 @@ def _create_app(settings, store):
         actor = store.identity(security.session_info(request))
         result = await connectors.github.decide_write_access(run_id, access_id, actor, body.decision)
         await checkpoints.flush()
+        if body.decision == 'approve' and body.resume:
+            # The normal message path preserves requester identity, queueing and
+            # retry deduplication without touching the browser's unsent draft.
+            access = store.rows('SELECT repository_id, number FROM github_write_access WHERE id=? AND run_id=?',
+                                (access_id, run_id))[0]
+            await send_message(run_id, ChatMessage(
+                content=f"I approved access to PR #{access['number']} in repository {access['repository_id']} for this session. Check the approval and continue the requested work.",
+                client_id=f'pr-access-{access_id}',
+            ), request)
         return result
 
     @app.get('/api/runs/{run_id}/pull-request')
