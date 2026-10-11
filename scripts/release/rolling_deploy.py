@@ -199,6 +199,8 @@ class RollingRelease(Release):
         if isinstance(state, dict) and state.get('ok') is True:
             return state
         reason, label = self.record_probe_failure(service, state, attempt, phase=phase)
+        if reason == 'runtime_validation_failed' and state.get('stage') == 'environment':
+            self.rotate_probe(service)
         # Render may still route SSH to the draining old container. Its build
         # check fails at environment validation. Only named startup/transport
         # states may wait; interrupted or malformed observations always stop.
@@ -206,6 +208,11 @@ class RollingRelease(Release):
                 (reason == 'runtime_validation_failed' and state.get('stage') == 'environment')):
             return None
         raise ReleaseError(f'Candidate {service.role} {phase} probe failed ({label}); release stopped.')
+
+    def rotate_probe(self, service):
+        # Synthetic probes and older one-shot callers need no lifecycle hook.
+        if invalidate := getattr(self.probe, 'invalidate', None):
+            invalidate(service)
 
     def check_schema_support(self, state, sid, *, candidate=False):
         expected = self.candidate.get('schema_support') if candidate else self.schema_supports[sid]
@@ -278,6 +285,7 @@ class RollingRelease(Release):
 
     def replace(self, service, sha):
         self.selected, self.replacement = service.id, None
+        self.rotate_probe(service)
         self.phase('Replace ' + service.role + ' while other roles continue serving work')
         self.configure(service, {'MOYAI_BUILD_SHA': sha})
         self.unchanged()
@@ -313,6 +321,7 @@ class RollingRelease(Release):
             self.check_state(state)
             owner = state.get('identity')
             if not owner or owner in self.identities.values():
+                self.rotate_probe(service)
                 return False
             if self.replacement and self.replacement != owner:
                 raise ReleaseError('Candidate process identity changed unexpectedly.')
@@ -331,6 +340,8 @@ class RollingRelease(Release):
             self.check_state(state)
             if (state.get('ready') is not True or state.get('identity') != self.replacement
                     or self.identities[service.id] in state['owners']):
+                if state.get('identity') == self.identities[service.id]:
+                    self.rotate_probe(service)
                 return False
             self.check_state(state, settled=True)
             self.check_schema_support(state, service.id, candidate=True)

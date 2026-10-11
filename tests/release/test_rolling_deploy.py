@@ -787,3 +787,58 @@ def test_running_probe_uses_installed_source_compatibility_admission(monkeypatch
     else:
         with pytest.raises(ValueError): schema_capability(connection, 'tenant', SCHEMA_REVISION + 1)
     assert calls == [(connection, 'tenant', SCHEMA_REVISION, SCHEMA_REVISION)]
+
+
+def test_replacement_closes_only_selected_probe_before_environment_write(setup):
+    release, render, _ = setup
+    observed, call, events = release.probe, render.call, []
+
+    class Probe:
+        def __call__(self, service):
+            return observed(service)
+
+        def invalidate(self, service):
+            events.append(('close', service.id))
+
+    def render_call(method, path, body=None):
+        if method in {'PUT', 'POST'}:
+            sid = path.split('/')[2]
+            events.append((method, sid))
+        return call(method, path, body)
+
+    release.probe, render.call = Probe(), render_call
+    release.run()
+    assert events == [(operation, sid) for sid in (WORKER, BROKER, COORDINATOR, API_ID)
+                      for operation in ('close', 'PUT', 'POST')]
+
+
+@pytest.mark.parametrize('phase', ['readiness', 'retirement'])
+@pytest.mark.parametrize('stale', ['environment', 'identity'])
+def test_old_container_observation_releases_connection_before_another_candidate_probe(setup, phase, stale):
+    release, render, _ = setup
+    observed, events, injected = release.probe, [], []
+
+    class Probe:
+        def invalidate(self, service):
+            events.append(('close', service.id))
+
+        def __call__(self, service):
+            state = observed(service)
+            current_phase = 'retirement' if release.record['phase'].startswith('Wait for old ') else 'readiness'
+            if service.id == WORKER and release.active_deploy and current_phase == phase:
+                if not injected:
+                    injected.append(True)
+                    events.append(('stale', service.id))
+                    if stale == 'environment':
+                        return {'ok': False, 'reason': 'runtime_validation_failed', 'stage': 'environment'}
+                    state['identity'] = release.identities[service.id]
+                else:
+                    events.append(('next', service.id))
+            return state
+
+    release.probe = Probe()
+    release.run()
+    start = events.index(('stale', WORKER))
+    assert events[start:start + 3] == [('stale', WORKER), ('close', WORKER), ('next', WORKER)]
+    assert release.record['status'] == 'success'
+    assert len([call for call in render.calls if call[0] == 'POST']) == 4
