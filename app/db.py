@@ -694,7 +694,7 @@ class Store:
                 if name in {'', slack_user, 'Slack ' + slack_user, message['user_id']}:
                     name = (email or '').strip() or 'Slack teammate'
                 message['display_content'] = f'Slack reply from {name}:\n' + message['content'][len(prefix):]
-        self.slack_mentions.decorate(messages)
+        self.slack_mentions.decorate(messages, connection=connection)
         # Inputs that never started (cancelled/failed while waiting) stay where
         # they were sent: before the first later-sent input that did run.
         ordered = [m for m in messages if not (m['role'] == 'user' and not m['started_at'])]
@@ -703,7 +703,7 @@ class Store:
                           and (m['created_at'], m['id']) > (orphan['created_at'], orphan['id'])), len(ordered))
             ordered.insert(index, orphan)
         messages = ordered + [m for m in messages if m['role'] == 'user' and not m['started_at'] and m['status'] == 'queued']
-        return self.attachments.messages(run_id, messages)
+        return self.attachments.messages(run_id, messages, connection=connection)
 
     def enqueue_message(self, run_id, content, client_id, model=None, user_id='', attachment_ids=None, send_now=False, *, send_immediately=False):
         with self.connect() as conn:
