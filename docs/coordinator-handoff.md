@@ -3,7 +3,7 @@
 `MOYAI_COORDINATOR_HANDOFF=true` opts a verified PostgreSQL cluster into standby
 coordinators. Keep it false until the dedicated API and broker routes are active,
 all roles run the same compatible contracts, and the selected release's schema
-(currently revision 7) is migrated offline. See [rolling deployment](rolling-deploy.md).
+(currently revision 15) is migrated offline. See [rolling deployment](rolling-deploy.md).
 The flag belongs to the shared runtime settings on every role. This is an
 application protocol; it does not remove Render disk or shutdown restrictions.
 

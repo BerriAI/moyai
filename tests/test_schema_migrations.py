@@ -305,6 +305,37 @@ def test_revision_five_adds_shared_boards_without_changing_saved_work(split_sett
         api.state.store.close()
 
 
+@pytest.mark.parametrize('previous_revision', [7, 14])
+def test_upgrade_adds_skill_learning_without_changing_saved_work(split_settings, previous_revision):
+    settings = ready(split_settings)
+    api = main.create_app(settings)
+    tables = ('runs', 'messages', 'login_states', 'swarm_missions', 'swarm_teams', 'swarm_posts', 'coordinator_hooks', 'broker_work_owners')
+    try:
+        store = api.state.store
+        store.create_run(f'Existing revision-{previous_revision} session', '', 'modal', [], chat_enabled=True)
+        store.execute('''INSERT INTO login_states
+            (state_hash,browser_hash,nonce,verifier,return_path,expires,client)
+            VALUES('state','browser','nonce','verifier','/',123,'browser-client')''')
+        saved = {name: store.rows('SELECT * FROM ' + name) for name in tables}
+    finally:
+        api.state.store.close()
+    with psycopg.connect(settings.moyai_database_url) as conn:
+        conn.execute(f'SET search_path TO "{settings.moyai_database_schema}"')
+        for name in ('skill_suggestions', 'skill_learning_jobs', 'skill_learning_preferences'):
+            conn.execute('DROP TABLE ' + name)
+        conn.execute('UPDATE schema_state SET revision=%s', (previous_revision,))
+    with pytest.raises(DatabaseError, match='offline migration'):
+        main.create_app(settings)
+    ready(split_settings)
+    api = main.create_app(settings)
+    try:
+        assert {name: api.state.store.rows('SELECT * FROM ' + name) for name in tables} == saved
+        for name in ('skill_suggestions', 'skill_learning_jobs', 'skill_learning_preferences'):
+            assert api.state.store.rows('SELECT * FROM ' + name) == []
+    finally:
+        api.state.store.close()
+
+
 def test_schema_initializers_have_a_versioned_manifest():
     # A schema edit without a new revision must fail CI, including optional
     # components and backend-specific functions/triggers used by the migrator.

@@ -249,10 +249,13 @@ def _create_app(settings, store):
     from .memory_review import MemoryReview
     memory_review = MemoryReview(memory, settings, spend, model_slots)
     memory.reviewer = store.memory_review = memory_review
+    from .skill_learning import SkillLearning
+    skill_learning = SkillLearning(skills, memory, settings, spend, model_slots)
+    store.skill_learning = skill_learning
     broker_requests = None
     if overlap_broker:
         from .broker_ownership import BrokerMaintenance, BrokerRequests
-        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery, repository_context))
+        broker_requests = BrokerRequests(broker_work, model_slots, BrokerMaintenance(store, memory_review, spend.recovery, repository_context, skill_learning=skill_learning))
     from .context_budget import ContextBudget, ContextPressure, provider_context_rejection
     context_budget = ContextBudget(settings)
     memory_review.context_budget = context_budget
@@ -306,6 +309,7 @@ def _create_app(settings, store):
                 spend.recovery.start()
                 memory_review.start()
                 repository_context.start()
+                skill_learning.start()
             watcher = asyncio.create_task(checkpoints.watch()) if settings.checkpoint_dir else None
             tracing.start()
             lens_feedback.start()
@@ -325,7 +329,7 @@ def _create_app(settings, store):
         if handoff:
             slack.chat.begin_drain()
         closes = ([hook_inbox.close] if hook_inbox else []) + [
-            session_lifecycle.close, repository_context.close, memory_review.close, spend.recovery.close,
+            session_lifecycle.close, repository_context.close, memory_review.close, skill_learning.close, spend.recovery.close,
             harness_gateway.maintenance.close, harness_gateway.live_context.close,
             computer.close, session_pull_requests.close, session_titles.close,
             infrastructure.close, automations.close, environments.close,
@@ -358,6 +362,7 @@ def _create_app(settings, store):
                     await session_lifecycle.close()
                     await session_titles.close()
                     await memory_review.close()
+                    await skill_learning.close()
                     await spend.recovery.close()
                     await infrastructure.close()
                     await automations.close()
@@ -404,11 +409,12 @@ def _create_app(settings, store):
                         spend.recovery.start()
                         memory_review.start()
                         repository_context.start()
+                        skill_learning.start()
                     yield
                 finally:
                     errors = []
                     closes = ([broker_requests.close] if broker_requests else []) + [
-                        repository_context.close, memory_review.close, spend.recovery.close,
+                        repository_context.close, memory_review.close, skill_learning.close, spend.recovery.close,
                         harness_gateway.maintenance.close, harness_gateway.live_context.close,
                         manager.shutdown, manager.modal_clients.close, environments.close,
                         session_lifecycle.close, computer.close, session_pull_requests.close, tracing.close,
@@ -481,6 +487,8 @@ def _create_app(settings, store):
     app.include_router(credentials.routes())
     app.state.credentials = credentials
     app.include_router(skills.routes())
+    app.include_router(skill_learning.routes())
+    app.state.skill_learning = skill_learning
     app.include_router(memory.routes())
     app.state.memory = memory
     app.state.memory_review = memory_review

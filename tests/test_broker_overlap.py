@@ -212,6 +212,43 @@ async def test_maintenance_transfer_waits_for_previous_owner_cleanup(verified, d
     await replacement.close()
 
 
+async def test_skill_learning_handoff_waits_for_review_cleanup(verified, monkeypatch):
+    broker, _ = verified
+    old, new = broker(), broker()
+    started, successor, cleaning, cleaned = (asyncio.Event() for _ in range(4))
+
+    async def cleanup():
+        cleaning.set()
+        await cleaned.wait()
+
+    monkeypatch.setattr(old.state.skill_learning, 'start', started.set)
+    monkeypatch.setattr(new.state.skill_learning, 'start', successor.set)
+    monkeypatch.setattr(old.state.skill_learning, 'close', cleanup)
+    old_context = old.router.lifespan_context(old)
+    new_context = new.router.lifespan_context(new)
+    closing = None
+    try:
+        await old_context.__aenter__()
+        await asyncio.wait_for(started.wait(), 2)
+        await new_context.__aenter__()
+        assert not successor.is_set()
+        closing = asyncio.create_task(old_context.__aexit__(None, None, None))
+        await asyncio.wait_for(cleaning.wait(), 2)
+        # Real PostgreSQL ownership must remain held while review cleanup waits.
+        assert not new.state.broker_requests.maintenance.acquire()
+        assert not successor.is_set() and not closing.done()
+        cleaned.set()
+        await asyncio.wait_for(closing, 2)
+        await asyncio.wait_for(successor.wait(), 2)
+    finally:
+        cleaned.set()
+        if closing:
+            await asyncio.gather(closing, return_exceptions=True)
+        else:
+            await old_context.__aexit__(None, None, None)
+        await new_context.__aexit__(None, None, None)
+
+
 def test_completed_receipt_releases_ownership_atomically(verified):
     broker, _ = verified
     first, replacement = broker(), broker()
